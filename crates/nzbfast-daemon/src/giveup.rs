@@ -416,13 +416,8 @@ fn agent() -> ureq::Agent {
 
 fn api_get(a: &ureq::Agent, inst: &ArrInstance, path: &str) -> Result<Value, String> {
     let url = format!("{}{}", inst.url.trim().trim_end_matches('/'), path);
-    let text = a
-        .get(&url)
-        .set("X-Api-Key", &inst.apikey)
-        .call()
-        .map_err(err_str)?
-        .into_string()
-        .map_err(|e| format!("read from {}: {e}", inst.name))?;
+    let text = crate::netfetch::call_body(a.get(&url).header("X-Api-Key", &inst.apikey))
+        .map_err(err_str)?;
     serde_json::from_str(&text).map_err(|e| format!("bad json from {}: {e}", inst.name))
 }
 
@@ -434,28 +429,44 @@ fn api_send(
     body: Option<&Value>,
 ) -> Result<(), String> {
     let url = format!("{}{}", inst.url.trim().trim_end_matches('/'), path);
-    let req = a.request(method, &url).set("X-Api-Key", &inst.apikey);
+    // ureq 2 had one `request(method, url)`; ureq 3 types the builder
+    // by whether the method carries a body, so the method is a match.
+    // An unlisted one is a mistake at the call site rather than
+    // something a user can reach - all three are in this file.
     match body {
-        Some(b) => req
-            .set("Content-Type", "application/json")
-            .send_string(&b.to_string()),
-        None => req.call(),
+        Some(b) => {
+            let req = match method {
+                "PUT" => a.put(&url),
+                "POST" => a.post(&url),
+                other => return Err(format!("unsupported method {other}")),
+            };
+            crate::netfetch::send_keeping_refusal(
+                req.header("X-Api-Key", &inst.apikey)
+                    .header("Content-Type", "application/json"),
+                &b.to_string()[..],
+            )
+        }
+        None => {
+            let req = match method {
+                "DELETE" => a.delete(&url),
+                "GET" => a.get(&url),
+                other => return Err(format!("unsupported method {other}")),
+            };
+            crate::netfetch::call_keeping_refusal(req.header("X-Api-Key", &inst.apikey))
+        }
     }
     .map(|_| ())
     .map_err(err_str)
 }
 
-/// ureq transport errors Display the full URL, query included. Nothing
+/// A failure an *arr's name can be hung off, with no URL in it. Nothing
 /// here carries the apikey in the query (it travels in a header), but
-/// the rebuilt message is still the readable form.
-fn err_str(e: ureq::Error) -> String {
-    match e {
-        ureq::Error::Status(code, _) => format!("HTTP {code}"),
-        ureq::Error::Transport(t) => format!(
-            "{}{}",
-            t.kind(),
-            t.message().map(|m| format!(": {m}")).unwrap_or_default()
-        ),
+/// the rule is the same one `netfetch::error_brief` states, and
+/// `Refusal`'s Display is that rule.
+fn err_str(e: crate::netfetch::Refusal) -> String {
+    match e.code() {
+        Some(code) => format!("HTTP {code}"),
+        None => e.to_string(),
     }
 }
 

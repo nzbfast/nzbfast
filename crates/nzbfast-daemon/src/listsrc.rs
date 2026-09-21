@@ -64,7 +64,7 @@ pub struct PendingPin {
     pub id: String,
     /// The source the resulting token belongs to.
     pub src: u64,
-    /// When it was started, for [`PIN_TTL_SECS`].
+    /// When it was started, for `PIN_TTL_SECS`.
     pub started: i64,
 }
 
@@ -248,12 +248,7 @@ fn wire_err(e: impl std::fmt::Display) -> String {
 }
 
 fn fetch_rss(url: &str) -> std::result::Result<Vec<nzbfast_meta::listsrc::ListEntry>, String> {
-    let body = ssrf_safe_agent(4, 30)
-        .get(url)
-        .call()
-        .map_err(wire_err)?
-        .into_string()
-        .map_err(wire_err)?;
+    let body = crate::netfetch::call_body(ssrf_safe_agent(4, 30).get(url)).map_err(wire_err)?;
     plex::parse_watchlist_rss(&body)
 }
 
@@ -270,16 +265,15 @@ fn fetch_account(
     let agent = ssrf_safe_agent(4, 30);
     let mut out = Vec::new();
     for page in 0..plex::MAX_PAGES {
-        let body = agent
-            .get(&plex::watchlist_url(page * plex::PAGE_SIZE))
-            .set("X-Plex-Token", token)
-            .set("X-Plex-Client-Identifier", client_id)
-            .set("X-Plex-Product", plex::PRODUCT)
-            .set("Accept", "application/xml")
-            .call()
-            .map_err(wire_err)?
-            .into_string()
-            .map_err(wire_err)?;
+        let body = crate::netfetch::call_body(
+            agent
+                .get(&plex::watchlist_url(page * plex::PAGE_SIZE))
+                .header("X-Plex-Token", token)
+                .header("X-Plex-Client-Identifier", client_id)
+                .header("X-Plex-Product", plex::PRODUCT)
+                .header("Accept", "application/xml"),
+        )
+        .map_err(wire_err)?;
         let (entries, seen) = plex::parse_watchlist_xml(&body)?;
         out.extend(entries);
         if seen < plex::PAGE_SIZE {
@@ -585,17 +579,17 @@ pub fn plex_link_start(d: &Arc<Daemon>, src_id: u64) -> std::result::Result<Valu
     if client_id.is_empty() {
         return Err("this install has no Plex client identifier yet".into());
     }
-    let body = ssrf_safe_agent(4, 30)
-        .post(plex::PIN_URL)
-        .set("X-Plex-Client-Identifier", &client_id)
-        .set("X-Plex-Product", plex::PRODUCT)
-        .set("Accept", "application/json")
-        // ureq needs a body on a POST; Plex takes the parameters in the
-        // query string and the headers.
-        .send_string("")
-        .map_err(wire_err)?
-        .into_string()
-        .map_err(wire_err)?;
+    let body = crate::netfetch::send_empty_keeping_refusal(
+        ssrf_safe_agent(4, 30)
+            .post(plex::PIN_URL)
+            .header("X-Plex-Client-Identifier", &client_id)
+            .header("X-Plex-Product", plex::PRODUCT)
+            .header("Accept", "application/json"),
+    )
+    .map_err(wire_err)?
+    .into_body()
+    .read_to_string()
+    .map_err(wire_err)?;
     let pin = plex::parse_pin(&body)?;
     *d.lists.pin.lock_ok() = Some(PendingPin {
         id: pin.id.clone(),
@@ -624,15 +618,14 @@ pub fn plex_link_poll(d: &Arc<Daemon>, pin_id: &str) -> std::result::Result<Valu
         return Err("that code has expired - start the link again".into());
     }
     let client_id = d.lists.client_id.lock_ok().clone();
-    let body = ssrf_safe_agent(4, 30)
-        .get(&plex::pin_poll_url(&p.id))
-        .set("X-Plex-Client-Identifier", &client_id)
-        .set("X-Plex-Product", plex::PRODUCT)
-        .set("Accept", "application/json")
-        .call()
-        .map_err(wire_err)?
-        .into_string()
-        .map_err(wire_err)?;
+    let body = crate::netfetch::call_body(
+        ssrf_safe_agent(4, 30)
+            .get(&plex::pin_poll_url(&p.id))
+            .header("X-Plex-Client-Identifier", &client_id)
+            .header("X-Plex-Product", plex::PRODUCT)
+            .header("Accept", "application/json"),
+    )
+    .map_err(wire_err)?;
     let pin = plex::parse_pin(&body)?;
     if pin.token.is_empty() {
         // The normal answer to almost every poll.

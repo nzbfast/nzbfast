@@ -37,7 +37,7 @@ pub struct Interest {
     /// The same interest said in newznab's category numbers - the
     /// standard top-level thousands, so a subcategory is covered by its
     /// parent. This is what an interest means to a REFERENCE indexer,
-    /// where we cannot ask by group: [`newznab_cats`] screens the seed
+    /// where we cannot ask by group: `newznab_cats` screens the seed
     /// lane's newest-listing sweep with it.
     ///
     /// It lives on the same struct as `groups` on purpose. They are two

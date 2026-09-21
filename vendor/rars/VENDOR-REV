@@ -1,6 +1,6 @@
 fork: private perf fork of github.com/bitplane/rars, branch perf
-last-synced-rev: aa07299 (less 7fc7c65's clean-room oracles) plus src/codec/rar50.rs from 43e478b, the 457afed hunk, the b449705 hunks to src/codec/rar50.rs and src/rar50/write/stream.rs, the b20261a hunk to src/codec/rar50.rs, the hand-applied SPEC C Part 7 x86 clip of fork 6009b50, and the cdbb587 hunks to src/source.rs, src/rar50.rs and src/rar15_40.rs, and the 38027ab + bc773d1 + e558553 + 741ddb9 hunks to src/rar50/write/{reference,mod,stream}.rs (the Windows FILETIME record, 16 Sep), and the a9651ce hunk to src/rar50/write/reference.rs (the rewrite path's size-vint width, 16 Sep), and the e352fba hunk to src/recovery/stream.rs (the IO_BUF marker-window split, 16 Sep), and the 7ef0267 hunk to src/recovery/stream.rs (read_chunk_at's per-record CRC buffer right-sized, 17 Sep), and the VENDOR-FIRST mid-member refill in src/codec/rar29.rs (ported to the fork as 47cb5a7, 16 Sep), see 15 and 16 Sep below
-last-synced-date: 2026-09-15
+last-synced-rev: 11f2fc9 (fork perf; exact mirror of src/ and tests/fixtures/) plus THREE hand-applied hunks on top: (1) the IO_BUF census correction and damaged_shards right-sizing in src/recovery/stream.rs, which post-dates that rev and is in the fork as 8c9537b (merge b3d58ed), see 18 Sep below; (2) fork 7cb704f's crates/rars/ half (RAR 1.5 DOS directory: src/rar15_40.rs and tests/fixtures/rar15_40/rar155_dos/), see 18 Sep below; (3) fork cc9def3's crates/rars/src/ half, which is THREE COMMENTS in src/rar15_40.rs and no behaviour at all, see 18 Sep below
+last-synced-date: 2026-09-18
 local-drift: none at the sync. On 22 Aug 2026 the whole vendored tree
   (104 local commits since the 24 Jul sync at 050758e, the NEON BLAKE2sp
   leaves among them) was ported INTO the fork as one commit, 1b84503 on
@@ -334,3 +334,63 @@ local-drift: none at the sync. On 22 Aug 2026 the whole vendored tree
   first port went onto a local perf 166 commits stale and was thrown
   away. See VENDORING.md and the host repo's
   research/RAR29-MIDSTREAM-REFILL-2026-09-16.md.
+  18 Sep 2026, CLEAN-ROOM SYNC (claim
+  rars-cleanroom-steps4-5-vendor-sync-18sep-r2): mirrored from fork
+  11f2fc9, which is perf 6b4903f plus this lane's commits. The
+  VENDOR-FIRST shard_group_crcs right-size the previous head line named
+  (2c922bcb2 here, fork e7da8f5) is in it: e7da8f5 lacked only that
+  commit's rewritten IO_BUF doc paragraph, which 11f2fc9 carries. Before
+  it, every vendor commit since the 15 Sep sync (879002e19, 42 commits
+  touching src/) was checked against the fork and the ones it lacked
+  were ported there as fork 615dc6b: the 16 Sep sweep's MEDIUM 8/9/11/13
+  (the RAR 3 VM filter-hold cap), LOW 28/31/65/67, the 24 LOW items and
+  LOW 69/70, next_volume_follows (sweep item 51), the QO test's CRC
+  check, the fold-team-probe feature, and the IO_BUF / SCAN_WINDOW
+  measurement comments. Then proven two ways, renames applied: every
+  added line of the 42 commits is in fork src, and every name defined in
+  vendor src resolves there. The residue of both arms is itemised in
+  the host repo's research/rars-originality-2026-09-18/chip1-subset-proof/;
+  every row of it is a clean-room-replaced body, a rename, src/fast.rs
+  (folded into codec/address_filters.rs by fork 994bcd0), a vendor-side
+  "re-apply at re-sync" marker comment, or c6ce24177's four u64::from
+  calls over u64 fields, dropped in the fork because its clippy gate
+  refuses them. So every hand-ported hunk the old head line listed, and
+  every VENDORING.md divergence row, is in the fork and in this mirror.
+  What the sync brought: the clean-room rewrites of specs A-D
+  (codec/rar13/, codec/address_filters.rs and the rewritten bodies in
+  rar20, rar29, rar30 crypto, recovery/rar3 and rar5), with no oracle
+  file; the deferred MAP E renames (fork f247f98; the pairs are in the
+  host repo's research/cleanroom/MAP-E-renames-comments.md); and the
+  fork's own work since aa07299. Cargo.toml by hand: bench-internals = []
+  and the three-file unsafe comment. Any vendor commit after this sync
+  is drift again: port it to the fork before the next one.
+  18 Sep 2026, AFTER that sync (claim
+  rars-rar15-dos-directory-and-exit-code-18sep): fork 7cb704f on perf
+  (parent b3d58ed) fixes FileHeader::is_directory for a genuine DOS
+  RAR 1.55, whose directory headers carry flags 0x8000 only and mark
+  the entry by DOS attribute 0x10 alone. Its crates/rars/ half was
+  hand-applied here with `git diff --binary --relative=crates/rars/`
+  and `git apply`: src/rar15_40.rs and the new
+  tests/fixtures/rar15_40/rar155_dos/. Both are byte-identical to the
+  fork at 7cb704f, so the next sync from 7cb704f or later carries them
+  and deletes nothing. The same commit's rars-cli half (exit code after
+  an extraction error) is not vendored.
+  18 Sep 2026, also after that sync (claim
+  rars-encrypted-compressed-rar29-members-18sep): fork cc9def3 on perf
+  (parent 055ad59) makes the rarfast unrar dialect follow a RAR 1.5-4.x
+  volume chain, which it never did - `Opened::is_volume` asked the
+  RAR 5 variant alone, so EVERY RAR4 multivolume set, encrypted or not,
+  refused its split member before any member callback and printed a
+  bare `Total errors: 1`. That half is crates/rars-cli/ and is NOT
+  vendored. Its crates/rars/src/ half is three COMMENTS on the
+  `unsupported_encryption()` guards in src/rar15_40.rs, hand-applied
+  here byte-identical to the fork, saying that those guards are
+  unreachable for an encrypted member and are not the defect - the
+  handoff that opened the item read them as the defect, and the
+  vendored lib suite has decoded the same encrypted RAR 3.00 fixture
+  byte-exact all along. NOTHING IN THIS MIRROR CHANGES BEHAVIOUR: no
+  nzbfast extraction path moves, and the next sync from cc9def3 or
+  later carries the comments and deletes nothing. The fork commit also
+  touches crates/rars/tests/rar15_40_fixtures.rs (a wrong-password arm)
+  and crates/rars-cli/tests/cli.rs, neither of which is vendored -
+  tests/*.rs is out of the mirror's scope by design.

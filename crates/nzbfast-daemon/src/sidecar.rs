@@ -570,6 +570,12 @@ pub fn spawn_sidecar(
                     journal_owner: crate::JournalOwner::Caller,
                     par_cleanup,
                     skip_samples,
+                    // TODO 332: the sidecar prefetches ANOTHER job and
+                    // never repairs (see the donor note below), so there
+                    // is no repair here to stand back from - and firing
+                    // the veto would spend a deferral belonging to a job
+                    // whose own run has not started.
+                    defer_long_repair: false,
                     password,
                     // The sidecar prefetches ANOTHER job; its consent
                     // travels with that job's record, not this one's.

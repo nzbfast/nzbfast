@@ -205,6 +205,7 @@ mod tests {
             "wall.html",
             "ui-tokens.html",
             "ui-sound.html",
+            "ui-signout.html",
             "site.webmanifest",
             "i18n/fr.json",
             "icons/favicon-16.png",

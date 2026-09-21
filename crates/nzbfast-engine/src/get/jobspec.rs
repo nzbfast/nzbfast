@@ -138,6 +138,25 @@ pub struct JobSpec<'a> {
     /// everywhere downstream; empty on the CLI, the sidecar and every
     /// ordinary job.
     pub donor_dirs: Vec<PathBuf>,
+    /// TODO 332: may this run stand back from a LONG par2 repair and
+    /// hand the job back to the queue instead of folding for half an
+    /// hour?
+    ///
+    /// Both halves of the policy are the CALLER's and are already
+    /// decided by the time this is set: the `repair_defer_long` setting
+    /// is on, AND this job has not already been deferred once (the mark
+    /// is `Job::repair_deferred`, kept across the requeue). The engine
+    /// holds no policy - it arms `SideCancel`'s `DeferGate` from this
+    /// bool and the gate answers one question at the survey point.
+    ///
+    /// DEFER ONCE, THEN REPAIR is the whole ruling: this is "give me a
+    /// chance to see it", never "block until I answer", because a job
+    /// that never repairs with nobody watching is worse than a slow one.
+    ///
+    /// `false` on the CLI, on the sidecar and on every second pass, and
+    /// a `false` here is byte-for-byte the behaviour that shipped before
+    /// TODO 332 - the gate is not built at all.
+    pub defer_long_repair: bool,
     /// PLAN M31: NZBs of DUPLICATE POSTINGS whose ARTICLES may fill a bad
     /// block - see `get::dupefill`. Empty on the CLI and wherever no
     /// alternative is held, which is the pass's whole no-op test.

@@ -3,6 +3,7 @@
 //! damaged or passworded.
 
 use super::*;
+use crate::rarfixtures::{self as rf, Member};
 
 fn temp_dir(tag: &str) -> PathBuf {
     let dir =
@@ -14,23 +15,12 @@ fn temp_dir(tag: &str) -> PathBuf {
 
 #[test]
 fn native_path_extracts_compressed_multivolume_set() {
-    use rars::rar50::{CompressedEntry, Rar50VolumeWriter, WriterOptions};
     let dir = temp_dir("multivol");
     let payload: Vec<u8> = (0..200_000u32)
         .flat_map(|i| (i.wrapping_mul(2654435761)).to_le_bytes())
         .collect();
-    let entries = [CompressedEntry {
-        name: b"inner/data.bin",
-        data: &payload,
-        mtime: None,
-        attributes: 0o100644, // Unix host: attributes are the file mode
-        host_os: 1,
-    }];
-    let volumes = Rar50VolumeWriter::new(WriterOptions::default())
-        .compressed_entries(&entries)
-        .max_payload_per_volume(64 * 1024)
-        .finish()
-        .unwrap();
+    let volumes =
+        rf::compressed_volume_set(&[Member::unix(b"inner/data.bin", &payload)], 64 * 1024);
     assert!(volumes.len() > 1, "expected a multivolume set");
     for (index, bytes) in volumes.iter().enumerate() {
         std::fs::write(dir.join(format!("set.part{:02}.rar", index + 1)), bytes).unwrap();
@@ -45,19 +35,7 @@ fn native_path_extracts_compressed_multivolume_set() {
 /// A compressed, split, multivolume RAR5 set on disk - the shape
 /// TODO 101 exists for. Returns the volume paths in set order.
 fn write_multivolume_set(dir: &std::path::Path, payload: &[u8]) -> Vec<PathBuf> {
-    use rars::rar50::{CompressedEntry, Rar50VolumeWriter, WriterOptions};
-    let entries = [CompressedEntry {
-        name: b"inner/data.bin",
-        data: payload,
-        mtime: None,
-        attributes: 0o100644,
-        host_os: 1,
-    }];
-    let volumes = Rar50VolumeWriter::new(WriterOptions::default())
-        .compressed_entries(&entries)
-        .max_payload_per_volume(64 * 1024)
-        .finish()
-        .unwrap();
+    let volumes = rf::compressed_volume_set(&[Member::unix(b"inner/data.bin", payload)], 64 * 1024);
     assert!(volumes.len() > 1, "expected a multivolume set");
     volumes
         .iter()
@@ -100,6 +78,67 @@ fn eating_extracts_the_payload_and_leaves_no_volume_behind() {
     for v in &volumes {
         assert!(!v.exists(), "{} outlived the extraction", v.display());
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TODO 101, the visibility half: an eating pass publishes what it is
+/// doing and what it has freed onto the very cell the queue row polls.
+///
+/// The mode deletes the user's downloaded archive parts permanently and
+/// the cost of that lands on a RETRY, so "it is happening" has to be
+/// readable while it happens rather than inferred afterwards. The
+/// figures are published per delete, not totalled at the end, which is
+/// what lets a pass that dies half way still say what it took.
+#[test]
+fn an_eating_pass_publishes_its_progress_to_the_row() {
+    let dir = temp_dir("eat-volumes-row");
+    let payload: Vec<u8> = (0..200_000u32)
+        .flat_map(|i| (i.wrapping_mul(2654435761)).to_le_bytes())
+        .collect();
+    let volumes = write_multivolume_set(&dir, &payload);
+    let on_disk = crate::eatvol::volume_bytes(&volumes);
+
+    // Through a hub, the way `unpackprog_tests::armed` does it: the map
+    // itself is private to nzbfast-core, and the hub field is how every
+    // real caller reaches it anyway.
+    let hub = std::sync::Arc::new(crate::streamhub::StreamHub::default());
+    let _prog = crate::unpackprog::arm(
+        Some(&hub.unpack),
+        "SABnzbd_nzo_nzbfast1",
+        volumes.len() as u64,
+    );
+    let cell = hub
+        .unpack
+        .lock_ok()
+        .get("SABnzbd_nzo_nzbfast1")
+        .cloned()
+        .expect("the ladder registers its row");
+    assert!(
+        !cell.eating(),
+        "an unarmed ladder claims nothing about eating"
+    );
+
+    let _arm = crate::eatvol::EatArm::new(
+        crate::eatvol::decide(
+            crate::eatvol::EatMode::Always,
+            true,
+            false,
+            crate::eatvol::forecast(&dir, on_disk, false),
+        )
+        .eats(),
+    );
+    assert!(try_unrar(&dir, None));
+
+    assert!(cell.eating(), "the row is told the parts are being eaten");
+    let (eaten, bytes) = cell.eaten();
+    assert_eq!(
+        eaten as usize,
+        volumes.len(),
+        "every volume that went is counted"
+    );
+    // Only successful removals credit bytes, so this is what the disk
+    // really gave back rather than what the set weighed.
+    assert_eq!(bytes, on_disk, "and the bytes they gave back");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -261,23 +300,12 @@ fn the_off_mode_never_eats_however_tight_the_disk() {
 
 #[test]
 fn rr_repair_rescues_corrupted_volume_and_extracts() {
-    use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
     let dir = temp_dir("rr-repair");
     let payload: Vec<u8> = (0..150_000u32)
         .flat_map(|i| (i.wrapping_mul(2246822519)).to_le_bytes())
         .collect();
-    let entries = [CompressedEntry {
-        name: b"video.bin",
-        data: &payload,
-        mtime: None,
-        attributes: 0o100644,
-        host_os: 1,
-    }];
-    let mut archive = Rar50Writer::new(WriterOptions::default())
-        .compressed_entries(&entries)
-        .recovery_percent(Some(20))
-        .finish()
-        .unwrap();
+    let mut archive =
+        rf::compressed_archive_with_recovery(&[Member::unix(b"video.bin", &payload)], Some(20));
     // Corrupt a run of payload bytes well inside the archive.
     let start = archive.len() / 3;
     for byte in &mut archive[start..start + 2048] {
@@ -309,23 +337,12 @@ fn rr_repair_rescues_corrupted_volume_and_extracts() {
 
 #[test]
 fn rr_repair_raw_scan_rescues_a_volume_whose_headers_are_destroyed() {
-    use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
     let dir = temp_dir("rr-raw-scan");
     let payload: Vec<u8> = (0..80_000u32)
         .flat_map(|i| (i.wrapping_mul(2246822519)).to_le_bytes())
         .collect();
-    let entries = [CompressedEntry {
-        name: b"video.bin",
-        data: &payload,
-        mtime: None,
-        attributes: 0o100644,
-        host_os: 1,
-    }];
-    let archive = Rar50Writer::new(WriterOptions::default())
-        .compressed_entries(&entries)
-        .recovery_percent(Some(20))
-        .finish()
-        .unwrap();
+    let archive =
+        rf::compressed_archive_with_recovery(&[Member::unix(b"video.bin", &payload)], Some(20));
 
     // Wreck the headers so the archive cannot be parsed at all: this is
     // the last-chance path that used to read the whole volume, clone it,
@@ -360,23 +377,12 @@ fn rr_repair_raw_scan_rescues_a_volume_whose_headers_are_destroyed() {
 
 #[test]
 fn rr_repair_raw_scan_leaves_the_original_alone_when_it_cannot_repair() {
-    use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
     let dir = temp_dir("rr-raw-fail");
     let payload: Vec<u8> = (0..80_000u32)
         .flat_map(|i| (i.wrapping_mul(2246822519)).to_le_bytes())
         .collect();
-    let entries = [CompressedEntry {
-        name: b"video.bin",
-        data: &payload,
-        mtime: None,
-        attributes: 0o100644,
-        host_os: 1,
-    }];
-    let archive = Rar50Writer::new(WriterOptions::default())
-        .compressed_entries(&entries)
-        .recovery_percent(Some(1))
-        .finish()
-        .unwrap();
+    let archive =
+        rf::compressed_archive_with_recovery(&[Member::unix(b"video.bin", &payload)], Some(1));
 
     // Headers destroyed AND far more damage than 1% can cover.
     let mut damaged = archive.clone();
@@ -405,23 +411,12 @@ fn rr_repair_raw_scan_leaves_the_original_alone_when_it_cannot_repair() {
 
 #[test]
 fn rr_repair_leaves_unrepairable_volume_untouched() {
-    use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
     let dir = temp_dir("rr-unrepairable");
     let payload: Vec<u8> = (0..100_000u32)
         .flat_map(|i| (i.wrapping_mul(374761393)).to_le_bytes())
         .collect();
-    let entries = [CompressedEntry {
-        name: b"video.bin",
-        data: &payload,
-        mtime: None,
-        attributes: 0o100644,
-        host_os: 1,
-    }];
-    let mut archive = Rar50Writer::new(WriterOptions::default())
-        .compressed_entries(&entries)
-        .recovery_percent(Some(1))
-        .finish()
-        .unwrap();
+    let mut archive =
+        rf::compressed_archive_with_recovery(&[Member::unix(b"video.bin", &payload)], Some(1));
     // Corrupt far more than 1% RR can cover.
     let end = archive.len() * 3 / 4;
     for byte in &mut archive[64..end] {
@@ -443,19 +438,9 @@ fn rr_repair_leaves_unrepairable_volume_untouched() {
 
 #[test]
 fn rr_repair_skips_volumes_without_recovery_records() {
-    use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
     let dir = temp_dir("rr-none");
-    let entries = [CompressedEntry {
-        name: b"data.bin",
-        data: b"hello recovery-less world",
-        mtime: None,
-        attributes: 0o100644,
-        host_os: 1,
-    }];
-    let archive = Rar50Writer::new(WriterOptions::default())
-        .compressed_entries(&entries)
-        .finish()
-        .unwrap();
+    let archive =
+        rf::compressed_archive(&[Member::unix(b"data.bin", b"hello recovery-less world")]);
     std::fs::write(dir.join("set.rar"), &archive).unwrap();
 
     assert!(!try_rar_rr_repair(&dir, None));

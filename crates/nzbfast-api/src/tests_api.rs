@@ -923,13 +923,15 @@ fn the_shared_enrich_agent_reuses_one_connection() {
         // true however this function is written - instead of that the
         // enricher's call sites share one.
         let resp = shared_enrich_agent()
-            .get(&format!("http://127.0.0.1:{port}/x{i}"))
-            .timeout(std::time::Duration::from_secs(5))
+            .get(format!("http://127.0.0.1:{port}/x{i}"))
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(5)))
+            .build()
             .call()
             .unwrap_or_else(|e| panic!("request {i} failed: {e}"));
         // The body MUST be drained, or ureq cannot return the
         // connection to the pool and the next request opens a new one.
-        let body = resp.into_string().unwrap();
+        let body = resp.into_body().read_to_string().unwrap();
         assert_eq!(body, "ok");
     }
 
@@ -965,8 +967,10 @@ fn the_shared_enrich_agent_reuses_one_connection() {
 ///
 /// Deliberate exceptions say so on the line with `// fresh-agent:
 /// <reason>`; a genuinely unpooled fetch is welcome to exist, it just
-/// may not be silent. Building an `AgentBuilder` is untouched - that is
-/// how [`ssrf_safe_agent`] and the per-indexer agents are made.
+/// may not be silent. Building an AGENT is untouched - that is how
+/// [`ssrf_safe_agent`] and the per-indexer agents are made
+/// (`Agent::with_parts` since the ureq 3 port; `AgentBuilder::new`
+/// before it, which is the spelling this sentence used to name).
 #[test]
 fn no_call_site_builds_a_throwaway_http_agent() {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

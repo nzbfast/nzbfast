@@ -8,11 +8,28 @@
 use super::*;
 
 /// Where the update checker looks for the release manifest. GitHub's
-/// /releases/latest/download/ path always serves the newest release's
-/// signed manifest over its CDN, no auth. The manifest is ed25519-signed
-/// and hard-verified against the baked-in key, so the origin is untrusted
+/// /releases/latest/download/ path serves the newest release's signed
+/// manifest over its CDN, no auth. The manifest is ed25519-signed and
+/// hard-verified against the baked-in key, so the origin is untrusted
 /// anyway - controlling it (or a MITM) cannot forge an update. Overridable
 /// via the live update_url setting; unreachable = silently up to date.
+///
+/// "The newest release" is per-REPO, and this comment used to say
+/// "always", which was wrong the moment the repo gained a second
+/// product. nzbfast and parfast publish from one repo, so a parfast tag
+/// released without `--prerelease` takes `/releases/latest` and this URL
+/// 404s for every install - thirteen hours of it on 18 Sep 2026, taking
+/// every download button on the website with it, since the site's
+/// buttons hang off the same path. Nothing here can detect that: an
+/// unreachable manifest is indistinguishable from a laptop offline, and
+/// must stay that way (see `check_update`). It is held on the RELEASE
+/// side instead - `--latest=false` on every parfast tag, and
+/// `tools/check-site-version.sh --published` nightly.
+///
+/// Which is also why this constant should not be "fixed" by moving it
+/// somewhere a sibling product cannot reach: every already-installed
+/// daemon keeps the URL it was built with, so a new path protects only
+/// future installs and the flag protects all of them, today.
 pub const DEFAULT_UPDATE_URL: &str =
     "https://github.com/nzbfast/nzbfast/releases/latest/download/latest.json";
 
@@ -96,10 +113,11 @@ pub(super) fn fetch_update_resource(url: &str) -> std::result::Result<Vec<u8>, S
     let resp = ssrf_safe_agent(10, 15)
         .get(url)
         .call()
-        .map_err(|e| format!("{e}"))?;
+        .map_err(|e| crate::netfetch::error_brief(&e))?;
     use std::io::Read as _;
     let mut body = Vec::new();
-    resp.into_reader()
+    resp.into_body()
+        .into_reader()
         .take(1024 * 1024)
         .read_to_end(&mut body)
         .map_err(|e| format!("read: {e}"))?;
@@ -219,7 +237,7 @@ pub(super) fn check_manifest_serial(d: &Arc<Daemon>, m: &Value) -> Result<(), St
 
 /// What a manifest's serial should do to the stored ratchet value, and
 /// whether the manifest may be used at all. Split out from
-/// [`check_manifest_serial`] so the decision can be tested without
+/// `check_manifest_serial` so the decision can be tested without
 /// building a whole `Daemon`, the same way [`verify_with_key`] is.
 ///
 /// Two variants accept and two refuse. No variant ever LOWERS the stored

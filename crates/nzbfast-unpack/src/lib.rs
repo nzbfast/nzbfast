@@ -117,3 +117,9 @@ pub mod renameclaim;
 // no integration target - see the module note.
 #[cfg(test)]
 mod testscratch;
+
+// The ONE place this crate's tests build RAR fixtures through the
+// engine's writer, named by SHAPE so the engine swap (cutover plan P3)
+// is one file rather than every test site.
+#[cfg(test)]
+mod rarfixtures;

@@ -3,6 +3,11 @@
 //! rules, hide suggestions) and `browse` itself. Bodies are verbatim moves
 //! from the old index.rs; see research/SEAM-TABLE-index-rs-2026-08-05.md.
 
+// Documented in full as part of TODO 84's missing_docs ratchet. The lint
+// is on here so the count cannot climb back: a new public item in this
+// module needs a doc comment.
+#![warn(missing_docs)]
+
 use super::cards::RES_RANK_SQL;
 use super::query::{fts_match, stem_fold_arm};
 use super::*;
@@ -54,15 +59,20 @@ pub struct BrowseQuery {
     /// representative-copy pick below then runs over the surviving rows,
     /// which is what keeps `total` and the page describing one list.
     pub group: Option<String>,
+    /// Keep only releases with every part present.
     pub complete_only: bool,
     /// Minimum total_bytes (0 = unbounded).
     pub min_bytes: u64,
     /// first_posted cutoff, unix seconds (0 = unbounded).
     pub newer_than: i64,
+    /// Which column orders the answer. See [`BrowseSort`].
     pub sort: BrowseSort,
     /// true = descending (the default direction for every sort).
     pub desc: bool,
+    /// Page size.
     pub limit: u32,
+    /// How many rows to skip. Paging is over the FILTERED set, so
+    /// `total` and the page describe the same list.
     pub offset: u32,
     /// M28: hide releases whose junk score is >= this (None = show all).
     pub max_junk: Option<u32>,
@@ -93,7 +103,9 @@ pub struct BrowseQuery {
     /// M30: original-year range filter (decade chips), inclusive.
     /// 0 = unbounded on that side. Cards only (uses the enriched year
     /// with the movie parse-key fallback).
+    /// Inclusive lower bound of the year range, 0 = unbounded.
     pub year_min: u32,
+    /// Inclusive upper bound of the year range, 0 = unbounded.
     pub year_max: u32,
     /// M29 3c: when set, keep only releases whose availability verdict is
     /// "ok". Pushed into SQL as a real predicate (so `total` and the page
@@ -108,8 +120,14 @@ pub struct BrowseQuery {
 /// Wilson math or family-fallback logic is duplicated into SQL.
 #[derive(Debug, Clone, Default)]
 pub struct VerdictFilter {
+    /// The ledger snapshot the verdict is computed against.
     pub snap: crate::oracle::Snapshot,
+    /// The user's enabled backbones, which is what the family fallback
+    /// walks when a release's own backbone has no evidence.
     pub backbones: Vec<String>,
+    /// The instant the verdict is evaluated at, Unix seconds. Carried
+    /// rather than read from the clock so every row on one page is
+    /// judged against the same moment.
     pub now: i64,
 }
 
@@ -145,6 +163,12 @@ macro_rules! adult_genre_match_sql {
 }
 pub(crate) use adult_genre_match_sql;
 
+/// The "this is NOT adult" test, as one SQL predicate over
+/// `titles.genres` with a `t.` alias.
+///
+/// The negated form, because the filter's job is to EXCLUDE. The
+/// positive form below is for the queries that have to select adult
+/// titles instead. Both come from one macro so the two cannot drift.
 pub const ADULT_GENRE_SQL: &str = concat!("NOT ", adult_genre_match_sql!("t."));
 
 /// The same test the POSITIVE way round, for a query that has to SELECT
@@ -206,28 +230,44 @@ impl Default for BrowseQuery {
 /// M30: one hidden title in the Hidden view.
 #[derive(Debug, Clone)]
 pub struct HiddenTitle {
+    /// `titles.key` - the card's identity.
     pub key: String,
+    /// Display title.
     pub title: String,
+    /// Poster, as a local art-cache filename.
     pub poster: String,
+    /// `titles.kind`: movie / tv / music / book / software / other.
     pub kind: String,
+    /// When the user hid it, Unix seconds. The Hidden view's sort key.
     pub at: i64,
+    /// How many releases the hide is currently suppressing.
     pub n_releases: u32,
 }
 
 /// M30: one hide rule (manual or accepted suggestion).
 #[derive(Debug, Clone)]
 pub struct WallRule {
+    /// Row id, the handle for editing or removing the rule.
     pub id: i64,
+    /// Which release or title field the rule tests.
     pub field: String,
+    /// The value that field is tested against.
     pub value: String,
+    /// When the rule was added, Unix seconds.
     pub added: i64,
+    /// True when this rule came from an accepted [`Suggestion`] rather
+    /// than being typed by the user. Kept because the two are undone
+    /// differently: a suggestion the user regrets should stop being
+    /// suggested, not merely be deleted once.
     pub auto: bool,
 }
 
 /// M30: a suggested rule derived from the user's hides.
 #[derive(Debug, Clone)]
 pub struct Suggestion {
+    /// Which field the proposed rule would test.
     pub field: String,
+    /// The value it would test against.
     pub value: String,
     /// How many hidden titles share this signal.
     pub n: u32,
@@ -235,6 +275,10 @@ pub struct Suggestion {
     pub sample: Vec<String>,
 }
 
+/// Which column orders a browse answer.
+///
+/// Every variant sorts descending by default; [`BrowseQuery::desc`]
+/// flips it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowseSort {
     /// Upload date (first_posted) - the browse default.
@@ -243,7 +287,9 @@ pub enum BrowseSort {
     /// opposed to Posted's upload date. 24C ships added-vs-posted as a
     /// sort option rather than a second date column.
     Seen,
+    /// Total bytes.
     Size,
+    /// Release name, lexicographic.
     Name,
     /// File count - the Releases table's Files column.
     Files,
@@ -705,6 +751,7 @@ impl Index {
         Ok(())
     }
 
+    /// Undo a per-title hide. A no-op when the title was not hidden.
     pub fn unhide_title(&self, key: &str) -> rusqlite::Result<()> {
         self.db
             .execute("DELETE FROM wall_hidden WHERE key = ?1", [key])?;
@@ -747,6 +794,7 @@ impl Index {
             .collect())
     }
 
+    /// Every hide rule, newest first.
     pub fn rules_list(&self) -> rusqlite::Result<Vec<WallRule>> {
         let mut stmt = self.db.prepare_cached(
             "SELECT id, field, value, added, auto FROM wall_rules ORDER BY added DESC",
@@ -792,6 +840,10 @@ impl Index {
         Ok(())
     }
 
+    /// Remove one hide rule by id. A no-op when no such rule exists.
+    ///
+    /// Deleting an `auto` rule removes the rule, not the suggestion
+    /// that produced it, so the same signal can be proposed again.
     pub fn rule_delete(&self, id: i64) -> rusqlite::Result<()> {
         self.db
             .execute("DELETE FROM wall_rules WHERE id = ?1", [id])?;

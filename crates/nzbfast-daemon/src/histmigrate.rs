@@ -244,10 +244,6 @@ pub fn dismiss_hist_migrate(d: &Daemon) -> bool {
 const PROBE_REST: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Env override so the daemon suite does not sit through the rest.
-// env-default-gate: the 50 ms the doc row states is [`PROBE_REST`] above,
-// a `Duration` const. The fallback here is that const and not a literal,
-// and it arrives through `unwrap_or` on the PARSE rather than on the env
-// read, so a static walk of the env call's own chain cannot reach it.
 fn probe_rest() -> std::time::Duration {
     match std::env::var("NZBFAST_HIST_MIGRATE_REST_MS") {
         Ok(v) => v

@@ -109,6 +109,9 @@ Options: (all uses)
              cache folder. A repeat create or --slow check of an unchanged
              file re-checks its contents on every core, then skips its
              slowest pass
+  --progress
+           : One bar from 0 to 100 over the whole run, even under -q -q.
+             With -q -q it is the only thing printed
   --       : Treat all following arguments as filenames
 Options: (verify or repair)
   -p       : Purge backup files and par files on successful recovery or

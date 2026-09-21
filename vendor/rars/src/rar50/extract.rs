@@ -1,5 +1,5 @@
 use super::{blake2sp, Archive, ExtractedEntryMeta, FileHeader, FileRedirection};
-use crate::codec::rar50::{DecodeMode, DecodedChunk, StreamDecodeError, Unpack50Decoder};
+use crate::codec::rar50::{DecodeMode, DecodedChunk, Rar50Decoder, StreamDecodeError};
 use crate::crc32::{crc32, Crc32};
 use crate::crypto::rar50::{Rar50Cipher, Rar50Keys};
 use crate::error::{Error, Result};
@@ -323,7 +323,7 @@ impl FileHeader {
         archive: &Archive,
         password: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         let mut reader_cache = crate::source::RangeReaderCache::default();
         Ok(self
             .decoded_data_with_decoder(archive, &mut decoder, password, &mut reader_cache)?
@@ -370,7 +370,7 @@ impl FileHeader {
     fn decoded_data_with_decoder(
         &self,
         archive: &Archive,
-        decoder: &mut Unpack50Decoder,
+        decoder: &mut Rar50Decoder,
         password: Option<&[u8]>,
         cache: &mut crate::source::RangeReaderCache,
     ) -> Result<DecodedData> {
@@ -382,7 +382,7 @@ impl FileHeader {
     fn decoded_data_with_mode(
         &self,
         archive: &Archive,
-        decoder: &mut Unpack50Decoder,
+        decoder: &mut Rar50Decoder,
         password: Option<&[u8]>,
         mode: DecodeMode,
         cache: &mut crate::source::RangeReaderCache,
@@ -395,7 +395,7 @@ impl FileHeader {
     fn decode_packed_with_decoder(
         &self,
         packed: &[u8],
-        decoder: &mut Unpack50Decoder,
+        decoder: &mut Rar50Decoder,
     ) -> Result<Vec<u8>> {
         self.decode_packed_with_decoder_mode(packed, decoder, DecodeMode::Lz)
     }
@@ -403,7 +403,7 @@ impl FileHeader {
     fn decode_packed_with_decoder_mode(
         &self,
         packed: &[u8],
-        decoder: &mut Unpack50Decoder,
+        decoder: &mut Rar50Decoder,
         mode: DecodeMode,
     ) -> Result<Vec<u8>> {
         if self.is_stored() {
@@ -468,7 +468,7 @@ impl FileHeader {
         &self,
         packed: &mut R,
         keys: Option<&Rar50Keys>,
-        decoder: &mut Unpack50Decoder,
+        decoder: &mut Rar50Decoder,
         buffered_decode_limit: u64,
         writer: &mut dyn Write,
     ) -> Result<()> {
@@ -493,7 +493,7 @@ impl FileHeader {
     fn stream_packed_digests<R: Read + Send>(
         &self,
         packed: &mut R,
-        decoder: &mut Unpack50Decoder,
+        decoder: &mut Rar50Decoder,
         buffered_decode_limit: u64,
         writer: &mut dyn Write,
         hash: HashState,
@@ -1203,21 +1203,19 @@ fn write_repeated_bytes(writer: &mut dyn Write, byte: u8, mut len: usize) -> std
 /// many cores as there are pieces ([`Crc32::update_pieces`]) and, for a
 /// member with a BLAKE2sp record, the hash on a thread beside it. The CRC32
 /// is skipped outright when the member records none.
+///
+/// The hash takes the whole batch in ONE call rather than a piece at a
+/// time, which is the point of gathering the batch at all for it: the
+/// aarch64 eight-worker leaf team reaches 5.00 GB/s over four 1 MiB pieces
+/// handed over together and 3.91 GB/s over the same four fed one by one
+/// (measured 18 Sep 2026, `rar50/blake2sp/portable.rs` carries the table).
 fn digest_pieces(crc: &mut Crc32, hash: &mut HashState, crc_wanted: bool, pieces: &[&[u8]]) {
     match hash.as_mut() {
         Some((_, hasher)) if crc_wanted => std::thread::scope(|scope| {
-            scope.spawn(|| {
-                for piece in pieces {
-                    hasher.update(piece);
-                }
-            });
+            scope.spawn(|| hasher.update_pieces(pieces));
             crc.update_pieces(pieces);
         }),
-        Some((_, hasher)) => {
-            for piece in pieces {
-                hasher.update(piece);
-            }
-        }
+        Some((_, hasher)) => hasher.update_pieces(pieces),
         None if crc_wanted => crc.update_pieces(pieces),
         None => {}
     }
@@ -1271,7 +1269,30 @@ impl Archive {
     where
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
     {
-        self.extract_to_impl(options, &mut open, &mut |_, _| Ok(()), false)
+        self.extract_to_impl(options, &mut open, &mut |_, _| Ok(()), false, None)
+    }
+
+    /// [`Self::extract_to`] that may write members CONCURRENTLY, each into
+    /// its own writer, instead of handing every member's bytes to `open` on
+    /// the caller's thread. See [`ConcurrentOpen`] for the contract. Output
+    /// bytes, the order of `open` calls and error semantics are those of
+    /// `extract_to`; what moves is which thread writes a member and when.
+    pub fn extract_to_concurrent<F>(
+        &self,
+        options: crate::ArchiveReadOptions<'_>,
+        concurrent: &ConcurrentOpen<'_>,
+        mut open: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+    {
+        self.extract_to_impl(
+            options,
+            &mut open,
+            &mut |_, _| Ok(()),
+            false,
+            Some(concurrent),
+        )
     }
 
     pub fn extract_to_with_redirections<F, R>(
@@ -1284,7 +1305,7 @@ impl Archive {
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
         R: FnMut(&ExtractedEntryMeta, &FileRedirection) -> Result<()>,
     {
-        self.extract_to_impl(options, &mut open, &mut redirect, true)
+        self.extract_to_impl(options, &mut open, &mut redirect, true, None)
     }
 
     fn extract_to_impl<F, R>(
@@ -1293,11 +1314,14 @@ impl Archive {
         open: &mut F,
         redirect: &mut R,
         emit_redirections: bool,
+        concurrent: Option<&ConcurrentOpen<'_>>,
     ) -> Result<()>
     where
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
         R: FnMut(&ExtractedEntryMeta, &FileRedirection) -> Result<()>,
     {
+        #[cfg(not(feature = "parallel"))]
+        let _ = concurrent;
         // Single archives get the same member pool as volume sets (they were
         // the one entry point with no cross-member parallelism at all). The
         // split guard preserves this method's distinct error for split
@@ -1307,7 +1331,9 @@ impl Archive {
             .files()
             .any(|file| file.is_split_before() || file.is_split_after())
         {
-            if let Some(plan) = member_pool_plan(std::slice::from_ref(self), options) {
+            if let Some(plan) =
+                member_pool_plan(std::slice::from_ref(self), options, concurrent.is_some())
+            {
                 return extract_volumes_pooled(
                     std::slice::from_ref(self),
                     options,
@@ -1315,6 +1341,7 @@ impl Archive {
                     redirect,
                     emit_redirections,
                     plan,
+                    concurrent,
                 );
             }
         }
@@ -1455,7 +1482,7 @@ struct DecodedData {
 }
 
 struct DecoderSession<'a> {
-    decoder: Unpack50Decoder,
+    decoder: Rar50Decoder,
     reader_cache: crate::source::RangeReaderCache,
     password: Option<&'a [u8]>,
     buffered_decode_limit: u64,
@@ -1466,7 +1493,7 @@ struct DecoderSession<'a> {
     /// checking as it reads, which is what every caller did before.
     split_fragment_digests: crate::Rar50SplitFragmentDigests,
     /// Retained so a RESET decoder gets the caller's window limit back.
-    /// `Unpack50Decoder::new()` defaults it to `usize::MAX`, so replacing the
+    /// `Rar50Decoder::new()` defaults it to `usize::MAX`, so replacing the
     /// session's decoder with a bare one silently dropped the safety limit
     /// for that member and every member after it.
     max_window: u64,
@@ -1500,7 +1527,7 @@ impl<'a> DecoderSession<'a> {
         buffered_decode_limit: u64,
         max_window: u64,
     ) -> Self {
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         decoder.set_window_limit(usize::try_from(max_window).unwrap_or(usize::MAX));
         Self {
             decoder,
@@ -1525,14 +1552,14 @@ impl<'a> DecoderSession<'a> {
     /// worker cap both reapplied.
     ///
     /// Every reset inside the session goes through here. A bare
-    /// `Unpack50Decoder::new()` defaults `window_limit` and `mt_workers_cap`
+    /// `Rar50Decoder::new()` defaults `window_limit` and `mt_workers_cap`
     /// to `usize::MAX`, so the two reset paths (the zero-output
     /// streaming-filter fallback on a split member, and the LzNoFilters
     /// retry with no checkpoint to restore) handed the rest of the archive a
     /// decoder that answers to no caller-supplied resource limit at all - a
     /// match beyond the configured window stopped being rejected.
-    fn fresh_decoder(&self) -> Unpack50Decoder {
-        let mut decoder = Unpack50Decoder::new();
+    fn fresh_decoder(&self) -> Rar50Decoder {
+        let mut decoder = Rar50Decoder::new();
         decoder.set_window_limit(usize::try_from(self.max_window).unwrap_or(usize::MAX));
         if let Some(policy) = self.policy {
             decoder.set_mt_workers_cap(policy.max_tape_workers.min(policy.max_workers).max(1));
@@ -1771,7 +1798,38 @@ pub fn extract_volumes_to<F>(
 where
     F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
 {
-    extract_volumes_to_impl(volumes, options, &mut open, &mut |_, _| Ok(()), false, None)
+    extract_volumes_to_impl(
+        volumes,
+        options,
+        &mut open,
+        &mut |_, _| Ok(()),
+        false,
+        None,
+        None,
+    )
+}
+
+/// [`extract_volumes_to`] that may write members CONCURRENTLY; the volume
+/// set twin of [`Archive::extract_to_concurrent`], and the same
+/// [`ConcurrentOpen`] contract.
+pub fn extract_volumes_to_concurrent<F>(
+    volumes: &[Archive],
+    options: crate::ArchiveReadOptions<'_>,
+    concurrent: &ConcurrentOpen<'_>,
+    mut open: F,
+) -> Result<()>
+where
+    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+{
+    extract_volumes_to_impl(
+        volumes,
+        options,
+        &mut open,
+        &mut |_, _| Ok(()),
+        false,
+        None,
+        Some(concurrent),
+    )
 }
 
 /// [`extract_volumes_to`] reporting each volume the engine is finished
@@ -1824,6 +1882,7 @@ where
         &mut |_, _| Ok(()),
         false,
         Some(&mut consumed),
+        None,
     )
 }
 
@@ -1837,7 +1896,7 @@ where
     F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
     R: FnMut(&ExtractedEntryMeta, &FileRedirection) -> Result<()>,
 {
-    extract_volumes_to_impl(volumes, options, &mut open, &mut redirect, true, None)
+    extract_volumes_to_impl(volumes, options, &mut open, &mut redirect, true, None, None)
 }
 
 fn extract_volumes_to_impl<F, R>(
@@ -1847,11 +1906,14 @@ fn extract_volumes_to_impl<F, R>(
     redirect: &mut R,
     emit_redirections: bool,
     mut consumed: Option<&mut (dyn FnMut(usize) + Send)>,
+    concurrent: Option<&ConcurrentOpen<'_>>,
 ) -> Result<()>
 where
     F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
     R: FnMut(&ExtractedEntryMeta, &FileRedirection) -> Result<()>,
 {
+    #[cfg(not(feature = "parallel"))]
+    let _ = concurrent;
     if volumes.is_empty() {
         return Err(Error::InvalidHeader("RAR 5 volume set is empty"));
     }
@@ -1876,7 +1938,7 @@ where
     // asked for the watermark asked for the serial walk.
     #[cfg(feature = "parallel")]
     if consumed.is_none() {
-        if let Some(plan) = member_pool_plan(volumes, options) {
+        if let Some(plan) = member_pool_plan(volumes, options, concurrent.is_some()) {
             return extract_volumes_pooled(
                 volumes,
                 options,
@@ -1884,6 +1946,7 @@ where
                 redirect,
                 emit_redirections,
                 plan,
+                concurrent,
             );
         }
     }
@@ -3393,6 +3456,35 @@ impl ChunkCursor {
     }
 }
 
+/// The worker-side opener of [`Archive::extract_to_concurrent`] and
+/// [`extract_volumes_to_concurrent`].
+///
+/// `concurrent(ordinal, meta)` MAY be called, from any thread and ahead of
+/// the caller's walk, for a regular file member of a non-solid archive:
+/// never for a directory, a redirection, a split member, or a member that
+/// shares a solid window. `ordinal` is the number of `open` calls the walk
+/// makes BEFORE this member's own, so a caller that numbers its `open`
+/// calls can find the member it is being asked about.
+///
+/// - `Ok(Some(writer))`: the engine writes the member's whole content into
+///   `writer` on that thread, calls `flush`, and drops it. A small member
+///   is decoded and verified first, so one that fails its check is never
+///   opened; a large one is streamed, so on failure the writer has already
+///   received part of it. Later, on the caller's thread and in archive
+///   order, `open(meta)` is still called for the member exactly once and
+///   is written NOTHING: it reports that the member is finished, and when
+///   the member failed it is followed by the member's error, the same
+///   place the serial walk reports one.
+/// - `Ok(None)`: the member goes through `open` and is written there, as
+///   [`Archive::extract_to`] does.
+/// - `Err(error)`: the member's error.
+///
+/// No ordering is owed between members written this way. A caller that
+/// needs one - two members resolving to the same file - declines the
+/// later ones.
+pub type ConcurrentOpen<'a> =
+    dyn Fn(usize, &ExtractedEntryMeta) -> Result<Option<Box<dyn Write + Send>>> + Sync + 'a;
+
 // --- member-parallel decode pool (non-solid sets, small members) -----------
 //
 // Non-solid RAR5 members share no decoder state, so several can decode at
@@ -3479,7 +3571,38 @@ fn pool_work_batch_shape(
 /// (nzbfast-local change, 3 Sep 2026 - re-apply on the next rars re-sync;
 /// see vendor/rars/VENDORING.md.)
 #[cfg(feature = "parallel")]
-type PoolMemberResult = Result<Vec<u8>>;
+type PoolMemberResult = Result<PoolPayload>;
+
+/// A pooled member's decoded bytes, or word that a worker has already
+/// written them through the caller's [`ConcurrentOpen`], or (for such a
+/// caller) that the member failed to decode and the walk must run it
+/// itself.
+#[cfg(feature = "parallel")]
+#[cfg_attr(test, derive(Debug))]
+enum PoolPayload {
+    Data(Vec<u8>),
+    Written,
+    /// The walk re-runs the member through the serial path, so the bytes
+    /// its writer holds and the error it reports are the serial walk's.
+    /// They differ from a pooled decode's where it matters: a STORED
+    /// member streams its bytes before its checksum fails, and unrar's
+    /// `-kb` keeps them, where a pooled member is verified before it is
+    /// written and would leave an empty file (conformance row
+    /// `extract-corrupted-keep-broken`, 18 Sep 2026). Only the failure
+    /// path pays for it.
+    Redo,
+}
+
+#[cfg(all(feature = "parallel", test))]
+impl PoolPayload {
+    fn bytes(self) -> Vec<u8> {
+        match self {
+            Self::Data(data) => data,
+            Self::Written => panic!("a member written by its worker has no bytes to hand back"),
+            Self::Redo => panic!("a member the walk must redo has no bytes to hand back"),
+        }
+    }
+}
 #[cfg(feature = "parallel")]
 type PoolResultIter = std::vec::IntoIter<PoolMemberResult>;
 
@@ -3514,7 +3637,7 @@ impl PoolResultReorder {
         &mut self,
         expected: usize,
         result_rx: &std::sync::mpsc::Receiver<PoolResultPacket>,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<PoolPayload> {
         loop {
             if let Some((next_seq, results)) = self.ready.as_mut() {
                 if *next_seq != expected {
@@ -3576,6 +3699,9 @@ struct PoolEntry<'a> {
     volume_index: usize,
     file: &'a FileHeader,
     unpacked_size: u64,
+    /// `open` calls the walk makes before this member's own: the
+    /// [`ConcurrentOpen`] ordinal.
+    ordinal: usize,
 }
 
 #[cfg(feature = "parallel")]
@@ -3584,6 +3710,12 @@ struct MemberPoolPlan<'a> {
     seq_of: std::collections::HashMap<(usize, usize), usize>,
     /// Pool entries in feed order (archive order).
     order: Vec<PoolEntry<'a>>,
+    /// Members too big to buffer on the pool that a [`ConcurrentOpen`]
+    /// caller lets run CONCURRENTLY, each streamed through its own decoder
+    /// (the inline MT pipeline) into its own writer. Always empty without
+    /// one: those members then decode inline, one after another.
+    big: Vec<PoolEntry<'a>>,
+    big_seq_of: std::collections::HashMap<(usize, usize), usize>,
 }
 
 /// A member decodes on the pool when it is a regular compressed file that
@@ -3593,16 +3725,41 @@ struct MemberPoolPlan<'a> {
 /// cost is I/O, not decode); MT-sized members stay inline (MT already uses
 /// the cores; trap: a big member must not be stolen from inline-MT by the
 /// pool).
+///
+/// With a [`ConcurrentOpen`] caller, STORED members up to
+/// `POOL_STORED_MAX` pool too: their cost is then file creation, which the
+/// worker takes off the caller's thread. Without one it is a small LOSS
+/// (a copy and a verify on a worker, nothing moved off the write floor),
+/// measured 18 Sep 2026 over 4,000 stored files (0.45 s serial against
+/// 0.52 pooled, 0.29 with worker writes), so they stay inline.
 #[cfg(feature = "parallel")]
-fn member_pool_eligible(file: &FileHeader, buffered_decode_limit: u64) -> bool {
+fn member_pool_eligible(file: &FileHeader, buffered_decode_limit: u64, concurrent: bool) -> bool {
+    member_concurrent_shape(file)
+        && if file.is_stored() {
+            concurrent && file.unpacked_size <= POOL_STORED_MAX
+        } else {
+            !file.should_stream_decode(buffered_decode_limit)
+                || pool_streaming_band(file.unpacked_size, buffered_decode_limit)
+        }
+}
+
+/// A member whose bytes owe nothing to any other member's: the shape both
+/// the pool and the concurrent big-member team may take. (The per-file
+/// solid flag and solid archives are excluded by the plan.)
+#[cfg(feature = "parallel")]
+fn member_concurrent_shape(file: &FileHeader) -> bool {
     file.redirection.is_none()
         && !file.is_split_before()
         && !file.is_split_after()
         && !file.is_directory()
-        && !file.is_stored()
-        && (!file.should_stream_decode(buffered_decode_limit)
-            || pool_streaming_band(file.unpacked_size, buffered_decode_limit))
 }
+
+/// Largest STORED member the pool buffers for a [`ConcurrentOpen`] caller;
+/// bigger ones stream through the big-member team. The prototype's figure.
+#[cfg(all(feature = "parallel", not(test)))]
+const POOL_STORED_MAX: u64 = 8 << 20;
+#[cfg(all(feature = "parallel", test))]
+const POOL_STORED_MAX: u64 = 1024;
 
 /// The streaming band the pool rescues: members that would stream SERIALLY
 /// inline (above the buffered threshold, below the MT pipeline floor - 4 to
@@ -3613,8 +3770,7 @@ fn member_pool_eligible(file: &FileHeader, buffered_decode_limit: u64) -> bool {
 #[cfg(feature = "parallel")]
 fn pool_streaming_band(unpacked_size: u64, buffered_decode_limit: u64) -> bool {
     unpacked_size <= buffered_decode_limit
-        && usize::try_from(unpacked_size)
-            .is_ok_and(|size| !Unpack50Decoder::mt_pipeline_engages(size))
+        && usize::try_from(unpacked_size).is_ok_and(|size| !Rar50Decoder::mt_pipeline_engages(size))
 }
 
 /// Build the pool plan, or None when nothing pools: fewer than two eligible
@@ -3628,36 +3784,202 @@ fn pool_streaming_band(unpacked_size: u64, buffered_decode_limit: u64) -> bool {
 /// does, since history retention keys on the archive flag), not the whole
 /// set: one stray solid member in a thousand-file set used to cost every
 /// other member its parallelism.
+///
+/// `concurrent` (a [`ConcurrentOpen`] caller) widens the plan: stored
+/// members join the pool, and every other independent member joins the
+/// big-member team. Two members of either kind are then enough to plan.
 #[cfg(feature = "parallel")]
 fn member_pool_plan<'a>(
     volumes: &'a [Archive],
     options: crate::ArchiveReadOptions<'_>,
+    concurrent: bool,
 ) -> Option<MemberPoolPlan<'a>> {
     let buffered_decode_limit = rar50_buffered_decode_limit(options);
     let mut seq_of = std::collections::HashMap::new();
     let mut order = Vec::new();
+    let mut big_seq_of = std::collections::HashMap::new();
+    let mut big = Vec::new();
+    // The walk calls `open` once per entry that is neither a redirection
+    // nor a split fragment with more to come (a split member opens at its
+    // Finish), solid or not, so the ordinal counts across every volume.
+    let mut opens = 0usize;
     for (volume_index, archive) in volumes.iter().enumerate() {
-        if archive.main.is_solid() {
-            continue;
-        }
+        let solid_archive = archive.main.is_solid();
         for (file_index, file) in archive.files().enumerate() {
-            if file
-                .decoded_compression_info()
-                .is_ok_and(|info| info.solid)
-            {
+            let ordinal = opens;
+            if file.redirection.is_none() && !file.is_split_after() {
+                opens += 1;
+            }
+            if solid_archive || file.decoded_compression_info().is_ok_and(|info| info.solid) {
                 continue;
             }
-            if member_pool_eligible(file, buffered_decode_limit) {
+            let entry = PoolEntry {
+                volume_index,
+                file,
+                unpacked_size: file.unpacked_size,
+                ordinal,
+            };
+            if member_pool_eligible(file, buffered_decode_limit, concurrent) {
                 seq_of.insert((volume_index, file_index), order.len());
-                order.push(PoolEntry {
-                    volume_index,
-                    file,
-                    unpacked_size: file.unpacked_size,
-                });
+                order.push(entry);
+            } else if concurrent && member_concurrent_shape(file) {
+                big_seq_of.insert((volume_index, file_index), big.len());
+                big.push(entry);
             }
         }
     }
-    (order.len() >= 2).then_some(MemberPoolPlan { seq_of, order })
+    (order.len() + big.len() >= 2).then_some(MemberPoolPlan {
+        seq_of,
+        order,
+        big,
+        big_seq_of,
+    })
+}
+
+/// Pool workers when they also CREATE the files they decode. Creation on
+/// APFS stops scaling past a handful of threads (132 us a file serial, 63
+/// at four, no better at eight), and measured 18 Sep 2026 on an 18-core
+/// aarch64 laptop six workers beat eight on both many-small-files legs: 0.150 s
+/// against 0.173 stored, 0.174 against 0.188 at `-m3`.
+#[cfg(feature = "parallel")]
+const CONCURRENT_POOL_WORKERS_MAX: usize = 6;
+
+/// Most big members streaming at once. Each runs the MT tape pipeline
+/// with its share of the cores, so this bounds memory (K windows and pipe
+/// buffers, not K members) rather than CPU.
+#[cfg(feature = "parallel")]
+const CONCURRENT_BIG_MAX: usize = 4;
+
+/// How many big members stream at once, and the tape-worker cap each one's
+/// MT pipeline gets.
+///
+/// Members are shed until their estimated working sets fit an allowance:
+/// the caller's policy when there is one, else `DEFAULT_STREAM_WINDOW_LIMIT`,
+/// the ceiling the engine already allows ONE member's window by default.
+/// So 64 MiB members run four at once whatever their dictionary (about 88
+/// MiB each, the window being capped by the member), while members of
+/// 1 GiB at `-md 256m` (about 536 MiB each) run one at a time, exactly as
+/// before: concurrency never costs more than one worst-case window.
+#[cfg(feature = "parallel")]
+fn concurrent_big_shape(
+    big: &[PoolEntry<'_>],
+    policy: Option<crate::Rar50ExecutionPolicy>,
+) -> (usize, usize) {
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let mut members = (cores / 4)
+        .clamp(1, CONCURRENT_BIG_MAX)
+        .min(big.len().max(1));
+    if let Some(policy) = policy {
+        members = members.min(policy.max_workers.max(1));
+    }
+    let allowance = policy.map_or(DEFAULT_STREAM_WINDOW_LIMIT, |p| p.working_memory_limit);
+    let each = big
+        .iter()
+        .map(|entry| concurrent_big_estimate(entry.file))
+        .max()
+        .unwrap_or(FLAT_OVERHEAD_ESTIMATE);
+    while members > 1 && each.saturating_mul(members as u64) > allowance {
+        members -= 1;
+    }
+    let mut tapes = (cores.saturating_sub(1) / members).max(1);
+    if let Some(policy) = policy {
+        tapes = tapes.min(policy.max_tape_workers.min(policy.max_workers).max(1));
+    }
+    (members, tapes)
+}
+
+/// Peak working set of one member streaming through the MT pipeline: its
+/// window, which is twice the dictionary but never more than the member,
+/// plus pipe and tape scratch. Measured 18 Sep 2026 over eight 64 MiB
+/// members at `-md 8m`, `32m` and `128m`: each member added 39, 83 and
+/// 83 MiB of peak RSS, which this reads as 40, 88 and 88.
+#[cfg(feature = "parallel")]
+fn concurrent_big_estimate(file: &FileHeader) -> u64 {
+    let dictionary = file
+        .decoded_compression_info()
+        .map_or(0, |info| info.dictionary_size);
+    let window = if file.is_stored() {
+        STORED_PIPE_BUF as u64 * STORED_POOL as u64
+    } else {
+        dictionary.saturating_mul(2).min(file.unpacked_size)
+    };
+    window.saturating_add(FLAT_OVERHEAD_ESTIMATE)
+}
+
+/// The policy one concurrently streaming big member decodes under: its
+/// share of the caller's allowance, and its share of the cores. With no
+/// caller policy the allowance stays unbounded - exactly what the inline
+/// session applies - and only the tape workers are capped.
+#[cfg(feature = "parallel")]
+fn concurrent_big_policy(
+    policy: Option<crate::Rar50ExecutionPolicy>,
+    members: usize,
+    tapes: usize,
+) -> crate::Rar50ExecutionPolicy {
+    let members = members.max(1) as u64;
+    match policy {
+        Some(policy) => crate::Rar50ExecutionPolicy {
+            working_memory_limit: policy.working_memory_limit / members,
+            flat_output_limit: policy.flat_output_limit / members,
+            max_workers: policy.max_workers,
+            max_tape_workers: tapes,
+        },
+        None => crate::Rar50ExecutionPolicy {
+            working_memory_limit: u64::MAX,
+            flat_output_limit: u64::MAX,
+            max_workers: tapes,
+            max_tape_workers: tapes,
+        },
+    }
+}
+
+/// What a big-member worker did with its member.
+#[cfg(feature = "parallel")]
+enum BigOutcome {
+    /// The caller's opener declined it: the walk decodes it inline.
+    Declined,
+    /// Streamed through the caller's writer, with the member's result.
+    Done(Result<()>),
+}
+
+/// Archive-order view of the big-member team's results.
+#[cfg(feature = "parallel")]
+struct BigReorder {
+    slots: Vec<Option<BigOutcome>>,
+}
+
+#[cfg(feature = "parallel")]
+impl BigReorder {
+    fn next(
+        &mut self,
+        seq: usize,
+        rx: &std::sync::mpsc::Receiver<(usize, BigOutcome)>,
+    ) -> Result<BigOutcome> {
+        loop {
+            if let Some(outcome) = self.slots.get_mut(seq).and_then(Option::take) {
+                return Ok(outcome);
+            }
+            let (index, outcome) = rx
+                .recv()
+                .map_err(|_| Error::InvalidHeader("RAR 5 concurrent member team disconnected"))?;
+            let slot = self.slots.get_mut(index).ok_or(Error::InvalidHeader(
+                "RAR 5 concurrent member team returned an unknown member",
+            ))?;
+            *slot = Some(outcome);
+        }
+    }
+}
+
+/// Sets a flag when dropped, so the big-member team stops taking members
+/// the moment the walk returns, error or not.
+#[cfg(feature = "parallel")]
+struct StopOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
+
+#[cfg(feature = "parallel")]
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 /// Decode + verify one pooled member on a worker. Mirrors the serial
@@ -3673,7 +3995,7 @@ fn decode_pooled_member(
     reader_cache: &mut crate::source::RangeReaderCache,
 ) -> Result<Vec<u8>> {
     let fresh_decoder = || {
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         decoder.set_window_limit(usize::try_from(max_window).unwrap_or(usize::MAX));
         decoder.set_retain_history(false);
         decoder
@@ -3710,11 +4032,13 @@ fn extract_volumes_pooled<F, R>(
     redirect: &mut R,
     emit_redirections: bool,
     plan: MemberPoolPlan,
+    concurrent: Option<&ConcurrentOpen<'_>>,
 ) -> Result<()>
 where
     F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
     R: FnMut(&ExtractedEntryMeta, &FileRedirection) -> Result<()>,
 {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::sync::{Arc, Condvar, Mutex};
 
@@ -3725,9 +4049,19 @@ where
     let workers = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
         .saturating_sub(1)
-        .clamp(1, 8)
+        .clamp(
+            1,
+            if concurrent.is_some() {
+                CONCURRENT_POOL_WORKERS_MAX
+            } else {
+                8
+            },
+        )
         .min(policy.map_or(usize::MAX, |p| p.max_workers.max(1)))
-        .min(plan.order.len());
+        .min(plan.order.len())
+        // A concurrent plan can hold big members and no pooled ones at all;
+        // one idle worker keeps the budget arithmetic below whole.
+        .max(1);
     // A constrained policy also shrinks the in-flight allowance; it never
     // grows past the built-in budget, and the floor keeps one decoded
     // member of any admitted size able to make progress. The floor tracks
@@ -3747,6 +4081,13 @@ where
     let work_rx = Arc::new(Mutex::new(work_rx));
     // workers -> coordinator
     let (result_tx, result_rx) = mpsc::channel::<PoolResultPacket>();
+    // The big-member team: members claimed in archive order off a shared
+    // cursor, results rejoined by index. Empty unless `concurrent`.
+    let (big_members, big_tapes) = concurrent_big_shape(&plan.big, policy);
+    let big_policy = concurrent_big_policy(policy, big_members, big_tapes);
+    let big_cursor = AtomicUsize::new(0);
+    let big_stop = AtomicBool::new(false);
+    let (big_tx, big_rx) = mpsc::channel::<(usize, BigOutcome)>();
 
     let outcome = std::thread::scope(|scope| {
         // Feeder: pushes small ranges of pool sequence numbers in archive
@@ -3807,6 +4148,7 @@ where
             let work_rx = Arc::clone(&work_rx);
             let result_tx = result_tx.clone();
             let order = &plan.order;
+            let budget = Arc::clone(&budget);
             scope.spawn(move || {
                 let mut reader_cache = crate::source::RangeReaderCache::default();
                 loop {
@@ -3821,13 +4163,40 @@ where
                         let archive = &volumes[entry.volume_index];
                         let file = entry.file;
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            decode_pooled_member(
+                            let decoded = decode_pooled_member(
                                 archive,
                                 file,
                                 password,
                                 max_window,
                                 &mut reader_cache,
-                            )
+                            );
+                            let data = match decoded {
+                                Ok(data) => data,
+                                Err(_) if concurrent.is_some() => return Ok(PoolPayload::Redo),
+                                Err(error) => return Err(error),
+                            };
+                            let Some(concurrent) = concurrent else {
+                                return Ok(PoolPayload::Data(data));
+                            };
+                            let Some(mut writer) = concurrent(entry.ordinal, &file.metadata())?
+                            else {
+                                return Ok(PoolPayload::Data(data));
+                            };
+                            writer
+                                .write_all(&data)
+                                .and_then(|()| writer.flush())
+                                .map_err(Error::from)
+                                .map_err(|error| file.entry_error("writing", error))?;
+                            drop(writer);
+                            drop(data);
+                            // Written here, so credited here: the walk has
+                            // nothing to write and the feeder can move on.
+                            let (lock, cvar) = &*budget;
+                            let mut state = lock.lock().expect("pool budget lock");
+                            state.0 = state.0.saturating_sub(entry.unpacked_size);
+                            drop(state);
+                            cvar.notify_all();
+                            Ok(PoolPayload::Written)
                         }))
                         .unwrap_or(Err(Error::InvalidHeader(
                             "RAR 5 member decode worker panicked",
@@ -3859,6 +4228,57 @@ where
             });
         }
         drop(result_tx);
+        // The big-member team. Each streams one member at a time through
+        // its own session, whose MT pipeline gets `big_tapes` workers, and
+        // stops taking members once the walk has returned.
+        let _big_stop = StopOnDrop(&big_stop);
+        if let Some(concurrent) = concurrent.filter(|_| !plan.big.is_empty()) {
+            for _ in 0..big_members {
+                let big_tx = big_tx.clone();
+                let big = &plan.big;
+                let big_cursor = &big_cursor;
+                let big_stop = &big_stop;
+                scope.spawn(move || loop {
+                    if big_stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let index = big_cursor.fetch_add(1, Ordering::Relaxed);
+                    let Some(entry) = big.get(index) else { return };
+                    let archive = &volumes[entry.volume_index];
+                    let file = entry.file;
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let mut writer = match concurrent(entry.ordinal, &file.metadata()) {
+                            Ok(Some(writer)) => writer,
+                            Ok(None) => return BigOutcome::Declined,
+                            Err(error) => return BigOutcome::Done(Err(error)),
+                        };
+                        let mut session = DecoderSession::new_with_password(
+                            password,
+                            buffered_decode_limit,
+                            max_window,
+                        )
+                        .with_policy(Some(big_policy));
+                        let result =
+                            session
+                                .write_file_to(archive, file, &mut writer)
+                                .and_then(|()| {
+                                    writer
+                                        .flush()
+                                        .map_err(Error::from)
+                                        .map_err(|error| file.entry_error("writing", error))
+                                });
+                        BigOutcome::Done(result)
+                    }))
+                    .unwrap_or(BigOutcome::Done(Err(Error::InvalidHeader(
+                        "RAR 5 concurrent member worker panicked",
+                    ))));
+                    if big_tx.send((index, outcome)).is_err() {
+                        return; // coordinator gone
+                    }
+                });
+            }
+        }
+        drop(big_tx);
         // ...and the work RECEIVER, the fifth instance of the pool-hang class
         // (181d06b8, 419c00ae, 48b21a0b). The feeder parks in TWO places and
         // the abort guard only covers one: it wakes a budget-condvar wait, but
@@ -3873,6 +4293,9 @@ where
         // pulled from the reorder map instead of decoded inline. Inline
         // members (stored, streaming/MT, splits) use the session as today.
         let mut results = PoolResultReorder::default();
+        let mut big_results = BigReorder {
+            slots: (0..plan.big.len()).map(|_| None).collect(),
+        };
         let mut split = SplitVolumeState::new();
         let mut session =
             DecoderSession::new_with_password(password, buffered_decode_limit, max_window)
@@ -3904,12 +4327,29 @@ where
                             }
                             let meta = file.metadata();
                             if let Some(&seq) = plan.seq_of.get(&(volume_index, file_index)) {
-                                let data = results.next(seq, &result_rx)?;
-                                let mut writer = open(&meta)?;
-                                writer
-                                    .write_all(&data)
-                                    .map_err(Error::from)
-                                    .map_err(|error| file.entry_error("writing", error))?;
+                                let result = results.next(seq, &result_rx);
+                                // A concurrent caller hears about a failed
+                                // member AFTER its `open`, which is where the
+                                // serial walk reports one. `extract_to` keeps
+                                // the pool's own order (error first).
+                                let (mut writer, payload) = if concurrent.is_some() {
+                                    let writer = open(&meta)?;
+                                    (writer, result?)
+                                } else {
+                                    let payload = result?;
+                                    (open(&meta)?, payload)
+                                };
+                                match payload {
+                                    PoolPayload::Data(data) => writer
+                                        .write_all(&data)
+                                        .map_err(Error::from)
+                                        .map_err(|error| file.entry_error("writing", error))?,
+                                    // Written and credited by the worker.
+                                    PoolPayload::Written => continue,
+                                    PoolPayload::Redo => {
+                                        session.write_file_to(archive, file, &mut writer)?
+                                    }
+                                }
                                 drop(writer);
                                 let (lock, cvar) = &*budget;
                                 let mut state = lock.lock().expect("pool budget lock");
@@ -3922,6 +4362,19 @@ where
                                 state.0 = state.0.saturating_sub(plan.order[seq].unpacked_size);
                                 drop(state);
                                 cvar.notify_all();
+                            } else if let Some(&seq) =
+                                plan.big_seq_of.get(&(volume_index, file_index))
+                            {
+                                match big_results.next(seq, &big_rx)? {
+                                    BigOutcome::Declined => {
+                                        let mut writer = open(&meta)?;
+                                        session.write_file_to(archive, file, &mut writer)?;
+                                    }
+                                    BigOutcome::Done(result) => {
+                                        drop(open(&meta)?);
+                                        result?;
+                                    }
+                                }
                             } else {
                                 let mut writer = open(&meta)?;
                                 if !meta.is_directory {
@@ -4726,7 +5179,7 @@ impl FileHeader {
         &self,
         volumes: &[Archive],
         split: &PendingSplitRefs,
-        decoder: &mut Unpack50Decoder,
+        decoder: &mut Rar50Decoder,
         decryptor: Option<&SplitDecryptor>,
         fragment_error: &SharedFragmentError,
     ) -> Result<Vec<u8>> {
@@ -5933,6 +6386,7 @@ mod tests {
             write_policy: None,
             tokenizer_horizon_choice: false,
             level_five_fallbacks: true,
+            recovery_fold_threads: None,
         })
         .compressed_entries(&[CompressedEntry {
             name: b"filtered.bin",
@@ -5973,6 +6427,7 @@ mod tests {
             write_policy: None,
             tokenizer_horizon_choice: false,
             level_five_fallbacks: true,
+            recovery_fold_threads: None,
         })
         .compressed_entries(&[CompressedEntry {
             name: b"filtered.bin",
@@ -6031,7 +6486,7 @@ mod tests {
         let mut file = plain_file(b"secret.txt", b"secret", None);
         file.encrypted = true;
         file.unpacked_size = 6;
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
 
         assert_eq!(
             file.decode_packed_with_decoder(b"secret\0\0", &mut decoder)
@@ -6191,7 +6646,7 @@ mod tests {
 
     #[test]
     fn decode_packed_rejects_stored_size_mismatch() {
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
 
         let mut file = plain_file(b"a.txt", &[0u8; 32], None);
         file.unpacked_size = 32;
@@ -6374,9 +6829,9 @@ mod tests {
         }
     }
 
-    fn split_fragment_file(name: &[u8], hfl_flags: u64) -> FileHeader {
+    fn split_fragment_file(name: &[u8], header_flags: u64) -> FileHeader {
         FileHeader {
-            block: empty_block(BLOCK_TYPE_FILE, hfl_flags, 0..0),
+            block: empty_block(BLOCK_TYPE_FILE, header_flags, 0..0),
             file_flags: 0,
             unpacked_size: 0,
             attributes: 0x20,
@@ -6684,7 +7139,11 @@ mod tests {
         let packet = |start: usize| {
             PoolResultPacket::Batch(
                 start,
-                vec![Ok(vec![start as u8]), Ok(vec![(start + 1) as u8])].into_iter(),
+                vec![
+                    Ok(PoolPayload::Data(vec![start as u8])),
+                    Ok(PoolPayload::Data(vec![(start + 1) as u8])),
+                ]
+                .into_iter(),
             )
         };
         let (tx, rx) = std::sync::mpsc::channel();
@@ -6694,18 +7153,18 @@ mod tests {
         assert!(tx.send(packet(4)).is_ok());
         assert!(tx.send(packet(2)).is_ok());
         assert!(tx.send(packet(0)).is_ok());
-        let single = PoolResultPacket::Single(6, Ok(vec![6]));
+        let single = PoolResultPacket::Single(6, Ok(PoolPayload::Data(vec![6])));
         assert!(matches!(&single, PoolResultPacket::Single(..)));
         assert!(tx.send(single).is_ok());
         drop(tx);
 
         let mut reorder = PoolResultReorder::default();
-        assert_eq!(reorder.next(0, &rx).unwrap(), [0]);
+        assert_eq!(reorder.next(0, &rx).unwrap().bytes(), [0]);
         // Two future BATCHES occupy two tree nodes, not four member nodes.
         assert_eq!(reorder.pending.len(), 2);
         assert!(reorder.ready.is_some());
         let tail: Vec<u8> = (1..=6)
-            .map(|seq| reorder.next(seq, &rx).unwrap()[0])
+            .map(|seq| reorder.next(seq, &rx).unwrap().bytes()[0])
             .collect();
         assert_eq!(tail, [1, 2, 3, 4, 5, 6]);
         assert!(reorder.pending.is_empty());
@@ -6723,7 +7182,7 @@ mod tests {
             .send(batch(
                 2,
                 Err(Error::InvalidHeader("later member failed")),
-                Ok(vec![3]),
+                Ok(PoolPayload::Data(vec![3])),
             ))
             .is_ok());
         assert!(tx
@@ -6735,14 +7194,14 @@ mod tests {
         assert!(tx
             .send(batch(
                 0,
-                Ok(vec![0]),
+                Ok(PoolPayload::Data(vec![0])),
                 Err(Error::InvalidHeader("first member failed")),
             ))
             .is_ok());
         drop(tx);
 
         let mut reorder = PoolResultReorder::default();
-        assert_eq!(reorder.next(0, &rx).unwrap(), [0]);
+        assert_eq!(reorder.next(0, &rx).unwrap().bytes(), [0]);
         assert!(reorder
             .next(1, &rx)
             .unwrap_err()
@@ -6755,7 +7214,7 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("later member failed"));
-        assert_eq!(reorder.next(3, &rx).unwrap(), [3]);
+        assert_eq!(reorder.next(3, &rx).unwrap().bytes(), [3]);
         assert!(reorder
             .next(4, &rx)
             .unwrap_err()
@@ -6833,7 +7292,7 @@ mod tests {
 
         let pooled_options = crate::ArchiveReadOptions::new()
             .with_rar50_buffered_decode_limit(BUFFERED_DECODE_LIMIT);
-        let plan = member_pool_plan(std::slice::from_ref(&archive), pooled_options).unwrap();
+        let plan = member_pool_plan(std::slice::from_ref(&archive), pooled_options, false).unwrap();
         assert_eq!(plan.order.len(), 128);
         assert!((1..=8).all(|workers| pool_work_batch_size(plan.order.len(), workers) > 1));
 
@@ -6935,11 +7394,310 @@ mod tests {
         );
     }
 
+    /// The four member kinds a concurrent walk distinguishes, in one
+    /// archive: small compressed and small stored members (the pool, which
+    /// buffers them), and large compressed and large stored members (the
+    /// big-member team, which streams them). In test builds the buffered
+    /// ceiling is 1 KiB and the MT floor is 0, so "large" is anything over
+    /// 1 KiB and still exercises the MT pipeline.
+    /// `(name, bytes)` per member, in archive order.
+    #[cfg(feature = "parallel")]
+    type NamedMembers = Vec<(Vec<u8>, Vec<u8>)>;
+
+    #[cfg(feature = "parallel")]
+    fn concurrent_fixture() -> (Vec<u8>, NamedMembers) {
+        // Odd members are PRNG bytes, which the writer stores (it keeps a
+        // member stored when packing does not shrink it); even ones are
+        // text, which it compresses.
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut members: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for index in 0..48usize {
+            let size = match index % 4 {
+                0 | 1 => 300 + index * 7,
+                _ => 3000 + index * 211,
+            };
+            let data: Vec<u8> = (0..size)
+                .map(|offset| {
+                    if index % 2 == 1 {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        state as u8
+                    } else {
+                        b'a' + ((index * 31 + offset % 23 + offset / 97) % 26) as u8
+                    }
+                })
+                .collect();
+            let name = format!("dir{}/member-{index:03}.bin", index % 3).into_bytes();
+            members.push((name, data));
+        }
+        let entries: Vec<CompressedEntry> = members
+            .iter()
+            .map(|(name, data)| CompressedEntry {
+                name,
+                data,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            })
+            .collect();
+        let bytes = Rar50Writer::new(WriterOptions::new(
+            crate::ArchiveVersion::Rar50,
+            crate::FeatureSet::default(),
+        ))
+        .compressed_entries(&entries)
+        .finish()
+        .unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        let expected = archive
+            .files()
+            .map(|file| {
+                let mut data = Vec::new();
+                file.write_to(&archive, None, &mut data).unwrap();
+                (file.name.clone(), data)
+            })
+            .collect();
+        (bytes, expected)
+    }
+
+    #[cfg(feature = "parallel")]
+    #[derive(Clone, Default)]
+    struct SyncSink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    #[cfg(feature = "parallel")]
+    impl Write for SyncSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// What one concurrent walk did: the walk's `open` calls in order with
+    /// the bytes each writer received, and the worker opener's calls.
+    #[cfg(feature = "parallel")]
+    struct ConcurrentRun {
+        opened: Vec<(Vec<u8>, SyncSink)>,
+        workers: std::collections::BTreeMap<usize, (Vec<u8>, SyncSink)>,
+        result: Result<()>,
+    }
+
+    #[cfg(feature = "parallel")]
+    fn run_concurrent(archive: &Archive, accept: bool) -> ConcurrentRun {
+        let workers = std::sync::Mutex::new(std::collections::BTreeMap::new());
+        let concurrent =
+            |ordinal: usize, meta: &ExtractedEntryMeta| -> Result<Option<Box<dyn Write + Send>>> {
+                if !accept {
+                    return Ok(None);
+                }
+                let sink = SyncSink::default();
+                let previous = workers
+                    .lock()
+                    .unwrap()
+                    .insert(ordinal, (meta.name.clone(), sink.clone()));
+                assert!(previous.is_none(), "ordinal {ordinal} opened twice");
+                Ok(Some(Box::new(sink)))
+            };
+        let mut opened = Vec::new();
+        let result =
+            archive.extract_to_concurrent(crate::ArchiveReadOptions::new(), &concurrent, |meta| {
+                let sink = SyncSink::default();
+                opened.push((meta.name.clone(), sink.clone()));
+                Ok(Box::new(sink))
+            });
+        ConcurrentRun {
+            opened,
+            workers: workers.into_inner().unwrap(),
+            result,
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn concurrent_walk_matches_serial_bytes_order_and_ordinals() {
+        let (bytes, expected) = concurrent_fixture();
+        let archive = Archive::parse(&bytes).unwrap();
+        let plan = member_pool_plan(
+            std::slice::from_ref(&archive),
+            crate::ArchiveReadOptions::new(),
+            true,
+        )
+        .unwrap();
+        // All four kinds are really there.
+        assert!(plan.order.iter().any(|entry| entry.file.is_stored()));
+        assert!(plan.order.iter().any(|entry| !entry.file.is_stored()));
+        assert!(plan.big.iter().any(|entry| entry.file.is_stored()));
+        assert!(plan.big.iter().any(|entry| !entry.file.is_stored()));
+        assert_eq!(plan.order.len() + plan.big.len(), expected.len());
+        // Without a concurrent caller the plan is the one it always was.
+        let serial_plan = member_pool_plan(
+            std::slice::from_ref(&archive),
+            crate::ArchiveReadOptions::new(),
+            false,
+        );
+        assert!(serial_plan
+            .is_none_or(|plan| plan.big.is_empty()
+                && plan.order.iter().all(|entry| !entry.file.is_stored())));
+
+        let run = run_concurrent(&archive, true);
+        run.result.unwrap();
+        // The walk still opens every member once, in archive order...
+        let names: Vec<_> = run.opened.iter().map(|(name, _)| name.clone()).collect();
+        let expected_names: Vec<_> = expected.iter().map(|(name, _)| name.clone()).collect();
+        assert_eq!(names, expected_names);
+        // ...every member went to a worker, under the ordinal of its open...
+        assert_eq!(run.workers.len(), expected.len());
+        for (ordinal, (name, _)) in &run.workers {
+            assert_eq!(&names[*ordinal], name);
+        }
+        // ...the walk's own writers were written nothing, and the workers'
+        // hold exactly what the serial walk writes.
+        for (ordinal, (name, data)) in expected.iter().enumerate() {
+            assert!(run.opened[ordinal].1 .0.lock().unwrap().is_empty());
+            let (worker_name, sink) = &run.workers[&ordinal];
+            assert_eq!(worker_name, name);
+            assert_eq!(&*sink.0.lock().unwrap(), data, "member {ordinal}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn a_declining_opener_leaves_the_walk_to_write_everything() {
+        let (bytes, expected) = concurrent_fixture();
+        let archive = Archive::parse(&bytes).unwrap();
+        let run = run_concurrent(&archive, false);
+        run.result.unwrap();
+        assert!(run.workers.is_empty());
+        let got: Vec<_> = run
+            .opened
+            .iter()
+            .map(|(name, sink)| (name.clone(), sink.0.lock().unwrap().clone()))
+            .collect();
+        assert_eq!(got, expected);
+    }
+
+    /// A member that fails its check reports the serial walk's error, at the
+    /// serial walk's place: after that member's own `open`, with nothing
+    /// opened past it - on the pool (verified before its writer is opened,
+    /// so no worker writer ever sees it) and on the big-member team
+    /// (streamed, so it is opened and fails mid-member).
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn a_corrupt_member_fails_where_the_serial_walk_fails() {
+        let (bytes, expected) = concurrent_fixture();
+        let archive = Archive::parse(&bytes).unwrap();
+        for (small, pick) in [(true, 1usize), (false, 3usize)] {
+            // Members 1 and 3 are stored (odd), small and large respectively.
+            let (name, data) = &expected[pick];
+            assert_eq!(data.len() <= POOL_STORED_MAX as usize, small);
+            let at = bytes
+                .windows(data.len())
+                .position(|window| window == data.as_slice())
+                .expect("stored payload is in the archive verbatim");
+            let mut corrupt = bytes.clone();
+            corrupt[at + data.len() / 2] ^= 0x55;
+            let archive = Archive::parse(&corrupt).unwrap();
+
+            let mut serial_opened = Vec::new();
+            let serial_bytes = SyncSink::default();
+            let serial_error = archive
+                .extract_to(crate::ArchiveReadOptions::new(), |meta| {
+                    serial_opened.push(meta.name.clone());
+                    let sink = SyncSink::default();
+                    if &meta.name == name {
+                        return Ok(Box::new(serial_bytes.clone()));
+                    }
+                    Ok(Box::new(sink))
+                })
+                .unwrap_err();
+            assert_eq!(serial_opened.last(), Some(name));
+
+            let run = run_concurrent(&archive, true);
+            let error = run.result.unwrap_err();
+            assert_eq!(error.to_string(), serial_error.to_string(), "small={small}");
+            let names: Vec<_> = run.opened.iter().map(|(name, _)| name.clone()).collect();
+            assert_eq!(names, serial_opened, "small={small}");
+            let reached_a_worker = run.workers.values().any(|(worker, _)| worker == name);
+            assert_eq!(reached_a_worker, !small, "small={small}");
+            // What the failing member's writers were handed, walk's and
+            // worker's together, is what the serial walk handed its one:
+            // a stored member's bytes arrive before its checksum fails,
+            // and a `-kb` caller keeps them.
+            let mut delivered = run.opened.last().unwrap().1 .0.lock().unwrap().clone();
+            for (worker, sink) in run.workers.values() {
+                if worker == name {
+                    delivered.extend_from_slice(&sink.0.lock().unwrap());
+                }
+            }
+            let serial_delivered = serial_bytes.0.lock().unwrap().clone();
+            assert!(!serial_delivered.is_empty(), "small={small}");
+            assert_eq!(delivered, serial_delivered, "small={small}");
+        }
+        drop(archive);
+    }
+
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn a_panicking_opener_is_an_error_not_a_hang() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (bytes, _) = concurrent_fixture();
+            let archive = Archive::parse(&bytes).unwrap();
+            let concurrent = |_ordinal: usize,
+                              _meta: &ExtractedEntryMeta|
+             -> Result<Option<Box<dyn Write + Send>>> {
+                panic!("opener panicked")
+            };
+            let outcome = archive.extract_to_concurrent(
+                crate::ArchiveReadOptions::new(),
+                &concurrent,
+                |_meta| Ok(Box::new(std::io::sink())),
+            );
+            let _ = done_tx.send(outcome.map_err(|error| error.to_string()));
+        });
+        let outcome = done_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("concurrent extraction deadlocked after an opener panic");
+        assert!(outcome.unwrap_err().contains("panicked"));
+    }
+
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn a_constrained_policy_sheds_concurrent_big_members() {
+        let (bytes, _) = concurrent_fixture();
+        let archive = Archive::parse(&bytes).unwrap();
+        let plan = member_pool_plan(
+            std::slice::from_ref(&archive),
+            crate::ArchiveReadOptions::new(),
+            true,
+        )
+        .unwrap();
+        let each = plan
+            .big
+            .iter()
+            .map(|entry| concurrent_big_estimate(entry.file))
+            .max()
+            .unwrap();
+        let tight = crate::Rar50ExecutionPolicy::from_working_memory(each);
+        let (members, tapes) = concurrent_big_shape(&plan.big, Some(tight));
+        assert_eq!(members, 1);
+        assert!(tapes <= tight.max_tape_workers.min(tight.max_workers));
+        let policy = concurrent_big_policy(Some(tight), 3, 2);
+        assert_eq!(policy.working_memory_limit, each / 3);
+        assert_eq!(policy.max_tape_workers, 2);
+        // No policy: never more than one default window's worth at once.
+        let (members, _) = concurrent_big_shape(&plan.big, None);
+        assert!(each.saturating_mul(members as u64) <= DEFAULT_STREAM_WINDOW_LIMIT);
+    }
+
     #[test]
     fn stream_packed_with_decoder_rejects_stored_files() {
         let file = plain_file(b"stored.txt", b"hello", None);
         assert!(file.is_stored());
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         let mut out: Vec<u8> = Vec::new();
         let err = file
             .stream_packed_with_decoder(
@@ -7051,7 +7809,7 @@ mod tests {
         file.unpacked_size = payload.len() as u64;
 
         let archive = archive_with_blocks(vec![Block::File(file.clone())], payload.to_vec());
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         let mut reader_cache = crate::source::RangeReaderCache::default();
         let decoded = file
             .decoded_data_with_mode(
@@ -7066,7 +7824,7 @@ mod tests {
         assert!(decoded.keys.is_none());
 
         // LzNoFilters dispatches through the same stored short-circuit.
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         let decoded = file
             .decoded_data_with_mode(
                 &archive,

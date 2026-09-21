@@ -1378,6 +1378,11 @@ pub(super) fn spawn_tail_giveup(
         return None;
     }
     let slots2 = slots.to_vec();
+    // The bounded wait on furniture (see `metatail`): built once, off the
+    // NZB, so a post without any costs the loop nothing per tick.
+    let meta_cands = super::metatail::meta_tail_grace()
+        .and_then(|g| super::metatail::candidates(slots, slot_file, nzb).map(|c| (g, c)));
+    let mut meta_still = super::metatail::Stillness::default();
     let verifier2 = verifier.clone();
     let queue_ctl2 = queue_ctl.clone();
     let stop = prefetch_stop.clone();
@@ -1461,6 +1466,39 @@ pub(super) fn spawn_tail_giveup(
             // `continue` added later cannot silently carry a stale
             // window past it - the defect this replaced.
             let was_starved = starved.take();
+            // Furniture-only tail: nothing but metadata the job completes
+            // without is still owed, and it has stopped moving. Runs
+            // BEFORE the walker census below, which stays shut unless
+            // every pending article is already a refusal-walker.
+            if let Some((grace, cands)) = &meta_cands {
+                let census = queue_ctl2.pending_census_if(&|id| cands.contains_key(id));
+                if meta_still.expired(census.as_ref().map(Vec::len), Instant::now(), *grace)
+                    && let Some(ws) = census
+                    && let Some(ws) = super::metatail::claimable(
+                        ws,
+                        &slots2,
+                        crate::get::census::covered_set_names(&verifier2).as_ref(),
+                        cands,
+                    )
+                {
+                    let claimed = queue_ctl2.give_up_covered(&ws);
+                    if !claimed.is_empty() {
+                        let names =
+                            super::metatail::charge_missing(&claimed, cands, &slots2, &fetch_done2);
+                        meta_still = Default::default();
+                        info!(
+                            target: "get",
+                            "every payload article is in and {} article(s) of {} metadata \
+                             file(s) are still unresolved after {}s - stopped waiting for \
+                             them, the job does not depend on them: {}",
+                            claimed.len(),
+                            names.len(),
+                            grace.as_secs(),
+                            names.join(", ")
+                        );
+                    }
+                }
+            }
             // The census gates everything: Some only when EVERY pending
             // article is a refusal-walker, which is exactly the state
             // the tail stall consists of. A single clean payload

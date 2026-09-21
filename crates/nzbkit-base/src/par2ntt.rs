@@ -1577,6 +1577,25 @@ mod tests {
         }
     }
 
+    /// # WHERE ITS WALL ACTUALLY IS (18 Sep 2026)
+    ///
+    /// Measured by a round that took this test as one of the one-process
+    /// CI job's largest rows. 18-core arm64 box, debug, 8.8 s in total:
+    ///
+    ///   w = 16,  56 cases  ~0.5 s   6%
+    ///   w = 173, 20 cases   1.35 s  15%
+    ///   w = 512, 12 cases   2.46 s  28%
+    ///   w = 1024, 8 cases   4.49 s  51%
+    ///
+    /// So the "full n sweep runs at w=16 ... costs a hundredth of the
+    /// wall" claim below is CONFIRMED, and the wall is the four widest
+    /// cells. Those are the `assert!(handled)` the 1,024 note names -
+    /// the one thing here a scratch sized for 512 words fails - so they
+    /// were ruled load-bearing rather than trimmed. `n = 129` at
+    /// w = 1,024 is the one cell whose 1.6 s no written reason names;
+    /// it is the only place a PARTIALLY filled leaf meets the
+    /// over-512-word scratch path, and settling whether that is
+    /// redundant needs the pairing's author, not a stopwatch.
     #[test]
     fn leaf_methods_agree_bit_for_bit() {
         let (_, _, real_kernel) = rader_tables();

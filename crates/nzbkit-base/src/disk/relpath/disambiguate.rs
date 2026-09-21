@@ -70,7 +70,7 @@
 ///
 /// Successive `retry` values must give distinct strings or a claim
 /// loop spins. They do, and by construction rather than by hash:
-/// [`super::cap_component`] truncates the TAIL and keeps the FRONT,
+/// `super::cap_component` truncates the TAIL and keeps the FRONT,
 /// its budget never falls below 225 bytes, and the prefix is at bytes
 /// 0..=5 - so `001-` and `001-1-` survive every shortening this can
 /// apply. The flatten fallback maps separators to `_` and is

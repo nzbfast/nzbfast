@@ -1,5 +1,171 @@
 use super::*;
 
+/// THE KERNEL ARM ROSTER: which SIMD arms the forced-arm tests in this
+/// file actually executed on THIS cpu, and which they skipped.
+///
+/// Several tests below deliberately FORCE a kernel that runtime dispatch
+/// would never pick on this part, so the test name pins WHICH kernel
+/// failed. Each forced arm sits behind a runtime feature probe, and when
+/// that probe is false the arm is skipped IN SILENCE - so the suite
+/// reported `ok` whether it exercised five kernels or one, and no log
+/// anywhere said which.
+///
+/// That cost a day on 18 Sep 2026. The 5 Sep `windows-one-process` red
+/// in `xor_mul_multi_matches_single_source_folds` turned on one fact
+/// about the runner - whether it had GFNI - and the job log could not
+/// answer it. It was recoverable only because the fixture is
+/// deterministic, so the expected value could be recomputed on another
+/// architecture entirely and the observed vector turned out to be `base`
+/// untouched, the signature of an all-zero nibble table. A kernel bug
+/// with a less obliging signature would have left that log undiagnosable
+/// (`research/GF16-AVX2-MULTI-5SEP-2026-09-18.md`).
+///
+/// This is INSTRUMENTATION, not a gate. It asserts nothing, it reddens
+/// nothing, and an arm reading `SKIPPED` is a fact about the box rather
+/// than a defect. Whether an arm that no runner anywhere exercises
+/// should be a hard failure is a separate decision, and it needs the
+/// inventory this roster produces before it can be made
+/// (`research/GF16-KERNEL-ARM-COVERAGE-2026-09-18.md`).
+///
+/// It is emitted ONCE PER TEST PROCESS, from [`roster_once`], which
+/// every forced-arm test calls first. That placement is the whole
+/// design:
+///
+/// * under nextest, each test gets its own process and captured output
+///   is printed for a FAILING test - so the roster lands beside the
+///   panic, which is exactly the 5 Sep case;
+/// * under `cargo test` (the one-process suites, where that red
+///   actually surfaced) libtest captures a passing test's output, so
+///   `unit-one-process` re-runs the roster test alone with
+///   `--nocapture` in a step of its own and refuses a run whose log does
+///   not carry the marker. A roster printed only on failure would answer
+///   nothing about a GREEN run, and "which kernels has CI ever verified"
+///   is a question about green runs.
+///
+/// THE PREDICATES BELOW ARE THE ONES THE ARMS THEMSELVES USE. They are
+/// spelled once, here, and every forced arm calls the same helper - so
+/// the roster cannot drift into claiming an arm ran when its call site
+/// was gated on something else. Adding a forced arm without adding its
+/// helper and its row is the one edit this file cannot catch; the row is
+/// the point.
+const ROSTER_MARKER: &str = "gf16-kernel-roster:";
+
+/// The SSSE3 nibble arms (`fold_ssse3`, `xor_mul_multi_ssse3`).
+#[cfg(target_arch = "x86_64")]
+fn arm_ssse3() -> bool {
+    is_x86_feature_detected!("ssse3")
+}
+
+/// The AVX2 arms: the nibble fold (`fold_avx2`, `xor_mul_multi_avx2`)
+/// and the direct-XOR `xor_multi_avx2`.
+#[cfg(target_arch = "x86_64")]
+fn arm_avx2() -> bool {
+    is_x86_feature_detected!("avx2")
+}
+
+/// The 256-bit GFNI affine2x arms (`fold_gfni`, `xor_mul_multi_gfni`).
+/// The ISA bits only - `gf16::gfni256_available()` additionally honours
+/// `NZBFAST_GF16_FORCE`, which is dispatch's question and not this one:
+/// these tests drive the kernel directly, so what gates them is whether
+/// the instruction would fault.
+#[cfg(target_arch = "x86_64")]
+fn arm_gfni256() -> bool {
+    is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx2")
+}
+
+/// The 512-bit GFNI arm (`xor_mul_multi_gfni512`). Same reading as
+/// [`arm_gfni256`]: the ISA bits, not `avx512_gfni_available()`'s
+/// additional `NZBFAST_GF16_AVX512` A/B knob.
+#[cfg(target_arch = "x86_64")]
+fn arm_gfni512() -> bool {
+    is_x86_feature_detected!("avx512f")
+        && is_x86_feature_detected!("avx512bw")
+        && is_x86_feature_detected!("gfni")
+}
+
+/// The NEON sha3 arm (`xor_mul_multi_neon_sha3`).
+#[cfg(target_arch = "aarch64")]
+fn arm_sha3() -> bool {
+    std::arch::is_aarch64_feature_detected!("sha3")
+}
+
+/// One row per forced arm: the kernels it drives, and whether this cpu
+/// can run them. Baseline arms (SSE2 on x86-64, NEON on aarch64) are
+/// listed too - they are unconditionally true, and a roster that hid
+/// them would not be a roster of the arms.
+fn kernel_arm_rows() -> Vec<(&'static str, &'static str, bool)> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        vec![
+            ("xor_multi_sse2", "baseline", true),
+            ("xor_multi_avx2", "avx2", arm_avx2()),
+            ("fold_ssse3 + xor_mul_multi_ssse3", "ssse3", arm_ssse3()),
+            ("fold_avx2 + xor_mul_multi_avx2", "avx2", arm_avx2()),
+            ("fold_gfni + xor_mul_multi_gfni", "gfni+avx2", arm_gfni256()),
+            (
+                "xor_mul_multi_gfni512",
+                "avx512f+avx512bw+gfni",
+                arm_gfni512(),
+            ),
+        ]
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        vec![
+            ("xor_multi_neon", "baseline", true),
+            ("xor_mul_multi_neon", "baseline", true),
+            ("xor_mul_multi_neon_sha3", "sha3", arm_sha3()),
+        ]
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        // Not an oversight and not an empty roster by accident: this
+        // arch has no SIMD kernel in `gf16` at all, so `multi_fold_width`
+        // is 0 and the forced-arm tests return early. Say so.
+        Vec::new()
+    }
+}
+
+/// Print the roster exactly once per test process. Cheap (a handful of
+/// cached `cpuid` reads and one `println!`) and outside every assertion
+/// path, so a test that calls it first is not measuring it.
+fn roster_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let rows = kernel_arm_rows();
+        println!(
+            "{ROSTER_MARKER} arch={} multi_fold_width={} arms={}",
+            std::env::consts::ARCH,
+            multi_fold_width(),
+            rows.len()
+        );
+        if rows.is_empty() {
+            println!("{ROSTER_MARKER} no SIMD kernel arm exists on this arch");
+        }
+        for (kernels, probe, on) in rows {
+            println!(
+                "{ROSTER_MARKER} {:<8} {kernels}  [{probe}]",
+                if on { "EXERCISED" } else { "SKIPPED" }
+            );
+        }
+    });
+}
+
+/// The roster on its own, for the CI step that re-runs one named test
+/// with `--nocapture` to put the lines in a log a later lane can grep.
+/// It asserts only that the roster is non-empty on an arch that has
+/// kernels - failing to find is failing, and a roster of zero rows on
+/// x86-64 or aarch64 means the rows stopped being maintained.
+#[test]
+fn gf16_kernel_arm_roster() {
+    roster_once();
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    assert!(
+        !kernel_arm_rows().is_empty(),
+        "this arch has gf16 SIMD kernels, so the roster must have rows"
+    );
+}
+
 /// The fused butterfly against the definition, both directions,
 /// and the inverse undoing the forward.
 #[test]
@@ -385,6 +551,7 @@ fn nibble_tables_match_mul() {
 /// into every later test in the binary).
 #[test]
 fn schedule_granule_is_the_selected_kernels_chunk() {
+    roster_once();
     let fan_in = multi_fold_width();
     let granule = multi_fold_schedule_granule_words(fan_in);
     assert!(
@@ -420,30 +587,27 @@ fn schedule_granule_is_the_selected_kernels_chunk() {
                 "{arm} must consume its {want}-word granule whole"
             );
         };
-        if is_x86_feature_detected!("avx2") {
+        if arm_avx2() {
             let mut dst = vec![0u16; 16];
             // SAFETY: AVX2 verified by the detect; the source covers
             // dst's full byte length.
             let got = unsafe { xor_mul_multi_avx2(&mut dst, &srcs, &[0x1234]) };
             whole(16, got, "the AVX2 nibble kernel");
         }
-        if is_x86_feature_detected!("ssse3") {
+        if arm_ssse3() {
             let mut dst = vec![0u16; 16];
             // SAFETY: SSSE3 verified by the detect; source as above.
             let got = unsafe { xor_mul_multi_ssse3(&mut dst, &srcs, &[0x1234]) };
             whole(16, got, "the SSSE3 nibble kernel");
         }
-        if is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx2") {
+        if arm_gfni256() {
             let mut dst = vec![0u16; 16];
             // SAFETY: GFNI and AVX2 verified by the detect; source as
             // above.
             let got = unsafe { xor_mul_multi_gfni(&mut dst, &srcs, &[0x1234]) };
             whole(16, got, "the GFNI affine2x kernel");
         }
-        if is_x86_feature_detected!("avx512f")
-            && is_x86_feature_detected!("avx512bw")
-            && is_x86_feature_detected!("gfni")
-        {
+        if arm_gfni512() {
             let mut dst = vec![0u16; 32];
             // SAFETY: the three features verified by the detects;
             // source as above.
@@ -463,7 +627,7 @@ fn schedule_granule_is_the_selected_kernels_chunk() {
             got, 16,
             "the NEON PMULL kernel must consume its granule whole"
         );
-        if std::arch::is_aarch64_feature_detected!("sha3") {
+        if arm_sha3() {
             let mut dst = vec![0u16; 16];
             // SAFETY: sha3 verified by the detect; source as above.
             let got = unsafe { xor_mul_multi_neon_sha3(&mut dst, &srcs, &[0x1234]) };
@@ -498,6 +662,7 @@ fn schedule_granule_is_the_selected_kernels_chunk() {
 
 #[test]
 fn xor_mul_multi_matches_single_source_folds() {
+    roster_once();
     let width = multi_fold_width();
     if width == 0 {
         return; // no multi kernel on this arch (yet)
@@ -583,7 +748,7 @@ fn xor_mul_multi_matches_single_source_folds() {
                     MulTable::new(*c).xor_mul_into(&mut got[done..], &s[done * 2..]);
                 }
                 assert_eq!(got, want, "plain-neon n={n} words={words}");
-                if std::arch::is_aarch64_feature_detected!("sha3") {
+                if arm_sha3() {
                     let mut got = base.clone();
                     // SAFETY: sha3 verified by the detect above;
                     // source coverage as above.
@@ -599,7 +764,7 @@ fn xor_mul_multi_matches_single_source_folds() {
             // the only place it can run - but force it so the test
             // name pins WHICH kernel failed).
             #[cfg(target_arch = "x86_64")]
-            if is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx2") {
+            if arm_gfni256() {
                 let mut got = base.clone();
                 // SAFETY: GFNI and AVX2 verified by the detect above;
                 // the kernel clamps to the shortest source.
@@ -610,10 +775,7 @@ fn xor_mul_multi_matches_single_source_folds() {
                 assert_eq!(got, want, "gfni-multi n={n} words={words}");
             }
             #[cfg(target_arch = "x86_64")]
-            if is_x86_feature_detected!("avx512f")
-                && is_x86_feature_detected!("avx512bw")
-                && is_x86_feature_detected!("gfni")
-            {
+            if arm_gfni512() {
                 let mut got = base.clone();
                 // SAFETY: the three features verified by the detects
                 // above; the kernel clamps to the shortest source.
@@ -630,7 +792,7 @@ fn xor_mul_multi_matches_single_source_folds() {
             // And the two shuffle kernels, which dispatch never picks
             // on a GFNI box but which every other x86 runs.
             #[cfg(target_arch = "x86_64")]
-            if is_x86_feature_detected!("avx2") {
+            if arm_avx2() {
                 let mut got = base.clone();
                 // SAFETY: AVX2 verified by the detect above; the
                 // kernel clamps to the shortest source.
@@ -642,7 +804,7 @@ fn xor_mul_multi_matches_single_source_folds() {
                 assert_eq!(got, want, "avx2-multi n={n} words={words}");
             }
             #[cfg(target_arch = "x86_64")]
-            if is_x86_feature_detected!("ssse3") {
+            if arm_ssse3() {
                 let mut got = base.clone();
                 // SAFETY: SSSE3 verified by the detect above; same clamp.
                 let done = unsafe { xor_mul_multi_ssse3(&mut got, &srcs, &coeffs) };
@@ -682,6 +844,7 @@ fn xor_multi_clamp_fixture() -> (Vec<Vec<u8>>, Vec<u16>, Vec<u16>) {
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn xor_multi_neon_clamps_to_shortest_source() {
+    roster_once();
     let (srcs, mut got, want) = xor_multi_clamp_fixture();
     let refs: Vec<&[u8]> = srcs.iter().map(Vec::as_slice).collect();
     // SAFETY: NEON is baseline on aarch64; the intentionally uneven
@@ -694,6 +857,7 @@ fn xor_multi_neon_clamps_to_shortest_source() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn xor_multi_x86_clamps_to_shortest_source() {
+    roster_once();
     let (srcs, base, want) = xor_multi_clamp_fixture();
     let refs: Vec<&[u8]> = srcs.iter().map(Vec::as_slice).collect();
     // Both x86 kernels are driven directly - runtime dispatch only ever
@@ -705,7 +869,7 @@ fn xor_multi_x86_clamps_to_shortest_source() {
     let done = unsafe { xor_multi_sse2(&mut got, &refs) };
     assert_eq!(done, 16);
     assert_eq!(got, want);
-    if is_x86_feature_detected!("avx2") {
+    if arm_avx2() {
         let mut got = base;
         // SAFETY: AVX2 verified by the detect above; same clamp.
         let done = unsafe { xor_multi_avx2(&mut got, &refs) };
@@ -720,6 +884,7 @@ fn xor_multi_x86_clamps_to_shortest_source() {
 /// with a non-zero starting `dst` so the accumulate (`^=`) is exercised.
 #[test]
 fn xor_mul_into_matches_scalar_all_lengths() {
+    roster_once();
     let mut state = 0x9E3779B97F4A7C15u64;
     let mut rng = || {
         state ^= state << 13;
@@ -752,7 +917,7 @@ fn xor_mul_into_matches_scalar_all_lengths() {
             // has (e.g. AVX2 shadowing SSSE3).
             #[cfg(target_arch = "x86_64")]
             {
-                if is_x86_feature_detected!("ssse3") {
+                if arm_ssse3() {
                     let mut got = base.clone();
                     // SAFETY: SSSE3 verified by the detect above; got
                     // holds words + 3 elements, a word for every byte
@@ -761,7 +926,7 @@ fn xor_mul_into_matches_scalar_all_lengths() {
                     MulTable::xor_mul_scalar(&t.lo, &t.hi, &mut got[done..], &src[done * 2..]);
                     assert_eq!(got, want, "ssse3 c={c:#x} len={len}");
                 }
-                if is_x86_feature_detected!("avx2") {
+                if arm_avx2() {
                     let mut got = base.clone();
                     // SAFETY: AVX2 verified by the detect above; got
                     // covers src as above.
@@ -769,7 +934,7 @@ fn xor_mul_into_matches_scalar_all_lengths() {
                     MulTable::xor_mul_scalar(&t.lo, &t.hi, &mut got[done..], &src[done * 2..]);
                     assert_eq!(got, want, "avx2 c={c:#x} len={len}");
                 }
-                if is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx2") {
+                if arm_gfni256() {
                     let mut got = base.clone();
                     // SAFETY: GFNI and AVX2 verified by the detect
                     // above; got covers src as above.

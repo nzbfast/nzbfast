@@ -6,6 +6,7 @@ use super::rrhint::{
     DamageHint, RrPassStats, Verdict, rr_repair_volumes, try_rar_rr_repair_hinted,
 };
 use super::*;
+use crate::rarfixtures::{self as rf, Member};
 
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("nzbfast-rrhint-{tag}-{}", std::process::id()));
@@ -23,20 +24,11 @@ fn payload(n: u32, seed: u32) -> Vec<u8> {
 /// A compressed multivolume RAR5 set with a 20% recovery record in every
 /// volume. Returns the volume paths in set order.
 fn write_rr_set(dir: &std::path::Path, payload: &[u8]) -> Vec<PathBuf> {
-    use rars::rar50::{CompressedEntry, Rar50VolumeWriter, WriterOptions};
-    let entries = [CompressedEntry {
-        name: b"inner/data.bin",
-        data: payload,
-        mtime: None,
-        attributes: 0o100644,
-        host_os: 1,
-    }];
-    let volumes = Rar50VolumeWriter::new(WriterOptions::default())
-        .compressed_entries(&entries)
-        .max_payload_per_volume(64 * 1024)
-        .recovery_percent(Some(20))
-        .finish()
-        .unwrap();
+    let volumes = rf::compressed_volume_set_with_recovery(
+        &[Member::unix(b"inner/data.bin", payload)],
+        64 * 1024,
+        Some(20),
+    );
     assert!(
         volumes.len() >= 4,
         "expected a multivolume set, got {}",
@@ -374,21 +366,13 @@ fn from_reports_maps_blocks_to_clipped_byte_ranges() {
 #[test]
 #[ignore]
 fn rr_hint_wall_time() {
-    use rars::rar50::{Rar50VolumeWriter, StoredEntry, WriterOptions};
     let dir = temp_dir("wall");
     let data = payload(24 * 2 * 1024 * 1024, 2654435761);
-    let volumes = Rar50VolumeWriter::new(WriterOptions::default())
-        .stored_entry(StoredEntry {
-            name: b"inner/data.bin",
-            data: &data,
-            mtime: None,
-            attributes: 0o100644,
-            host_os: 1,
-        })
-        .max_payload_per_volume(8 * 1024 * 1024)
-        .recovery_percent(Some(5))
-        .finish()
-        .unwrap();
+    let volumes = rf::stored_volume_set_with_recovery(
+        &[Member::unix(b"inner/data.bin", &data)],
+        8 * 1024 * 1024,
+        Some(5),
+    );
     let mut vols = Vec::new();
     for (index, bytes) in volumes.iter().enumerate() {
         let p = dir.join(format!("set.part{:02}.rar", index + 1));
@@ -468,22 +452,10 @@ fn rr_hint_wall_time() {
 
 #[test]
 fn a_damaged_volume_without_a_record_still_fails_the_rung_under_a_hint() {
-    use rars::rar50::{CompressedEntry, Rar50VolumeWriter, WriterOptions};
     let dir = temp_dir("norecord");
     let data = payload(100_000, 2246822519);
-    let entries = [CompressedEntry {
-        name: b"inner/data.bin",
-        data: &data,
-        mtime: None,
-        attributes: 0o100644,
-        host_os: 1,
-    }];
     // No recovery record anywhere.
-    let volumes = Rar50VolumeWriter::new(WriterOptions::default())
-        .compressed_entries(&entries)
-        .max_payload_per_volume(64 * 1024)
-        .finish()
-        .unwrap();
+    let volumes = rf::compressed_volume_set(&[Member::unix(b"inner/data.bin", &data)], 64 * 1024);
     let mut vols = Vec::new();
     for (index, bytes) in volumes.iter().enumerate() {
         let p = dir.join(format!("set.part{:02}.rar", index + 1));
@@ -768,8 +740,6 @@ fn rrscan_env(key: &str, default: &str) -> String {
 #[test]
 #[ignore]
 fn rrscan_build_set() {
-    use rars::rar50::{Rar50VolumeWriter, StoredEntry, WriterOptions};
-
     let dir = PathBuf::from(std::env::var("RRSCAN_SET").expect("RRSCAN_SET"));
     let spec = rrscan_env("RRSCAN_SIZES", "4x64");
     let (count, mib) = spec.split_once('x').expect("RRSCAN_SIZES=<count>x<MiB>");
@@ -785,19 +755,11 @@ fn rrscan_build_set() {
     // carries anyway. The repair path under measurement never looks at
     // the member's compression method.
     let data = rrscan_payload(count * mib * 1024 * 1024);
-    let entries = [StoredEntry {
-        name: b"inner/data.bin",
-        data: &data,
-        mtime: None,
-        attributes: 0o100644,
-        host_os: 1,
-    }];
-    let volumes = Rar50VolumeWriter::new(WriterOptions::default())
-        .stored_entries(&entries)
-        .max_payload_per_volume(mib * 1024 * 1024)
-        .recovery_percent(Some(percent))
-        .finish()
-        .unwrap();
+    let volumes = rf::stored_volume_set_with_recovery(
+        &[Member::unix(b"inner/data.bin", &data)],
+        mib * 1024 * 1024,
+        Some(percent),
+    );
     assert!(
         volumes.len() >= count,
         "expected at least {count} volumes, got {}",

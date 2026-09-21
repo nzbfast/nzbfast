@@ -254,7 +254,20 @@ pub(super) fn rules_save_warning(name: &str, v: &str) -> Option<String> {
 /// is judged by exactly one of them, so the order is not a precedence
 /// rule.
 pub fn save_warning(name: &str, v: &str) -> Option<String> {
-    rules_save_warning(name, v).or_else(|| prefer_external_unrar_warning(name, v))
+    rules_save_warning(name, v)
+        .or_else(|| prefer_external_unrar_warning(name, v))
+        .or_else(|| log_detail_warning(name, v))
+}
+
+/// The log dial, set on a process whose filter came from the
+/// environment: the save is real and will be honoured the first time
+/// the daemon starts without `NZBFAST_LOG` set, but nothing changes
+/// now, and a dial that silently does nothing is worse than no dial.
+fn log_detail_warning(name: &str, _v: &str) -> Option<String> {
+    (name == "log_detail" && nzbfast_core::logging::env_pinned()).then(|| {
+        "NZBFAST_LOG (or RUST_LOG) is set in this daemon's environment, so it is what          decides the log level - this setting is saved but has no effect until that          variable is unset"
+            .to_string()
+    })
 }
 
 /// Readable and writable, but the value is a blob we only log the size of.
@@ -621,6 +634,10 @@ pub(super) const RENAME: &[Setting] = &[
     }),
     rw("skip_samples", |c| {
         json!(c.d.skip_samples.load(Ordering::Relaxed))
+    }),
+    // TODO 332: defer a long repair ONCE, so the user can see it coming.
+    rw("repair_defer_long", |c| {
+        json!(c.d.repair_defer_long.load(Ordering::Relaxed))
     }),
     rw("rename_from_nzb", |c| {
         json!(c.d.rename.from_nzb.load(Ordering::Relaxed))
@@ -1156,6 +1173,14 @@ pub(super) const INTERFACE: &[Setting] = &[
     }),
     rw("update_url", |c| json!(c.d.update_url.lock_ok().clone())),
     rw("ui_locale", |c| json!(c.d.ui_locale.lock_ok().clone())),
+    // How loud the log is. Read off the log module rather than off the
+    // Daemon: the dial IS the subscriber's filter, and a second copy of
+    // it on the Daemon would be a second source for one rule. `_c`
+    // because this is the one setting in the table that no daemon field
+    // backs.
+    rw("log_detail", |_c| {
+        json!(nzbfast_core::logging::detail().as_str())
+    }),
 ];
 
 /// Credentials. Set-only: the UI is told a key EXISTS, never what it is.
@@ -1192,6 +1217,22 @@ pub(super) const KEYS: &[Setting] = &[
         write: Write::Setting,
         log: Log::Masked,
     },
+    // TODO 19 (public request #4): the optional dashboard login. The
+    // NAME is an ordinary value and is echoed - SAB shows its web
+    // username too, and hiding it would mean the settings page could not
+    // tell you which account you configured. The PASSWORD is write-only
+    // like every other credential here; what settings.json holds under
+    // that name is the Argon2id PHC string the setter produced, never
+    // the plaintext.
+    rw("web_username", |c| {
+        json!(c.d.web_username.lock_ok().clone().unwrap_or_default())
+    }),
+    Setting {
+        name: "web_password",
+        expose: Expose::Hidden,
+        write: Write::Setting,
+        log: Log::Masked,
+    },
     ro("has_apikey", |c| json!(c.d.apikey.lock_ok().is_some())),
     ro("has_nzbkey", |c| json!(c.d.nzbkey.lock_ok().is_some())),
     ro("has_omdb", |c| json!(c.d.omdb_key.lock_ok().is_some())),
@@ -1199,6 +1240,17 @@ pub(super) const KEYS: &[Setting] = &[
     ro("has_scoreboard_key", |c| {
         json!(c.d.scoreboard.key.lock_ok().is_some())
     }),
+    ro("has_web_password", |c| {
+        json!(c.d.web_password.lock_ok().is_some())
+    }),
+    // Whether a login form actually exists - BOTH halves set. The page
+    // needs this as one answer rather than two: a half-configured login
+    // is not a login, and a UI that decided for itself would be a second
+    // copy of the router's rule.
+    ro("web_login", |c| json!(crate::websession::login_on(c.d))),
+    // How many browsers are signed in right now. Display only, and the
+    // "sign every browser out" button's feedback.
+    ro("web_sessions", |c| json!(c.d.sessions.live_count())),
 ];
 
 /// Rows `get_config` fills in itself, plus the SAB-compatible actions
@@ -1227,6 +1279,18 @@ pub(super) const RUNTIME: &[Setting] = &[
     // arm off (see `finish_action::cancel` for why it does both).
     Setting {
         name: "queue_finished_cancel",
+        expose: Expose::Hidden,
+        write: Write::Action,
+        log: Log::Plain,
+    },
+    // TODO 19: "sign every browser out". An action, not a value - there
+    // is nothing to store and nothing to read back. Worth its own
+    // control rather than only riding a password change: a laptop left
+    // signed in somewhere is the reason somebody presses it, and making
+    // them change the password to do it would lock out the *arrs too if
+    // they got the wrong field.
+    Setting {
+        name: "web_logout_all",
         expose: Expose::Hidden,
         write: Write::Action,
         log: Log::Plain,
@@ -1260,7 +1324,7 @@ pub fn setting(name: &str) -> Option<&'static Setting> {
 /// rule.
 ///
 /// Default-deny by design: the rule comes from the setting's row in
-/// [`SETTING_GROUPS`], and a name with no row at all gets a shape
+/// `SETTING_GROUPS`, and a name with no row at all gets a shape
 /// summary, not its value - so the next credential-bearing setting
 /// someone adds cannot silently reopen this.
 pub fn log_value(name: &str, v: &str) -> String {
@@ -1310,8 +1374,8 @@ pub fn path_str(p: &Option<PathBuf>) -> String {
 
 /// The settings block `get_config` hands the UI, built by walking the
 /// table rather than by one enormous `json!` literal. Every
-/// [`Expose::Config`] row contributes its live value under its own name;
-/// the [`Expose::Assembled`] rows are filled in by the caller, which has
+/// `Expose::Config` row contributes its live value under its own name;
+/// the `Expose::Assembled` rows are filled in by the caller, which has
 /// already computed them.
 pub fn config_block(ctx: &ConfigCtx) -> serde_json::Map<String, Value> {
     let mut map = serde_json::Map::new();
@@ -1527,6 +1591,13 @@ pub fn apply_setting(
         "update_url" => set_update_url(d, name, v)?,
         "ui_locale" => set_ui_locale(d, name, v)?,
         "cors_origin" => set_cors_origin(d, name, v)?,
+        // TODO 19: the dashboard login pair. Both live immediately - a
+        // password you have just changed must not keep working until the
+        // next restart - and both sign every browser out, because a
+        // credential change that leaves the old sessions standing has
+        // revoked nothing.
+        "web_username" => set_web_username(d, name, v)?,
+        "web_password" => set_web_password(d, name, v)?,
         "bench_interval" => set_bench_interval(d, name, v)?,
         "auto_prefetch" => set_auto_prefetch(d, name, v)?,
         "race_stragglers" => set_race_stragglers(d, name, v)?,

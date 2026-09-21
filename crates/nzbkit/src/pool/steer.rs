@@ -879,7 +879,7 @@ impl ServerLive {
     /// or `None` while it has never delivered a body this run.
     ///
     /// Lives here rather than beside [`ServerLive::down_secs`] because
-    /// it is the READ half of [`Shared::note_srv_bytes`] a few lines
+    /// it is the READ half of `Shared::note_srv_bytes` a few lines
     /// above, and the two have to stay in step: that fold stores the
     /// rate ALREADY divided by tau (`ewma_rate(folded)`), so this reader
     /// must decay it and must not divide again. Dividing twice reads a
@@ -891,7 +891,7 @@ impl ServerLive {
     /// a Servers pane reading the field raw would report a provider that
     /// went silent ten minutes ago at full speed. `srv_rate_at` is
     /// stamped beside the value for exactly this, and it is a WALL-CLOCK
-    /// stamp (`now_ms`), unlike the [`Shared::srv_rate`] twin's, which
+    /// stamp (`now_ms`), unlike the `Shared::srv_rate` twin's, which
     /// is against the run clock - a reader outside the pool has no run
     /// clock to ask.
     ///
@@ -901,7 +901,7 @@ impl ServerLive {
     ///
     /// THE TWIN'S SENTINEL IS A DIFFERENT VALUE, and that asymmetry is
     /// the one thing to know before writing a third reader of this
-    /// quantity. [`Shared::srv_rate`] one screen up gates on
+    /// quantity. `Shared::srv_rate` one screen up gates on
     /// `prev == u64::MAX`, because `Shared::new` initialises its own
     /// `srv_rate_at` vector to `u64::MAX`; the published mirror beside
     /// it starts at 0. Both are correct where they are, and both are

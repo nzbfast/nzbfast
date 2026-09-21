@@ -88,7 +88,7 @@ pub struct Candidate {
 /// W4-01 a vouched set's denial FAILS the job, which turned a job that
 /// used to finish into one that does not.
 ///
-/// Derived from the SAME walk [`walk_candidates`] uses rather than from
+/// Derived from the SAME walk `walk_candidates` uses rather than from
 /// a second one, and that is the whole point rather than an economy:
 /// depth, the symlink rule, the directory cap and the entry cap are
 /// decided in ONE place, so a caller cannot end up reaching further -
@@ -96,7 +96,7 @@ pub struct Candidate {
 /// one is the copy-paste sibling that agrees today and drifts later.
 ///
 /// The BYTE budget is the one bound deliberately NOT taken, and it was
-/// taken for a day. [`MAX_NESTED_BYTES`] bounds what a packet walk might
+/// taken for a day. `MAX_NESTED_BYTES` bounds what a packet walk might
 /// LOAD; this returns paths and loads nothing, and `get::latesets`'
 /// `has_unclaimed` - the door this exists to keep pace with - has no
 /// byte bound either, so charging it here made the reach SHORTER than
@@ -182,7 +182,7 @@ pub fn walk_files(dir: &Path, scope: PacketScope) -> Result<Vec<Candidate>, Repa
     walk(dir, scope, false)
 }
 
-/// The nested [`walk_files`] set as `(path, length)`, for a caller
+/// The nested `walk_files` set as `(path, length)`, for a caller
 /// OUTSIDE this crate.
 ///
 /// `nzbfast::repair::adoption_candidates_present` is the one that needs

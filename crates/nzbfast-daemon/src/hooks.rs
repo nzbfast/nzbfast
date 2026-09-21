@@ -15,7 +15,7 @@
 //!   nothing but fan each event out, and a worker per target key owns
 //!   that target's queue, its socket and its retry clock. A receiver
 //!   that accepts and never answers therefore burns its own ten-second
-//!   timeouts and fills its own [`PENDING_CAP`] backlog, and no healthy
+//!   timeouts and fills its own `PENDING_CAP` backlog, and no healthy
 //!   target waits behind it (M12, 10 Aug sweep).
 //! - **Deliveries to one target keep the order its events happened
 //!   in.** A lane is strictly FIFO and a deferred retry goes back on
@@ -41,7 +41,7 @@
 //!   spoke, redirects are off on purpose, and hammering a 404 or a
 //!   signature-rejecting 401 with retries would only hide the
 //!   misconfiguration. Transport errors (refused, DNS, timeout) retry
-//!   on [`RETRY_AFTER`]'s backoff, then drop with a warning. Every
+//!   on `RETRY_AFTER`'s backoff, then drop with a warning. Every
 //!   outcome lands in `notify_health`, so the settings row shows it.
 
 use super::script::Fence;
@@ -766,23 +766,27 @@ fn post_event(p: &Pending) -> Result<u16, SendErr> {
     let a = ssrf_safe_agent(0, 10);
     let req = a
         .post(&p.url)
-        .set("Content-Type", "application/json")
-        .set("X-NzbFast-Event", &p.kind)
-        .set("X-NzbFast-Delivery", &p.delivery);
+        .header("Content-Type", "application/json")
+        .header("X-NzbFast-Event", &p.kind)
+        .header("X-NzbFast-Delivery", &p.delivery);
     let req = if p.secret.is_empty() {
         req
     } else {
-        req.set(
+        req.header(
             "X-NzbFast-Signature",
             &crate::notify::sign(&p.secret, p.body.as_bytes()),
         )
     };
-    match req.send_string(&p.body) {
-        Ok(r) => Ok(r.status()),
-        Err(ureq::Error::Status(code, _)) => Err(SendErr::Terminal(code, format!("HTTP {code}"))),
-        Err(ureq::Error::Transport(t)) => {
-            Err(SendErr::Transient(crate::notify::transport_brief(&t)))
-        }
+    match crate::netfetch::send_keeping_refusal(req, &p.body[..]) {
+        Ok(r) => Ok(r.status().as_u16()),
+        // `Refusal`'s Display is `netfetch::error_brief`, which is the
+        // rule this used to reach into `notify::transport_brief` for:
+        // a webhook's PATH is its bearer token and this string is
+        // logged, so the failure is reported and the request is not.
+        Err(e) => match e.code() {
+            Some(code) => Err(SendErr::Terminal(code, format!("HTTP {code}"))),
+            None => Err(SendErr::Transient(e.to_string())),
+        },
     }
 }
 
@@ -965,18 +969,24 @@ mod tests {
 
         d.life_emit("job.added", json!({"name": "X", "category": "tv"}));
         let (head, body) = accept_one(&l, "200 OK");
-        assert!(head.contains("X-NzbFast-Event: job.added"), "{head}");
+        assert_eq!(
+            crate::netfetch::raw_header_of(&head, "X-NzbFast-Event"),
+            Some("job.added"),
+            "{head}"
+        );
         let v: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["kind"], "job.added", "{v}");
         assert_eq!(v["schema_version"], 1, "{v}");
         let delivery = v["delivery"].as_str().expect("delivery id");
-        assert!(
-            head.contains(&format!("X-NzbFast-Delivery: {delivery}")),
+        assert_eq!(
+            crate::netfetch::raw_header_of(&head, "X-NzbFast-Delivery"),
+            Some(delivery),
             "{head}"
         );
         let sig = crate::notify::sign("s3cret", body.as_bytes());
-        assert!(
-            head.contains(&format!("X-NzbFast-Signature: {sig}")),
+        assert_eq!(
+            crate::netfetch::raw_header_of(&head, "X-NzbFast-Signature"),
+            Some(sig.as_str()),
             "{head}"
         );
         // Recorded as the target's last send.
@@ -1128,7 +1138,11 @@ mod tests {
         std::thread::sleep(Duration::from_millis(30));
         let l = TcpListener::bind(addr).expect("rebind the same port");
         let (head, _) = accept_one(&l, "200 OK");
-        assert!(head.contains("X-NzbFast-Event: job.added"), "{head}");
+        assert_eq!(
+            crate::netfetch::raw_header_of(&head, "X-NzbFast-Event"),
+            Some("job.added"),
+            "{head}"
+        );
 
         // Terminal: a 404 answer records and does NOT come back.
         d.life_emit("job.added", json!({"name": "T"}));

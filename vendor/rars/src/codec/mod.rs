@@ -1,8 +1,16 @@
 //! RAR compression codecs, filters, PPMd, and RARVM components used by `rars`.
 
+pub(crate) mod address_filters;
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub use address_filters::harness as address_filters_harness;
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub use address_filters::census as address_filters_census;
 mod fast;
 mod filters;
 mod huffman;
+mod match_index;
 mod ppmd;
 pub mod rar13;
 pub mod rar20;
@@ -19,7 +27,7 @@ pub enum Error {
     NeedMoreInput,
     Cancelled,
     /// A match is legal for the archive's dictionary but needs a wider window
-    /// than the caller allowed (see `Unpack50Decoder::set_window_limit`). The
+    /// than the caller allowed (see `Rar50Decoder::set_window_limit`). The
     /// extract layer remaps this to `crate::Error::Rar50WindowLimitExceeded`.
     WindowLimitExceeded {
         limit: u64,

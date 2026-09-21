@@ -159,6 +159,13 @@ impl FoldTeam {
         Ok(team)
     }
 
+    /// The threads this team actually started, which is what a caller's
+    /// asked-for width has to be read back against.
+    #[cfg(test)]
+    pub(super) fn width(&self) -> usize {
+        self.workers.len()
+    }
+
     pub(super) fn push(&mut self, mut bytes: &[u8]) -> Result<()> {
         let end = (self.batch.len() as u64)
             .checked_add(bytes.len() as u64)

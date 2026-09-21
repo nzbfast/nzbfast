@@ -175,21 +175,36 @@ pub(super) fn finalize_payload(
                 // every candidate below meets the same one - a full disk
                 // used to burn the entire file and then blame the
                 // passwords in it.
-                let mut winner: Option<String> = None;
-                for pw in d3.read_unpack_passwords_for(&site2, &poster2) {
+                let mut winner: Option<(usize, usize, String)> = None;
+                let cands = d3.read_unpack_passwords_for_indexed(&site2, &poster2);
+                let total = cands.len();
+                for (attempt, (entry, pw)) in cands.into_iter().enumerate() {
                     if refused.is_some() {
                         break;
                     }
                     if spend(&pw, &mut refused) {
-                        winner = Some(pw);
+                        winner = Some((entry, attempt + 1, pw));
                         break;
                     }
                 }
                 match winner {
-                    Some(pw) => {
+                    Some((entry, attempt, pw)) => {
+                        // §99: WHICH entry, never the value - the entry
+                        // number is the file's own and the only thing
+                        // about a password that is safe to log, and the
+                        // attempt is what says whether the try-order
+                        // earned its keep on this job. Naming both is
+                        // the whole diagnostic: an unlock that keeps
+                        // landing on attempt 1 is the heuristic
+                        // working, and one that walks the file every
+                        // time is a site key that never matches.
+                        // Deliberately the log and NOT the job report -
+                        // that meta is a whitelist and a password entry
+                        // has no business in a file the user may share.
                         info!(
                             target: "unlock",
-                            "{name2:?}: unlocked with a password from the passwords file"
+                            "{name2:?}: unlocked with passwords-file entry {entry} of {total}, \
+                             on attempt {attempt}"
                         );
                         d3.record_unlock_password(&site2, &poster2, &pw);
                         pw_used = Some(pw);

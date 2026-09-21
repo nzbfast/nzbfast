@@ -311,7 +311,7 @@ const COOL_MAX: u64 = 3600;
 ///   is entitled to ask for is a lane that cannot see `stop.stopping()`
 ///   for an hour, and shutdown is only checked between batches.
 /// - `cool_until` is the provider's actual instruction, and NOTHING
-///   sleeps on it: callers ask [`cooling`] and skip the request. That is
+///   sleeps on it: callers ask `cooling` and skip the request. That is
 ///   what stops the next ROW spending the same refused window - the
 ///   clamped minute above expires long before a `Retry-After: 900` does,
 ///   so without it title 2 of the batch walks straight into title 1's

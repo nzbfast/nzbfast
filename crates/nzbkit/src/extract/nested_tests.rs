@@ -922,7 +922,7 @@ fn nested_store_raise_is_revoked_by_a_compressed_archive_at_the_same_level() {
         ),
     ]);
     let comp_bytes = noisy(60_000, 133);
-    let b_rar = rars_compressed_volume(&[("comp.bin", &comp_bytes)]);
+    let b_rar = compressed_archive(&[("comp.bin", &comp_bytes)]);
     assert_not_store(&b_rar);
     let cut = 100_000;
     assert!(
@@ -1192,7 +1192,7 @@ fn nested_mixed_payload_chase_at_depth() {
         .collect();
     let g = payload(150_000, 0x71);
     let deep = fixtures::rar5_volume(&[("G.bin", g.len() as u64, &g, false, false)]);
-    let a3 = rars_compressed_volume(&[("docs_3.txt", &docs[3]), ("deep.rar", &deep)]);
+    let a3 = compressed_archive(&[("docs_3.txt", &docs[3]), ("deep.rar", &deep)]);
     assert_not_store(&a3);
     let a2 = fixtures::rar5_volume(&[
         ("docs_2.txt", docs[2].len() as u64, &docs[2], false, false),
@@ -1369,7 +1369,7 @@ fn nested_depth_holds_peak_bounded() {
     // half-entropy input keeps the packed stream near half size).
     {
         let f = noisy(8 << 20, 0x99);
-        let inner_arch = rars_compressed_volume(&[("F.bin", &f)]);
+        let inner_arch = compressed_archive(&[("F.bin", &f)]);
         assert_not_store(&inner_arch);
         let outer = fixtures::rar5_volume(&[(
             "inner.rar",
@@ -1417,3 +1417,364 @@ fn nested_depth_holds_peak_bounded() {
 // -- TODO 37 step 3: `.7z.001` split sets --
 
 // -- TODO 37 step 2: drop-behind trimming --
+
+// -- TODO 13 stage 0a: the tally has to survive a restart --
+
+/// The running total is never below what THIS process has counted, at
+/// any field. The baseline is `u64` addition over a number loaded from a
+/// file nobody in this crate validates, so the one way this can go wrong
+/// is an overflow wrapping a live count back to zero - which is exactly
+/// what `saturating_add` is there to stop.
+///
+/// Lower-bound, and the process figure is read FIRST on purpose: the
+/// counters are process-global and a test beside this one may bump them
+/// between the two reads, which can only ever make the total larger.
+#[test]
+fn the_running_total_is_never_below_this_process() {
+    let now = nested_prevalence();
+    let total = nested_prevalence_total();
+    for (name, a, b) in [
+        ("levels", now.levels, total.levels),
+        ("in_stream", now.in_stream, total.in_stream),
+        ("demoted", now.demoted, total.demoted),
+        ("disk", now.disk, total.disk),
+        ("rar_store", now.rar_store, total.rar_store),
+        ("rar_compressed", now.rar_compressed, total.rar_compressed),
+        ("rar_encrypted", now.rar_encrypted, total.rar_encrypted),
+        ("sevenz", now.sevenz, total.sevenz),
+        ("other", now.other, total.other),
+    ] {
+        assert!(b >= a, "{name}: total {b} is below the process figure {a}");
+    }
+}
+
+/// A baseline near `u64::MAX` must not wrap the live count back to
+/// something small. This is the corrupt-file case reaching the engine:
+/// `nestedstat::load` degrades a file it cannot parse to zeros, but a
+/// file that parses to an absurd number is a number, and the arithmetic
+/// is the only thing between it and a stats answer that reads as a
+/// REGRESSION in nesting prevalence.
+///
+/// Restores the baseline it found rather than zeroing it, because it is
+/// process-global and a daemon test in this process may have installed a
+/// real one.
+///
+/// It BUMPS the counters itself rather than relying on the process figure
+/// being nonzero. It was written the other way first and failed under
+/// nextest while passing under `cargo test --lib`, for the reason
+/// CLAUDE.md gives at length: nextest runs every test in its own process,
+/// so the process figures a one-process run has accumulated from the
+/// nested fixtures upstairs are all zero here, and `MAX - 1 + 0` is not
+/// `MAX`. One in-stream bump makes the addend at least 1 whichever runner
+/// this is, so both assertions are exact either way.
+#[test]
+fn an_absurd_baseline_saturates_rather_than_wrapping() {
+    let saved = nested_prevalence_baseline();
+    set_nested_prevalence_baseline(NestedPrevalence {
+        levels: u64::MAX,
+        in_stream: u64::MAX - 1,
+        ..Default::default()
+    });
+    note_nested_level(1, "rar-store", NestedDisposition::InStream);
+    let total = nested_prevalence_total();
+    assert_eq!(total.levels, u64::MAX, "levels wrapped");
+    assert_eq!(total.in_stream, u64::MAX, "in_stream wrapped");
+    set_nested_prevalence_baseline(saved);
+}
+
+/// The sink fires for EVERY disposition, the demote included. That arm
+/// bumps only the `demoted` diagnostic - by design, because the archive
+/// materializes and is re-counted under `disk` - so a hook written into
+/// the match arms rather than after them is the one most easily left off
+/// it, and a demote-only run would then bank nothing at all.
+#[test]
+fn the_sink_fires_for_every_disposition_including_a_demote() {
+    static HITS: AtomicU64 = AtomicU64::new(0);
+    fn count() {
+        HITS.fetch_add(1, Ordering::Relaxed);
+    }
+    let before = HITS.load(Ordering::Relaxed);
+    set_nested_prevalence_sink(count);
+    note_nested_level(1, "rar-store", NestedDisposition::InStream);
+    note_nested_level(1, "7z", NestedDisposition::Disk);
+    note_nested_level(1, "rar-compressed", NestedDisposition::Demoted("test"));
+    clear_nested_prevalence_sink();
+    // Lower bound: the counters are process-global, so a nested fixture
+    // running beside this test fires the same sink.
+    assert!(
+        HITS.load(Ordering::Relaxed) >= before + 3,
+        "the sink did not fire for all three dispositions"
+    );
+}
+
+// -- TODO 13: the two relational invariants, over a RECORDED run --
+//
+// `levels == in_stream + disk` and `demoted <= disk` were the residual
+// the 24 Jul adversarial audit left behind: both HOLD, and neither was
+// runtime-tested, because the only instrument was the process-global
+// counter set. Under `cargo test --lib` a whole crate shares one process
+// and the nested fixtures above move those counters while any assertion
+// over them is mid-flight, so every prevalence test here could assert a
+// monotonic lower bound and nothing else - an `==` or a zero delta was
+// simply wrong, not flaky. TODO 13 deferred the fix and named it:
+// capture the EMITTED EVENTS into a local buffer instead.
+//
+// `record_nested_events()` is that buffer. It is thread-local, so it
+// sees this test's emissions and no other test's, whichever runner is
+// driving - which is what lets the assertions below be exact. The events
+// carry the bumps `note_nested_level` APPLIED (`NestedBumps`, the one
+// place a disposition becomes numbers), so folding them back up is an
+// assertion about that function rather than about arithmetic the test
+// did itself.
+//
+// Checked both ways round on 20 Sep 2026: with `bumps_for`'s Demoted arm
+// temporarily changed to bump `levels`, both tests below fail under
+// `cargo test -p nzbkit --lib` AND under `cargo nextest run -p nzbkit
+// --lib`; the pre-existing lower-bound delta tests stay green through
+// that same break, which is the gap this pair closes.
+
+/// Invariant 1, exactly: every counted level is either in-stream or
+/// disk, and a demote is neither.
+///
+/// Three REAL fixtures drive the in-stream and demote halves (a
+/// store-in-store that streams, a group-less encrypted 7z that demotes,
+/// a CRC-damaged store group that demotes through the other topology),
+/// and the disk half is emitted the way `nzbfast-unpack`'s post-pass
+/// emits it - one `Disk` call per materialized nested archive
+/// (`unpack.rs`, `nested_inner_kind` -> `note_nested_level`). The disk
+/// site lives in another crate, so standing in for it with its own call
+/// is the only way to get both halves of this invariant into one buffer.
+#[test]
+fn recorded_levels_equal_in_stream_plus_disk() {
+    let rec = record_nested_events();
+
+    // (a) in-stream: store-in-store, inner payload produced in RAM.
+    let dir = tmpdir("inv-instream");
+    let data = payload(90_000, 93);
+    let inner_arch =
+        fixtures::rar5_volume(&[("movie.mkv", data.len() as u64, &data, false, false)]);
+    let outer = fixtures::rar5_volume(&[(
+        "inner.rar",
+        inner_arch.len() as u64,
+        &inner_arch,
+        false,
+        false,
+    )]);
+    let ex = Extractor::new(&dir, 1, true);
+    feed(&ex, 0, "v.rar", &outer, 7000, 43);
+    ex.finish().unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    // (b) demote: a group-less encrypted 7z with no password.
+    let f = payload(120_000, 179);
+    let arch = sevenz_archive(
+        &[("F.bin", &f)],
+        Some(vec![
+            sevenz_rust2::encoder_options::AesEncoderOptions::new(sevenz_rust2::Password::from(
+                "secret",
+            ))
+            .into(),
+        ]),
+        false,
+    );
+    let outer7 = store_outer("inner.7z", &arch);
+    let dir7 = tmpdir("inv-demote7z");
+    let ex7 = Extractor::new(&dir7, 1, true);
+    feed(&ex7, 0, "v.rar", &outer7, 7000, 53);
+    ex7.finish().unwrap();
+    std::fs::remove_dir_all(&dir7).unwrap();
+
+    // (c) the disk post-pass re-extracting what (b) materialized.
+    note_nested_level(1, "7z", NestedDisposition::Disk);
+
+    let events = rec.events();
+    let t = rec.tally();
+    assert_eq!(
+        t.levels,
+        t.in_stream + t.disk,
+        "levels != in_stream + disk over {events:#?}"
+    );
+    // The buffer must not be empty or one-sided: an invariant over
+    // nothing is the rubber stamp this pair exists to avoid, and an
+    // emission that moved to a worker thread would read exactly that
+    // way. Every disposition has to be present for the equality above
+    // to have been worth asserting.
+    assert_eq!(t.in_stream, 1, "in-stream half missing: {events:#?}");
+    assert_eq!(t.disk, 1, "disk half missing: {events:#?}");
+    assert_eq!(t.demoted, 1, "demote half missing: {events:#?}");
+    assert_eq!(t.levels, 2, "a demote counted a level: {events:#?}");
+}
+
+/// Invariant 2, over the same buffer: `demoted <= disk`, and every type
+/// that appears under `demoted` also appears under `disk`.
+///
+/// This is TODO 13's standing RISK item as a test. A demoted line whose
+/// type never shows up under `disk` is the phantom the 24 Jul audit was
+/// run for - a non-archive routed through the demote site, or a grouped
+/// demote emitting twice where the post-pass counts once. Both halves
+/// are asserted here:
+///
+/// * NO DOUBLE-EMIT. The two demote topologies take structurally
+///   different paths (`fallback_slot_or_group`'s demote site for a
+///   group-less inner, `report_nested_prevalence`'s groups loop for a
+///   grouped one), and each must emit exactly ONE event. A lower-bound
+///   delta over the global counter cannot see a second emission at all;
+///   the buffer can count them.
+/// * NO PHANTOM TYPE. Each demoted event's type is one the post-pass can
+///   also produce, and the pipeline is then closed the way
+///   `nzbfast-unpack` closes it - one `Disk` per materialized archive -
+///   so `demoted <= disk` holds with every demoted type present under
+///   `disk`.
+#[test]
+fn a_demote_emits_once_and_its_type_reappears_under_disk() {
+    let rec = record_nested_events();
+
+    // Grouped topology: a multi-volume store set demoted whole by the
+    // finish-time CRC gate.
+    let f = payload(400_000, 181);
+    let whole = crc32fast::hash(&f);
+    let mut iv = fixtures::rar5_volume_set_crc_layout(
+        &[
+            &[(
+                "F.mkv",
+                400_000,
+                &f[..150_001],
+                false,
+                true,
+                Some(crc32fast::hash(&f[..150_001])),
+            )],
+            &[(
+                "F.mkv",
+                400_000,
+                &f[150_001..300_001],
+                true,
+                true,
+                Some(crc32fast::hash(&f[150_001..300_001])),
+            )],
+            &[("F.mkv", 400_000, &f[300_001..], true, false, Some(whole))],
+        ],
+        fixtures::Rar5Head::default(),
+        fixtures::Rar5Crc::FinalFragment,
+    );
+    let mid = iv[1].len() / 2;
+    for b in &mut iv[1][mid..mid + 64] {
+        *b ^= 0xA5;
+    }
+    let outer = fixtures::rar5_volume(&[
+        ("i.part1.rar", iv[0].len() as u64, &iv[0], false, false),
+        ("i.part2.rar", iv[1].len() as u64, &iv[1], false, false),
+        ("i.part3.rar", iv[2].len() as u64, &iv[2], false, false),
+    ]);
+    let dir = tmpdir("inv-grouped-demote");
+    let ex = Extractor::new(&dir, 1, true);
+    feed(&ex, 0, "o.rar", &outer, 7000, 59);
+    ex.finish().unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let demotes: Vec<NestedEvent> = rec
+        .events()
+        .into_iter()
+        .filter(|e| e.disposition == "demoted")
+        .collect();
+    assert_eq!(
+        demotes.len(),
+        1,
+        "one demoted inner emitted {} events: {:#?}",
+        demotes.len(),
+        rec.events()
+    );
+    assert!(
+        demotes[0].reason.is_some(),
+        "a demote with no reason: {:#?}",
+        demotes[0]
+    );
+    // A demote is a diagnostic: it bumps the demoted counter and nothing
+    // else, which is what keeps `demoted` from inflating `levels`.
+    assert_eq!(
+        demotes[0].bumps,
+        NestedBumps {
+            levels: 0,
+            in_stream: 0,
+            demoted: 1,
+            disk: 0,
+            kind_counted: false,
+        },
+        "a demote bumped something other than the diagnostic"
+    );
+    assert!(
+        matches!(
+            demotes[0].kind.as_str(),
+            "rar-store" | "rar-compressed" | "rar-encrypted" | "7z" | "other"
+        ),
+        "demoted type {:?} is outside the counted vocabulary - the disk \
+         site cannot produce it, so it could never reappear under disk",
+        demotes[0].kind
+    );
+
+    // Close the pipeline the way the post-pass closes it: the demote
+    // materialized volumes, and `unpack.rs` counts the archive they make
+    // up once under `disk`.
+    for d in &demotes {
+        note_nested_level(d.depth, &d.kind, NestedDisposition::Disk);
+    }
+    let t = rec.tally();
+    assert!(
+        t.demoted <= t.disk,
+        "demoted {} > disk {} over {:#?}",
+        t.demoted,
+        t.disk,
+        rec.events()
+    );
+    let disk_kinds: Vec<String> = rec
+        .events()
+        .into_iter()
+        .filter(|e| e.disposition == "disk")
+        .map(|e| e.kind)
+        .collect();
+    for d in &demotes {
+        assert!(
+            disk_kinds.contains(&d.kind),
+            "demoted type {:?} never appears under disk ({disk_kinds:?}) - a phantom",
+            d.kind
+        );
+    }
+    assert_eq!(
+        t.levels,
+        t.in_stream + t.disk,
+        "levels != in_stream + disk over {:#?}",
+        rec.events()
+    );
+}
+
+/// The property the two tests above rest on: a recorder sees what was
+/// emitted while IT was installed, on its own thread, and nothing else.
+///
+/// Without this, an exact assertion over a buffer is only as good as the
+/// guard's drop - and the guard is what makes the test beside this one
+/// safe. Emissions before the guard is taken and after it drops must not
+/// reach it, and a second recorder must start empty.
+#[test]
+fn a_recorder_captures_only_what_it_was_installed_for() {
+    note_nested_level(1, "other", NestedDisposition::InStream);
+    {
+        let rec = record_nested_events();
+        note_nested_level(2, "7z", NestedDisposition::Disk);
+        let e = rec.events();
+        assert_eq!(e.len(), 1, "{e:#?}");
+        assert_eq!(e[0].depth, 2);
+        assert_eq!(e[0].kind, "7z");
+        assert_eq!(e[0].disposition, "disk");
+    }
+    note_nested_level(3, "rar-store", NestedDisposition::InStream);
+    let rec = record_nested_events();
+    assert!(
+        rec.events().is_empty(),
+        "a fresh recorder saw earlier emissions: {:#?}",
+        rec.events()
+    );
+    note_nested_level(4, "rar-compressed", NestedDisposition::Demoted("why"));
+    let e = rec.events();
+    assert_eq!(e.len(), 1, "{e:#?}");
+    assert_eq!(e[0].reason.as_deref(), Some("why"));
+    assert_eq!(rec.tally().demoted, 1);
+}

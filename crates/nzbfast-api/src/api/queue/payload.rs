@@ -544,7 +544,7 @@ pub(super) fn m_queue(
                                 .min(1);
                             let mut g = job.lock_ok();
                             if top > g.priority {
-                                g.priority = top;
+                                g.set_priority(top, "moved to the front of the queue");
                             }
                         }
                         q.insert(to, job);
@@ -639,7 +639,7 @@ pub(super) fn m_queue(
                 // client checking `position >= 0` read every successful
                 // priority change as a failure.
                 let mut position: i64 = -1;
-                {
+                let moved: Vec<String> = {
                     let mut q = d.queue.lock_ok();
                     // Two passes under the one lock: write the
                     // priorities, then move each row to where it will
@@ -661,7 +661,13 @@ pub(super) fn m_queue(
                             position = at as i64;
                         }
                     }
-                }
+                    moved
+                };
+                // After the locks: a Force job that was running through a
+                // queue pause, lowered here, has to actually STOP - the
+                // write alone left it transferring under a "paused"
+                // header (see `wind_down_after_priority`).
+                wind_down_after_priority(d, &moved);
                 if n > 0 {
                     d.save_queue();
                 }

@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "The nzbfast engine's base layer: NZB/yEnc/NNTP/PAR2/container primitives"
+readme = "README.md"
+homepage = "https://nzbfast.github.io/nzbfast/"
+documentation = "https://docs.rs/nzbkit-base"
+keywords = ["usenet", "nntp", "nzb", "yenc", "par2"]
+categories = ["network-programming", "parser-implementations", "encoding", "filesystem"]
 
 # WHY THIS CRATE EXISTS. It is the 46 modules that `extract`, `pool`,
 # `mediaprobe` and `index` all reach and that reach none of them back -

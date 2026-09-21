@@ -198,6 +198,7 @@ pub(super) fn build_fetch_plan(
             // through PAR2 or fails the job - it must not vanish from
             // the manifest and finish green zero-filled.
             total_segments: f.segments.len() + f.dropped_segments,
+            posted_bytes: f.bytes(),
             remaining: AtomicUsize::new(f.segments.len()),
             missing: AtomicUsize::new(f.dropped_segments),
             errors: AtomicUsize::new(0),
@@ -1143,7 +1144,7 @@ const RESUME_MAP_VOLUME_MARGIN: u64 = 2;
 ///
 /// 1. **The total fits.** Unchanged since TODO 94 A, and read against the
 ///    RAW cap so nothing this gate used to admit stops being admitted.
-/// 2. **The widest volume fits [`RESUME_MAP_VOLUME_MARGIN`] times over.**
+/// 2. **The widest volume fits `RESUME_MAP_VOLUME_MARGIN` times over.**
 ///    TODO 309(a). The replay's held bytes track ONE VOLUME, not the
 ///    total: at a fixed ~2.1 GB replayed over 48 F4 legs the peak went
 ///    from 9 MB at 32 MB volumes to 1782 MB at 256 MB volumes, a 200x

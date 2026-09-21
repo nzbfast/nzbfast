@@ -10,6 +10,11 @@
 //! the public items are re-exported beside the `mod` line, so
 //! `index::seed::` paths are unchanged for callers.
 
+// Documented in full as part of TODO 84's missing_docs ratchet. The lint
+// is on here so the count cannot climb back: a new public item in this
+// module needs a doc comment.
+#![warn(missing_docs)]
+
 use super::*;
 
 /// Attribution and listing metadata for one external NZB.
@@ -18,24 +23,53 @@ use super::*;
 /// own NZB, an uploader submission, or a licensed reference-indexer result.
 #[derive(Debug, Clone, Copy)]
 pub struct NzbSeedSpec<'a> {
+    /// Which source this assertion came from. Free-form and at most 128
+    /// bytes after trimming; it is half the identity of an assertion,
+    /// so the same NZB from two sources stays two auditable rows.
     pub source: &'a str,
+    /// The source's own identifier for this NZB, at most 1,024 bytes.
+    /// The other half of the assertion identity: re-asserting the same
+    /// `(source, source_guid)` updates rather than duplicates.
     pub source_guid: &'a str,
+    /// The release name the source gives, at most 4,096 bytes. A
+    /// trailing `.nzb` is stripped before storage.
     pub name: &'a str,
+    /// The source's category string, at most 256 bytes. May be empty,
+    /// unlike the three fields above.
     pub category: &'a str,
+    /// The source's posted timestamp, Unix seconds.
     pub posted: i64,
+    /// The source's declared size in bytes. Not verified against the
+    /// NZB and used only for the capacity accounting.
     pub bytes: u64,
 }
 
+/// What every stage of the seed path returns on failure.
+///
+/// The variants separate WHOSE fault it is, which is what decides
+/// whether a caller should retry, drop the input, or raise an alarm:
+/// `Invalid` and `Nzb` blame the submission, `Capacity` is a local
+/// limit the caller can act on, and `Corrupt` and `Sqlite` are this
+/// index's own state.
 #[derive(Debug, thiserror::Error)]
 pub enum NzbSeedError {
+    /// The submitted metadata failed validation: an empty required
+    /// field, one past its length cap, or a character XML disallows.
     #[error("invalid external NZB seed: {0}")]
     Invalid(&'static str),
+    /// The NZB itself would not parse.
     #[error("NZB: {0}")]
     Nzb(#[from] crate::nzb::NzbError),
+    /// Stored seed evidence read back inconsistent. An index-state
+    /// fault, not a submission fault: the affected set is abandoned and
+    /// counted in `sets_errored`.
     #[error("corrupt local seed evidence: {0}")]
     Corrupt(&'static str),
+    /// A configured storage limit for external seeds is reached, so
+    /// this submission was not stored.
     #[error("external NZB seed capacity reached: {0}")]
     Capacity(&'static str),
+    /// The database refused the operation.
     #[error("SQLite: {0}")]
     Sqlite(#[from] rusqlite::Error),
 }
@@ -86,13 +120,27 @@ pub fn validate_nzb_seed_spec(spec: NzbSeedSpec<'_>) -> Result<(), NzbSeedError>
 /// sources shares `set_id`; each source assertion remains auditable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NzbSeedStored {
+    /// The membership set this assertion joined. Shared by every source
+    /// that asserts the same NZB.
     pub set_id: i64,
+    /// This particular source assertion's row.
     pub assertion_id: i64,
+    /// The key the set was identified by, derived from the NZB's own
+    /// file manifests rather than from any name.
     pub membership_key: String,
+    /// True when this store created the set rather than joining one.
     pub new_set: bool,
+    /// True when this store created the assertion rather than updating
+    /// an existing `(source, source_guid)` row.
     pub new_assertion: bool,
+    /// Data files in the stored NZB, PAR2 volumes excluded.
     pub data_files: usize,
+    /// Message-IDs stored as match probes.
     pub probe_ids: usize,
+    /// True when every data file contributed its full declared part
+    /// count. False keeps the set shadow-only: a partial probe catalog
+    /// cannot support a strong membership key, so it can never name a
+    /// release.
     pub probe_complete: bool,
 }
 
@@ -103,25 +151,69 @@ pub struct NzbSeedReplayStats {
     /// Background callers can stop after observing it without mistaking a
     /// full `limit` batch for proof that more unseen sets remain.
     pub cycle_wrapped: bool,
+    /// Sets this pass looked at. The denominator for [`fan_out`].
+    ///
+    /// [`fan_out`]: NzbSeedReplayStats::fan_out
     pub sets_examined: usize,
+    /// Sets that reached a complete, settled, title-agreeing match, so
+    /// name claims were written for them. The success terminal.
     pub sets_matched: usize,
+    /// Sets with no local candidate at all. The ordinary outcome for an
+    /// NZB whose articles this index has never seen.
     pub sets_unmatched: usize,
+    /// Sets with candidates that no single release covered completely.
+    /// Distinguished from `sets_fragmented` by failing the coverage or
+    /// quorum test.
     pub sets_partial: usize,
+    /// Sets whose manifest matched but whose release had not crossed the
+    /// header-settle window. A LATER pass can still match these, so this
+    /// is a wait, not a refusal.
     pub sets_unsettled: usize,
+    /// Sets whose required files are covered only by the UNION of two or
+    /// more local releases. Real (a crosspost split across releases) but
+    /// never a naming basis, since no single release is the set.
     pub sets_fragmented: usize,
+    /// Sets that cannot be trusted to name anything: the probe catalog
+    /// was incomplete or carried no strong membership key. Shadow-only
+    /// by construction.
     pub sets_unsafe: usize,
+    /// Sets where the sources disagree about the name, so no claim was
+    /// applied. Any earlier claim attributed to this set key is
+    /// retracted rather than left standing.
     pub sets_title_conflict: usize,
+    /// Sets whose only title was unusable as a name.
     pub sets_invalid_title: usize,
+    /// Sets skipped because a per-pass scan budget was already spent.
+    /// A budget refusal, not a verdict about the set: a later pass
+    /// examines it normally.
     pub sets_saturated: usize,
+    /// Sets abandoned on corrupt stored evidence.
     pub sets_errored: usize,
+    /// Candidate releases reached by message-id hash lookup, before any
+    /// coverage test.
     pub hash_candidates: usize,
+    /// Candidates thrown out before the coverage test.
     pub hash_candidates_rejected: usize,
+    /// Local release copies that passed the complete-and-settled test.
+    /// Can exceed `sets_matched`, because a crosspost puts the same set
+    /// on several releases; that ratio is [`fan_out`].
+    ///
+    /// [`fan_out`]: NzbSeedReplayStats::fan_out
     pub exact_release_matches: usize,
+    /// Claims that named a previously unnamed release.
     pub claims_applied: usize,
+    /// Claims that displaced a weaker existing name.
     pub claims_replaced: usize,
+    /// Claims that agreed with the name already applied.
     pub claims_confirmed: usize,
+    /// Claims stored without being applied, the evidence tier not being
+    /// enough to name on its own.
     pub claims_recorded: usize,
+    /// Claims stored against a release holding an equal-or-stronger
+    /// DIFFERENT name. Logged and never auto-resolved here.
     pub claims_conflicted: usize,
+    /// Claims refused as unusable (an empty or path-like name, an
+    /// unknown release).
     pub claims_rejected: usize,
 }
 
@@ -140,18 +232,37 @@ impl NzbSeedReplayStats {
 /// Persistent inventory for a shadow-mode readout.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct NzbSeedInventory {
+    /// Membership sets stored.
     pub sets: usize,
+    /// Source assertions stored across those sets. Greater than `sets`
+    /// wherever two sources asserted the same NZB.
     pub assertions: usize,
+    /// File rows across all stored sets.
     pub files: usize,
+    /// Message-ID probes stored.
     pub probe_ids: usize,
+    /// Audit edges from a set to a local release, every state included.
     pub match_edges: usize,
+    /// Sets currently in the matched terminal state.
     pub matched_sets: usize,
+    /// Sets whose required files only the union of several releases
+    /// covers.
     pub fragmented_sets: usize,
+    /// Sets parked because their sources disagree about the name.
     pub title_conflict_sets: usize,
+    /// Match edges that actually carry a name claim. The numerator for
+    /// [`fan_out`].
+    ///
+    /// [`fan_out`]: NzbSeedInventory::fan_out
     pub named_release_edges: usize,
 }
 
 impl NzbSeedInventory {
+    /// Named release edges per stored set, over the whole inventory.
+    ///
+    /// The durable counterpart of
+    /// [`NzbSeedReplayStats::fan_out`], which measures one pass.
+    /// Greater than one means crossposts, not double counting.
     pub fn fan_out(&self) -> f64 {
         if self.sets == 0 {
             0.0
@@ -164,11 +275,22 @@ impl NzbSeedInventory {
 /// Auditable exact/partial membership edge from a seed set to a local row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NzbSeedMatch {
+    /// The local release this edge points at.
     pub release_id: i64,
+    /// Message-IDs matched exactly between the set and that release.
     pub exact_ids: usize,
+    /// How many of the set's required data files this release covered.
     pub covered_data_files: usize,
+    /// The edge's verdict, as the replay pass spelled it: `matched`,
+    /// `partial`, `fragmented`, `unsettled`, `unsafe`, `unmatched`,
+    /// `invalid-title`, `title-conflict`, `error`, or one of the claim
+    /// outcomes (`applied`, `replaced`, `confirmed`, `recorded`,
+    /// `conflict`, `rejected`).
     pub state: String,
+    /// The membership key a name claim was attributed to, or empty for
+    /// an edge that carried no claim.
     pub claim_key: String,
+    /// When this edge was written, Unix seconds.
     pub at: i64,
 }
 
@@ -211,6 +333,13 @@ pub struct NzbSeedPrepared {
 }
 
 impl NzbSeedPrepared {
+    /// Build seed evidence from a parsed NZB, without touching a
+    /// database.
+    ///
+    /// This is the half that can be expensive on a large NZB, which is
+    /// why it is separable: do it first, then hold the database writer
+    /// only for the store call. An NZB with no usable Message-IDs is
+    /// refused here rather than stored as a set that could never match.
     pub fn from_nzb(nzb: &crate::nzb::Nzb) -> Result<Self, NzbSeedError> {
         let shape = seed_shape(nzb)?;
         if shape.probes.is_empty() {

@@ -1,5 +1,6 @@
 //! What a CREATE tells a caller while it runs, and how a caller stops
-//! it.
+//! it: the create's progress sink, cancel gate and the trail a cancel
+//! unlinks. Added 12 Sep 2026 (claim `par2gen-create-control`).
 //!
 //! The repair side grew this on 12 Sep 2026
 //! ([`crate::par2repair::control`]); create had none of it - no
@@ -11,10 +12,9 @@
 //!
 //! # It is the repair's machinery, not a second copy of it
 //!
-//! [`CreateControl`] is a thin face over
-//! [`RepairControl`](crate::par2repair::RepairControl): the bucket rate
-//! limiter, the per-phase meters, the `hint`/`reported` pair that keeps
-//! a bar from going backwards, the [`PauseGate`] and the
+//! [`CreateControl`] is a thin face over [`RepairControl`]: the bucket
+//! rate limiter, the per-phase meters, the `hint`/`reported` pair that
+//! keeps a bar from going backwards, the [`PauseGate`] and the
 //! [`ProgressSink`] trait are all THAT module's, reached through it.
 //! Nothing here reimplements any of them, deliberately - a second copy
 //! of a progress model is a second set of bugs, and a sink written for
@@ -199,6 +199,13 @@ pub struct CreateControl {
     /// batch driver are handed the same control, and a per-clone
     /// counter would silently read zero on either side of that.
     chain: Arc<std::sync::atomic::AtomicU64>,
+    /// Bytes the BLOCK-DIGEST lanes have stepped into
+    /// [`CreatePhase::Verify`] - the raw lane count, kept apart from
+    /// what the sink has been told. See [`Self::verify_sync`].
+    verify_blocks: Arc<std::sync::atomic::AtomicU64>,
+    /// Bytes of `Verify` the sink HAS been told, so the two lanes'
+    /// lesser can be forwarded to an add-only meter as increments.
+    verify_forwarded: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl std::fmt::Debug for CreateControl {
@@ -219,6 +226,8 @@ impl CreateControl {
             inner: RepairControl::new(sink, gate),
             digest_cache: None,
             chain: Arc::default(),
+            verify_blocks: Arc::default(),
+            verify_forwarded: Arc::default(),
         }
     }
 
@@ -267,6 +276,12 @@ impl CreateControl {
     /// zero. Driver thread only, before the workers that step into it
     /// exist.
     pub(super) fn begin(&self, phase: RepairPhase, total: u64) {
+        if phase == RepairPhase::Verify {
+            self.verify_blocks
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.verify_forwarded
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
         self.inner.begin(phase, total);
     }
 
@@ -297,7 +312,49 @@ impl CreateControl {
     /// already chunks: a relaxed `fetch_add`, two multiplies and a
     /// compare, and the sink is reached at most 256 times per phase.
     pub(super) fn step(&self, phase: RepairPhase, add: u64) {
+        if phase == RepairPhase::Verify {
+            self.verify_blocks
+                .fetch_add(add, std::sync::atomic::Ordering::Relaxed);
+            self.verify_sync();
+            return;
+        }
         self.inner.step(phase, add);
+    }
+
+    /// Forward to the sink the LESSER of `Verify`'s two lanes.
+    ///
+    /// The scan hashes a member on two lanes at once: the block digests,
+    /// `threads`-way parallel and stepping [`CreatePhase::Verify`], and
+    /// the whole-file MD5 chain, one sequential pass stepping
+    /// [`Self::chain`]. The phase is over when BOTH are, and from page
+    /// cache the block lanes finish several times sooner - measured
+    /// 20 Sep 2026 on a 4 GiB single member, `parfast c -r10`: the
+    /// block lanes stepped `Verify` to full in 0.44 s, the chain ran
+    /// 6.09 s, and every bar over the phase sat on 100 for the last
+    /// 5.6 s of it (GH #88's "gets to 100 and then waits"). So the sink
+    /// hears `min(blocks, chain)`: each lane's step recomputes the
+    /// lesser and forwards only what is NEW beyond what the sink already
+    /// has, through a `fetch_max` so two lanes racing here never
+    /// forward the same bytes twice. The chain takes part once it has
+    /// stepped at all; an arm that hashes without a chain (none today,
+    /// but the gate costs one load) reports its block lanes as before.
+    ///
+    /// The chain counter itself is unchanged and still not a phase -
+    /// [`Self::chain`] says why - so the pacer that reads it for a rate
+    /// reads what it always did.
+    fn verify_sync(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let blocks = self.verify_blocks.load(Relaxed);
+        let chain = self.chain.load(Relaxed);
+        let lesser = if chain == 0 {
+            blocks
+        } else {
+            blocks.min(chain)
+        };
+        let told = self.verify_forwarded.fetch_max(lesser, Relaxed);
+        if lesser > told {
+            self.inner.step(RepairPhase::Verify, lesser - told);
+        }
     }
 
     /// A phase is over: the sink lands on full exactly once.
@@ -316,9 +373,16 @@ impl CreateControl {
     /// record answers for it, `crate::digest_cache`) credits the rest of
     /// its length here as it leaves, because the chain's WORK for that
     /// member is then over - which is the question the pacer is asking.
+    ///
+    /// Since 20 Sep 2026 it also re-syncs the `Verify` phase: the sink
+    /// hears the lesser of this lane and the block lanes, so a chain
+    /// running behind them holds the bar back rather than being
+    /// invisible to it. It still adds nothing of its own to the phase -
+    /// the bytes stay counted once. See [`Self::verify_sync`].
     pub(super) fn chain_step(&self, add: u64) {
         self.chain
             .fetch_add(add, std::sync::atomic::Ordering::Relaxed);
+        self.verify_sync();
     }
 
     /// What the chain has accounted for so far, in the same units and
@@ -445,7 +509,12 @@ impl CreateTrail {
     ///
     /// Called from the volume writers' threads, so the note is a lock -
     /// once per FILE, which is nothing beside writing one.
-    pub(super) fn create(&self, dir: &Path, name: &str) -> std::io::Result<std::fs::File> {
+    ///
+    /// It returns a [`SetMember`] and not a `std::fs::File`, which is
+    /// what makes this the one door in the LANGUAGE rather than only in
+    /// the gate: `SetMember`'s field is private to this module, so no
+    /// other function anywhere can produce one. See that type's doc.
+    pub(super) fn create(&self, dir: &Path, name: &str) -> std::io::Result<SetMember> {
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(self.no_clobber)
@@ -458,7 +527,9 @@ impl CreateTrail {
         // AFTER the open, and only on success. A refused open is
         // somebody else's file and was never this run's to remove.
         self.note(name);
-        Ok(file)
+        // The ONE construction of a `SetMember` in the crate, and the
+        // reason the write paths can only be fed by this function.
+        Ok(SetMember { file })
     }
 
     /// Note a file this create has just created, by its name in the
@@ -486,10 +557,169 @@ impl CreateTrail {
     }
 }
 
+/// An open handle on a file of THIS run's recovery set, which only
+/// [`CreateTrail::create`] can mint.
+///
+/// # Why this is a type and not a `std::fs::File`
+///
+/// The door above is the one place a set member comes into existence,
+/// and until 20 Sep 2026 that was held by a GATE
+/// (`tools/par2-create-door-gate.py`) and by nothing in the language: a
+/// fourth write path spelled `std::fs::File::create` type-checked
+/// perfectly, wrote a real volume, and lost both of the door's
+/// properties - the no-clobber refusal and the note-after-open
+/// ordering - with every test still green.
+///
+/// The field is PRIVATE TO THIS MODULE, so `control` is the only place
+/// a `SetMember` can be built and `create` is the only function in
+/// `control` that builds one. `par2gen` is this module's PARENT and
+/// reaches the field no more than a stranger does. Everything that
+/// writes a set member - the index (`super::write_member`), the batched
+/// volume writer (`super::volwrite`), the stripe-first layout
+/// (`super::stripe_first`) - now names this type in its own signature,
+/// so a bare `File` cannot be threaded into any of them and the handle
+/// those paths write to is, by construction, the handle the door
+/// opened. That last is the CONVERSE of what the gate can prove: the
+/// gate shows the door is CALLED, never that its return value is what
+/// gets written.
+///
+/// # What it deliberately does NOT have
+///
+/// There is no `as_file`, no `into_inner` and no `From<File>`, and that
+/// absence is the whole point rather than an omission to be tidied up.
+/// One accessor handing out a `&File` would put every method on
+/// `std::fs::File` and every free helper in [`crate::disk`] back within
+/// reach of a bare create, which is the hole this type closes. The four
+/// operations the three write paths actually need are forwarded below;
+/// a fifth is added HERE, deliberately, and not bought with an
+/// accessor.
+///
+/// # What it does NOT prove, so a build is read for what it is
+///
+/// Rust cannot ban a call. A new par2gen function is still free to
+/// write `std::fs::File::create(path)` and drive the result with
+/// `std::io::Write` directly, never touching this type - it simply
+/// cannot reach any of par2gen's OWN write machinery that way. That
+/// residue is arm D of `tools/par2-create-door-gate.py`, which is why
+/// arm D stays: the plan that commissioned this type ruled that the type
+/// would subsume that arm, and building it is what showed the ruling does
+/// not hold. That gate's own docstring states it at the arm.
+///
+/// # `Debug`
+///
+/// Derived because a test asserting the door REFUSED an open reaches the
+/// refusal through `Result::expect_err`, which needs the ok side
+/// printable. It hands out no handle: the derive prints the descriptor
+/// and path the way `std::fs::File`'s own does.
+#[derive(Debug)]
+pub(super) struct SetMember {
+    /// Private to `control`. See the type's own doc: this field, and
+    /// the absence of any accessor for it, IS the invariant.
+    file: std::fs::File,
+}
+
+impl SetMember {
+    /// Write `buf` at `at`, leaving the file's cursor alone
+    /// ([`crate::disk::write_all_at`]). The stripe-first layout's
+    /// grain: every volume is sized up front and filled by offset.
+    pub(super) fn write_all_at(&self, buf: &[u8], at: u64) -> std::io::Result<()> {
+        crate::disk::write_all_at(&self.file, buf, at)
+    }
+
+    /// Size the file before the first positional write
+    /// ([`crate::disk::preallocate_output`]), which on NTFS is what
+    /// keeps a write past the valid data length from zero-filling up
+    /// to it.
+    pub(super) fn preallocate(&self, size: u64, cap: u64) -> std::io::Result<()> {
+        crate::disk::preallocate_output(&self.file, size, cap)
+    }
+
+    /// The data of this member on the platter, without the metadata
+    /// flush a full `sync_all` also pays.
+    pub(super) fn sync_data(&self) -> std::io::Result<()> {
+        self.file.sync_data()
+    }
+}
+
+/// So a member can be handed to a [`std::io::BufWriter`] and filled in
+/// stream order, which is the batched volume writer's whole shape.
+impl std::io::Write for SetMember {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        std::io::Write::write(&mut self.file, buf)
+    }
+
+    fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
+        std::io::Write::write_vectored(&mut self.file, bufs)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(&mut self.file)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// THE DOOR'S RETURN TYPE, asserted at COMPILE TIME rather than by
+    /// running anything - this item is the test.
+    ///
+    /// `SetMember`'s field is private to `control`, so this signature is
+    /// what makes a bare `std::fs::File::create` unusable in every one
+    /// of par2gen's write paths: they name `SetMember` and only this
+    /// function produces one. Widening `create` back to `-> Result<
+    /// std::fs::File>` is the one edit that would restore the hole
+    /// wholesale and would be invisible at every call site (`let file =
+    /// trail.create(..)?` compiles either way), so it is pinned here.
+    ///
+    /// WHAT THIS DOES NOT SAY: Rust cannot ban a call, so a brand-new
+    /// par2gen function writing `File::create` and driving the handle
+    /// with `std::io::Write` directly still compiles. That residue is
+    /// arm D of `tools/par2-create-door-gate.py`, which is why arm D
+    /// was NOT retired when this type landed.
+    const _DOOR_RETURNS_A_SET_MEMBER: fn(&CreateTrail, &Path, &str) -> std::io::Result<SetMember> =
+        CreateTrail::create;
+
+    /// A member writes through the three forwarded shapes the real write
+    /// paths use, and the bytes land where each one says they do.
+    ///
+    /// The point is not that `std::fs::File` works - it is that these
+    /// are the ONLY four operations a set member has, so the next path
+    /// that needs a fifth adds it here deliberately rather than reaching
+    /// a raw handle through an accessor.
+    #[test]
+    fn a_set_member_writes_in_stream_order_and_by_offset() {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-setmember-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let trail = CreateTrail::default();
+        let mut m = trail.create(&dir, "set.par2").expect("the door opens");
+        // Stream order, which is what `BufWriter` drives in `volwrite`.
+        std::io::Write::write_all(&mut m, b"HEADER..").expect("write_all");
+        std::io::Write::flush(&mut m).expect("flush");
+        // Sized and then filled by offset, which is `stripe_first`'s
+        // whole shape.
+        m.preallocate(16, u64::MAX).expect("preallocate");
+        m.write_all_at(b"TAIL", 8).expect("write_all_at");
+        m.sync_data().expect("sync_data");
+        drop(m);
+
+        let got = std::fs::read(dir.join("set.par2")).expect("read back");
+        assert_eq!(&got[..8], b"HEADER..", "the stream write landed at 0");
+        assert_eq!(&got[8..12], b"TAIL", "the positional write landed at 8");
+        assert_eq!(
+            trail.noted(),
+            vec!["set.par2".to_string()],
+            "the door noted the member it opened"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The default control is every engine caller that never asked for
     /// any of this, and it must reach nothing at all.
@@ -592,7 +822,7 @@ mod tests {
     /// bytes `Verify` already counted, so a sink that heard it would
     /// report the create as twice itself.
     #[test]
-    fn the_chain_counter_is_its_own_and_reaches_no_sink() {
+    fn the_chain_counter_is_its_own_and_never_adds_to_the_phase() {
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let rec = Arc::clone(&calls);
         let c = CreateControl::new(
@@ -623,11 +853,52 @@ mod tests {
         assert_eq!(
             calls.lock().unwrap().len(),
             heard,
-            "the chain reached the progress sink - a bar would double-count the member"
+            "the chain reached the progress sink past a phase already full - a bar would \
+             double-count the member"
         );
 
         c.chain_reset();
         assert_eq!(c.chain_done(), 0);
+    }
+
+    /// The phase reports the LESSER of its two lanes (see
+    /// `verify_sync`): block lanes that race ahead cannot put the bar
+    /// on 100 while the chain is still hashing, and the chain catching
+    /// up is what moves it - without ever counting a byte twice.
+    #[test]
+    fn verify_reports_the_slower_of_the_block_lanes_and_the_chain() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rec = Arc::clone(&calls);
+        let c = CreateControl::new(
+            Some(Arc::new(move |p: RepairPhase, done: u64, _t: u64| {
+                if p == RepairPhase::Verify {
+                    rec.lock().unwrap().push(done);
+                }
+            })),
+            None,
+        );
+        let last = || *calls.lock().unwrap().last().unwrap();
+        c.begin(RepairPhase::Verify, 1000);
+        // The chain has started; the block lanes then finish the whole
+        // member at once, as they do from page cache.
+        c.chain_step(10);
+        c.step(RepairPhase::Verify, 1000);
+        assert_eq!(last(), 10, "the block lanes may not outrun the chain");
+        c.chain_step(490);
+        assert_eq!(last(), 500, "the chain moves the bar");
+        // The chain overtaking the blocks would be held by them in turn.
+        let held = c.clone();
+        held.begin(RepairPhase::Verify, 1000);
+        held.step(RepairPhase::Verify, 300);
+        held.chain_step(1000);
+        assert_eq!(last(), 300);
+        held.step(RepairPhase::Verify, 700);
+        assert_eq!(last(), 1000);
+        // Finish still lands on full whatever the lanes said.
+        c.begin(RepairPhase::Verify, 1000);
+        c.step(RepairPhase::Verify, 100);
+        c.finish(RepairPhase::Verify);
+        assert_eq!(last(), 1000);
     }
 
     /// A clone SHARES the chain counter, because the scan thread and the

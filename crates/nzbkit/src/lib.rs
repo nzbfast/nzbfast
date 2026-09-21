@@ -22,6 +22,53 @@
 //! takes out next - `extract` (+ `journal`), `pool` (and its rigs),
 //! `mediaprobe`, and `index` (+ `nzbimport`, `spot`) - each of which
 //! reaches base and none of which reaches another.
+//!
+//! # The front door
+//!
+//! Every base module is re-exported here under its own name, so a
+//! caller depends on `nzbkit` alone and spells the paths as if nothing
+//! had been split:
+//!
+//! ```
+//! use nzbkit::{names, nzb, release, yenc};
+//!
+//! let xml = br#"<?xml version="1.0"?>
+//! <nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+//!   <file subject="[1/2] &quot;Max.Payne.2008.1080p.BluRay.x264-GRP.part01.rar&quot; yEnc (1/1)"
+//!         poster="p" date="1700000000">
+//!     <groups><group>alt.binaries.test</group></groups>
+//!     <segments><segment bytes="750000" number="1">a1@example.com</segment></segments>
+//!   </file>
+//!   <file subject="[2/2] &quot;Max.Payne.2008.1080p.BluRay.x264-GRP.vol000+01.par2&quot; yEnc (1/1)"
+//!         poster="p" date="1700000000">
+//!     <groups><group>alt.binaries.test</group></groups>
+//!     <segments><segment bytes="250000" number="1">a2@example.com</segment></segments>
+//!   </file>
+//! </nzb>"#;
+//!
+//! let manifest = nzb::Nzb::parse(xml).expect("well-formed NZB");
+//!
+//! // The whole post reduces to one release, recovery volumes included.
+//! let stem = names::release_stem(manifest.files[0].filename_hint().unwrap());
+//! assert_eq!(stem, "Max.Payne.2008.1080p.BluRay.x264-GRP");
+//! let parsed = release::parse_release(&stem);
+//! assert_eq!(parsed.title, "Max Payne");
+//! assert_eq!(parsed.year, Some(2008));
+//!
+//! // Recovery volumes stay unfetched until something needs repairing.
+//! assert_eq!(manifest.eager_bytes(), 750_000);
+//! assert_eq!(manifest.total_bytes(), 1_000_000);
+//!
+//! // And the decode path is the same one, under the same name.
+//! let body = yenc::encode("demo.bin", 4, None, 1, &[0, 1, 2, 3]);
+//! assert_eq!(yenc::decode(&body).unwrap().data, [0, 1, 2, 3]);
+//! ```
+//!
+//! What this crate still declares for itself is the four sibling layers
+//! above that base: [`extract`], [`pool`], [`mediaprobe`] and
+//! `index`. Each drives a live download rather than answering a pure
+//! call, so their entry points are documented at the module level
+//! instead of shown here.
 
 pub use nzbkit_base::audiotag;
 pub mod benchserve;

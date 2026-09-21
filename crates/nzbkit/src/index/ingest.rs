@@ -8,6 +8,7 @@ use super::*;
 use aggregates::RelAgg;
 use claims::norm_msgid;
 use spots::{GEN_HEX, POSTER_GEN_MARK};
+use tracing::info;
 
 // EVERY test subject in this file now lives in its own child under the
 // size gate (TODO 106). The last three came over on 10 Sep 2026, when
@@ -26,6 +27,8 @@ use spots::{GEN_HEX, POSTER_GEN_MARK};
 // reached by a plain `mod ingest;` in index/mod.rs, not by a `#[path]`.
 #[cfg(test)]
 mod custom_category_tests;
+#[cfg(test)]
+mod gen_fold_tests;
 #[cfg(test)]
 mod gen_split_tests;
 #[cfg(test)]
@@ -822,7 +825,7 @@ const MAX_GEN_PASSES: u32 = 4;
 ///
 /// [`Index::ingest`]'s generation split resolves a second posting of the
 /// same (file, part) slot WITHIN a batch, under a budget of
-/// [`MAX_GEN_PASSES`] passes; articles past that budget are dropped and
+/// `MAX_GEN_PASSES` passes; articles past that budget are dropped and
 /// re-arrive on a later scan. The budget is PER BATCH, so regrouping the
 /// same header stream changes both how many articles the budget drops
 /// and the `POSTER_GEN_MARK` suffix of any generation row it mints
@@ -1574,6 +1577,10 @@ impl Index {
             .unwrap_or(0)
     }
 
+    /// Record how far back this group has been scanned on `server`.
+    /// Per (group, server): two servers carve different article number
+    /// ranges for the same group, so a mark from one says nothing
+    /// about the other. See [`Self::low_water`].
     pub fn set_low_water(&self, grp: &str, server: &str, low: u64) -> rusqlite::Result<()> {
         self.db.execute(
             "INSERT INTO marks(grp, server, high, low) VALUES(?1, ?2, 0, ?3)
@@ -1583,6 +1590,10 @@ impl Index {
         Ok(())
     }
 
+    /// Newest article this group has been scanned up to on `server`
+    /// (0 = never recorded). An incremental scan resumes here, so a
+    /// mark ahead of what was really ingested skips articles
+    /// permanently.
     pub fn high_water(&self, grp: &str, server: &str) -> u64 {
         self.db
             .query_row(
@@ -1594,6 +1605,9 @@ impl Index {
             .unwrap_or(0)
     }
 
+    /// Move this group's resume point on `server`. Write it only
+    /// after the batch it covers has been ingested: see
+    /// [`Self::high_water`] for what a premature mark costs.
     pub fn set_high_water(&self, grp: &str, server: &str, high: u64) -> rusqlite::Result<()> {
         self.db.execute(
             "INSERT INTO marks(grp, server, high) VALUES(?1, ?2, ?3)
@@ -1681,18 +1695,13 @@ impl Index {
             deferred.is_empty(),
             "a zero-budget pass deferred articles it can never place"
         );
+        // Folded rather than said here. The drop is the same drop and
+        // the depth is still the number that names the cause, but this
+        // site runs once per INGEST_BATCH, and on a busy group that is
+        // thousands of identical-shaped lines per pass - see `GenFold`
+        // for the measurement. `flush_gen_fold` says it once.
         if gp.dropped > 0 {
-            // Level and site unchanged from the overflow warning this
-            // replaces: the drop is the same drop, made in the pass that
-            // can already prove it rather than three passes later, and
-            // the depth is the number that names the cause.
-            warn!(
-                target: "index",
-                "{grp}: {} articles dropped - their (file, part) slot carries more \
-                 contradicting articles than {MAX_GEN_PASSES} generation passes can place \
-                 (deepest slot: {} articles); they re-arrive on the next scan of this window",
-                gp.dropped, gp.deepest
-            );
+            self.fold_gen(grp, 0, 0, gp.dropped, gp.deepest);
         }
         // Once per batch, not once per pass: the row half is only
         // complete when the last pass has minted, and the counters are
@@ -2397,16 +2406,88 @@ impl Index {
         for h in std::mem::take(hits) {
             self.push_watch_hit(h);
         }
-        if gen_minted > 0 || gen_dropped > 0 {
-            warn!(
-                target: "index",
-                "{grp}: {gen_minted} reposted posting(s) indexed as generation rows, \
-                 {gen_dropped} dropped at the {MAX_GEN_SIBLINGS}-sibling cap",
-            );
-        }
+        // Folded, not said - once per batch was once per INGEST_BATCH
+        // chunk. `GenFold` has the count that made this the daemon's
+        // loudest line by a factor of ten.
+        self.fold_gen(grp, gen_minted, gen_dropped, 0, 0);
         drops.record(self)?;
         gp.dropped += drops.gen_depth;
         Ok(deferred)
+    }
+
+    /// Add one batch's generation-row figures to the pending fold,
+    /// flushing first when the group has changed.
+    ///
+    /// Takes both halves so the two sites that had a `warn!` of their
+    /// own each pass what they know and zero for the rest; a batch that
+    /// minted nothing and dropped nothing still counts as a batch,
+    /// because the batch COUNT is what says whether a quiet pass was
+    /// quiet or simply small.
+    fn fold_gen(&mut self, grp: &str, minted: u32, capped: u32, dropped: u64, deepest: usize) {
+        if self.gen_fold.group.as_deref().is_some_and(|g| g != grp) {
+            self.flush_gen_fold();
+        }
+        let f = &mut self.gen_fold;
+        if f.group.is_none() {
+            f.group = Some(grp.to_string());
+        }
+        f.batches += 1;
+        f.minted += u64::from(minted);
+        f.capped += u64::from(capped);
+        f.dropped += dropped;
+        f.deepest = f.deepest.max(deepest);
+    }
+
+    /// Take the pending fold, or None when there is nothing worth
+    /// saying. Split from the logging half so the arithmetic - which is
+    /// the part that can be wrong - has a test that does not have to
+    /// read a log line back.
+    ///
+    /// "Nothing worth saying" is every counter at zero, NOT an empty
+    /// fold: a pass over a group with no reposts at all ingested its
+    /// batches perfectly well and has no news. The batch count alone is
+    /// never news.
+    fn take_gen_fold(&mut self) -> Option<GenFold> {
+        let f = std::mem::take(&mut self.gen_fold);
+        f.group
+            .is_some()
+            .then_some(f)
+            .filter(|f| f.minted > 0 || f.capped > 0 || f.dropped > 0)
+    }
+
+    /// Say what the batches since the last flush did, once, and reset.
+    ///
+    /// A no-op when nothing is pending, so the scan can call it at every
+    /// exit from a group pass without guarding. Two levels on purpose:
+    /// reposted postings given generation rows are the index doing its
+    /// job and belong at `info`, while an article dropped for slot depth
+    /// is a real loss and keeps the `warn` the per-batch line had.
+    pub fn flush_gen_fold(&mut self) {
+        let Some(f) = self.take_gen_fold() else {
+            return;
+        };
+        let Some(grp) = f.group.as_deref() else {
+            return;
+        };
+        let batches = f.batches;
+        if f.dropped > 0 {
+            warn!(
+                target: "index",
+                "{grp}: {} articles dropped over {batches} batch(es) - their (file, part) \
+                 slot carries more contradicting articles than {MAX_GEN_PASSES} generation \
+                 passes can place (deepest slot: {} articles); they re-arrive on the next \
+                 scan of this window. {} reposted posting(s) indexed as generation rows, \
+                 {} refused at the {MAX_GEN_SIBLINGS}-sibling cap",
+                f.dropped, f.deepest, f.minted, f.capped
+            );
+        } else {
+            info!(
+                target: "index",
+                "{grp}: {} reposted posting(s) indexed as generation rows over {batches} \
+                 batch(es), {} refused at the {MAX_GEN_SIBLINGS}-sibling cap",
+                f.minted, f.capped
+            );
+        }
     }
 
     // ---- the pre feed -------------------------------------------------

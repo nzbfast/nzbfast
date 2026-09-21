@@ -133,6 +133,20 @@ pub struct WriterOptions {
     /// settings, and the streamed writers accept it.
     /// (nzbfast-local change, 14 Sep 2026; see VENDORING.md.)
     pub level_five_fallbacks: bool,
+    /// Ceiling on the worker threads the STREAMED recovery record's fold
+    /// team starts (`write_stored_archive_streamed_with_recovery` and its
+    /// volume sibling), or `None` for the host's core count. This is the
+    /// write side's counterpart of
+    /// [`crate::Rar50ExecutionPolicy::max_workers`], and it is what
+    /// carries `rarfast -mt<n>` to the `-m0 -rr` fold: that team sizes
+    /// itself inside the library, so without this a caller that was asked
+    /// for a width has no way to say so. It cannot move a byte - see
+    /// [`crate::recovery::InlineRecoveryFolder::with_thread_cap`], which
+    /// also holds the team's floor of two workers and its cap of eight.
+    /// It reaches nothing else: the encoder's own parallelism is the rayon
+    /// pool the caller builds.
+    /// (nzbfast-local change, 16 Sep 2026; see VENDORING.md.)
+    pub recovery_fold_threads: Option<usize>,
 }
 
 /// The checksum a file header carries for its payload.
@@ -176,6 +190,7 @@ impl WriterOptions {
             write_policy: None,
             tokenizer_horizon_choice: false,
             level_five_fallbacks: true,
+            recovery_fold_threads: None,
         }
     }
 
@@ -241,6 +256,14 @@ impl WriterOptions {
         self.tokenizer_horizon_choice = enabled;
         self
     }
+
+    /// Caps the streamed recovery record's fold team; see
+    /// [`WriterOptions::recovery_fold_threads`].
+    /// (nzbfast-local change, 16 Sep 2026; see VENDORING.md.)
+    pub const fn with_recovery_fold_threads(mut self, threads: Option<usize>) -> Self {
+        self.recovery_fold_threads = threads;
+        self
+    }
 }
 
 impl Default for WriterOptions {
@@ -257,6 +280,7 @@ impl Default for WriterOptions {
             write_policy: None,
             tokenizer_horizon_choice: false,
             level_five_fallbacks: true,
+            recovery_fold_threads: None,
         }
     }
 }
@@ -4093,7 +4117,7 @@ mod tests {
         encode_member_with_filter_specs,
     };
     use super::*;
-    use crate::codec::rar50::Unpack50Encoder;
+    use crate::codec::rar50::Rar50Encoder;
     use crate::codec::rar50::{encode_literal_only, encode_lz_member};
     use crate::codec::rar50::{encode_lz_member_with_options, EncodeOptions, Rar50FilterSpec};
     use crate::x86_filter_scan::auto_x86_filter_ranges;
@@ -5399,7 +5423,7 @@ mod tests {
             chosen.len()
         );
 
-        let mut decoder = crate::codec::rar50::Unpack50Decoder::new();
+        let mut decoder = crate::codec::rar50::Rar50Decoder::new();
         let output = decoder
             .decode_member(
                 &chosen,
@@ -5456,7 +5480,7 @@ mod tests {
 
         let packed =
             encode_member_with_filter_specs(&data, 0, &filters, EncodeOptions::default()).unwrap();
-        let mut decoder = crate::codec::rar50::Unpack50Decoder::new();
+        let mut decoder = crate::codec::rar50::Rar50Decoder::new();
         let output = decoder
             .decode_member(
                 &packed,
@@ -5510,7 +5534,7 @@ mod tests {
 
         assert!(ranged.len() < plain.len());
         assert!(auto.len() <= ranged.len());
-        let mut decoder = crate::codec::rar50::Unpack50Decoder::new();
+        let mut decoder = crate::codec::rar50::Rar50Decoder::new();
         let output = decoder
             .decode_member(
                 &auto,
@@ -5533,7 +5557,7 @@ mod tests {
             EncodeOptions::new(0),
         )
         .unwrap();
-        let mut decoder = crate::codec::rar50::Unpack50Decoder::new();
+        let mut decoder = crate::codec::rar50::Rar50Decoder::new();
 
         assert_eq!(
             decoder
@@ -5554,12 +5578,12 @@ mod tests {
         let options = EncodeOptions::default();
         let first = b"solid reset policy unrelated prefix data\n".repeat(32);
         let second = b"second member second member second member\n".repeat(16);
-        let mut encoder = Unpack50Encoder::with_options(options);
+        let mut encoder = Rar50Encoder::with_options(options);
         encoder.encode_member(&first, 0).unwrap();
 
         let mut continued = encoder.clone();
         let continued_packed = continued.encode_member(&second, 0).unwrap();
-        let mut fresh = Unpack50Encoder::with_options(options);
+        let mut fresh = Rar50Encoder::with_options(options);
         let fresh_packed = fresh.encode_member(&second, 0).unwrap();
         let expected_fresh = fresh_packed.len() < continued_packed.len();
         let expected_len = continued_packed.len().min(fresh_packed.len());

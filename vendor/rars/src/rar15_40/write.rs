@@ -1,16 +1,16 @@
 use super::*;
 use crate::write_entropy::EntropyScope;
 use crate::codec::rar13::{
-    unpack15_encode_with_options_and_progress, EncodeOptions as Rar15EncodeOptions, Unpack15Encoder,
+    EncodeOptions as Rar15EncodeOptions, MatchingWriter, Rar15CheckedEncoder,
 };
 use crate::codec::rar20::{
-    unpack20_encode_auto_with_options_and_progress, EncodeOptions as Rar20EncodeOptions,
-    Unpack20Encoder,
+    encode_rar20_auto_with_options_and_progress, EncodeOptions as Rar20EncodeOptions, Rar20Decoder,
+    Rar20Encoder,
 };
 use crate::codec::rar29::{
-    unpack29_encode_literals, unpack29_encode_literals_with_options,
-    unpack29_encode_literals_with_options_and_progress, unpack29_encode_ppmd,
-    unpack29_encode_ppmd_with_filter, EncodeOptions as Rar29EncodeOptions, Unpack29Encoder,
+    encode_rar29_literals, encode_rar29_literals_with_options,
+    encode_rar29_literals_with_options_and_progress, encode_rar29_ppmd,
+    encode_rar29_ppmd_with_filter, EncodeOptions as Rar29EncodeOptions, Rar29Decoder, Rar29Encoder,
 };
 pub use crate::codec::rar29::{Rar29FilterKind as FilterKind, Rar29FilterSpec as FilterSpec};
 use crate::io_util::align16 as checked_align16;
@@ -141,11 +141,15 @@ fn write_compressed_archive_with_comment_impl(
     write_archive_comment(&mut out, archive_comment, options.target)?;
     if options.features.solid {
         let mut solid_encoder = SolidEncoder::for_target(options, true)?;
-        let mut solid_run_has_member = false;
+        let mut solid_run = SolidRun::default();
+        let mut decode_back = DecodeBack::default();
         for entry in entries {
             let payload =
                 encode_or_store_payload(entry.data, options, &mut solid_encoder, progress)?;
-            let solid_continuation = payload.method != 0x30 && solid_run_has_member;
+            let solid_continuation = solid_run.continues(&payload, entry.data.len());
+            if !decode_back.decodes_back(options.target, &payload, entry.data, solid_continuation) {
+                return Err(member_does_not_decode_back());
+            }
             write_compressed_entry(
                 &mut out,
                 entry,
@@ -155,7 +159,6 @@ fn write_compressed_archive_with_comment_impl(
                 dictionary_flags_for_options(options)?,
                 solid_continuation,
             )?;
-            solid_run_has_member = payload.method != 0x30;
         }
     } else {
         let payloads = encode_independent_payloads(entries, options, progress)?;
@@ -217,13 +220,24 @@ pub fn write_rar29_compressed_archive_with_filter_policy_and_progress(
     result
 }
 
+/// A member with no bytes is STORED, whatever the policy asks for, because
+/// a reader only skips a compressed member when its packed size is zero as
+/// well as its unpacked one (`is_empty_compressed_payload` in `extract.rs`).
+/// PPMd encodes nothing into a six-byte init block, so a `Ppmd` or
+/// `PpmdFiltered` empty member used to be written with packed 6 / unpacked 0,
+/// which a reader decodes and rejects as trailing data; in a solid chain
+/// `DecodeBack` caught that and the whole archive was refused. The `Lz` and
+/// `Auto` paths already stored it, the first through
+/// `encode_rar29_lz_member`'s "no smaller than the input" fallback and the
+/// second through its own empty guard, so this only moves the other three
+/// onto the behaviour those two already had.
 fn encode_rar29_policy_filtered_payload(
     data: &[u8],
     policy: &FilterPolicy,
     options: Rar29EncodeOptions,
     lz_method: u8,
 ) -> Result<EncodedPayload> {
-    if lz_method == 0x30 {
+    if lz_method == 0x30 || data.is_empty() {
         return Ok(EncodedPayload {
             data: data.to_vec(),
             method: 0x30,
@@ -237,11 +251,11 @@ fn encode_rar29_policy_filtered_payload(
             method: lz_method,
         }),
         FilterPolicy::Ppmd => Ok(EncodedPayload {
-            data: unpack29_encode_ppmd(data).map_err(Error::from)?,
+            data: encode_rar29_ppmd(data).map_err(Error::from)?,
             method: 0x35,
         }),
         FilterPolicy::PpmdFiltered(filter) => Ok(EncodedPayload {
-            data: unpack29_encode_ppmd_with_filter(data, filter.clone()).map_err(Error::from)?,
+            data: encode_rar29_ppmd_with_filter(data, filter.clone()).map_err(Error::from)?,
             method: 0x35,
         }),
     }
@@ -284,7 +298,7 @@ fn encode_rar29_lz_member(
     options: Rar29EncodeOptions,
     method: u8,
 ) -> Result<EncodedPayload> {
-    let compressed = unpack29_encode_literals_with_options(data, options).map_err(Error::from)?;
+    let compressed = encode_rar29_literals_with_options(data, options).map_err(Error::from)?;
     if compressed.len() >= data.len() {
         return Ok(EncodedPayload {
             data: data.to_vec(),
@@ -302,7 +316,7 @@ fn encode_rar29_filtered_member(
     filter: FilterSpec,
     options: Rar29EncodeOptions,
 ) -> Result<Vec<u8>> {
-    Unpack29Encoder::with_options(options)
+    Rar29Encoder::with_options(options)
         .encode_member_with_filter(data, filter)
         .map_err(Error::from)
 }
@@ -312,9 +326,23 @@ fn encode_rar29_filtered_members(
     filters: &[FilterSpec],
     options: Rar29EncodeOptions,
 ) -> Result<Vec<u8>> {
-    Unpack29Encoder::with_options(options)
+    Rar29Encoder::with_options(options)
         .encode_member_with_filters(data, filters)
         .map_err(Error::from)
+}
+
+/// Replace `best` with `candidate` only when the candidate's packed stream is
+/// STRICTLY shorter, and drop the loser at the caller's statement end.
+///
+/// The strictness is load-bearing: the selection this replaced walked a
+/// `Vec<EncodedPayload>` in push order with `candidate.data.len() <
+/// best.data.len()`, so equal-length candidates never displaced an earlier
+/// one. Folding the same comparison into the build order keeps that
+/// first-wins-on-ties rule, which is what makes the fold byte-identical.
+fn keep_shorter(best: &mut EncodedPayload, candidate: EncodedPayload) {
+    if candidate.data.len() < best.data.len() {
+        *best = candidate;
+    }
 }
 
 fn encode_rar29_auto_filtered_member(
@@ -331,17 +359,17 @@ fn encode_rar29_auto_filtered_member(
     }
     if include_ppmd && is_large_text_ppmd_candidate(data) {
         return Ok(EncodedPayload {
-            data: unpack29_encode_ppmd(data).map_err(Error::from)?,
+            data: encode_rar29_ppmd(data).map_err(Error::from)?,
             method: 0x35,
         });
     }
     let mut best = EncodedPayload {
-        data: unpack29_encode_literals_with_options(data, options).map_err(Error::from)?,
+        data: encode_rar29_literals_with_options(data, options).map_err(Error::from)?,
         method: lz_method,
     };
     if include_ppmd && data.len() <= 1024 * 1024 && is_text_ppmd_candidate(data) {
         let ppmd = EncodedPayload {
-            data: unpack29_encode_ppmd(data).map_err(Error::from)?,
+            data: encode_rar29_ppmd(data).map_err(Error::from)?,
             method: 0x35,
         };
         if ppmd.data.len() < best.data.len() {
@@ -352,22 +380,42 @@ fn encode_rar29_auto_filtered_member(
     if is_text_ppmd_candidate(data) {
         return Ok(best);
     }
-    let mut candidates = Vec::new();
+    // Every candidate below is a FULL packed stream of the member, so
+    // collecting them all before choosing made peak heap
+    // (candidate count) x (member): 76.0x on a 16 MiB incompressible
+    // member, which was what was left of this path's heap after the
+    // planner work of handoff items 9 and 11. `keep_shorter` folds the
+    // selection into the build order instead, dropping a loser at the end
+    // of its own statement, so at most two streams are live at once.
+    // It is byte-identical BY CONSTRUCTION only while the build order and
+    // the strict `<` are preserved - the old selection walked the vector
+    // in push order with `candidate.data.len() < best.data.len()`, so it
+    // was first-wins on ties, and so is this.
     if include_ppmd && is_auto_ppmd_candidate(data) {
-        candidates.push(EncodedPayload {
-            data: unpack29_encode_ppmd(data).map_err(Error::from)?,
-            method: 0x35,
-        });
+        keep_shorter(
+            &mut best,
+            EncodedPayload {
+                data: encode_rar29_ppmd(data).map_err(Error::from)?,
+                method: 0x35,
+            },
+        );
     }
-    candidates.extend([
+    keep_shorter(
+        &mut best,
         EncodedPayload {
             data: encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::E8), options)?,
             method: lz_method,
         },
+    );
+    keep_shorter(
+        &mut best,
         EncodedPayload {
             data: encode_rar29_filtered_member(data, FilterSpec::whole(FilterKind::E8E9), options)?,
             method: lz_method,
         },
+    );
+    keep_shorter(
+        &mut best,
         EncodedPayload {
             data: encode_rar29_filtered_member(
                 data,
@@ -376,17 +424,20 @@ fn encode_rar29_auto_filtered_member(
             )?,
             method: lz_method,
         },
-    ]);
+    );
     let e8_candidates = auto_x86_filter_ranges(data, false);
     for range in e8_candidates.iter().cloned() {
-        candidates.push(EncodedPayload {
-            data: encode_rar29_filtered_member(
-                data,
-                FilterSpec::range(FilterKind::E8, range),
-                options,
-            )?,
-            method: lz_method,
-        });
+        keep_shorter(
+            &mut best,
+            EncodedPayload {
+                data: encode_rar29_filtered_member(
+                    data,
+                    FilterSpec::range(FilterKind::E8, range),
+                    options,
+                )?,
+                method: lz_method,
+            },
+        );
     }
     let e8_ranges = disjoint_filter_ranges(e8_candidates);
     if e8_ranges.len() > 1 {
@@ -394,21 +445,27 @@ fn encode_rar29_auto_filtered_member(
             .into_iter()
             .map(|range| FilterSpec::range(FilterKind::E8, range))
             .collect();
-        candidates.push(EncodedPayload {
-            data: encode_rar29_filtered_members(data, &filters, options)?,
-            method: lz_method,
-        });
+        keep_shorter(
+            &mut best,
+            EncodedPayload {
+                data: encode_rar29_filtered_members(data, &filters, options)?,
+                method: lz_method,
+            },
+        );
     }
     let e8e9_candidates = auto_x86_filter_ranges(data, true);
     for range in e8e9_candidates.iter().cloned() {
-        candidates.push(EncodedPayload {
-            data: encode_rar29_filtered_member(
-                data,
-                FilterSpec::range(FilterKind::E8E9, range),
-                options,
-            )?,
-            method: lz_method,
-        });
+        keep_shorter(
+            &mut best,
+            EncodedPayload {
+                data: encode_rar29_filtered_member(
+                    data,
+                    FilterSpec::range(FilterKind::E8E9, range),
+                    options,
+                )?,
+                method: lz_method,
+            },
+        );
     }
     let e8e9_ranges = disjoint_filter_ranges(e8e9_candidates);
     if e8e9_ranges.len() > 1 {
@@ -416,59 +473,68 @@ fn encode_rar29_auto_filtered_member(
             .into_iter()
             .map(|range| FilterSpec::range(FilterKind::E8E9, range))
             .collect();
-        candidates.push(EncodedPayload {
-            data: encode_rar29_filtered_members(data, &filters, options)?,
-            method: lz_method,
-        });
+        keep_shorter(
+            &mut best,
+            EncodedPayload {
+                data: encode_rar29_filtered_members(data, &filters, options)?,
+                method: lz_method,
+            },
+        );
     }
     for channels in 1..=4 {
-        candidates.push(EncodedPayload {
-            data: encode_rar29_filtered_member(
-                data,
-                FilterSpec::whole(FilterKind::Delta { channels }),
-                options,
-            )?,
-            method: lz_method,
-        });
-        if is_audio_filter_candidate(data, channels) {
-            candidates.push(EncodedPayload {
+        keep_shorter(
+            &mut best,
+            EncodedPayload {
                 data: encode_rar29_filtered_member(
                     data,
-                    FilterSpec::whole(FilterKind::Audio { channels }),
+                    FilterSpec::whole(FilterKind::Delta { channels }),
                     options,
                 )?,
                 method: lz_method,
-            });
+            },
+        );
+        if is_audio_filter_candidate(data, channels) {
+            keep_shorter(
+                &mut best,
+                EncodedPayload {
+                    data: encode_rar29_filtered_member(
+                        data,
+                        FilterSpec::whole(FilterKind::Audio { channels }),
+                        options,
+                    )?,
+                    method: lz_method,
+                },
+            );
         }
     }
     for channels in 1..=4 {
         if let Some(range) = auto_delta_filter_range(data, channels) {
-            candidates.push(EncodedPayload {
-                data: encode_rar29_filtered_member(
-                    data,
-                    FilterSpec::range(FilterKind::Delta { channels }, range),
-                    options,
-                )?,
-                method: lz_method,
-            });
+            keep_shorter(
+                &mut best,
+                EncodedPayload {
+                    data: encode_rar29_filtered_member(
+                        data,
+                        FilterSpec::range(FilterKind::Delta { channels }, range),
+                        options,
+                    )?,
+                    method: lz_method,
+                },
+            );
         }
     }
     for width in AUTO_RGB_WIDTHS {
         if data.len() >= width {
-            candidates.push(EncodedPayload {
-                data: encode_rar29_filtered_member(
-                    data,
-                    FilterSpec::whole(FilterKind::Rgb { width, pos_r: 0 }),
-                    options,
-                )?,
-                method: lz_method,
-            });
-        }
-    }
-
-    for candidate in candidates {
-        if candidate.data.len() < best.data.len() {
-            best = candidate;
+            keep_shorter(
+                &mut best,
+                EncodedPayload {
+                    data: encode_rar29_filtered_member(
+                        data,
+                        FilterSpec::whole(FilterKind::Rgb { width, pos_r: 0 }),
+                        options,
+                    )?,
+                    method: lz_method,
+                },
+            );
         }
     }
     if best.data.len() >= data.len() {
@@ -601,10 +667,14 @@ fn write_rar29_filtered_archive(
         None
     };
     if options.features.solid {
-        let mut solid_run_has_member = false;
+        let mut solid_run = SolidRun::default();
+        let mut decode_back = DecodeBack::default();
         for entry in entries {
             let payload = encode(entry)?;
-            let solid_continuation = payload.method != 0x30 && solid_run_has_member;
+            let solid_continuation = solid_run.continues(&payload, entry.data.len());
+            if !decode_back.decodes_back(options.target, &payload, entry.data, solid_continuation) {
+                return Err(member_does_not_decode_back());
+            }
             if let Some(password) = header_password {
                 write_header_encrypted_compressed_entry(
                     &mut out,
@@ -626,10 +696,12 @@ fn write_rar29_filtered_archive(
                     solid_continuation,
                 )?;
             }
-            solid_run_has_member = payload.method != 0x30;
         }
     } else {
-        let payloads = encode_filtered_payloads(entries, &encode)?;
+        let payloads = encode_filtered_payloads(entries, &|entry: &FileEntry<'_>| {
+            encode(entry)
+                .map(|payload| stored_unless_decodes_back(options.target, payload, entry.data))
+        })?;
         for (entry, payload) in entries.iter().zip(&payloads) {
             if let Some(password) = header_password {
                 write_header_encrypted_compressed_entry(
@@ -692,10 +764,14 @@ fn write_header_encrypted_compressed_archive(
     write_main_header(&mut out, main_flags);
     if options.features.solid {
         let mut solid_encoder = SolidEncoder::for_target(options, true)?;
-        let mut solid_run_has_member = false;
+        let mut solid_run = SolidRun::default();
+        let mut decode_back = DecodeBack::default();
         for entry in entries {
             let payload = encode_or_store_payload(entry.data, options, &mut solid_encoder, None)?;
-            let solid_continuation = payload.method != 0x30 && solid_run_has_member;
+            let solid_continuation = solid_run.continues(&payload, entry.data.len());
+            if !decode_back.decodes_back(options.target, &payload, entry.data, solid_continuation) {
+                return Err(member_does_not_decode_back());
+            }
             write_header_encrypted_compressed_entry(
                 &mut out,
                 entry,
@@ -705,7 +781,6 @@ fn write_header_encrypted_compressed_archive(
                 solid_continuation,
                 password,
             )?;
-            solid_run_has_member = payload.method != 0x30;
         }
     } else {
         let payloads = encode_independent_payloads(entries, options, None)?;
@@ -973,10 +1048,14 @@ pub fn write_compressed_volume_set(
     let mut members = Vec::with_capacity(entries.len());
     if options.features.solid {
         let mut solid_encoder = SolidEncoder::for_target(options, true)?;
-        let mut solid_run_has_member = false;
+        let mut solid_run = SolidRun::default();
+        let mut decode_back = DecodeBack::default();
         for entry in entries {
             let payload = encode_or_store_payload(entry.data, options, &mut solid_encoder, None)?;
-            let solid_continuation = payload.method != 0x30 && solid_run_has_member;
+            let solid_continuation = solid_run.continues(&payload, entry.data.len());
+            if !decode_back.decodes_back(options.target, &payload, entry.data, solid_continuation) {
+                return Err(member_does_not_decode_back());
+            }
             members.push(volume_set_member(VolumeSetMemberInput {
                 name: entry.name,
                 unpacked: entry.data,
@@ -989,7 +1068,6 @@ pub fn write_compressed_volume_set(
                 solid_continuation,
                 target: options.target,
             })?);
-            solid_run_has_member = payload.method != 0x30;
         }
     } else {
         let payloads = encode_independent_payloads(entries, options, None)?;
@@ -1368,9 +1446,9 @@ fn compression_method_for_level(options: WriterOptions) -> Result<u8> {
 }
 
 enum SolidEncoder {
-    Rar15(Box<Unpack15Encoder>),
-    Rar20(Unpack20Encoder),
-    Rar29(Unpack29Encoder),
+    Rar15(Box<Rar15CheckedEncoder>),
+    Rar20(Rar20Encoder),
+    Rar29(Rar29Encoder),
 }
 
 impl SolidEncoder {
@@ -1379,14 +1457,14 @@ impl SolidEncoder {
             return Ok(None);
         }
         let encoder = match options.target {
-            ArchiveVersion::Rar15 => Self::Rar15(Box::new(Unpack15Encoder::with_options(
+            ArchiveVersion::Rar15 => Self::Rar15(Box::new(Rar15CheckedEncoder::with_options(
                 rar15_encode_options_for_level(options.compression_level)?,
             ))),
-            ArchiveVersion::Rar20 => Self::Rar20(Unpack20Encoder::with_options(
+            ArchiveVersion::Rar20 => Self::Rar20(Rar20Encoder::with_options(
                 rar20_encode_options_for_options(options)?,
             )),
             ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => Self::Rar29(
-                Unpack29Encoder::with_options(rar29_encode_options_for_options(options)?),
+                Rar29Encoder::with_options(rar29_encode_options_for_options(options)?),
             ),
             _ => return Ok(None),
         };
@@ -1397,6 +1475,130 @@ impl SolidEncoder {
 struct EncodedPayload {
     data: Vec<u8>,
     method: u8,
+}
+
+/// Which members of a solid archive are marked as continuing the one before.
+///
+/// A reader keeps one decoder for a solid run and restarts it at a member
+/// not marked solid. The writer restarts its encoder after a stored member,
+/// so the next compressed member must not be marked. A compressed member
+/// with no bytes at all is different: the reader skips it without touching
+/// its decoder and the encoder returns before touching its own state, so it
+/// must neither start a run nor end one. Treating it as a start once marked
+/// the member after a stored one and an empty one as solid, and the reader
+/// decoded it from state the encoder had already dropped.
+#[derive(Default)]
+struct SolidRun {
+    has_member: bool,
+}
+
+impl SolidRun {
+    /// Whether this member continues the run, recording it for the next.
+    fn continues(&mut self, payload: &EncodedPayload, unpacked_len: usize) -> bool {
+        let compressed = payload.method != 0x30;
+        let continuation = compressed && self.has_member;
+        if !(compressed && payload.data.is_empty() && unpacked_len == 0) {
+            self.has_member = compressed;
+        }
+        continuation
+    }
+}
+
+/// Decodes each compressed RAR 2.0 or RAR 2.9-4.x member back before it is
+/// written, from the decoder state a reader will be in when it gets there
+/// (`DecoderSession` in `extract.rs`): a fresh decoder for a member not
+/// marked solid, the carried-over one for a member that is, and nothing at
+/// all for stored and empty members, which a reader never decodes. RAR 1.5
+/// members are checked as they are encoded, by `Rar15CheckedEncoder`.
+///
+/// It follows the reader's state rather than the encoder's, so it also
+/// refuses a solid archive whose members are marked wrongly. Both defects
+/// the writer round-trip campaign (`tests/rar15_40_writer_roundtrip.rs`)
+/// found were of that kind, and a check kept in step with the encoder
+/// would have passed them. The RAR 1.5 one is not covered here, because
+/// `Rar15CheckedEncoder` follows the encoder; `should_store_fallback` is
+/// what holds it. Measured before it was added, on 32 MiB members
+/// under load: decoding back took 0.3-4.5% of the time encoding took. A RAR
+/// 2.0 member is decoded into one buffer of the member's size.
+#[derive(Default)]
+struct DecodeBack {
+    decoder: Option<DecodeBackState>,
+}
+
+enum DecodeBackState {
+    Rar20(Box<Rar20Decoder>),
+    Rar29(Box<Rar29Decoder>),
+}
+
+impl DecodeBack {
+    /// Whether `payload` decodes back to `data`. After a `false` the decoder
+    /// is dropped, so the next member must not be marked solid.
+    fn decodes_back(
+        &mut self,
+        target: ArchiveVersion,
+        payload: &EncodedPayload,
+        data: &[u8],
+        continuation: bool,
+    ) -> bool {
+        let rar20 = match target {
+            ArchiveVersion::Rar20 => true,
+            ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40 => false,
+            _ => return true,
+        };
+        if payload.method == 0x30 || (payload.data.is_empty() && data.is_empty()) {
+            return true;
+        }
+        let carried = matches!(
+            (rar20, &self.decoder),
+            (true, Some(DecodeBackState::Rar20(_))) | (false, Some(DecodeBackState::Rar29(_)))
+        );
+        if !continuation || !carried {
+            self.decoder = Some(if rar20 {
+                DecodeBackState::Rar20(Box::default())
+            } else {
+                DecodeBackState::Rar29(Box::default())
+            });
+        }
+        let mut expected = MatchingWriter::new(data);
+        let decoded = match self.decoder.as_mut() {
+            Some(DecodeBackState::Rar20(decoder)) => decoder
+                .decode_member_to(&payload.data, data.len(), &mut expected)
+                .is_ok(),
+            Some(DecodeBackState::Rar29(decoder)) => decoder
+                .decode_member_to(&payload.data, data.len(), &mut expected)
+                .is_ok(),
+            None => false,
+        };
+        let matches = decoded && expected.is_complete();
+        if !matches {
+            self.decoder = None;
+        }
+        matches
+    }
+}
+
+/// A non-solid member that does not decode back is stored instead.
+fn stored_unless_decodes_back(
+    target: ArchiveVersion,
+    payload: EncodedPayload,
+    data: &[u8],
+) -> EncodedPayload {
+    if DecodeBack::default().decodes_back(target, &payload, data, false) {
+        payload
+    } else {
+        EncodedPayload {
+            data: data.to_vec(),
+            method: 0x30,
+        }
+    }
+}
+
+/// A solid member cannot be stored instead, because the encoder has already
+/// moved past it.
+fn member_does_not_decode_back() -> Error {
+    Error::from(crate::codec::Error::InvalidData(
+        "RAR encoder produced a solid member that does not decode back",
+    ))
 }
 
 fn encode_independent_payload(
@@ -1453,7 +1655,24 @@ where
     }
 }
 
+/// A solid member is decoded back by the archive loop, which knows how it
+/// will be marked; a non-solid one is decoded back here.
 fn encode_or_store_payload(
+    data: &[u8],
+    options: WriterOptions,
+    solid_encoder: &mut Option<SolidEncoder>,
+    progress: Option<&WorkTracker<'_>>,
+) -> Result<EncodedPayload> {
+    let solid = solid_encoder.is_some();
+    let payload = encode_or_store_payload_unchecked(data, options, solid_encoder, progress)?;
+    Ok(if solid {
+        payload
+    } else {
+        stored_unless_decodes_back(options.target, payload, data)
+    })
+}
+
+fn encode_or_store_payload_unchecked(
     data: &[u8],
     options: WriterOptions,
     solid_encoder: &mut Option<SolidEncoder>,
@@ -1480,7 +1699,14 @@ fn encode_or_store_payload(
         }
         return encode_rar29_auto_filtered_member(data, encode_options, lz_method, true);
     }
-    let compressed = encode_compressed_payload(data, options, solid_encoder.as_mut(), progress)?;
+    let Some(compressed) =
+        encode_compressed_payload(data, options, solid_encoder.as_mut(), progress)?
+    else {
+        return Ok(EncodedPayload {
+            data: data.to_vec(),
+            method: 0x30,
+        });
+    };
     if should_store_fallback(target, solid, data.len(), compressed.len()) {
         if solid {
             *solid_encoder = SolidEncoder::for_target(options, true)?;
@@ -1501,7 +1727,7 @@ fn encode_compressed_payload(
     options: WriterOptions,
     solid_encoder: Option<&mut SolidEncoder>,
     progress: Option<&WorkTracker<'_>>,
-) -> Result<Vec<u8>> {
+) -> Result<Option<Vec<u8>>> {
     let target = options.target;
     let mut last = 0usize;
     let mut advance = |position: usize| {
@@ -1513,30 +1739,36 @@ fn encode_compressed_payload(
         progress.is_none_or(|progress| progress.advance(delta as u64))
     };
     match (target, solid_encoder) {
+        // A RAR 1.5 member is decoded back before it is written. A non-solid
+        // one that does not is stored instead (`None`); a solid one cannot
+        // be, because the encoder has already moved past it.
         (ArchiveVersion::Rar15, Some(SolidEncoder::Rar15(encoder))) => encoder
-            .encode_member_with_progress(data, &mut advance)
+            .encode_solid_member_with_progress(data, &mut advance)
+            .map(Some)
             .map_err(map_codec_cancel),
-        (ArchiveVersion::Rar15, None) => unpack15_encode_with_options_and_progress(
-            data,
+        (ArchiveVersion::Rar15, None) => Rar15CheckedEncoder::with_options(
             rar15_encode_options_for_level(options.compression_level)?,
-            &mut advance,
         )
+        .encode_member_with_progress(data, &mut advance)
         .map_err(map_codec_cancel),
-        (ArchiveVersion::Rar20, None) => unpack20_encode_auto_with_options_and_progress(
+        (ArchiveVersion::Rar20, None) => encode_rar20_auto_with_options_and_progress(
             data,
             rar20_encode_options_for_options(options)?,
             &mut advance,
         )
+        .map(Some)
         .map_err(map_codec_cancel),
         (ArchiveVersion::Rar20, Some(SolidEncoder::Rar20(encoder))) => encoder
             .encode_member_with_progress(data, &mut advance)
+            .map(Some)
             .map_err(map_codec_cancel),
         (ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40, None) => {
-            unpack29_encode_literals_with_options_and_progress(
+            encode_rar29_literals_with_options_and_progress(
                 data,
                 Rar29EncodeOptions::default(),
                 &mut advance,
             )
+            .map(Some)
             .map_err(map_codec_cancel)
         }
         (
@@ -1544,6 +1776,7 @@ fn encode_compressed_payload(
             Some(SolidEncoder::Rar29(encoder)),
         ) => encoder
             .encode_member_with_progress(data, &mut advance)
+            .map(Some)
             .map_err(map_codec_cancel),
         _ => Err(Error::UnsupportedVersion(target)),
     }
@@ -1564,6 +1797,12 @@ fn should_store_fallback(
     packed_len: usize,
 ) -> bool {
     if packed_len < unpacked_len {
+        return false;
+    }
+    // A reader carries RAR 1.5 decoder state across every member of a
+    // solid archive and ignores the per-file solid flag, so a stored member
+    // would leave it holding bytes the restarted encoder no longer has.
+    if solid && target == ArchiveVersion::Rar15 {
         return false;
     }
     if !solid
@@ -1913,7 +2152,7 @@ fn write_newsub_archive_comment(out: &mut Vec<u8>, comment: Option<&[u8]>) -> Re
     let Some(comment) = comment else {
         return Ok(());
     };
-    let packed = unpack29_encode_literals(comment)?;
+    let packed = encode_rar29_literals(comment)?;
     write_file_header_and_data(
         out,
         FileRecord {
@@ -2711,7 +2950,7 @@ mod tests {
         encode_rar29_filtered_members, is_audio_filter_candidate, rar29_encode_options_for_options,
         FilterKind, FilterSpec, AUTO_DELTA_EDGE_SKIP, RAR29_LARGE_TEXT_PPMD_THRESHOLD,
     };
-    use crate::codec::rar29::{unpack29_decode, EncodeOptions};
+    use crate::codec::rar29::{decode_rar29, EncodeOptions};
     use crate::{ArchiveVersion, FeatureSet};
 
     #[test]
@@ -2855,7 +3094,7 @@ mod tests {
 
         let packed = encode_rar29_filtered_members(&data, &filters, EncodeOptions::default())
             .expect("multi-filter RAR29 member should encode");
-        let decoded = unpack29_decode(&packed, data.len()).unwrap();
+        let decoded = decode_rar29(&packed, data.len()).unwrap();
 
         assert_eq!(filters.len(), 2);
         assert!(
@@ -2914,7 +3153,7 @@ mod tests {
             "tight x86 ranges should avoid filtering sparse data gaps"
         );
         assert!(auto.data.len() <= tight.len());
-        assert_eq!(unpack29_decode(&auto.data, data.len()).unwrap(), data);
+        assert_eq!(decode_rar29(&auto.data, data.len()).unwrap(), data);
     }
 
     #[test]
@@ -2942,7 +3181,7 @@ mod tests {
         let options = EncodeOptions::default();
 
         let plain =
-            crate::codec::rar29::unpack29_encode_literals_with_options(&data, options).unwrap();
+            crate::codec::rar29::encode_rar29_literals_with_options(&data, options).unwrap();
         let ranged = encode_rar29_filtered_member(
             &data,
             FilterSpec::range(
@@ -2988,5 +3227,37 @@ mod tests {
             .max_match_distance,
             4 * 1024 * 1024
         );
+    }
+
+    #[test]
+    fn decode_back_accepts_a_member_and_refuses_it_damaged() {
+        let data = b"decode back decode back decode back, then a little more text\n".repeat(40);
+        let rar20 =
+            crate::codec::rar20::encode_rar20_auto_with_options(&data, Default::default()).unwrap();
+        let rar29 = crate::codec::rar29::encode_rar29_literals(&data).unwrap();
+        for (target, packed) in [
+            (ArchiveVersion::Rar20, rar20),
+            (ArchiveVersion::Rar29, rar29),
+        ] {
+            let good = super::EncodedPayload {
+                data: packed.clone(),
+                method: 0x33,
+            };
+            assert!(super::DecodeBack::default().decodes_back(target, &good, &data, false));
+            let mut damaged = packed;
+            let middle = damaged.len() / 2;
+            damaged[middle] ^= 0x5a;
+            let damaged = super::EncodedPayload {
+                data: damaged,
+                method: 0x33,
+            };
+            assert!(
+                !super::DecodeBack::default().decodes_back(target, &damaged, &data, false),
+                "{target:?}"
+            );
+            let stored = super::stored_unless_decodes_back(target, damaged, &data);
+            assert_eq!(stored.method, 0x30);
+            assert_eq!(stored.data, data);
+        }
     }
 }

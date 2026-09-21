@@ -2,6 +2,8 @@
 //! the card SQL fragments, `browse_cards` and the wall tip. Bodies are
 //! verbatim moves from the old index.rs.
 
+#![warn(missing_docs)]
+
 use super::query::{fts_match, stem_fold_arm};
 use super::*;
 
@@ -24,13 +26,26 @@ pub struct TipInfo {
 /// wall pages instead of materializing the whole index per load.
 #[derive(Debug, Clone)]
 pub struct Card {
+    /// The grouping key every release under this card shares, and the
+    /// join key into the `titles` metadata table.
     pub title_key: String,
     /// Representative kind ("movie"/"tv"/…).
     pub kind: String,
     /// Release count grouped under this card.
     pub n_releases: u32,
+    /// Newest `first_posted` in the group, unix seconds. The wall's
+    /// default sort. A release's posted time is its FIRST article's, so
+    /// a set that only finished arriving now can still sort well down
+    /// the page - `CardSort::Arrived` is the sort that answers "what
+    /// showed up while I was away".
     pub latest_posted: i64,
+    /// At least one release in the group is complete. A card-level OR,
+    /// so it says the title is gettable and not that every release
+    /// under it is.
     pub any_complete: bool,
+    /// Largest `total_bytes` in the group, not their sum: the card
+    /// stands for a title, and what a size sort is being asked is "how
+    /// big is the best copy here".
     pub max_bytes: u64,
     /// Best resolution seen ("2160p" > "1080p" > …; '' = unknown).
     pub best_res: String,
@@ -41,19 +56,37 @@ pub struct Card {
     /// its group family.
     pub rep_grp: String,
     // Joined titles metadata ('' / 0 until the enricher lands it).
+    /// Enriched display title. Empty until the enricher has matched the
+    /// card, and the wall falls back to `rep_stem`.
     pub title: String,
+    /// Enriched release year, 0 = unknown.
     pub year: u32,
+    /// Enriched rating out of 10, 0.0 = unrated or unknown.
     pub rating: f64,
+    /// Enriched genre list as the provider gave it, comma-separated.
+    /// Matched by substring for the Affinity sort, so it is kept as one
+    /// string rather than split.
     pub genres: String,
+    /// Enriched plot summary.
     pub overview: String,
+    /// Poster filename in the art cache (`wall::art_name` output),
+    /// empty when none was fetched.
     pub poster_art: String,
+    /// Backdrop filename in the art cache, empty when none was fetched.
     pub backdrop_art: String,
+    /// When enrichment last wrote this row, unix seconds. 0 means never
+    /// enriched, and it doubles as the cache-busting `?v=` on the art
+    /// URLs so a replaced poster is not served from the browser's copy.
     pub checked: i64,
+    /// Enriched cast list as the provider gave it, comma-separated.
     pub actors: String,
     /// Enriched release / first-air date, ISO `YYYY-MM-DD` ('' = unknown).
     pub air_date: String,
 }
 
+/// How `browse_cards` orders the poster grid. Parsed from the `sort=`
+/// the wall sends, and an unrecognised value falls back to `Latest`
+/// rather than refusing the page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardSort {
     /// Latest upload in the group (the wall default).
@@ -67,10 +100,16 @@ pub enum CardSort {
     /// is the order the "new arrivals" pill sends you to, and on its own
     /// it answers "what showed up while I was away".
     Arrived,
+    /// Enriched rating, best first. Unrated cards sort below rated
+    /// ones rather than leading the page with a 0.
     Rating,
+    /// Enriched title alphabetically, falling back to the
+    /// representative stem for cards the enricher has not matched.
     Title,
     /// Group release count (how actively posted).
     Releases,
+    /// Largest release in the group first - `max_bytes`, so it ranks
+    /// titles by their best copy rather than by how many copies exist.
     Size,
     /// Original release year (enriched year, falling back to the year
     /// baked into a movie parse key) - "original date" vs Latest's
@@ -89,6 +128,9 @@ pub enum CardSort {
 }
 
 impl CardSort {
+    /// Parse the wall's `sort=` parameter. Anything unrecognised - a
+    /// stale bookmark, a hand-typed URL, a client from a future
+    /// release - reads as `Latest`, so the grid always renders.
     pub fn parse(s: &str) -> CardSort {
         match s {
             "arrived" => CardSort::Arrived,

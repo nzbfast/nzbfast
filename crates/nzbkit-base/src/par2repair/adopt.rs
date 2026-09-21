@@ -129,6 +129,45 @@ pub(crate) fn disabled_for_screen() -> bool {
 /// first-candidate-wins adoption semantics prefer the bytes that
 /// already live where the repair lands over a donor's copy of them.
 ///
+/// Within a group a candidate at a name a NEIGHBOURING set in this
+/// directory declares sorts LAST, and that is the whole of the
+/// 20 Sep 2026 ordering change (claim
+/// `parfast-adoption-order-demote-declared-20sep`,
+/// `research/PARFAST-WHOLE-DIR-EXTRA-SCAN-COST-2026-09-20.md`
+/// section 7 option B). DEMOTED, NEVER EXCLUDED: a neighbour that
+/// really does hold our bytes is still found, just after ours - which
+/// is the difference between this and the narrowed wildcard that makes
+/// par2cmdline-turbo FAIL the multi-set job this engine completes
+/// (`research/SAB-MULTISET-WILDCARD-2026-09-20.md`).
+///
+/// It is worth what it is worth because of [`sliding_scan`]'s early
+/// exit: `ScanShared::settled_at` cuts the scan from a position
+/// onwards once every wanted slice is covered, so the order decides how
+/// much of the folder is read before the cut fires. That note measured
+/// 8 GiB of neighbouring set costing +192.87 G instructions when the
+/// obfuscated donor's token happened to sort BEFORE the neighbour's
+/// members and +313.66 G when it sorted after - the only difference
+/// being the token's first character - and the `late` slope is linear
+/// and unbounded at 39.3 G per neighbour GiB, where `early` saturates
+/// at the fan-out. This makes every post the `early` arm.
+///
+/// The predicate is `ctx.declared`, threaded down: the directory-wide
+/// set of every FileDesc name any set declares, already computed by
+/// `PacketCatalog::declared_and_contested` before this runs, and
+/// already the rule [`is_somebodys_payload`] states. It lands the right
+/// way round by construction - an obfuscated donor is NOT at a declared
+/// name, which is what makes it obfuscated, so it is never demoted,
+/// while a neighbour's member at the name its own set gives it always
+/// is. OUR OWN set's declared names are taken back out
+/// ([`declared_by_name`] says why): an unidentified target of this set
+/// is a candidate deliberately - a member whose bytes are SHIFTED is
+/// found by rolling over its own file - and demoting it would give away
+/// the single-set case to buy the multi-set one.
+///
+/// WHAT IT DOES NOT REACH: a neighbouring set whose members are
+/// themselves obfuscated. No declared name matches, nothing is demoted,
+/// and that folder costs what it always did.
+///
 /// Within a group the sort key is (DEPTH, path) and not the path alone,
 /// which is a consequence of the widening above rather than a
 /// preference. A plain path sort puts `VIDEO_TS/z.bin` in FRONT of
@@ -166,6 +205,7 @@ fn adoption_candidates(
     donors: &[PathBuf],
     targets: &[Target],
     exclude: &HashSet<PathBuf>,
+    declared: &HashSet<String>,
 ) -> Result<(Vec<(PathBuf, u64)>, usize), RepairError> {
     // Keyed by filesystem identity, not by spelling: the PAR2-declared name
     // and the on-disk name routinely differ in case, and on a case-insensitive
@@ -177,6 +217,16 @@ fn adoption_candidates(
         .filter(|t| t.exists && (t.intact || t.present.iter().any(|&p| p)))
         .map(|t| path_identity_key(fold, &t.path))
         .collect();
+    // The demotion set: every name SOME set in this directory declares,
+    // less the names OUR OWN set declares. See the header. Our own
+    // targets' names are removed rather than never added because
+    // `declared` is directory-wide by construction and includes them -
+    // and an unidentified target of this set is a candidate on purpose.
+    let ours: HashSet<String> = targets
+        .iter()
+        .map(|t| name_identity_key(fold, &t.file.name))
+        .collect();
+    let demote_names: HashSet<String> = declared.difference(&ours).cloned().collect();
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let walk = |d: &Path,
                 out: &mut Vec<(PathBuf, u64)>,
@@ -199,10 +249,13 @@ fn adoption_candidates(
                 out.push((p, len));
             }
         }
-        // DEPTH first, then path - see the header. A directory with no
-        // subdirectories sorts exactly as the flat walk's `sort()` did.
+        // A NEIGHBOURING SET'S DECLARED PAYLOAD LAST, then DEPTH, then
+        // path - see the header. The partition is stable because the
+        // (depth, path) pair below is already a total order, so within
+        // each of the two classes the list is byte-for-byte what it was.
         out[start..].sort_by_key(|(p, _)| {
             (
+                declared_by_name(d, fold, p, &demote_names),
                 p.strip_prefix(d).unwrap_or(p).components().count(),
                 p.clone(),
             )
@@ -393,6 +446,38 @@ fn adoption_tally(
     per
 }
 
+/// The target one candidate's [`adoption_tally`] row mostly fed, or
+/// `None` when two of them tie for the lead.
+///
+/// The whole of [`extra_file_matches`]' attribution rule; its docstring
+/// carries the argument and the measurement. A one-entry row is its own
+/// strict maximum, so this is the identity on every unambiguous donor
+/// and the function exists only for the rest.
+///
+/// Iteration order is a `HashMap`'s, and the answer must not be: a tie
+/// resolves to `None` whichever of the tied entries is seen first, and
+/// a strict maximum is reached from any order.
+///
+/// An EMPTY row would also answer `None`, and cannot arrive:
+/// [`adoption_tally`] inserts a candidate only when a slice was adopted
+/// from it. The caller's branch for `None` is therefore the tie, which
+/// is what its comment says.
+fn dominant_target(by_target: &HashMap<usize, (usize, bool)>) -> Option<usize> {
+    let mut best: Option<(usize, usize)> = None;
+    let mut tied = false;
+    for (&ti, &(n, _)) in by_target {
+        match best {
+            Some((_, bn)) if n < bn => {}
+            Some((_, bn)) if n == bn => tied = true,
+            _ => {
+                best = Some((ti, n));
+                tied = false;
+            }
+        }
+    }
+    best.filter(|_| !tied).map(|(ti, _)| ti)
+}
+
 /// What the reference's "Scanning extra files:" section announces, read
 /// back out of the adoption decision this repair already made.
 ///
@@ -422,6 +507,52 @@ fn adoption_tally(
 /// intact on disk - the reference would count those too. Reporting what
 /// was actually adopted is the honest half of that pair: it is what
 /// this repair did.
+///
+/// A DONOR THAT FED SEVERAL TARGETS IS NAMED FOR THE ONE IT MOSTLY FED
+/// (20 Sep 2026, claim `parfast-donor-attribution-several-vs-reference-20sep`,
+/// `research/PARFAST-DONOR-ATTRIBUTION-2026-09-20.md`). The rule was
+/// `by_target.len() > 1 -> None`, and on an ORDINARY posting shape -
+/// two members of one set sharing a leading header, both landing under
+/// obfuscated names - that shipped a file. SABnzbd fills
+/// `reconstructed` off `PAR2_BLOCK_FOUND_RE`
+/// (`File: "x" - found N of M data blocks from "y"`, newsunpack.py:84)
+/// and DELETES what that line names; the several-variant matches
+/// neither of its two regexes, so the donor survived into the completed
+/// folder as junk. Measured end to end: four files shipped where three
+/// were the payload.
+///
+/// THE RULE IS A STRICT PLURALITY AND HAS NO THRESHOLD IN IT. One
+/// target holding the unique maximum is named; two tied for it are the
+/// several-variant, which is what that line is FOR and stays reachable
+/// on exactly the shape it describes - a donor feeding two members
+/// equally. There is nothing to tune: the discriminator is "is there a
+/// single largest", not "is the largest big enough".
+///
+/// WHAT IT IS HELD AGAINST. par2cmdline-turbo 1.4.0 over two members of
+/// one set sharing a leading prefix, swept from 0 to 100% shared: it
+/// names one target per donor at EVERY point, never printing several,
+/// because it assigns a whole extra FILE to one source file and
+/// consumes it. This rule reproduces that answer, donor for donor and
+/// count for count, everywhere except the fully-duplicate end of the
+/// sweep, where our adoption is block-level and one donor legitimately
+/// supplies both members. (Upstream par2cmdline 1.2.0 prints several
+/// for BOTH donors from 11 shared blocks up, so the reference being
+/// followed here is turbo's improvement and not the dialect's floor.)
+///
+/// THE COUNT ON A DOMINANT DONOR IS THAT TARGET'S BLOCKS, not the
+/// donor's total: the cross-target blocks it also fed are not announced
+/// under a line that names one target. That is the SAME count the
+/// single-target branch always printed - the docstring above is
+/// unchanged by this - and it is the reference's number to the block on
+/// every swept point.
+///
+/// `whole_file` ALSO REQUIRES A SOLE TARGET, which is not redundant
+/// with `whole_claims`. It is what keeps this function and
+/// [`whole_file_renames`] from disagreeing, the thing
+/// [`adoption_tally`]'s docstring forbids: the rename path gates on
+/// `by_target.len() == 1` and ACTS by moving a file, so a dominant
+/// donor promoted to `is a match for` here would announce a rename that
+/// never happened.
 pub(super) fn extra_file_matches(
     dir: &Path,
     cands: &[(PathBuf, u64)],
@@ -441,27 +572,25 @@ pub(super) fn extra_file_matches(
         .into_iter()
         .map(|(ci, by_target)| {
             let donor = crate::disk::out_name_of(dir, &cands[ci].0);
-            let blocks: usize = by_target.values().map(|(n, _)| n).sum();
-            if by_target.len() > 1 {
+            let sole = by_target.len() == 1;
+            let Some(ti) = dominant_target(&by_target) else {
                 return ExtraFileMatch {
                     donor,
                     target: None,
-                    blocks,
+                    blocks: by_target.values().map(|(n, _)| n).sum(),
                     target_blocks: 0,
                     whole_file: false,
                 };
-            }
-            let (ti, (n, aligned)) = by_target
-                .into_iter()
-                .next()
-                .expect("a candidate with no target is never inserted");
+            };
+            let (n, aligned) = by_target[&ti];
             let t = &targets[ti];
             ExtraFileMatch {
                 donor,
                 target: Some(t.file.name.clone()),
                 blocks: n,
                 target_blocks: t.n_slices,
-                whole_file: whole_claims.contains(&ci)
+                whole_file: sole
+                    && whole_claims.contains(&ci)
                     && aligned
                     && n == t.n_slices
                     && cands[ci].1 == t.file.length,
@@ -507,9 +636,24 @@ pub(super) fn is_somebodys_payload(
     target_keys: &HashSet<PathBuf>,
     declared_names: &HashSet<String>,
 ) -> bool {
-    let out_rel = name_identity_key(fold, &crate::disk::out_name_of(dir, p));
     target_keys.contains(&path_identity_key(fold, p))
-        || declared_names.contains(&out_rel)
+        || declared_by_name(dir, fold, p, declared_names)
+}
+
+/// The NAME half of [`is_somebodys_payload`], both spellings, factored
+/// out because a second caller asks exactly this and no more.
+///
+/// [`adoption_candidates`] uses it to DEMOTE a candidate in the scan
+/// order rather than to protect it from a sweep, and there the target
+/// arm above would be wrong - an unidentified target of THIS set is a
+/// candidate on purpose (a shifted or prepended member is found by
+/// rolling over its own file) and must keep its place. The two
+/// spellings and the `fold` rule are the same question in both
+/// callers, so they stay in one place; read this function's reasoning
+/// at [`is_somebodys_payload`].
+fn declared_by_name(dir: &Path, fold: bool, p: &Path, declared_names: &HashSet<String>) -> bool {
+    let out_rel = name_identity_key(fold, &crate::disk::out_name_of(dir, p));
+    declared_names.contains(&out_rel)
         || p.file_name()
             .map(|n| name_identity_key(fold, &n.to_string_lossy()))
             .is_some_and(|n| declared_names.contains(&n))
@@ -840,7 +984,7 @@ pub(super) fn any_adoption_source(
 /// `par2repair::is_recovery_by_name_and_content`, because a caller
 /// outside this crate has to ask the identical question and was
 /// answering it by NAME. `nzbfast::repair::adoption_candidates_present`
-/// exists to PREDICT what [`adoption_candidates`] finds, and it screened
+/// exists to PREDICT what `adoption_candidates` finds, and it screened
 /// `.par2` on the extension alone - so on M4-52's own composition (an
 /// obfuscated payload landing under a `<hash>.par2` yEnc name) the gate
 /// said NO where this says YES, and that NO is an arm of
@@ -890,12 +1034,12 @@ pub(super) fn any_adoption_source(
 /// THE DELETION PATH WAS THE SHARP RISK AND IT IS NOT REACHED, measured
 /// rather than reasoned, because the reasoning goes the wrong way:
 /// `par2repair.rs`'s proven-spent sweep guards with
-/// [`is_somebodys_payload`], which asks whether a candidate is a TARGET
+/// `is_somebodys_payload`, which asks whether a candidate is a TARGET
 /// of this set or a name some set DECLARES - and parity is declared by
 /// nobody, so a volume clears that guard outright. What actually keeps
 /// it is the three spend proofs, each of which wants evidence about
 /// EVERY byte of the candidate: exact whole-file MD5 against a
-/// same-length target, [`proven_spent`]'s damaged-twin arm (same length,
+/// same-length target, `proven_spent`'s damaged-twin arm (same length,
 /// plus an ALIGNED majority, and the donated span sits at 472, which is
 /// not a block boundary), and its fully-donated arm, which needs merged
 /// coverage reaching the candidate's end and can never start at 0
@@ -1185,7 +1329,7 @@ fn prefetch_md5s(
 /// what read them apart.
 pub(super) fn adopt_blocks(
     dir: &Path,
-    donors: &[PathBuf],
+    ctx: &super::DirContext,
     targets: &[Target],
     missing: &[usize],
     bs: usize,
@@ -1199,7 +1343,8 @@ pub(super) fn adopt_blocks(
     ),
     RepairError,
 > {
-    let (cands, donor_from) = adoption_candidates(dir, donors, targets, exclude)?;
+    let (cands, donor_from) =
+        adoption_candidates(dir, &ctx.donors, targets, exclude, &ctx.declared)?;
     let mut adopted: HashMap<usize, AdoptSrc> = HashMap::new();
     let mut whole_claims: HashSet<usize> = HashSet::new();
     if cands.is_empty() {
@@ -2365,9 +2510,9 @@ pub(super) fn proven_spent(
 /// `Found 30 of 30`, and the repair that followed refused work the
 /// reference completes (`research/CLI-SUBSTITUTION-2026-09-03.md`, G4;
 /// measured 30-of-30 against 0-of-30 on the DEFAULT no-switch verify).
-/// The capability was already here - [`sliding_scan`] is the same
+/// The capability was already here - `sliding_scan` is the same
 /// rolling window, and the engine's own repair reaches it through
-/// [`adopt_blocks`] and the caller's escalation - but only ever behind
+/// `adopt_blocks` and the caller's escalation - but only ever behind
 /// a repair that had already decided to run. A CLI has to PRINT the
 /// count before it decides anything, which is what this door is for.
 ///

@@ -112,12 +112,13 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
     <li><a href="#automation">10 · Automatisierung</a></li>
     <li><a href="#arr">11 · Sonarr, Radarr &amp; Co.</a></li>
     <li><a href="#remotes">12 · Handy &amp; Fernsteuer-Apps</a></li>
-    <li><a href="#performance">13 · Performance-Tools</a></li>
-    <li><a href="#updates">14 · Updates</a></li>
-    <li><a href="#cli">15 · Kommandozeile</a></li>
-    <li><a href="#api">16 · API-Überblick</a></li>
-    <li><a href="#files">17 · Dateien &amp; Speicherorte</a></li>
-    <li><a href="#troubleshooting">18 · Fehlerbehebung</a></li>
+    <li><a href="#security">13 · Sicherheit &amp; Zugang</a></li>
+    <li><a href="#performance">14 · Performance-Tools</a></li>
+    <li><a href="#updates">15 · Updates</a></li>
+    <li><a href="#cli">16 · Kommandozeile</a></li>
+    <li><a href="#api">17 · API-Überblick</a></li>
+    <li><a href="#files">18 · Dateien &amp; Speicherorte</a></li>
+    <li><a href="#troubleshooting">19 · Fehlerbehebung</a></li>
   </ol>
 </nav>
 <main>
@@ -684,7 +685,7 @@ Releases darunter. Öffne sie mit <b>&#9656;</b> oder per Klick auf die Zeile; d
 Kästchen am Titel wählt die gezeigten Releases aus. Gruppieren gilt nur für <b>Diesen
 Index</b>; wählst du <b>Indexer</b> oder <b>Beides</b>, wird die Tabelle wieder flach
 und sagt es.</li>
-<li><b>Eine Newsgroup auf einmal.</b> Klick den Gruppennamen unter einer Release an, und die Seite zeigt nur noch die dort geposteten Releases; eine Pille über der Tabelle nennt die Gruppe, bis du sie löschst. Sie greift für Wand und Tabelle gleichermaßen, der Wechsel zwischen beiden behält sie also. Der andere Weg hinein ist Einstellungen &rarr; Organisieren &rarr; <b>Indexierung</b> &rarr; <b>Zu scannende Gruppen</b> &rarr; <b>Finden…</b>: öffne eine Gruppe, die du schon scannst, und drück <b>Indizierte Releases</b>.</li>
+<li><b>Eine Newsgroup auf einmal.</b> Das Menü <b>Gruppe</b> über der Tabelle listet die Gruppen, die du indexierst; wähl eine aus, und die Seite zeigt nur noch die dort geposteten Releases - die Adresszeile trägt sie mit, ein Neuladen oder ein geteilter Link behält sie also. Ein Klick auf den Gruppennamen unter einer Release wählt dieselbe Gruppe. Sie greift für Wand und Tabelle gleichermaßen, der Wechsel zwischen beiden behält sie also. Der andere Weg hinein ist Einstellungen &rarr; Organisieren &rarr; <b>Indexierung</b> &rarr; <b>Zu scannende Gruppen</b> &rarr; <b>Finden…</b>: öffne eine Gruppe, die du schon scannst, und drück <b>Indizierte Releases</b>.</li>
 <li><b>Jede Release eines Titels</b> steht in seiner Karte, mit Auflösung, Codec,
 Tonformat und Dynamikumfang (Dolby Vision, HDR10) aus dem Release-Namen gelesen, dazu
 Größe, Alter und ob noch jeder Teil bei deinem Provider liegt. Stell <b>Bevorzugte
@@ -730,7 +731,7 @@ Klick übernimmt („Alle Reality-Titel ab jetzt ausblenden?“). Alles Ausgeble
 jeder gelernte Filter steht unter <b>Ausgeblendet &amp; Filter</b> und lässt sich dort
 zurücknehmen.</li>
 <li>Ein kleiner <b>Verfügbarkeitspunkt</b> auf einer Kachel ist das Urteil des Orakels
-(<a href="#performance">§13</a>): gelbes „?“ heißt unsicher bei deinen Providern, rot
+(<a href="#performance">§14</a>): gelbes „?“ heißt unsicher bei deinen Providern, rot
 heißt, die Teile fehlen immer wieder. Ganze Gruppen, die gerade abgeräumt werden,
 tragen ein <b>abgeräumt</b>-Abzeichen.</li>
 </ul>
@@ -822,12 +823,12 @@ jeden Server in den Pool holen oder aus ihm herausnehmen. Jeder Server hat:</p>
 <tr><th>Feld</th><th>Hinweise</th></tr>
 <tr><td>Host / Port</td><td>Nimm den SSL-Port <b>563</b>. TLS kostet nichts Messbares - nzbfast verschlüsselt immer.</td></tr>
 <tr><td>Benutzername / Passwort</td><td>Lokal in <code>config.local.json</code> gespeichert, nie zurück an den Browser gezeigt. Das Passwort beim Bearbeiten leer lassen behält das gespeicherte. Passwörter werden <a href="#passwords">auf der Platte verschleiert, nicht verschlüsselt</a>.</td></tr>
-<tr><td>Verbindungen</td><td>Gleichzeitige Verbindungen pro Server. Nutz <b>Verbindungs-Tuning</b> (<a href="#performance">§13</a>), um den Sweet Spot jedes Providers zu finden, statt einfach hoch zu raten.</td></tr>
+<tr><td>Verbindungen</td><td>Gleichzeitige Verbindungen pro Server. Nutz <b>Verbindungs-Tuning</b> (<a href="#performance">§14</a>), um den Sweet Spot jedes Providers zu finden, statt einfach hoch zu raten.</td></tr>
 <tr><td>Level (Tier)</td><td>0 = primär; höhere Level sind Fill-Server und werden nur nach Artikeln gefragt, die alle niedrigeren Level verpasst haben. Flatrate-Konten auf 0, Block-Konten auf 1+.</td></tr>
 <tr><td>Blockgröße (GB)</td><td>Für Block-Konten (Bezahlung pro GB): nzbfast zählt die Lebenszeitnutzung dagegen und lässt den Server aus, sobald der Block aufgebraucht ist (Warnung bei 85 %).</td></tr>
-<tr><td>Jedes Byte wird abgerechnet</td><td>Für ein Konto mit Volumenabrechnung einschalten. Deine Downloads nutzen den Server genau wie zuvor; was aufhört, ist Verkehr, den nzbfast von sich aus schickt - das automatische Verbindungs-Tuning, die Netzwerk-Etappe des System-Benchmarks und die Header-Scans für den eingebauten Index lassen ihn alle aus. Unabhängig vom Level und von der Blockgröße, denn ein Volumen-Konto kann dein einziger Provider sein und ein Flatrate-Konto auf Level 2 sitzen. Standardmäßig aus. Der manuelle <b>Test</b> im <b>Verbindungs-Tuning</b> (<a href="#performance">§13</a>) funktioniert auf einem so markierten Server weiterhin und fragt vorher, denn dort entscheidest du selbst, etwas auszugeben.</td></tr>
+<tr><td>Jedes Byte wird abgerechnet</td><td>Für ein Konto mit Volumenabrechnung einschalten. Deine Downloads nutzen den Server genau wie zuvor; was aufhört, ist Verkehr, den nzbfast von sich aus schickt - das automatische Verbindungs-Tuning, die Netzwerk-Etappe des System-Benchmarks und die Header-Scans für den eingebauten Index lassen ihn alle aus. Unabhängig vom Level und von der Blockgröße, denn ein Volumen-Konto kann dein einziger Provider sein und ein Flatrate-Konto auf Level 2 sitzen. Standardmäßig aus. Der manuelle <b>Test</b> im <b>Verbindungs-Tuning</b> (<a href="#performance">§14</a>) funktioniert auf einem so markierten Server weiterhin und fragt vorher, denn dort entscheidest du selbst, etwas auszugeben.</td></tr>
 </table></div>
-<p><b>Lass etwas Luft unter dem Verbindungslimit deines Kontos.</b> Die Verbindungszahl etwas unter das Limit zu setzen kostet nichts: der Durchsatz flacht schon vor den letzten ein, zwei Verbindungen ab, und <b>Verbindungs-Tuning</b> (<a href="#performance">§13</a>) landet ohnehin meist darunter. Die freien Plätze sind es, durch die ein zweites Gerät, ein anderes Programm oder ein neuer Versuch nach einem abgebrochenen Socket noch hineinkommt, statt abgewiesen zu werden, während hier jeder Platz belegt ist.</p>
+<p><b>Lass etwas Luft unter dem Verbindungslimit deines Kontos.</b> Die Verbindungszahl etwas unter das Limit zu setzen kostet nichts: der Durchsatz flacht schon vor den letzten ein, zwei Verbindungen ab, und <b>Verbindungs-Tuning</b> (<a href="#performance">§14</a>) landet ohnehin meist darunter. Die freien Plätze sind es, durch die ein zweites Gerät, ein anderes Programm oder ein neuer Versuch nach einem abgebrochenen Socket noch hineinkommt, statt abgewiesen zu werden, während hier jeder Platz belegt ist.</p>
 <p><b>Um das Limit offener Dateien deiner Maschine musst du dich nicht kümmern.</b> Das
 System zählt jede Verbindung als offene Datei, und macOS startet ein Programm mit einem
 Limit von 256 davon, das ein voller Satz Verbindungen über mehrere Server hinweg
@@ -892,7 +893,7 @@ Installationsorte, zeigt die Funde und übernimmt die Server (Duplikate werden
 </ul>
 <div class="tip"><b>Empfehlung</b>Zwei Provider auf <em>verschiedenen</em> Backbones
 schlagen drei auf demselben. Lass <b>Server-Diversität</b> laufen
-(<a href="#performance">§13</a>), um zu sehen, welche deiner Provider deine Abdeckung
+(<a href="#performance">§14</a>), um zu sehen, welche deiner Provider deine Abdeckung
 wirklich diversifizieren und welche redundante Kopien voneinander sind.</div>
 
 <h2 id="settings">9 · Einstellungs-Referenz</h2>
@@ -907,9 +908,9 @@ gespeichert und übersteht Neustarts (UI-Werte schlagen Kommandozeilen-Flags).</
 <tr><th>Einstellung</th><th>Was sie bewirkt</th></tr>
 <tr><td>Tempolimit</td><td>Limit in Bytes/Sek. (<code>50M</code>, <code>1G</code>, 0 = unbegrenzt). Fernsteuer-Apps schicken womöglich Prozente - setz das <i>Leitungstempo</i>, damit sie richtig übersetzt werden. Der Eintrag <b>eigener Wert…</b> in der Kopfzeile setzt dasselbe Limit, ohne die Einstellungen zu öffnen.</td></tr>
 <tr><td>Auto-Tempo</td><td>RTT-gesteuertes Limit, das anderem Verkehr im Haushalt weicht und sich wieder ausdehnt, wenn die Leitung ruhig ist.</td></tr>
-<tr><td>Langsame Downloads zurückstellen</td><td>Ein Job, der an einem einzelnen langsamen Server festhängt, während andere warten, wandert ans Ende der Warteschlange (Fortschritt bleibt). Siehe <a href="#performance">§13</a>.</td></tr>
-<tr><td>Prefetch auf freien Servern</td><td>Server, die dem aktiven Job nichts nützen, starten den nächsten eingereihten. Siehe <a href="#performance">§13</a>.</td></tr>
-<tr><td>Auto-Update / Update-Check-URL</td><td>Siehe <a href="#updates">§14</a>.</td></tr>
+<tr><td>Langsame Downloads zurückstellen</td><td>Ein Job, der an einem einzelnen langsamen Server festhängt, während andere warten, wandert ans Ende der Warteschlange (Fortschritt bleibt). Siehe <a href="#performance">§14</a>.</td></tr>
+<tr><td>Prefetch auf freien Servern</td><td>Server, die dem aktiven Job nichts nützen, starten den nächsten eingereihten. Siehe <a href="#performance">§14</a>.</td></tr>
+<tr><td>Auto-Update / Update-Check-URL</td><td>Siehe <a href="#updates">§15</a>.</td></tr>
 <tr><td>Leitungstempo</td><td>Die Nenngeschwindigkeit deines Anschlusses - ermöglicht Prozent-Limits aus SABnzbd-kompatiblen Apps.</td></tr>
 <tr><td>Wochenplan</td><td>Zeileneditor für Wochenzeit-Regeln: pausieren, fortsetzen oder ein Tempolimit zu bestimmten Tagen/Uhrzeiten setzen (lokale Zeit). Z.&nbsp;B. werktags 9–17 auf 20&nbsp;MB/s begrenzen, sonst unbegrenzt.</td></tr>
 </table></div>
@@ -1139,7 +1140,7 @@ Browsers, gilt also für jedes Gerät, das auf diese Installation schaut.</p>
 <h3>Fortgeschritten: die Stellschrauben hinter den offensichtlichen</h3>
 <p>Sechs Einstellungen ohne Kommandozeilen-Flag. Jede hat jetzt eine erweiterte Zeile auf
 der Einstellungskarte, zu der sie gehört, und bleibt über die API setzbar
-(<a href="#api">§16</a>), z. B.
+(<a href="#api">§17</a>), z. B.
 <code>/api?mode=config&amp;name=verify_mode&amp;value=lean&amp;apikey=…</code>. Wie
 alle anderen landen sie dauerhaft in <code>settings.json</code>.</p>
 <div class="tblwrap"><table>
@@ -1147,7 +1148,7 @@ alle anderen landen sie dauerhaft in <code>settings.json</code>.</p>
 <tr><td><code>verify_mode</code></td><td><code>full</code> | <code>fast</code> | <code>lean</code> (Standard <code>fast</code>). <code>lean</code> ist der Schub für langsame CPUs: wie fast, überspringt aber zusätzlich den yEnc-CRC pro Artikel, sobald PAR2 eine Datei abdeckt, also eine CRC32-Schicht statt zwei. Downloads ohne PAR2 behalten ihre Artikel-CRCs, und die Prüfung und Reparatur am Ende des Jobs bleiben in jedem Fall unverändert. Die Auswahl <b>Prüfung während des Downloads</b> oben ist diese Einstellung.</td></tr>
 <tr><td><code>auto_retry_mins</code></td><td>Wartezeit vor dem <em>einen</em> automatischen zweiten Versuch, den ein erstes Scheitern mit fehlenden Artikeln bekommt (Standard 20). Propagationsverzögerung ist eine echte Ursache fehlender Artikel und löst sich von selbst; dank Journal holt der zweite Lauf nur, was noch fehlt. Passwort- und Takedown-Fehler qualifizieren sich nie.</td></tr>
 <tr><td><code>index_scan_par</code></td><td>Wie viele Gruppen der Indexer parallel scannt (Standard 3, begrenzt auf 1-8).</td></tr>
-<tr><td><code>oracle_sample</code></td><td>Leerlauf-STAT-Budget des Verfügbarkeits-Orakels (<a href="#oracle">§13</a>), Proben pro Stunde und Server. Standard 300, Maximum 3600, <code>0</code> schaltet das Abtasten ganz ab.</td></tr>
+<tr><td><code>oracle_sample</code></td><td>Leerlauf-STAT-Budget des Verfügbarkeits-Orakels (<a href="#oracle">§14</a>), Proben pro Stunde und Server. Standard 300, Maximum 3600, <code>0</code> schaltet das Abtasten ganz ab.</td></tr>
 <tr><td><code>predb_max_rows</code></td><td>Wie viele Pre-Ankündigungen die Feed-Tabelle behält (Standard 250000, begrenzt auf 10000-5000000). Der stündliche Schnitt kürzt auf diesen Wert, und der historische Import verweigert den Start, sobald er darüber hinausginge - so fügt ein Import nie Zeilen hinzu, die der nächste Schnitt löscht.</td></tr>
 <tr><td><code>predb_seed_days</code></td><td>Wie weit ein historischer Import zurückreicht, wenn er ohne eigenes Fenster gestartet wird (Standard 180 Tage, Maximum 366). Ein größeres Fenster bedeutet mehr Anfragen an die Pre-Quelle, die auf eine alle zwei Sekunden getaktet ist.</td></tr>
 </table></div>
@@ -1350,7 +1351,7 @@ das ganze Dashboard und die Wand haben ein Touch-Layout. Das Panel Einstellungen
 Fernzugriff zeigt die genauen URLs und einen QR-Code zum Scannen.</p>
 
 <h3 id="remote-proxy">nzbfast von außerhalb erreichen</h3>
-<p>Es gibt keine Anmeldeseite, und das ist Absicht. Eine Anmeldung per Session-Cookie ist eine Sicherheitsfläche, die dauerhaft gepflegt werden muss, und sie wäre trotzdem das schwächste Schloss an allem, was im offenen Internet steht. nzbfast authentifiziert stattdessen mit Ihrem API-Schlüssel und nimmt diesen Schlüssel ebenso im Anfrage-Header wie in der URL entgegen (<code>X-Api-Key</code> oder <code>Authorization: Bearer</code>) - genau das erlaubt es einer vorgeschalteten Instanz, die Anmeldung sauber zu übernehmen.</p>
+<p>nzbfast authentifiziert mit Ihrem API-Schlüssel und nimmt diesen Schlüssel ebenso im Anfrage-Header wie in der URL entgegen (<code>X-Api-Key</code> oder <code>Authorization: Bearer</code>), genau das erlaubt es einer vorgeschalteten Instanz, die Anmeldung sauber zu übernehmen. Es gibt außerdem optional einen Benutzernamen und ein Passwort vor dem Dashboard im Browser, die für Sonarr, Radarr und die Telefon-Apps nichts ändern; <a href="#security">§13</a> vergleicht beide und sagt, wann welches die richtige Antwort ist.</p>
 <p><b>Am einfachsten ist es, gar nichts zu veröffentlichen.</b> Installieren Sie <b>Tailscale</b> auf diesem Rechner und auf Ihrem Telefon, und beide sind im selben privaten Netz: nichts ist exponiert, weder Router- noch Zertifikatsarbeit fällt an, und Einstellungen → Fernzugriff zeigt eine Adresse für überall, sobald Tailscale läuft. Nehmen Sie diesen Weg, sofern Sie nicht ausdrücklich eine öffentliche Domain brauchen.</p>
 <p><b>nzbfast kann auch selbst HTTPS ausliefern.</b> Zeigen Sie Einstellungen →
 Sicherheit → HTTPS-Zertifikat / privater HTTPS-Schlüssel auf ein PEM-Zertifikat und
@@ -1394,7 +1395,152 @@ durchs Internet, und eine Installation ganz ohne Schlüssel steht jedem offen, d
 sie findet. Wenn Sie trotzdem einen Port weiterleiten, setzen Sie zuerst einen
 API-Schlüssel und schalten Sie HTTPS ein.</div>
 
-<h2 id="performance">13 · Performance-Tools</h2>
+<h2 id="security">13 · Sicherheit &amp; Zugang</h2>
+<p>nzbfast hat vier Wege, zu steuern, wer es erreichen darf, und sie tun
+Verschiedenes. Zwei davon sind Zugangsdaten, die es selbst prüft: der
+<b>API-Schlüssel</b>, den jedes Programm vorzeigt, das mit ihm spricht, und die
+optionale <b>Dashboard-Anmeldung</b>, ein Benutzername und ein Passwort vor den
+Seiten im Browser. Die anderen beiden betreffen das Netz statt die Person: auf
+welcher Adresse der Dienst antwortet, und ob etwas davor den Einlass regelt.
+Keines ersetzt ein anderes. Eine Heiminstallation in einem vertrauten Netz
+braucht nur das erste; eine ins Internet veröffentlichte Installation will drei
+der vier.</p>
+<div class="tblwrap"><table>
+<tr><th>Schicht</th><th>Was sie abhält</th><th>Wo</th></tr>
+<tr><td>API-Schlüssel</td><td>alles, was die API ohne ihn aufruft: ein anderer Rechner, ein anderes Programm, eine Webseite, die Sie zufällig besuchen</td><td>Einstellungen → Sicherheit. Beim ersten Start erzeugt</td></tr>
+<tr><td>NZB-Schlüssel</td><td>für sich genommen nichts. Er ist ein schwächerer Schlüssel zum Weitergeben, der Downloads hinzufügen darf und sonst nichts</td><td>Einstellungen → Sicherheit. Optional</td></tr>
+<tr><td>Dashboard-Anmeldung</td><td>eine Person am Browser, die das Passwort nicht kennt</td><td>Einstellungen → Sicherheit. Standardmäßig aus</td></tr>
+<tr><td>Das Netz davor</td><td>ganze Netze auf einmal: die Lausch-Adresse, Ihre Firewall, ein Reverse-Proxy, ein VPN</td><td>Einstellungen → Sicherheit, und außerhalb von nzbfast</td></tr>
+</table></div>
+
+<h3 id="sec-apikey">Der API-Schlüssel</h3>
+<p>Der API-Schlüssel ist das wichtigste Zugangsmittel. Er schützt die gesamte
+SAB-kompatible API (<a href="#api">§17</a>), und das ist die komplette
+Steuerfläche: die Warteschlange, die Historie, jede Einstellung, Ihre
+Server-Passwörter, der Befehl zum Beenden. Alles, was mit nzbfast spricht,
+benutzt ihn. Sonarr, Radarr und der Rest der *arr-Familie
+(<a href="#arr">§11</a>), nzb360 und LunaSea auf dem Telefon
+(<a href="#remotes">§12</a>) und Browser-Erweiterungen wie NZB Unity und NZB
+Donkey zeigen alle denselben Schlüssel vor.</p>
+<p>Sie müssen keinen anlegen. Beim ersten Start erzeugt nzbfast einen zufälligen
+Schlüssel, legt ihn neben Ihren Einstellungen in einer Datei namens
+<code>apikey</code> ab (<a href="#files">§18</a>), gibt ihn einmal im Terminal
+aus und behält ihn über Neustarts hinweg, was den *arrs erst erlaubt, ihn zu
+halten. Einstellungen → Sicherheit zeigt ihn wieder: das Feld ist mit Absicht
+leer, klicken Sie also auf <b>Anzeigen</b>, um ihn zu lesen, und auf <b>Neu
+erstellen</b>, um ihn zu ersetzen. Das Ersetzen wirkt sofort, und jede
+eingerichtete App hört auf zu funktionieren, bis Sie den neuen dort eingetragen
+haben.</p>
+<p>Clients dürfen den Schlüssel in der URL als <code>apikey=…</code> senden oder
+in einem Header, als <code>X-Api-Key</code> oder
+<code>Authorization: Bearer</code>. Der Header ist vorzuziehen, sobald irgendetwas
+Ihre URLs protokolliert, und er ist es, der einem Reverse-Proxy erlaubt, den
+Schlüssel für die Clients dahinter zu ergänzen.</p>
+
+<h3 id="sec-nzbkey">Der NZB-Schlüssel, nur zum Hinzufügen</h3>
+<p>Der NZB-Schlüssel ist ein zweiter, bewusst schwächerer Schlüssel für alles,
+dessen einzige Aufgabe es ist, nzbfast einen Download zu übergeben. Wer ihn
+vorzeigt, darf eine NZB hinzufügen, die Version abfragen, die Kurzübersicht aus
+Pause, Platz und Warnungen lesen und die Kategorienamen holen, also genau das,
+was eine Push-Erweiterung braucht, um ein Release hinzuzufügen und Ihnen eine
+Kategorieliste zu zeigen. Er darf weder Warteschlange noch Historie lesen, keine
+einzige Einstellung sehen oder ändern, nichts pausieren, löschen, erneut
+versuchen oder herunterfahren. Er ist keine abgespeckte Fassung des
+API-Schlüssels, die man statt eines solchen setzt: er ist etwas, das Sie in eine
+Browser-Erweiterung einfügen, damit ein Rechner, dem Sie nicht ganz trauen, Ihre
+Konfiguration nicht zurücklesen kann.</p>
+
+<h3 id="sec-login">Die Dashboard-Anmeldung</h3>
+<p>Setzen Sie unter Einstellungen → Sicherheit einen Benutzernamen und ein
+Passwort, und nzbfast stellt eine Anmeldeseite vor das Dashboard und die
+Posterwand. Sie ist standardmäßig aus, und solange eines der beiden Felder leer
+ist, ändert sich nirgends etwas. Sie ist für einen Fall da: eine Installation,
+die Sie über Ihr eigenes Netz hinaus veröffentlicht haben, wo ein Schlüssel in
+einer URL nicht das ist, was ein Mensch tippen soll.</p>
+<p>Das Passwort muss mindestens acht Zeichen haben, und vier weitere Formen
+werden abgelehnt, weil ein Rater sie zuerst probiert: der Benutzername selbst,
+eines der am häufigsten geratenen Passwörter wie <code>password123</code>, ein
+einzelnes wiederholtes Zeichen wie <code>aaaaaaaa</code> und eine fortlaufende
+Reihe wie <code>abcdefgh</code>. Die Ablehnung nennt, welche Regel es war. Es
+wird mit Argon2id gehasht gespeichert, das heißt, nzbfast kann es Ihnen nicht
+zurückzeigen, sondern nur ersetzen: lassen Sie das Feld leer, um das
+gespeicherte zu behalten, und tippen Sie ein einzelnes Leerzeichen, um es zu
+entfernen. Eine Änderung an einem der beiden Felder meldet alle Browser ab,
+diesen eingeschlossen, und <b>Alle Browser abmelden</b> tut auf Wunsch
+dasselbe. Ein angemeldeter Browser bleibt vierzehn Tage lang angemeldet,
+solange er genutzt wird.</p>
+<p><b>Für Sonarr, Radarr, nzb360, LunaSea und Ihre Erweiterungen ändert sich
+nichts.</b> Das ist die Frage, die alle haben, und die Antwort lautet: die
+Anmeldung ist ausschließlich ein Browser-Zugang. Diese Programme benutzen
+weiterhin genau den API-Schlüssel wie bisher, und kein Programm muss eine
+Anmeldeseite ausfüllen. Was die Anmeldung abdeckt, ist ein Mensch mit einem
+Browser: das Dashboard, die Wand und die API-Aufrufe, die diese Seiten machen,
+sobald Sie angemeldet sind.</p>
+<p>Das Einzige, was sie nicht leistet, ist eine Installation ohne API-Schlüssel
+zu schützen. Die Anmeldung bewacht die Seiten, nicht die API: ein Dienst ohne
+Schlüssel antwortet weiterhin allem, was ihn direkt fragt, Anmeldeseite hin oder
+her. Setzen Sie auch einen Schlüssel. Auf einer veröffentlichten Installation
+beides.</p>
+
+<h3 id="sec-outside">Von außerhalb Ihres Netzes darauf zugreifen</h3>
+<p>Drei Antworten funktionieren, und sie sind nicht gleichwertig.
+<a href="#remote-proxy">§12</a> hat die Konfiguration für jede; hier geht es
+darum, wie man wählt.</p>
+<div class="tblwrap"><table>
+<tr><th>Ansatz</th><th>Was er bringt</th><th>Was er kostet</th></tr>
+<tr><td><b>Ein privates Netz</b> (Tailscale, WireGuard)</td><td>Es wird überhaupt nichts veröffentlicht. Es gibt keine öffentliche Adresse zu finden, zu scannen oder zu erraten, also stellt sich die Frage, wer sich anmelden darf, gar nicht erst</td><td>Das VPN muss auf jedem Gerät laufen, das Sie nutzen wollen. Keine öffentliche Domain, also erreicht nichts es, worauf Sie keine Software installieren können</td></tr>
+<tr><td><b>Ein Reverse-Proxy, der authentifiziert</b> (Caddy, nginx oder Apache, mit Basic Auth, Authelia, Authentik oder oauth2-proxy)</td><td>Eine echte Haustür auf einer echten Domain, mit einem Zertifikat, das Sie ohnehin erneuern, einer Anmeldung gemeinsam mit Ihren anderen Diensten, und Ratenbegrenzung und Protokollen dort, wo Sie sie sehen</td><td>Eine zweite Sache, die eingerichtet und am Laufen gehalten werden will. Ihre *arrs und Telefon-Apps können keine Anmeldeseite ausfüllen, der Proxy muss also eine Anfrage mit gültigem API-Schlüssel durchlassen</td></tr>
+<tr><td><b>nzbfast allein</b> (<code>tls_cert</code> und <code>tls_key</code>, dazu die Dashboard-Anmeldung)</td><td>Ein Programm, kein Proxy. HTTPS durchgehend, und eine Anmeldeseite für Menschen</td><td>Die Zertifikatserneuerung ist Ihre Sache. Sie bekommen die Anmeldung von nzbfast statt die Ihres Haushalts, und die Grenze für falsche Passwörter wird je Adresse gezählt</td></tr>
+</table></div>
+<p>Was Sie auch wählen: <b>setzen Sie zusätzlich einen API-Schlüssel</b>. Ein
+Proxy ist eine Schicht davor, kein Schloss an der Tür dahinter: alles, was den
+Dienst direkt erreicht, im LAN oder durch einen Fehler in der
+Proxy-Konfiguration, trifft auf das, was nzbfast selbst verlangt. Ein
+schlüsselloser Ursprung hinter einem authentifizierenden Proxy ist eine
+fehlgeleitete Anfrage davon entfernt, offen zu sein.</p>
+<p>Wenn Sie das Zertifikat an einem Proxy terminieren, starten Sie nzbfast mit
+<code>--bind 127.0.0.1</code>, damit der Proxy wirklich der einzige Weg hinein
+ist. Wenn nzbfast HTTPS lieber selbst ausliefern soll, zeigen Sie Einstellungen →
+Sicherheit auf ein PEM-Zertifikat und seinen privaten Schlüssel und starten neu.
+Zu vermeiden ist nur eines: den Port am Router weiterzuleiten, ohne eines von
+beidem. Das veröffentlicht einfaches HTTP, und Ihr Schlüssel und alles, was Sie
+damit tun, queren das Internet lesbar für jeden auf dem Weg.</p>
+
+<h3 id="sec-cors">Browser-Erweiterungen, und wofür <code>cors_origin</code> da ist</h3>
+<p><code>cors_origin</code> ist nicht die Authentifizierungsschicht, und das
+gehört klar gesagt, weil die Einstellung in derselben Karte sitzt. Sie
+entscheidet, welche <i>Webseiten</i> ein Browser diese API lesen lässt, mehr
+nicht. Jede solche Anfrage braucht weiterhin den API-Schlüssel; was diese
+Einstellung ändert, ist, ob der Browser die Antwort an die fragende Seite
+zurückgibt.</p>
+<p>Der Standard ist <code>*</code>, wie bei SABnzbd. Deshalb funktionieren
+Erweiterungen wie NZB Unity und NZB Donkey, sobald Sie dort einen Schlüssel
+einfügen, ganz ohne Einrichtung hier. Um es enger zu fassen, tragen Sie
+stattdessen die erlaubten Ursprünge ein (<code>https://example.com</code>), durch
+Kommas getrennt. Leer sendet gar keinen Header, was jede Erweiterung
+aussperrt.</p>
+
+<h3 id="sec-open">Was nichts davon schützt</h3>
+<p><b>Eine Installation ohne API-Schlüssel ist offen.</b> Ohne Schlüssel gibt es
+nichts zu prüfen, also hat jeder Rechner, der den Port erreicht, volle Kontrolle,
+und jede Webseite, die Sie besuchen, ebenfalls, denn deren Anfragen an Ihre eigene
+LAN-Adresse kann der Dienst nicht von Ihren unterscheiden. nzbfast sagt das beim
+Start, im Protokoll und im Dashboard, immer wenn es zutrifft. Es ist ein Feld weit
+entfernt davon, behoben zu sein.</p>
+<p><b>Ein Schlüssel schützt die API, nicht den Rechner.</b> Einstellungen →
+Sicherheit → <b>Lauschen auf</b> entscheidet, welche Adressen überhaupt antworten.
+<code>0.0.0.0</code>, die Vorgabe, antwortet in jedem Netz, in dem dieser Rechner
+ist, was ein NAS oder ein Container braucht. <code>127.0.0.1</code> antwortet nur
+auf diesem Rechner, sodass nichts anderes in Ihrem Netz es erreicht, auch mit
+Schlüssel nicht. Vorsicht: eine Adresse, die dieser Rechner nicht hat, lässt den
+nächsten Start gar nicht hochkommen, und der Weg zurück führt über
+<code>settings.json</code> von Hand.</p>
+<p><b>Ihre Einstellungs-Sicherung enthält alles.</b> Die Sicherungsdatei aus
+derselben Karte trägt jede Einstellung, beide Schlüssel und Ihre
+Usenet-Server-Passwörter im Klartext. Bewahren Sie sie privat auf, und behandeln
+Sie das Verschicken wie das Verschicken Ihrer Konten.</p>
+
+<h2 id="performance">14 · Performance-Tools</h2>
 <h3 id="perf-benchmark">System-Benchmark</h3>
 <p>Ein Klick misst deine drei Limits - Netzwerk-Durchsatz (eine echte
 8-Sekunden-Messung über mehrere Verbindungen), CPU-Prüfrate und
@@ -1449,7 +1595,7 @@ kostet also etwas Zeit statt des Downloads.</li>
 </ul>
 <p class="dim">Das Urteil ist eine Vorhersage aus Indizien, keine Garantie. Für eine
 harte Antwort zu einer NZB zählt <code>nzbfast check</code>
-(<a href="#cli">§15</a>) die tatsächlichen Artikel. Beide zählen Antworten, nicht Inhalte. Ein sauberer Check heißt, dass die Artikel
+(<a href="#cli">§16</a>) die tatsächlichen Artikel. Beide zählen Antworten, nicht Inhalte. Ein sauberer Check heißt, dass die Artikel
 da waren, als gefragt wurde, nicht dass ihr Inhalt unbeschädigt ist: eine kleine Zahl
 von Providern antwortet für entfernte Artikel mit Dummy-Daten, statt sie zu verweigern,
 und das zeigt sich erst beim Download selbst, wo der Artikel an seiner eigenen
@@ -1514,7 +1660,7 @@ zwar korrekt; er lastet nur die Leitung nicht aus.</p>
 <p class="dim">Die Benchmarks werden für jedes Release neu gefahren; Methode und
 Zahlen pro Maschine werden neben den Ergebnissen veröffentlicht.</p>
 
-<h2 id="updates">14 · Updates</h2>
+<h2 id="updates">15 · Updates</h2>
 <ul>
 <li>Updates sind <b>reine Benachrichtigungen</b>: nzbfast lädt sein eigenes
 Binary nie herunter und ersetzt es nie, und es enthält keinen Code, der das
@@ -1532,12 +1678,12 @@ mehr; eine leere Update-Check-URL bewirkt dasselbe.</li>
 <p>Eine Regel gilt für jede Installation: <b>ein Update ersetzt das Programm,
 nie deine Einstellungen.</b> Alles, was du konfiguriert hast - Server, Pfade,
 der API-Key, die Warteschlange - liegt in einer Handvoll Dateien in einem
-Ordner (<a href="#files">§17</a>), und kein Installer, kein Image-Pull und kein
+Ordner (<a href="#files">§18</a>), und kein Installer, kein Image-Pull und kein
 Paket-Upgrade rührt diesen Ordner an. Wenn Einstellungen nach einem Update doch
 verschwunden wirken, liegt das fast immer daran, dass die neue Installation
 einen <em>anderen, leeren</em> Ordner liest, nicht daran, dass irgendetwas
 gelöscht wurde; die alten Dateien liegen noch genau dort, wo sie immer lagen.
-<a href="#settings-gone">§18</a> hat die Schritte zur Wiederherstellung.</p>
+<a href="#settings-gone">§19</a> hat die Schritte zur Wiederherstellung.</p>
 <div class="tblwrap"><table>
 <tr><th>Installation</th><th>So aktualisierst du</th></tr>
 <tr><td>macOS-App</td><td>Öffne das neue DMG und zieh <b>NzbFast</b> nach
@@ -1575,7 +1721,7 @@ eine Deinstallation sie mit.</td></tr>
 <tr><td>Debian / Ubuntu (.deb)<br>Fedora / RHEL (.rpm)</td><td>Installieren Sie das neue Paket über das alte: <code>sudo dpkg -i nzbfast_*.deb</code> oder <code>sudo rpm -U nzbfast-*.rpm</code>. Ihr Einstellungsordner gehört nicht zum Paket, ein Upgrade kann darin also nichts ersetzen, und Ihre Änderungen an <code>/etc/nzbfast/nzbfast.env</code> bleiben erhalten. Der Dienst wird nur neu gestartet, wenn er bereits lief.</td></tr>
 <tr><td>Homebrew</td><td><code>brew upgrade nzbfast</code></td></tr>
 <tr><td>Reines Binary</td><td>Ersetz das Binary. Deine Config bleibt, wo du sie
-angelegt hast (<a href="#files">§17</a>).</td></tr>
+angelegt hast (<a href="#files">§18</a>).</td></tr>
 </table></div>
 <div class="tip"><b>Tipp</b>Docker-Nutzer, die Sonarr oder Radarr anbinden:
 Leg den API-Key in die Container-Definition selbst
@@ -1585,7 +1731,7 @@ jedes Container-Missgeschick, denn er liegt auf dem Host, in der Definition, und
 wird bei jedem Start neu angewendet. Ein Key, den du später in den Einstellungen
 setzt, gewinnt trotzdem gegen ihn.</div>
 
-<h2 id="cli">15 · Kommandozeile</h2>
+<h2 id="cli">16 · Kommandozeile</h2>
 <p>Alles, was der Daemon kann, ist auch skriptbar. Die Alltagsbefehle:</p>
 <div class="tblwrap"><table>
 <tr><th>Befehl</th><th>Zweck</th></tr>
@@ -1607,7 +1753,7 @@ Befehl nimmt <code>--config</code> und <code>--help</code>. Dazu kommt <code>pos
 yEnc-Artikel hoch und schreibt die passende NZB. Ein Betriebswerkzeug, es verlangt ein
 ausdrückliches <code>--post-server</code> und wählt nie selbst einen Server aus.</p>
 
-<h2 id="api">16 · API-Überblick</h2>
+<h2 id="api">17 · API-Überblick</h2>
 <p>Basis-Endpunkt: <code>http://host:6789/api?mode=…&amp;apikey=…&amp;output=json</code> -
 SABnzbd-kompatibel, bestehende SAB-Integrationen funktionieren also unverändert. Zwei
 Keys: der <b>API-Key</b> (volle Kontrolle) und der <b>NZB-Key</b> (nur Hinzufügen:
@@ -1626,7 +1772,7 @@ Keys: der <b>API-Key</b> (volle Kontrolle) und der <b>NZB-Key</b> (nur Hinzufüg
 <tr><td>Überwachung</td><td><code>/metrics</code> antwortet im Prometheus-Textformat 0.0.4: Downloadrate, Warteschlangentiefe und Bytes, Verbindungen je Anbieter, Ausfälle und Artikelzahlen, Speicher je Teilsystem und Laufzeit. Durchgehend Basiseinheiten (Bytes, Sekunden), damit das Dashboard umrechnet und nichts vorgerundet ankommt. Nur GET, und standardmäßig ist der volle API-Schlüssel nötig. Setzen Sie <code>metrics_open</code>, um es ohne Schlüssel auszuliefern, was der übliche Prometheus-Aufbau ist: es enthält keine Auftragsnamen und keine Pfade, veröffentlicht aber den Hostnamen jedes eingerichteten Anbieters an jeden, der den Port erreichen kann.</td></tr>
 </table></div>
 
-<h2 id="files">17 · Dateien &amp; Speicherorte</h2>
+<h2 id="files">18 · Dateien &amp; Speicherorte</h2>
 <p>Wo der Einstellungs-Ordner liegt, hängt davon ab, wie nzbfast installiert
 wurde. Dieser eine Ordner enthält alles, was ein Backup wert ist:</p>
 <div class="tblwrap"><table>
@@ -1658,20 +1804,20 @@ zeigt.</td></tr>
 <tr><td>Externe Tools</td><td>Keine nötig - RAR-Entpacken und PAR2-Reparatur sind nativ. Sollte ein exotisches Set je ein externes <code>unrar</code> oder <code>par2</code> als Fallback brauchen, schaut nzbfast neben seine ausführbare Datei, dann auf den <code>$PATH</code>.</td></tr>
 </table></div>
 
-<h2 id="troubleshooting">18 · Fehlerbehebung</h2>
+<h2 id="troubleshooting">19 · Fehlerbehebung</h2>
 <div class="tblwrap"><table>
 <tr><th>Symptom</th><th>Prüfen</th></tr>
 <tr><td>Langsame Downloads</td><td>Frag zuerst den Download selbst: während er läuft, nennt die Zeile unter seinem Fortschrittsbalken die Schicht, die <i>diesen</i> Job aufhält, und ein Klick auf dieses Urteil öffnet die Zeile mit den Belegen dafür (siehe <a href="#dash-queue">Warteschlange</a>). Lass den <b>System-Benchmark</b> laufen - er nennt den Flaschenhals direkt beim Namen. Ist es das Netzwerk: <b>Verbindungs-Tuning</b> laufen lassen, die Verbindungszahlen pro Server prüfen und sicherstellen, dass deine Provider nicht alle ein Backbone sind (<b>Server-Diversität</b>).</td></tr>
 <tr><td>Langsam nur bei sehr großen Jobs<br>(NAS oder Maschine mit wenig RAM)</td><td>Erwartet, und messbar: Ein ausgehungertes Speicher-Budget lagert Caches auf die Festplatte aus und kostet ab ~87 GB 20–40 %. Siehe <a href="#memory">Speicher-Budget</a> für die Zahlen und wie viel RAM du geben solltest. Kleinere Jobs sind nicht betroffen.</td></tr>
 <tr><td>Download scheitert mit „articles missing“</td><td>Der Post ist abgelaufen oder wurde bei deinen Providern entfernt. Ein zweiter Provider auf einem anderen Backbone rettet die meisten dieser Fälle. <code>nzbfast check</code> sagt das schon vor dem Download voraus. Und die Wand markiert die wahrscheinlich verschwundenen vorab mit ihrem
-Verfügbarkeitspunkt (<a href="#oracle">§13</a>). Ein erstes Scheitern dieser Art
+Verfügbarkeitspunkt (<a href="#oracle">§14</a>). Ein erstes Scheitern dieser Art
 wiederholt sich nach einer Wartezeit einmal von selbst, denn Propagationsverzögerung
 sieht genauso aus und löst sich von allein.</td></tr>
 <tr><td>Fertiges Archiv verlangt ein Passwort</td><td>Die Verlaufszeile zeigt 🔑 - gib das Passwort dort ein; der Job wird an Ort und Stelle fertig. </td></tr>
 <tr><td>Ein Archiv lässt sich nicht entpacken</td><td>Passwort- und Reparaturfehler benennen sich selbst in der Verlaufszeile. Für alles andere gibt es einen Notausgang: Einstellungen → Watch-Ordner &amp; Nachbearbeitung → <b>Mit externem unrar entpacken</b> (eine erweiterte Einstellung) übergibt das Entpacken an das auf deinem Rechner installierte Programm <code>unrar</code> statt an den eingebauten Entpacker. Lass es sonst aus: der eingebaute Weg ist bei jeder von uns gemessenen Form schneller, und verschleierte Posts mit Hash-Namen nehmen ihn ohnehin immer, weil unrar ihrer Umbenennung nicht folgen kann. Derselbe Schalter für <code>nzbfast get</code>-Läufe ist die Umgebungsvariable <code>NZBFAST_NO_NATIVE_UNRAR=1</code>. Wenn unrar ein Archiv entpackt, das der eingebaute Entpacker abgelehnt hat, melde es bitte, damit wir den eingebauten Weg reparieren können.</td></tr>
 <tr><td>Sonarr/Radarr bekommt keine Verbindung</td><td>Port 6789 erreichbar? API-Key korrekt (voller Key, nicht der NZB-Key)? Client-Typ auf SABnzbd gestellt?</td></tr>
 <tr><td>Das Dashboard fragt nach einem API-Key, den ich nie gesetzt habe</td><td>Eine neue Installation macht sich selbst einen und druckt ihn einmalig beim Start (<a href="#firstrun-key">§2</a>). Er steht in der Datei <code>apikey</code> neben deiner Config und in der Startausgabe. Oder tipp aus einem bereits angemeldeten Browser unter Einstellungen → Sicherheit einen eigenen Key ein.</td></tr>
-<tr id="settings-gone"><td>Alle meine Einstellungen wirken nach einem Update weg<br>(Server, Pfade, API-Key)</td><td>Nichts an einem Update löscht Einstellungen; das heißt, nzbfast liest einen anderen, leeren Ordner. Zuerst: Das API-Key-Feld in den Einstellungen zeigt sich absichtlich leer - klick <b>Show</b>, bevor du schließt, dass er verloren ist. Auf Docker vergleich die <code>/config</code>-Zuordnung des neuen Containers mit der des alten: Ein geänderter Host-Pfad, ein relativer Pfad aus einem anderen Verzeichnis oder ein frischer appdata-Ordner lassen nzbfast allesamt bei null anfangen, während deine echten Einstellungen unangetastet am vorherigen Pfad liegen. Find den alten Ordner (such nach <code>settings.json</code>, deiner Config-Datei und <code>apikey</code> - die Orte stehen in <a href="#files">§17</a>), dann richte entweder die Zuordnung wieder auf ihn oder kopiere die Dateien in den neuen Ordner und starte neu. Das Start-Log nennt die exakt verwendete Einstellungsdatei: <code>[settings] applying saved settings from …</code></td></tr>
+<tr id="settings-gone"><td>Alle meine Einstellungen wirken nach einem Update weg<br>(Server, Pfade, API-Key)</td><td>Nichts an einem Update löscht Einstellungen; das heißt, nzbfast liest einen anderen, leeren Ordner. Zuerst: Das API-Key-Feld in den Einstellungen zeigt sich absichtlich leer - klick <b>Show</b>, bevor du schließt, dass er verloren ist. Auf Docker vergleich die <code>/config</code>-Zuordnung des neuen Containers mit der des alten: Ein geänderter Host-Pfad, ein relativer Pfad aus einem anderen Verzeichnis oder ein frischer appdata-Ordner lassen nzbfast allesamt bei null anfangen, während deine echten Einstellungen unangetastet am vorherigen Pfad liegen. Find den alten Ordner (such nach <code>settings.json</code>, deiner Config-Datei und <code>apikey</code> - die Orte stehen in <a href="#files">§18</a>), dann richte entweder die Zuordnung wieder auf ihn oder kopiere die Dateien in den neuen Ordner und starte neu. Das Start-Log nennt die exakt verwendete Einstellungsdatei: <code>[settings] applying saved settings from …</code></td></tr>
 <tr><td>Nichts im Netzwerk erreicht den Daemon</td><td>Prüf <code>--bind</code>: <code>127.0.0.1</code> bedient nur die Maschine, auf der nzbfast läuft. Der Standard, <code>0.0.0.0</code>, bedient jede Schnittstelle. Prüf dann die Firewall der Maschine selbst für Port 6789.</td></tr>
 <tr><td>Durchsuchen-Karte bleibt klein</td><td>Der Indexer wächst im Hintergrund - prüf, ob unter Einstellungen → Indexierung Gruppen gesetzt sind, und gib „Vertiefen pro Scan“ Zeit, Historie anzusammeln. „Jetzt scannen“ erzwingt einen Durchlauf; die Statuszeile zeigt den Live-Fortschritt.</td></tr>
 <tr><td>Wand zeigt falsches/kein Artwork</td><td>Detailblatt → ✎ Match korrigieren oder ↻ Metadaten erneuern. Film-Zuordnungen werden mit einem gratis OMDb-Key besser.</td></tr>

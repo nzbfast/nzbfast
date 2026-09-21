@@ -13,11 +13,13 @@
 //! line, so the budget is further capped at half of it. The `--mem-limit`
 //! flag overrides.
 
+#![warn(missing_docs)]
+
 /// Physical RAM in bytes (unix: sysconf pages × page size; Windows:
 /// GlobalMemoryStatusEx).
 ///
 /// The Windows arm is not cosmetic. This returning None is what
-/// [`MemBudget::auto_total`] falls back to, and its fallback is a flat
+/// `MemBudget::auto_total` falls back to, and its fallback is a flat
 /// 1 GB - so for as long as this was unix-only, EVERY Windows install ran
 /// the whole pipeline on a 1 GB budget no matter how much RAM the machine
 /// had, where a 32 GB box should get 8. The budget only decides when each
@@ -94,7 +96,7 @@ pub fn available_ram() -> Option<u64> {
 }
 
 /// macOS memory the OS could hand out now: `host_statistics64(HOST_VM_INFO64)`,
-/// summed as [`vm_available_bytes`] says. For `examples/memprobe.rs` and
+/// summed as `vm_available_bytes` says. For `examples/memprobe.rs` and
 /// the knee round; the gate reads [`available_ram`], which since 16 Sep
 /// 2026 is this same reading.
 #[cfg(target_os = "macos")]
@@ -381,17 +383,36 @@ fn cgroup_u64(p: &std::path::Path) -> Option<u64> {
 /// One field out of a cgroup `memory.stat`.
 #[cfg(target_os = "linux")]
 fn cgroup_stat_field(p: &std::path::Path, key: &str) -> Option<u64> {
-    let text = std::fs::read_to_string(p).ok()?;
+    stat_field_from(&std::fs::read_to_string(p).ok()?, key)
+}
+
+/// Pure half of [`cgroup_stat_field`], and of every other `key value` line
+/// this module reads: cgroup `memory.stat`, `/proc/self/status`. Split out so
+/// the composition [`cgroup_available_ram`] builds out of these fields can be
+/// asserted against a REAL file's text - the whole reading is three fields of
+/// one file and a caller that gets the wrong field gets a plausible number.
+#[cfg(any(target_os = "linux", test))]
+fn stat_field_from(text: &str, key: &str) -> Option<u64> {
     text.lines().find_map(|l| {
         let mut it = l.split_whitespace();
-        (it.next()? == key).then(|| it.next()?.parse().ok())?
+        (it.next()?.trim_end_matches(':') == key).then(|| it.next()?.parse().ok())?
     })
 }
 
 /// Cgroup memory limit on our own cgroup (Linux): tightest `memory.max`
 /// (v2) or `memory.limit_in_bytes` (v1 memory controller) over
-/// [`cgroup_dirs`]. "max" / v1's page-rounded i64::MAX sentinel read as no
+/// `cgroup_dirs`. "max" / v1's page-rounded i64::MAX sentinel read as no
 /// limit.
+///
+/// PLAIN BACKTICKS AND NOT AN INTRA-DOC LINK, here and at the three other
+/// names below - `cgroup_available_from`, `MemBudget::auto_total` and
+/// `par2gen::map_fit::create_map_headroom`. All four are PRIVATE, this item
+/// is `pub`, and `check`'s rustdoc gate runs `-D warnings`, which makes
+/// `rustdoc::private_intra_doc_links` fatal: a link from a public page to a
+/// private item resolves to nothing in the published documentation, which
+/// is the artefact that gate exists to keep clean. The names are what a reader needs and they are
+/// still here; do not re-bracket them. Re-bracketing is only correct if the
+/// target becomes `pub`.
 // `pub`, matching the `cfg(not(linux))` twin below: examples/memprobe.rs
 // consumes it from OUTSIDE the crate, so a `pub(crate)` here is E0603 on
 // Linux and invisible everywhere else (see the §103.6 note below).
@@ -409,6 +430,8 @@ pub fn cgroup_mem_limit() -> Option<u64> {
         .min()
 }
 
+/// Always `None`: cgroups are a Linux interface, and no other OS this
+/// ships on charges the process to one. See the Linux arm.
 #[cfg(not(target_os = "linux"))]
 pub fn cgroup_mem_limit() -> Option<u64> {
     None
@@ -448,10 +471,10 @@ pub fn cgroup_mem_limit() -> Option<u64> {
 /// deducted. That asymmetry is measured; the arms are in section 8 of the
 /// round below.
 ///
-/// The composition is [`cgroup_available_from`]: a cgroup LIMIT is not an
+/// The composition is `cgroup_available_from`: a cgroup LIMIT is not an
 /// AVAILABLE figure and cannot be dropped in as one, because `memory.current`
 /// already holds whatever cache this cgroup has charged. It is NOT
-/// [`MemBudget::auto_total`]'s half-the-limit either - that is a budget
+/// `MemBudget::auto_total`'s half-the-limit either - that is a budget
 /// heuristic for when a tier spills, and this is a question about what the
 /// page cache can hold.
 #[cfg(target_os = "linux")]
@@ -477,8 +500,172 @@ pub fn cgroup_available_ram() -> Option<u64> {
         .min()
 }
 
+/// Always `None` off Linux. Callers fall back to [`available_ram`],
+/// which is the host reading and the right one where there is no
+/// container limit to be inside. See the Linux arm.
 #[cfg(not(target_os = "linux"))]
 pub fn cgroup_available_ram() -> Option<u64> {
+    None
+}
+
+/// One line per limited cgroup this process is charged to, naming every term
+/// [`cgroup_available_ram`] folds plus the `memory.stat` fields that say what
+/// the unreclaimable remainder is MADE OF - the reading a caller needs to
+/// tell "this charge is not in the available figure" from "this charge is
+/// already deducted and my own headroom term adds it a second time".
+///
+/// Exists because that question is not answerable from the composed figure.
+/// `limit - (usage - cache)` is one number and the double-count it can
+/// contain is a difference of two of its parts, so the parts have to be
+/// readable at the instant the gate is asked - and by then a shell reading
+/// /sys/fs/cgroup is a different instant on a create that allocates.
+/// `par2gen::map_fit` prints these under `NZBFAST_REPAIR_TIMING`.
+#[cfg(target_os = "linux")]
+pub fn cgroup_probe_lines() -> Vec<String> {
+    const FIELDS: &[&str] = &[
+        "anon",
+        "file",
+        "kernel",
+        "kernel_stack",
+        "pagetables",
+        "percpu",
+        "sock",
+        "shmem",
+        "file_mapped",
+        "file_dirty",
+        "file_writeback",
+        "slab",
+        "active_anon",
+        "inactive_anon",
+        "active_file",
+        "inactive_file",
+    ];
+    cgroup_dirs()
+        .iter()
+        .filter_map(|(dir, v2)| {
+            let (limit, usage, cache) = if *v2 {
+                ("memory.max", "memory.current", "file")
+            } else {
+                (
+                    "memory.limit_in_bytes",
+                    "memory.usage_in_bytes",
+                    "total_cache",
+                )
+            };
+            let lim = cgroup_u64(&dir.join(limit))?;
+            let use_ = cgroup_u64(&dir.join(usage))?;
+            let stat = dir.join("memory.stat");
+            let cch = cgroup_stat_field(&stat, cache)?;
+            let fields: Vec<String> = FIELDS
+                .iter()
+                .filter_map(|k| cgroup_stat_field(&stat, k).map(|v| format!("{k}={v}")))
+                .collect();
+            Some(format!(
+                "cgroup {} v2={} limit={lim} current={use_} cache={cch} \
+                 unreclaimable={} available={} [{}]",
+                dir.display(),
+                v2,
+                use_.saturating_sub(cch),
+                cgroup_available_from(lim, use_, cch),
+                fields.join(" "),
+            ))
+        })
+        .collect()
+}
+
+/// Always empty off Linux: there is no cgroup to describe. Callers
+/// print nothing rather than a line saying the probe is unavailable,
+/// so a diagnostic dump stays quiet where the question does not
+/// arise. See the Linux arm.
+#[cfg(not(target_os = "linux"))]
+pub fn cgroup_probe_lines() -> Vec<String> {
+    Vec::new()
+}
+
+/// This process's own resident composition, for the same question
+/// [`cgroup_probe_lines`] answers from the cgroup's side: whether the bytes a
+/// caller's headroom term is about to add are bytes the process has ALREADY
+/// touched, and so already inside the cgroup's unreclaimable charge.
+///
+/// `statm`'s resident and shared fields are pages; the anonymous half is the
+/// difference, which is the term that matters here because a lazily allocated
+/// accumulator is anonymous and is charged only as it is written.
+#[cfg(target_os = "linux")]
+pub fn self_rss_probe() -> Option<String> {
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let mut it = statm.split_whitespace();
+    let page = 4096u64;
+    let size: u64 = it.next()?.parse().ok()?;
+    let resident: u64 = it.next()?.parse().ok()?;
+    let shared: u64 = it.next()?.parse().ok()?;
+    let rollup = std::fs::read_to_string("/proc/self/smaps_rollup").unwrap_or_default();
+    let pick = |key: &str| -> String {
+        rollup
+            .lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                (k == key).then(|| v.split_whitespace().next().unwrap_or("?").to_string())
+            })
+            .unwrap_or_else(|| "?".into())
+    };
+    Some(format!(
+        "self vsize={} rss={} shared={} anon={} smaps_rss_kb={} anonymous_kb={} \
+         private_dirty_kb={} shared_clean_kb={}",
+        size * page,
+        resident * page,
+        shared * page,
+        resident.saturating_sub(shared) * page,
+        pick("Rss"),
+        pick("Anonymous"),
+        pick("Private_Dirty"),
+        pick("Shared_Clean"),
+    ))
+}
+
+/// Always `None` off Linux: the composition this reports comes from
+/// `/proc/self/statm` and `smaps_rollup`, which no other OS here
+/// exposes. See the Linux arm.
+#[cfg(not(target_os = "linux"))]
+pub fn self_rss_probe() -> Option<String> {
+    None
+}
+
+/// This process's own RESIDENT ANONYMOUS bytes, or `None` where the OS does
+/// not report them - the bytes it has already faulted in that no page cache
+/// holds a copy of, which is exactly the charge
+/// [`cgroup_available_ram`]'s `usage - cache` term has already deducted.
+///
+/// **A caller adding a working-set term to that reading needs this figure or
+/// it charges its own already-resident bytes twice.** `par2gen::map_fit` is
+/// the caller: it asks what a create is ABOUT to make resident, and on the
+/// measured shape most of that was resident before the question was asked.
+/// See `par2gen::map_fit::create_map_headroom` for the arithmetic
+/// and for why the credit is CAPPED rather than taken whole.
+///
+/// `/proc/self/status`'s `RssAnon` is read in preference to deriving it from
+/// `statm`, which reports pages and calls the same quantity
+/// `resident - shared`: the named field cannot be read off by one, and both
+/// are O(1) where `smaps_rollup` walks every mapping of a process that is
+/// about to hold a multi-GiB one.
+#[cfg(target_os = "linux")]
+pub fn self_anon_rss() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    if let Some(kb) = stat_field_from(&status, "RssAnon") {
+        return Some(kb.saturating_mul(1024));
+    }
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let mut it = statm.split_whitespace().skip(1);
+    let resident: u64 = it.next()?.parse().ok()?;
+    let shared: u64 = it.next()?.parse().ok()?;
+    Some(resident.saturating_sub(shared).saturating_mul(4096))
+}
+
+/// Always `None` off Linux. A caller sizing a headroom term must
+/// treat that as "unknown", never as zero anonymous bytes - the
+/// process has them, this OS just will not say how many. See the
+/// Linux arm.
+#[cfg(not(target_os = "linux"))]
+pub fn self_anon_rss() -> Option<u64> {
     None
 }
 
@@ -676,7 +863,12 @@ pub fn fold_workers() -> usize {
 /// fold, which a caller budgeting cores adds itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PacedFolds {
+    /// How many paced creates are live, each holding one
+    /// [`FoldWidthCap`].
     pub creates: usize,
+    /// Their fold widths summed. Does NOT include the one whole-file
+    /// MD5 chain thread each create also runs beside its fold; a
+    /// caller budgeting cores adds `creates` for those itself.
     pub fold_workers: usize,
 }
 
@@ -803,12 +995,25 @@ pub(crate) fn cpu_workers_override(raw: &str) -> Option<usize> {
         .map(|n| n.min(1024))
 }
 
+/// The process's memory budget: one total, which the tier accessors
+/// below slice into the pipeline's shares. A budget rather than a
+/// limit - nothing enforces it at the allocator, the tiers simply size
+/// themselves to fit, so exceeding it is a spill or a smaller window
+/// rather than a failure.
 #[derive(Clone, Copy, Debug)]
 pub struct MemBudget {
+    /// Budgeted bytes for the whole process. Already clamped to
+    /// [`Self::MIN`] and to what this host's address space can hold,
+    /// so it is the figure to slice rather than the figure a person
+    /// asked for - see [`Self::limit_clamp`] for the difference.
     pub total: u64,
 }
 
 impl MemBudget {
+    /// The smallest budget that is still a budget. A `--mem-limit`
+    /// below this is raised to it: the tiers below have fixed minima
+    /// of their own, so a smaller total buys nothing and only makes
+    /// the reported figure a lie.
     pub const MIN: u64 = 64 << 20; // even --mem-limit can't go below 64 MB
     const AUTO_FLOOR: u64 = 256 << 20;
     // 16 GB (was 4): the 4 GB ceiling forced the verify-partials spill on
@@ -858,6 +1063,11 @@ impl MemBudget {
         Self::fit_address_space(total)
     }
 
+    /// An explicit budget, as `--mem-limit` and the `mem_limit`
+    /// setting supply it. Raised to [`Self::MIN`] and lowered to what
+    /// this host's address space can hold, silently - ask
+    /// [`Self::limit_clamp`] whether either clamp moved the figure
+    /// before reporting it back to whoever set it.
     pub fn with_total(total: u64) -> MemBudget {
         MemBudget {
             total: Self::fit_address_space(total.max(Self::MIN)),
@@ -870,7 +1080,7 @@ impl MemBudget {
     ///
     /// Split out from the warning below so the arithmetic is pinnable
     /// without capturing a log, and it answers BOTH clamps in one place:
-    /// the [`Self::MIN`] floor, and the 32-bit [`Self::ADDRESS_SPACE_CEIL`]
+    /// the [`Self::MIN`] floor, and the 32-bit `Self::ADDRESS_SPACE_CEIL`
     /// whose own comment already calls the silence a defect - "it just
     /// made the knob lie, silently, on the one platform where memory is
     /// scarce".
@@ -934,7 +1144,7 @@ impl MemBudget {
     }
 
     /// The largest total this target can hold, whatever is asked for:
-    /// [`Self::ADDRESS_SPACE_CEIL`] on 32-bit, `u64::MAX` on 64-bit
+    /// `Self::ADDRESS_SPACE_CEIL` on 32-bit, `u64::MAX` on 64-bit
     /// (where [`Self::with_total`] clamps nothing at the top).
     ///
     /// EXPOSED BECAUSE THE CEILING IS OTHERWISE INVISIBLE TO ANYTHING
@@ -1253,6 +1463,15 @@ fn rar_window_limit() -> u64 {
     (process_budget().total / 4).clamp(64 << 20, 1 << 30)
 }
 
+/// The RAR reader options this process uses everywhere, with the
+/// budget-derived knobs already applied: the RAR5 execution policy, the
+/// window ceiling `rar_window_limit` derives, and the two split-archive
+/// behaviours this engine relies on.
+///
+/// Take this rather than building `ArchiveReadOptions` at a call site.
+/// The window limit in particular is a header field an untrusted
+/// archive chooses, so a reader built without it inherits the vendored
+/// crate's own 1 GiB default and allocates outside the budget.
 pub fn rar_read_options(password: Option<&[u8]>) -> rars::ArchiveReadOptions<'_> {
     rars::ArchiveReadOptions::with_optional_password(password)
         .with_rar50_execution_policy(process_budget().rar_execution_policy())
@@ -1281,7 +1500,7 @@ pub fn set_process_budget(budget: MemBudget) {
 ///
 /// The twin of [`clear_cpu_workers`], for the same caller and the same
 /// reason - a host whose "Auto" has to MEAN the engine's own answer and
-/// not the last job's number. [`USER_LIMIT`] is deliberately left alone:
+/// not the last job's number. `USER_LIMIT` is deliberately left alone:
 /// [`published_user_limit`] answers by VALUE against the published total,
 /// so clearing the total already makes it `None`, and a stale figure
 /// nothing is published against says nothing.
@@ -1330,7 +1549,7 @@ static USER_LIMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// move the automatic default on every small box and container
 /// (`par2repair::fastpar::clamp_to_published`, 15 Sep 2026).
 ///
-/// Answered by VALUE against [`USER_LIMIT`], because that is where the
+/// Answered by VALUE against `USER_LIMIT`, because that is where the
 /// provenance survives: the daemon resolves its budget into `ServeOpts`
 /// (from `--mem-limit` or the `mem_limit` setting) and republishes the
 /// bare `MemBudget` later, so a flag set at the publish call would be lost
@@ -1522,6 +1741,9 @@ fn dict_charge_admits(cur: u64, need: u64, cap: u64) -> bool {
 pub struct ConcurrencyCaps {
     pub(crate) connections: usize,
     pub(crate) window: usize,
+    /// Ceiling on decode threads. Public because the decode side sizes
+    /// its own pool from this directly, where connections and window
+    /// are only ever applied through [`Self::apply`].
     pub decoders: usize,
 }
 
@@ -1919,6 +2141,10 @@ pub fn opt_out_of_power_throttling() {
     }
 }
 
+/// No-op off Windows: no other OS here parks a process for being
+/// background. `pub` and not optional, matching the `cfg(windows)`
+/// twin above - the note there explains why the visibility must not
+/// be narrowed.
 #[cfg(not(windows))]
 pub fn opt_out_of_power_throttling() {}
 
@@ -2242,6 +2468,115 @@ mod tests {
         // Saturating, never wrapping: a cgroup over its own limit (v1 can
         // report usage above the limit briefly) answers zero, not u64::MAX.
         assert_eq!(cgroup_available_from(gb, 2 * gb, 0), 0);
+    }
+
+    /// The reading composed out of a REAL cgroup v2 `memory.stat`, because
+    /// `cgroup_available_ram` is three fields of one file and the failure mode
+    /// is a plausible number off the wrong field.
+    ///
+    /// **Every figure below was read out of the cgroup by the create itself,
+    /// at the instant its mapping-fit gate was asked** - 18 Sep 2026, inside
+    /// `docker run -m 2320m` on an 8-core 31 GB x86_64 Linux box, one 2 GiB
+    /// member at 5% over 32,768 slices, the `cg2320m/def/r1` leg of
+    /// `research/rounds/map-gate-own-charge-2026-09-18/`. A shell reading
+    /// /sys/fs/cgroup around the create would have read a different instant:
+    /// the same leg's EARLIER gate call (the stripe-first one) reads
+    /// `unreclaimable=3133440` against this one's 113,963,008, because the
+    /// accumulator is allocated between them.
+    ///
+    /// The two traps it pins, both of which produce a believable figure:
+    /// `file` is the whole page-cache term and ALREADY INCLUDES `shmem`, so a
+    /// composition that subtracts both double-discounts the cache; and `anon`
+    /// is not the same quantity as `current - file`, because the kernel,
+    /// pagetable, percpu and slab terms are unreclaimable too and belong in
+    /// the charge that binds.
+    #[test]
+    fn the_cgroup_reading_is_composed_out_of_a_real_memory_stat() {
+        // `docker run -m 2320m` is 2320 MiB, and the create read it back as
+        // `limit=2432696320` - which is that, exactly.
+        const LIMIT: u64 = 2_432_696_320;
+        const CURRENT: u64 = 192_872_448;
+        const STAT: &str = "\
+anon 112148480
+file 78909440
+kernel 1134592
+kernel_stack 131072
+pagetables 372736
+percpu 3720
+sock 0
+shmem 0
+file_mapped 0
+file_dirty 659456
+file_writeback 0
+slab 564784
+active_anon 112103424
+inactive_anon 0
+active_file 0
+inactive_file 78807040
+";
+        assert_eq!(LIMIT, 2320 * (1 << 20), "the cell's own limit");
+        let file = stat_field_from(STAT, "file").expect("file");
+        let anon = stat_field_from(STAT, "anon").expect("anon");
+        assert_eq!(file, 78_909_440);
+        assert_eq!(anon, 112_148_480);
+        // `anon` is a PREFIX of both `*active_anon` lines, and `file` of five
+        // other keys here: the parse matches WHOLE keys, so a reader asking
+        // for `file` cannot be handed `file_dirty`.
+        assert_eq!(stat_field_from(STAT, "active_anon"), Some(112_103_424));
+        assert_eq!(stat_field_from(STAT, "file_dirty"), Some(659_456));
+        assert_eq!(stat_field_from(STAT, "file_mapped"), Some(0));
+        assert_eq!(stat_field_from(STAT, "no_such_field"), None);
+
+        // The composition, as `cgroup_available_ram` builds it - and both
+        // figures are the ones the binary printed on that leg.
+        let unreclaimable = CURRENT - file;
+        assert_eq!(unreclaimable, 113_963_008, "the charge that binds");
+        let avail = cgroup_available_from(LIMIT, CURRENT, file);
+        assert_eq!(avail, 2_318_733_312, "the figure the gate was given");
+        assert_eq!(avail, LIMIT - unreclaimable);
+
+        // THE CHARGE IS THIS CREATE'S OWN ACCUMULATOR, which is the whole
+        // reason `par2gen::map_fit::headroom_net` exists: the accumulator on
+        // this shape is 107,347,968 B and the process's own RssAnon at this
+        // instant was 112,029,696 - so 96% of everything the create had
+        // resident, and all of it already deducted above.
+        assert!(
+            (107_347_968u64..=112_148_480).contains(&anon),
+            "{anon} should sit between the accumulator and the process's anon"
+        );
+        // The unreclaimable charge is MORE than `anon` alone - kernel,
+        // kernel_stack, pagetables and percpu are in it too - which is why the
+        // reading is `current - file` and not `anon`. It accounts for itself
+        // to within a slab rounding.
+        let named: u64 = [
+            "anon",
+            "kernel",
+            "kernel_stack",
+            "pagetables",
+            "percpu",
+            "sock",
+        ]
+        .iter()
+        .map(|k| stat_field_from(STAT, k).unwrap_or(0))
+        .sum();
+        assert!(unreclaimable > anon, "{unreclaimable} vs {anon}");
+        assert!(
+            unreclaimable.abs_diff(named) < (1 << 20),
+            "{unreclaimable} against the named terms' {named}"
+        );
+        // And subtracting `shmem` as well as `file` would be wrong even here,
+        // where it is zero: `file` is documented to include it. `file_mapped`
+        // is zero because the gate is asked BEFORE the mapping exists.
+        assert_eq!(stat_field_from(STAT, "shmem"), Some(0));
+
+        // `/proc/self/status`'s RssAnon goes through the same parse, and its
+        // value is in kB behind a trailing-colon key. This is the same leg's
+        // 109,404 kB, which is the 112,029,696 B quoted above.
+        assert_eq!(
+            stat_field_from("VmRSS:\t  113612 kB\nRssAnon:\t  109404 kB\n", "RssAnon"),
+            Some(109_404)
+        );
+        assert_eq!(109_404u64 * 1024, 112_029_696);
     }
 
     #[test]

@@ -36,19 +36,11 @@ use super::*;
 /// on a chase that never started.
 fn damaged_compressed_chase(tag: &str) -> (Fixture, Vec<u8>, Vec<String>) {
     let doc = half_entropy(24_000_000, 0x2545f4914f6cdd1d);
-    let vols = rars::rar50::Rar50VolumeWriter::new(
-        rars::rar50::WriterOptions::default().with_compression_level(1),
-    )
-    .compressed_entries(&[rars::rar50::CompressedEntry {
-        name: b"movie.bin",
-        data: &doc,
-        mtime: None,
-        attributes: 0,
-        host_os: 0,
-    }])
-    .max_payload_per_volume(1_500_000)
-    .finish()
-    .unwrap();
+    let vols = crate::rarfixtures::compressed_volume_set_at_effort(
+        &[crate::rarfixtures::Member::bare(b"movie.bin", &doc)],
+        1_500_000,
+        Some(1),
+    );
     assert!(vols.len() >= 6, "want many volumes, got {}", vols.len());
     let mut fx = Fixture::new(tag);
     let names: Vec<String> = (1..=vols.len()).map(|i| format!("c.part{i}.rar")).collect();
@@ -751,19 +743,11 @@ fn count_after(log: &str, marker: &str, prefix: &str) -> Option<usize> {
 /// what makes the set chase at all.
 fn ghosted_volume_beside_a_chase(tag: &str) -> (Fixture, Vec<u8>, Vec<String>) {
     let doc = half_entropy(12_000_000, 0x9e3779b97f4a7c15);
-    let vols = rars::rar50::Rar50VolumeWriter::new(
-        rars::rar50::WriterOptions::default().with_compression_level(1),
-    )
-    .compressed_entries(&[rars::rar50::CompressedEntry {
-        name: b"movie.bin",
-        data: &doc,
-        mtime: None,
-        attributes: 0,
-        host_os: 0,
-    }])
-    .max_payload_per_volume(800_000)
-    .finish()
-    .unwrap();
+    let vols = crate::rarfixtures::compressed_volume_set_at_effort(
+        &[crate::rarfixtures::Member::bare(b"movie.bin", &doc)],
+        800_000,
+        Some(1),
+    );
     assert!(vols.len() >= 6, "want many volumes, got {}", vols.len());
     let mut fx = Fixture::new(tag);
     let names: Vec<String> = (1..=vols.len()).map(|i| format!("c.part{i}.rar")).collect();

@@ -4,6 +4,10 @@
 //! multi-threaded BLAKE3 pass has re-proved the content, and never on the
 //! strength of a length or a timestamp.
 //!
+//! Behind the `digest-cache` feature; without it, `digest_cache_off.rs`
+//! stands in, an inert stub with the same crate-internal surface, so the
+//! create and verify paths never branch on the feature themselves.
+//!
 //! The MD5 chain is the one sequential cost of a single-file create: one
 //! core over every byte, ~11 s of an ~12 s create of 8.86 GB. BLAKE3 is a
 //! tree hash and runs on every core, so re-proving the same bytes costs
@@ -18,7 +22,7 @@
 //! bytes that pass read, or from a record THIS store wrote whose BLAKE3
 //! matched the bytes that pass read. Nothing in this module accepts an MD5
 //! from outside: no constructor takes one, and there is no option or
-//! environment variable that supplies one. [`MemberDigest`] is the only
+//! environment variable that supplies one. `MemberDigest` is the only
 //! thing that hands a record's MD5 to the engine, and it does so only
 //! after the BLAKE3 of the open member matched the record's.
 //!

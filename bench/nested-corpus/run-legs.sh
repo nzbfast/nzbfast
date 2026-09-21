@@ -539,7 +539,29 @@ EOF
     nohup "$SAB_CMD" -f "$OUTROOT/sabnzbd-bench.ini" -s 127.0.0.1:$SAB_PORT -b0 \
         > "$OUTROOT/$LEGNAME/sab.out" 2>&1 &
     local sab_pid=$!
-    sleep 8
+    # WAIT FOR SAB'S API, NEVER A FIXED SLEEP. This was `sleep 8` until
+    # 20 Sep 2026, and on a loaded box 8 s is not enough for SABnzbd to
+    # bind and answer: the r2c leg of the compressed-inner round raced it
+    # at load ~250, the addfile POST came back curl rc=7 (could not
+    # connect), NOTHING WAS EVER QUEUED, and the leg then ran out its full
+    # 1800 s cap and published `rc=124 class=fail` - a client verdict the
+    # client never earned, which is the most serious kind of wrong number
+    # this rig can emit. The tell is in the same round's log two lines
+    # later: `sab tuning: pipelining_requests=unknown`, because the
+    # set_config calls could not connect either, so that cell would ALSO
+    # have been an unpipelined SAB had the submit landed.
+    #
+    # This poll sits OUTSIDE the timed region - t0 is taken after it - so
+    # it cannot move wall_s, hiwater_mb, cpu_s or the class of any cell.
+    # It only stops the submit racing startup. Bounded at 120 s so a SAB
+    # that genuinely will not start still fails fast rather than hanging.
+    local sab_ready=0 sab_waited=0
+    while (( sab_waited < 120 )); do
+        curl -sf -o /dev/null "http://127.0.0.1:$SAB_PORT/api?mode=version&apikey=harnesskey&output=json" && { sab_ready=1; break; }
+        sleep 2; sab_waited=$(( sab_waited + 2 ))
+    done
+    (( sab_ready )) || log "  sab WARNING: API did not answer within ${sab_waited}s - the cell below is a RIG failure, not a SABnzbd result"
+    [[ $sab_ready == 1 && $sab_waited -gt 8 ]] && log "  sab api ready after ${sab_waited}s (the old fixed 8 s wait would have raced it)"
     # SABnzbd REWRITES its ini on startup and reset our
     # pipelining_requests=8 back to its shipped 1, so the file is not a
     # reliable way to tune it - set it over the API where the value

@@ -1590,7 +1590,7 @@ mod tests {
     /// one BODY this test performs.
     #[tokio::test]
     async fn one_article_yields_the_recovery_sets_block_size() {
-        const INDEX: &[u8] = include_bytes!("../../nzbkit-base/tests/fixtures/par2/testset.par2");
+        const INDEX: &[u8] = nzbkit_base::testdata::PAR2_TESTSET;
         let mut articles = std::collections::HashMap::new();
         let segs = make_file_articles("testset.par2", INDEX, 64_000, "idx", &mut articles);
         assert_eq!(segs.len(), 1, "the fixture is one article");
@@ -1619,7 +1619,7 @@ mod tests {
     /// reading would call a covered file unrepairable.
     #[tokio::test]
     async fn described_lengths_ride_along_and_never_deny_membership() {
-        const INDEX: &[u8] = include_bytes!("../../nzbkit-base/tests/fixtures/par2/testset.par2");
+        const INDEX: &[u8] = nzbkit_base::testdata::PAR2_TESTSET;
         let truth = crate::par2::Par2Set::parse(&[INDEX]).expect("fixture parses");
         assert!(!truth.files.is_empty(), "the fixture describes files");
 
@@ -1666,8 +1666,7 @@ mod tests {
     async fn nothing_the_probe_cannot_verify_becomes_a_block_size() {
         // A volume with its critical packets stripped: real PAR2 bytes,
         // real recovery slices, no Main packet anywhere in them.
-        const VOL: &[u8] =
-            include_bytes!("../../nzbkit-base/tests/fixtures/par2/testset.vol0+4.par2");
+        const VOL: &[u8] = nzbkit_base::testdata::PAR2_TESTSET_VOL0_4;
         let slices_only: Vec<u8> = VOL[..4_164].to_vec();
         assert!(
             crate::par2::Par2Set::parse(&[&slices_only]).is_err(),
@@ -1936,8 +1935,7 @@ mod tests {
     /// packet found in either one settles it.
     #[tokio::test]
     async fn the_tail_article_answers_when_the_head_does_not() {
-        const VOL: &[u8] =
-            include_bytes!("../../nzbkit-base/tests/fixtures/par2/testset.vol0+4.par2");
+        const VOL: &[u8] = nzbkit_base::testdata::PAR2_TESTSET_VOL0_4;
         let mut articles = std::collections::HashMap::new();
         // Head: slices only, no Main. Tail: the rest, which carries it.
         let head = make_file_articles("v.par2", &VOL[..4_164], 64_000, "h", &mut articles);

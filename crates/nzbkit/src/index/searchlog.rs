@@ -42,14 +42,28 @@ pub struct SearchRecord {
 /// One row of the top-misses readout.
 #[derive(Debug, Clone)]
 pub struct SearchMiss {
+    /// `wall` or `newznab` - which surface the searches came from.
     pub surface: String,
+    /// The normalized query, as [`SearchRecord::q`] holds it.
     pub q: String,
+    /// Kind filter in force, `""` when none.
     pub kind: String,
+    /// Searches for this query in the window, summed over buckets.
     pub n: u64,
+    /// How many of them returned nothing. `zero_n == n` is the case
+    /// this readout exists to surface: something people look for and
+    /// the index has never held.
     pub zero_n: u64,
+    /// When the first of them ran, unix time.
     pub first_at: i64,
+    /// When the last of them ran, unix time. Read with
+    /// [`Self::first_at`]: a miss that stopped weeks ago is not the
+    /// same problem as one still being asked today.
     pub last_at: i64,
+    /// Hits the most recent of them returned.
     pub last_hits: u64,
+    /// The most any of them returned. Non-zero here with a zero
+    /// `last_hits` means coverage was LOST, not that it never existed.
     pub best_hits: u64,
 }
 

@@ -346,10 +346,18 @@ pub(super) fn rar5_compressed_volume(name: &str, data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Compressed RAR5 single volume built by the vendored RAR engine's
-/// writer - a REAL compressed archive (LZ bitstream, valid CRCs), not
-/// a hand-crafted header shell.
-pub(super) fn rars_compressed_volume(entries: &[(&str, &[u8])]) -> Vec<u8> {
+/// One COMPRESSED RAR 5 archive - a REAL compressed archive (LZ
+/// bitstream, valid CRCs), not a hand-crafted header shell.
+///
+/// Named for the SHAPE and not for the engine call, like every builder
+/// in this block: the RAR engine is being replaced (cutover plan
+/// `research/RARKIT-CUTOVER-PLAN-2026-09-18.md`, preparation item P3)
+/// and only the BODIES here move when it is. The counterpart modules
+/// are `nzbfast_unpack::rarfixtures`, `crates/nzbfast/tests/rarfixtures`
+/// and `postfast::container::rarfixtures` - deliberate duplicates, since
+/// a dev-dependency edge between these crates would move the
+/// workspace's feature resolution for the engine.
+pub(super) fn compressed_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
     use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
     let entries: Vec<CompressedEntry> = entries
         .iter()
@@ -367,10 +375,10 @@ pub(super) fn rars_compressed_volume(entries: &[(&str, &[u8])]) -> Vec<u8> {
         .unwrap()
 }
 
-/// Compressed RAR5 multi-volume set (one member split across
+/// A COMPRESSED RAR 5 multivolume set (one member split across
 /// volumes), capped payload bytes per volume.
-pub(super) fn rars_compressed_volumes(name: &str, data: &[u8], per_vol: usize) -> Vec<Vec<u8>> {
-    rars_compressed_volumes_at_level(name, data, per_vol, None)
+pub(super) fn compressed_volume_set(name: &str, data: &[u8], per_vol: usize) -> Vec<Vec<u8>> {
+    compressed_volume_set_at_effort(name, data, per_vol, None)
 }
 
 /// The same set with the encoder's SEARCH EFFORT named, for the two
@@ -378,7 +386,7 @@ pub(super) fn rars_compressed_volumes(name: &str, data: &[u8], per_vol: usize) -
 /// compresses tens of megabytes. Only the search changes; the ARCHIVE
 /// does not.
 ///
-/// `None` - what [`rars_compressed_volumes`] passes, and the writer's
+/// `None` - what [`compressed_volume_set`] passes, and the writer's
 /// own default - is the most expensive setting it has:
 /// `encode_options_for_level` gives it 256 match candidates per position
 /// AND a lazy-matching pass, where `Some(1)` gets 8 candidates and no
@@ -412,7 +420,7 @@ pub(super) fn rars_compressed_volumes(name: &str, data: &[u8], per_vol: usize) -
 /// `chase_volume_set` fixture's packed size, which the slightly worse
 /// ratio moves. A fixture whose size a test asserts on is not one to
 /// re-cut in passing.
-pub(super) fn rars_compressed_volumes_at_level(
+pub(super) fn compressed_volume_set_at_effort(
     name: &str,
     data: &[u8],
     per_vol: usize,
@@ -437,9 +445,9 @@ pub(super) fn rars_compressed_volumes_at_level(
         .unwrap()
 }
 
-/// Compressed RAR4 (RAR 2.9/3.x format) single volume from the vendored
-/// engine's writer - a real LZ bitstream with valid CRCs.
-pub(super) fn rars_v4_compressed_volume(entries: &[(&str, &[u8])]) -> Vec<u8> {
+/// One COMPRESSED RAR 4 (2.9/3.x) archive - a real LZ bitstream with
+/// valid CRCs.
+pub(super) fn rar4_compressed_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
     use rars::rar15_40::{FileEntry, WriterOptions, write_compressed_archive};
     use rars::{ArchiveVersion, FeatureSet};
     let entries: Vec<FileEntry> = entries
@@ -461,9 +469,9 @@ pub(super) fn rars_v4_compressed_volume(entries: &[(&str, &[u8])]) -> Vec<u8> {
     .unwrap()
 }
 
-/// Compressed RAR4 multi-volume set (one member split across volumes),
-/// capped packed bytes per volume.
-pub(super) fn rars_v4_compressed_volumes(name: &str, data: &[u8], per_vol: usize) -> Vec<Vec<u8>> {
+/// A COMPRESSED RAR 4 multivolume set (one member split across
+/// volumes), capped packed bytes per volume.
+pub(super) fn rar4_compressed_volume_set(name: &str, data: &[u8], per_vol: usize) -> Vec<Vec<u8>> {
     use rars::rar15_40::{FileEntry, WriterOptions, write_compressed_volumes};
     use rars::{ArchiveVersion, FeatureSet};
     write_compressed_volumes(
@@ -482,10 +490,10 @@ pub(super) fn rars_v4_compressed_volumes(name: &str, data: &[u8], per_vol: usize
     .unwrap()
 }
 
-/// Encrypted compressed RAR4 multi-volume set. `hp` encrypts the headers
+/// An ENCRYPTED, compressed RAR 4 multivolume set. `hp` encrypts the headers
 /// too (`-hp`; needs the Rar30 target - Rar29 refuses header encryption),
 /// otherwise the data alone (`-p`).
-pub(super) fn rars_v4_encrypted_volumes(
+pub(super) fn rar4_encrypted_volume_set(
     name: &str,
     data: &[u8],
     per_vol: usize,
@@ -518,8 +526,38 @@ pub(super) fn rars_v4_encrypted_volumes(
     .unwrap()
 }
 
-/// Encrypted compressed RAR4 SINGLE volume (`-p` data encryption).
-pub(super) fn rars_v4_encrypted_volume(name: &str, data: &[u8], password: &str) -> Vec<u8> {
+/// An ENCRYPTED, compressed RAR 5 multivolume set: every member is both
+/// deflated and AES-encrypted under `password`, headers in the clear
+/// (`rar a -p`, not `-hp`).
+///
+/// The writer refuses a single-volume encrypted set, so `per_vol` must
+/// be small enough against the payload to produce at least two.
+pub(super) fn encrypted_compressed_volume_set(
+    name: &str,
+    data: &[u8],
+    per_vol: usize,
+    password: &str,
+) -> Vec<Vec<u8>> {
+    use rars::rar50::{EncryptedCompressedEntry, Rar50VolumeWriter, WriterOptions};
+    let mut features = rars::FeatureSet::store_only();
+    features.file_encryption = true;
+    Rar50VolumeWriter::new(WriterOptions::new(rars::ArchiveVersion::Rar50, features))
+        .encrypted_compressed_entries(&[EncryptedCompressedEntry {
+            name: name.as_bytes(),
+            data,
+            mtime: None,
+            attributes: 0,
+            host_os: 0,
+            password: password.as_bytes(),
+        }])
+        .max_payload_per_volume(per_vol)
+        .finish()
+        .unwrap()
+}
+
+/// An ENCRYPTED, compressed RAR 4 single archive (`-p` data
+/// encryption, headers in the clear).
+pub(super) fn rar4_encrypted_archive(name: &str, data: &[u8], password: &str) -> Vec<u8> {
     use rars::rar15_40::{FileEntry, WriterOptions, write_compressed_archive};
     use rars::{ArchiveVersion, FeatureSet};
     let mut features = FeatureSet::store_only();

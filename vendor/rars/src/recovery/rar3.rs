@@ -1,6 +1,89 @@
-const MAX_PARITY: usize = 255;
-const MAX_POLYNOMIAL: usize = 512;
-const PRIMITIVE_POLYNOMIAL: u16 = 0x11d;
+/// The most symbols a Reed-Solomon codeword over GF(2^8) can hold: the field
+/// has 255 nonzero elements and a codeword needs a distinct one per position.
+/// The parity count is bounded by the same figure.
+const SYMBOL_LIMIT: usize = 255;
+
+/// The low byte of `x^8 + x^4 + x^3 + x^2 + 1`: what a bit shifted out of the
+/// top of a byte folds back in as.
+const BYTE_FIELD_REDUCTION: u8 = 0x1d;
+
+/// `a^(i mod 255)` for the primitive element `a = 2`, for every `i` in `0..512`.
+///
+/// A product indexes it with the sum of two logarithms, each at most 254. The
+/// table is 512 entries rather than the 509 that needs because two `u8`
+/// logarithms widened and summed are at most 510, which the compiler can see
+/// is in bounds, so the lookup carries no bounds check.
+static BYTE_EXP: [u8; 512] = byte_exp_table();
+
+/// The discrete logarithm base `a` of every nonzero byte. Entry 0 is never
+/// read: every lookup handles a zero operand before indexing.
+static BYTE_LOG: [u8; 256] = byte_log_table(&BYTE_EXP);
+
+const fn byte_exp_table() -> [u8; 512] {
+    let mut table = [0u8; 512];
+    let mut value: u8 = 1;
+    let mut index = 0;
+    while index < SYMBOL_LIMIT {
+        table[index] = value;
+        let carry = value & 0x80 != 0;
+        value <<= 1;
+        if carry {
+            value ^= BYTE_FIELD_REDUCTION;
+        }
+        index += 1;
+    }
+    while index < table.len() {
+        table[index] = table[index - SYMBOL_LIMIT];
+        index += 1;
+    }
+    table
+}
+
+const fn byte_log_table(exp: &[u8; 512]) -> [u8; 256] {
+    let mut table = [0u8; 256];
+    let mut index = 0;
+    while index < SYMBOL_LIMIT {
+        table[exp[index] as usize] = index as u8;
+        index += 1;
+    }
+    table
+}
+
+/// `value * a^power`, for any `power` a `u8` holds.
+#[inline]
+fn byte_mul_by_power(value: u8, power: u8) -> u8 {
+    if value == 0 {
+        return 0;
+    }
+    BYTE_EXP[usize::from(BYTE_LOG[usize::from(value)]) + usize::from(power)]
+}
+
+/// The field product of two bytes.
+#[inline]
+fn byte_mul(left: u8, right: u8) -> u8 {
+    if right == 0 {
+        return 0;
+    }
+    byte_mul_by_power(left, BYTE_LOG[usize::from(right)])
+}
+
+/// `numerator / denominator` for a nonzero denominator.
+#[inline]
+fn byte_div(numerator: u8, denominator: u8) -> u8 {
+    // `a^-k = a^(255 - k)`, and a logarithm is at most 254.
+    byte_mul_by_power(
+        numerator,
+        (SYMBOL_LIMIT as u8) - BYTE_LOG[usize::from(denominator)],
+    )
+}
+
+/// Evaluate a polynomial, lowest power first, at `a^power`.
+#[inline]
+fn byte_poly_at(coefficients: &[u8], power: u8) -> u8 {
+    coefficients.iter().rev().fold(0, |value, &coefficient| {
+        byte_mul_by_power(value, power) ^ coefficient
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -28,194 +111,172 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The Reed-Solomon code RAR 3 `.rev` sets carry, over GF(2^8).
+///
+/// A codeword is `k` data symbols followed by `p` parity symbols, at most 255
+/// in all, and slice index 0 is the coefficient of the highest power of `x`.
+/// The generator's roots are `a^1 ..= a^p`, so a codeword is exactly a symbol
+/// sequence whose polynomial vanishes at each of them. The field tables are
+/// compile-time data, so a coder is nothing but its parity count.
 #[derive(Debug, Clone)]
-pub(crate) struct RSCoder8 {
-    parity_size: usize,
-    gf_exp: [u8; MAX_POLYNOMIAL],
-    gf_log: [u16; MAX_PARITY + 1],
-    generator: Vec<u8>,
+pub(crate) struct ByteFieldCoder {
+    parity: usize,
 }
 
-impl RSCoder8 {
-    pub(crate) fn new(parity_size: usize) -> Result<Self> {
-        if parity_size == 0 || parity_size > MAX_PARITY {
+impl ByteFieldCoder {
+    /// A coder with `parity` check symbols, `1 ..= 255`.
+    pub(crate) fn new(parity: usize) -> Result<Self> {
+        if parity == 0 || parity > SYMBOL_LIMIT {
             return Err(Error::InvalidParitySize);
         }
-        let mut coder = Self {
-            parity_size,
-            gf_exp: [0; MAX_POLYNOMIAL],
-            gf_log: [0; MAX_PARITY + 1],
-            generator: vec![0; parity_size],
-        };
-        coder.init_field();
-        coder.init_generator();
-        Ok(coder)
+        Ok(Self { parity })
     }
 
+    /// The generator `(x + a^1)(x + a^2)...(x + a^p)` below its leading 1,
+    /// lowest power first.
+    #[cfg(test)]
+    fn generator(&self) -> Vec<u8> {
+        let mut product = vec![0u8; self.parity + 1];
+        product[0] = 1;
+        for root_power in 1..=self.parity {
+            // Multiply the degree `root_power - 1` product by `(x + root)`.
+            let power = root_power as u8;
+            for degree in (1..=root_power).rev() {
+                product[degree] = product[degree - 1] ^ byte_mul_by_power(product[degree], power);
+            }
+            product[0] = byte_mul_by_power(product[0], power);
+        }
+        product.truncate(self.parity);
+        product
+    }
+
+    /// Systematic parity for `data`, highest power first: the remainder of
+    /// `data(x) * x^p` divided by the generator.
     #[cfg(test)]
     fn encode(&self, data: &[u8]) -> Vec<u8> {
-        let mut shift = vec![0u8; self.parity_size + 1];
-        for &byte in data {
-            let feedback = byte ^ shift[self.parity_size - 1];
-            for index in (1..self.parity_size).rev() {
-                shift[index] = shift[index - 1] ^ self.mul(self.generator[index], feedback);
+        let generator = self.generator();
+        let mut remainder = vec![0u8; self.parity];
+        for &symbol in data {
+            // The coefficient shifted up to `x^p`, which the generator folds
+            // back as `g_(p-1) x^(p-1) + ... + g_0`.
+            let feedback = symbol ^ remainder[0];
+            remainder.copy_within(1.., 0);
+            remainder[self.parity - 1] = 0;
+            for (slot, &coefficient) in remainder.iter_mut().zip(generator.iter().rev()) {
+                *slot ^= byte_mul(feedback, coefficient);
             }
-            shift[0] = self.mul(self.generator[0], feedback);
         }
-        (0..self.parity_size)
-            .map(|index| shift[self.parity_size - index - 1])
-            .collect()
+        remainder
     }
 
+    /// Repair the symbols at `erasures` in place.
+    ///
+    /// Erasure decoding only: the caller names every corrupt position and
+    /// nothing else is searched for. A codeword whose polynomial already
+    /// vanishes at every root is left untouched whatever `erasures` says. On
+    /// success every position, data and parity, holds its corrected value;
+    /// on any error the codeword is unchanged. Works in fixed stack scratch.
     pub(crate) fn correct_erasures(&self, codeword: &mut [u8], erasures: &[usize]) -> Result<()> {
-        if codeword.is_empty() || codeword.len() > MAX_PARITY {
+        let len = codeword.len();
+        if len == 0 || len > SYMBOL_LIMIT {
             return Err(Error::InvalidCodewordSize);
         }
-        if erasures.len() > self.parity_size {
-            return Err(Error::TooManyErasures);
-        }
-        if erasures.iter().any(|&index| index >= codeword.len()) {
-            return Err(Error::InvalidCodewordSize);
-        }
+        let parity = self.parity;
 
-        let mut syndromes = vec![0u8; self.parity_size];
-        let mut all_zero = true;
-        for (index, syndrome) in syndromes.iter_mut().enumerate() {
-            let factor = self.gf_exp[index + 1];
-            let mut sum = 0;
-            for &byte in codeword.iter() {
-                sum = byte ^ self.mul(factor, sum);
-            }
-            *syndrome = sum;
-            all_zero &= sum == 0;
+        // S_m = C(a^(m+1)), by Horner from slice index 0, the top power.
+        let mut syndromes = [0u8; SYMBOL_LIMIT];
+        let mut clean = true;
+        for (index, syndrome) in syndromes[..parity].iter_mut().enumerate() {
+            let power = (index + 1) as u8;
+            *syndrome = codeword
+                .iter()
+                .fold(0, |value, &symbol| byte_mul_by_power(value, power) ^ symbol);
+            clean &= *syndrome == 0;
         }
-        if all_zero {
+        if clean {
             return Ok(());
         }
         if erasures.is_empty() {
             return Err(Error::DecodeFailed);
         }
+        if erasures.len() > parity {
+            return Err(Error::TooManyErasures);
+        }
+        let mut erased = [false; SYMBOL_LIMIT];
+        for &position in erasures {
+            if position >= len {
+                return Err(Error::InvalidCodewordSize);
+            }
+            // A repeated position is a double root: no Forney denominator.
+            if std::mem::replace(&mut erased[position], true) {
+                return Err(Error::DecodeFailed);
+            }
+        }
 
-        let mut locator = vec![0u8; self.parity_size + 1];
+        // The erasure locator, the product of `(1 + X_e x)` with
+        // `X_e = a^(len - 1 - e)`, lowest power first.
+        let count = erasures.len();
+        let mut locator = [0u8; SYMBOL_LIMIT + 1];
         locator[0] = 1;
-        for &erasure in erasures {
-            let multiplier = self.gf_exp[codeword.len() - erasure - 1];
-            for index in (1..=self.parity_size).rev() {
-                locator[index] ^= self.mul(multiplier, locator[index - 1]);
+        for (degree, &position) in erasures.iter().enumerate() {
+            let power = (len - 1 - position) as u8;
+            for index in (1..=degree + 1).rev() {
+                locator[index] ^= byte_mul_by_power(locator[index - 1], power);
             }
         }
+        let locator = &locator[..=count];
 
-        let mut error_locs = Vec::new();
-        let mut denominators = Vec::new();
-        // Exponents are taken mod MAX_PARITY, so root 0 and root MAX_PARITY
-        // evaluate identically. A full-length codeword would scan both and
-        // record the same true root twice -- once as the valid loc 0 and once
-        // as the impossible loc MAX_PARITY, failing the decode. Start at 1 so
-        // alpha^0 is scanned exactly once; shorter codewords already do.
-        for root in (MAX_PARITY - codeword.len()).max(1)..=MAX_PARITY {
-            let mut sum = 0;
-            for (power, &coefficient) in locator.iter().enumerate() {
-                sum ^= self.mul(self.gf_exp[(power * root) % MAX_PARITY], coefficient);
-            }
-            if sum == 0 {
-                let loc = MAX_PARITY - root;
-                error_locs.push(loc);
-                let mut denominator = 0;
-                for index in (1..=self.parity_size).step_by(2) {
-                    denominator ^= self.mul(
-                        locator[index],
-                        self.gf_exp[(root * (index - 1)) % MAX_PARITY],
-                    );
-                }
-                denominators.push(denominator);
-            }
+        // The evaluator, `S(x) * L(x) mod x^p`.
+        let mut evaluator = [0u8; SYMBOL_LIMIT];
+        for (index, slot) in evaluator[..parity].iter_mut().enumerate() {
+            *slot = (0..=index.min(count)).fold(0, |value, term| {
+                value ^ byte_mul(locator[term], syndromes[index - term])
+            });
         }
-        if error_locs.is_empty() || error_locs.len() > self.parity_size {
-            return Err(Error::DecodeFailed);
-        }
+        let evaluator = &evaluator[..parity];
 
-        let evaluator = self.multiply_polynomials(&locator, &syndromes);
-        for (&loc, &denominator) in error_locs.iter().zip(&denominators) {
+        // Forney: with roots starting at `a^1`, the error at `e` is
+        // `evaluator(X_e^-1) / locator'(X_e^-1)`. Each position's root is
+        // computed from the position itself, so every field element is
+        // visited at most once and `a^0` never aliases `a^255`.
+        let mut corrections = [0u8; SYMBOL_LIMIT];
+        for (correction, &position) in corrections.iter_mut().zip(erasures) {
+            let root = (SYMBOL_LIMIT - (len - 1 - position)) as u8;
+            if byte_poly_at(locator, root) != 0 {
+                return Err(Error::DecodeFailed);
+            }
+            // The formal derivative keeps the odd-degree terms, each one
+            // power lower: a polynomial in `x^2` evaluated at `root^2`.
+            let root_squared = ((usize::from(root) * 2) % SYMBOL_LIMIT) as u8;
+            let denominator = locator
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .rev()
+                .fold(0, |value, &coefficient| {
+                    byte_mul_by_power(value, root_squared) ^ coefficient
+                });
             if denominator == 0 {
                 return Err(Error::DecodeFailed);
             }
-            let data_pos = codeword
-                .len()
-                .checked_sub(loc + 1)
-                .ok_or(Error::DecodeFailed)?;
-            let dloc = MAX_PARITY - loc;
-            let mut numerator = 0;
-            for (index, &coefficient) in evaluator.iter().enumerate() {
-                numerator ^= self.mul(coefficient, self.gf_exp[(dloc * index) % MAX_PARITY]);
-            }
-            let correction = self.mul(
-                numerator,
-                self.gf_exp[MAX_PARITY - usize::from(self.gf_log[denominator as usize])],
-            );
-            codeword[data_pos] ^= correction;
+            *correction = byte_div(byte_poly_at(evaluator, root), denominator);
+        }
+        for (&correction, &position) in corrections.iter().zip(erasures) {
+            codeword[position] ^= correction;
         }
         Ok(())
     }
 
-    fn init_field(&mut self) {
-        let mut value = 1u16;
-        for index in 0..MAX_PARITY {
-            self.gf_log[value as usize] = index as u16;
-            self.gf_exp[index] = value as u8;
-            value <<= 1;
-            if value > 0xff {
-                value ^= PRIMITIVE_POLYNOMIAL;
-            }
-        }
-        for index in MAX_PARITY..MAX_POLYNOMIAL {
-            self.gf_exp[index] = self.gf_exp[index - MAX_PARITY];
-        }
-    }
-
-    fn init_generator(&mut self) {
-        let mut current = vec![0u8; self.parity_size];
-        current[0] = 1;
-        for index in 1..=self.parity_size {
-            let mut factor = vec![0u8; self.parity_size];
-            factor[0] = self.gf_exp[index];
-            if self.parity_size > 1 {
-                factor[1] = 1;
-            }
-            self.generator = self.multiply_polynomials(&factor, &current);
-            current.clone_from(&self.generator);
-        }
-    }
-
-    fn multiply_polynomials(&self, left: &[u8], right: &[u8]) -> Vec<u8> {
-        let mut out = vec![0u8; self.parity_size];
-        for left_index in 0..self.parity_size {
-            if left.get(left_index).copied().unwrap_or(0) == 0 {
-                continue;
-            }
-            for right_index in 0..(self.parity_size - left_index) {
-                out[left_index + right_index] ^= self.mul(
-                    left[left_index],
-                    right.get(right_index).copied().unwrap_or(0),
-                );
-            }
-        }
-        out
-    }
-
-    fn mul(&self, left: u8, right: u8) -> u8 {
-        if left == 0 || right == 0 {
-            0
-        } else {
-            self.gf_exp[usize::from(self.gf_log[left as usize] + self.gf_log[right as usize])]
-        }
-    }
-
-    /// Multiply-by-constant lookup, so bulk reconstruction costs one indexed
-    /// load per byte instead of two log lookups, an add, and a branch.
-    fn mul_table(&self, coefficient: u8) -> [u8; 256] {
+    /// `table[v]` is `coefficient * v` for every byte `v`, so a bulk multiply
+    /// is one load per byte.
+    pub(crate) fn mul_table(&self, coefficient: u8) -> [u8; 256] {
         let mut table = [0u8; 256];
-        for (value, slot) in table.iter_mut().enumerate() {
-            *slot = self.mul(coefficient, value as u8);
+        if coefficient == 0 {
+            return table;
+        }
+        let power = BYTE_LOG[usize::from(coefficient)];
+        for (value, slot) in table.iter_mut().enumerate().skip(1) {
+            *slot = byte_mul_by_power(value as u8, power);
         }
         table
     }
@@ -240,9 +301,9 @@ const RECONSTRUCT_CHUNK: usize = 64 * 1024;
 /// serial time, 2 MiB 0.63-0.98x, 3 MiB 0.49-0.78x, 8 MiB 0.31-0.46x. On an
 /// M3 Ultra (32 threads): 2 MiB 1.12x cold, 3 MiB 0.49-0.82x, 4 MiB
 /// 0.40-0.69x. 128 KiB a thread wins on both (2.5 MiB at 20 threads, 4 MiB
-/// at 32), floored at the 2 MiB the 20-thread box measured. nzbfast's
-/// vendored copy folds one byte at a time here, which costs more per byte
-/// still, so the team pays at least as early there. See the host repo's
+/// at 32), floored at the 2 MiB the 20-thread box measured. This tree folds whole
+/// sources four to a pass; nzbfast's vendored copy folds one byte at a time,
+/// which costs more per byte, so the team pays at least as early there. See the host repo's
 /// `research/RARFAST-BENCH-2026-09-14.md` section 14 (nzbfast-local change,
 /// 15 Sep 2026; see VENDORING.md).
 #[cfg(feature = "parallel")]
@@ -273,7 +334,7 @@ fn reconstruct_on_team(volume_len: usize, sources: usize) -> bool {
 /// A unit codeword always has non-zero syndromes, so no probe can take the
 /// clean-codeword early return and silently yield an all-zero column.
 fn erasure_correction_matrix(
-    coder: &RSCoder8,
+    coder: &ByteFieldCoder,
     codeword_len: usize,
     erasures: &[usize],
     known: &[(usize, &[u8])],
@@ -299,10 +360,10 @@ pub fn reconstruct_data_volumes(
     recovery_count: usize,
     recovery_volumes: &[(usize, &[u8])],
 ) -> Result<Vec<Vec<u8>>> {
-    if data_volumes.is_empty() || data_volumes.len() + recovery_count > MAX_PARITY {
+    if data_volumes.is_empty() || data_volumes.len() + recovery_count > SYMBOL_LIMIT {
         return Err(Error::InvalidCodewordSize);
     }
-    if recovery_volumes.is_empty() || recovery_count == 0 || recovery_count > MAX_PARITY {
+    if recovery_volumes.is_empty() || recovery_count == 0 || recovery_count > SYMBOL_LIMIT {
         return Err(Error::InvalidParitySize);
     }
     let shard_len = recovery_volumes[0].1.len();
@@ -356,7 +417,7 @@ pub fn reconstruct_data_volumes(
         return Err(Error::TooManyErasures);
     }
 
-    let coder = RSCoder8::new(recovery_count)?;
+    let coder = ByteFieldCoder::new(recovery_count)?;
     let mut out: Vec<Vec<u8>> = data_volumes
         .iter()
         .map(|data| {
@@ -417,9 +478,14 @@ pub fn reconstruct_data_volumes(
 
     // Accumulate one chunk of one rebuilt volume: every surviving volume's
     // matching bytes, each scaled by its coefficient and folded in. The
-    // destination stays in cache while the sources stream past it.
+    // destination stays in cache while the sources stream past it, and the
+    // sources that cover the whole chunk are folded four to a pass, so the
+    // destination is rewritten a quarter as often. Still one table load per
+    // source byte.
     let fold_chunk = |destination: &mut [u8], row: usize, start: usize| {
         let end = start + destination.len();
+        let mut whole: [(&[u8; 256], &[u8]); SYMBOL_LIMIT] = [(&[0; 256], &[]); SYMBOL_LIMIT];
+        let mut whole_count = 0;
         for (slot, &(_, data)) in known.iter().enumerate() {
             let Some(table) = &tables[row][slot] else {
                 continue;
@@ -430,7 +496,29 @@ pub fn reconstruct_data_volumes(
             if available <= start {
                 continue;
             }
+            if available == end {
+                whole[whole_count] = (table, &data[start..end]);
+                whole_count += 1;
+                continue;
+            }
             for (byte, &symbol) in destination.iter_mut().zip(&data[start..available]) {
+                *byte ^= table[usize::from(symbol)];
+            }
+        }
+        let mut quads = whole[..whole_count].chunks_exact(4);
+        for quad in &mut quads {
+            let [(t0, s0), (t1, s1), (t2, s2), (t3, s3)] = [quad[0], quad[1], quad[2], quad[3]];
+            for ((((byte, &b0), &b1), &b2), &b3) in
+                destination.iter_mut().zip(s0).zip(s1).zip(s2).zip(s3)
+            {
+                *byte ^= t0[usize::from(b0)]
+                    ^ t1[usize::from(b1)]
+                    ^ t2[usize::from(b2)]
+                    ^ t3[usize::from(b3)];
+            }
+        }
+        for &(table, source) in quads.remainder() {
+            for (byte, &symbol) in destination.iter_mut().zip(source) {
                 *byte ^= table[usize::from(symbol)];
             }
         }
@@ -562,8 +650,8 @@ fn padded_sector(protected: &[u8], index: usize) -> [u8; RECOVERY_SECTOR_LEN] {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_newsub_recovery_data, plan_newsub_recovery, reconstruct_data_volumes, Error,
-        RSCoder8, MAX_PARITY, RECOVERY_SECTOR_LEN,
+        build_newsub_recovery_data, byte_mul, plan_newsub_recovery, reconstruct_data_volumes,
+        ByteFieldCoder, Error, BYTE_EXP, BYTE_LOG, RECOVERY_SECTOR_LEN, SYMBOL_LIMIT,
     };
 
     #[test]
@@ -643,7 +731,7 @@ mod tests {
     fn reconstruct_per_symbol(
         data_volumes: &[Option<&[u8]>],
         recovery_by_index: &[Option<&[u8]>],
-        coder: &RSCoder8,
+        coder: &ByteFieldCoder,
         erasures: &[usize],
         missing_data: &[usize],
         shard_len: usize,
@@ -694,7 +782,7 @@ mod tests {
         let mut erasures = missing_data.clone();
         erasures.extend(missing_recovery);
 
-        let coder = RSCoder8::new(recovery_count)?;
+        let coder = ByteFieldCoder::new(recovery_count)?;
         let out: Vec<Vec<u8>> = data_volumes
             .iter()
             .map(|data| {
@@ -751,17 +839,17 @@ mod tests {
             }
         }
         super::erasure_correction_matrix(
-            &RSCoder8::new(recovery_count)?,
+            &ByteFieldCoder::new(recovery_count)?,
             data_volumes.len() + recovery_count,
             &erasures,
             &known,
         )
     }
 
-    /// Column-wise RS(255) parity over the same generator `RSCoder8` builds,
+    /// Column-wise RS(255) parity over the same generator `ByteFieldCoder` builds,
     /// i.e. the shape a real .rev set carries.
     fn encode_columns(data: &[Vec<u8>], recovery_count: usize, shard_len: usize) -> Vec<Vec<u8>> {
-        let coder = RSCoder8::new(recovery_count).unwrap();
+        let coder = ByteFieldCoder::new(recovery_count).unwrap();
         let mut parity = vec![vec![0u8; shard_len]; recovery_count];
         for offset in 0..shard_len {
             let column: Vec<u8> = data
@@ -901,7 +989,7 @@ mod tests {
 
     #[test]
     fn max_parity_bound_is_unchanged() {
-        assert_eq!(MAX_PARITY, 255);
+        assert_eq!(SYMBOL_LIMIT, 255);
     }
 
     /// Full-length codeword, last position erased: root 0 and root 255 are
@@ -912,8 +1000,8 @@ mod tests {
     fn full_length_codeword_repairs_last_position() {
         let data_count = 250;
         let recovery_count = 5;
-        assert_eq!(data_count + recovery_count, MAX_PARITY);
-        let coder = RSCoder8::new(recovery_count).unwrap();
+        assert_eq!(data_count + recovery_count, SYMBOL_LIMIT);
+        let coder = ByteFieldCoder::new(recovery_count).unwrap();
 
         let data = pseudorandom(data_count, 0xC0DE);
         let parity = coder.encode(&data);
@@ -922,7 +1010,7 @@ mod tests {
 
         // Erase the last data symbol (position 254 of the codeword is parity;
         // exercise both the last data position and the very last position).
-        for &erased in &[data_count - 1, MAX_PARITY - 1] {
+        for &erased in &[data_count - 1, SYMBOL_LIMIT - 1] {
             let mut damaged = codeword.clone();
             damaged[erased] = damaged[erased].wrapping_add(1);
             coder.correct_erasures(&mut damaged, &[erased]).unwrap();
@@ -957,7 +1045,7 @@ mod tests {
     fn no_full_length_erasure_set_needs_a_per_byte_fallback() {
         let shard_len = 8;
         for &(data_count, recovery_count) in &[(200usize, 55usize), (250, 5), (128, 127)] {
-            assert_eq!(data_count + recovery_count, MAX_PARITY);
+            assert_eq!(data_count + recovery_count, SYMBOL_LIMIT);
             let volumes: Vec<Vec<u8>> = (0..data_count)
                 .map(|index| pseudorandom(shard_len, 0xA11A + index as u64))
                 .collect();
@@ -993,17 +1081,17 @@ mod tests {
     }
 
     #[test]
-    fn rs8_encoder_matches_unrar_generator_shape() {
-        let coder = RSCoder8::new(11).unwrap();
+    fn rs8_generator_polynomial_is_pinned() {
+        let coder = ByteFieldCoder::new(11).unwrap();
         assert_eq!(
-            coder.generator,
+            coder.generator(),
             vec![97, 180, 203, 151, 195, 196, 219, 7, 113, 50, 69]
         );
     }
 
     #[test]
     fn rs8_reconstructs_single_erased_data_symbol() {
-        let coder = RSCoder8::new(4).unwrap();
+        let coder = ByteFieldCoder::new(4).unwrap();
         let data = b"rar recovery data";
         let parity = coder.encode(data);
         let mut codeword = [data.as_slice(), parity.as_slice()].concat();
@@ -1017,7 +1105,7 @@ mod tests {
 
     #[test]
     fn rs8_reconstructs_multiple_erased_symbols_including_parity() {
-        let coder = RSCoder8::new(5).unwrap();
+        let coder = ByteFieldCoder::new(5).unwrap();
         let data = b"rar3-rs8";
         let parity = coder.encode(data);
         let mut codeword = [data.as_slice(), parity.as_slice()].concat();
@@ -1033,7 +1121,7 @@ mod tests {
 
     #[test]
     fn rs8_rejects_more_erasures_than_parity_symbols() {
-        let coder = RSCoder8::new(2).unwrap();
+        let coder = ByteFieldCoder::new(2).unwrap();
         let mut codeword = b"abcde".to_vec();
 
         assert_eq!(
@@ -1093,7 +1181,7 @@ mod tests {
             b"volume-three".as_slice(),
         ];
         let recovery_count = 2;
-        let coder = RSCoder8::new(recovery_count).unwrap();
+        let coder = ByteFieldCoder::new(recovery_count).unwrap();
         let shard_len = data.iter().map(|shard| shard.len()).max().unwrap();
         let mut recovery = vec![vec![0; shard_len]; recovery_count];
         for offset in 0..shard_len {
@@ -1115,5 +1203,270 @@ mod tests {
         .unwrap();
 
         assert_eq!(&repaired[1][..data[1].len()], data[1]);
+    }
+
+    /// Bitwise multiply straight from the field definition, sharing nothing
+    /// with the tables.
+    fn bitwise_byte_mul(mut left: u8, mut right: u8) -> u8 {
+        let mut product = 0;
+        while right != 0 {
+            if right & 1 != 0 {
+                product ^= left;
+            }
+            let carry = left & 0x80 != 0;
+            left <<= 1;
+            if carry {
+                left ^= 0x1d;
+            }
+            right >>= 1;
+        }
+        product
+    }
+
+    #[test]
+    fn byte_field_tables_match_the_field_definition() {
+        assert_eq!(BYTE_EXP[0], 1);
+        for index in 1..BYTE_EXP.len() {
+            let shifted = u16::from(BYTE_EXP[index - 1]) << 1;
+            let expected = if shifted > 0xff {
+                shifted ^ 0x11d
+            } else {
+                shifted
+            };
+            assert_eq!(u16::from(BYTE_EXP[index]), expected, "exponent {index}");
+        }
+        assert_eq!(BYTE_EXP[255], 1, "a^255 is a^0");
+        for power in 0..SYMBOL_LIMIT {
+            assert_eq!(usize::from(BYTE_LOG[usize::from(BYTE_EXP[power])]), power);
+        }
+        for value in 1..=255u8 {
+            assert_eq!(BYTE_EXP[usize::from(BYTE_LOG[usize::from(value)])], value);
+        }
+        assert_eq!(byte_mul(2, 2), 4);
+        let coder = ByteFieldCoder::new(1).unwrap();
+        for coefficient in 0..=255u8 {
+            let table = coder.mul_table(coefficient);
+            for value in 0..=255u8 {
+                let expected = bitwise_byte_mul(coefficient, value);
+                assert_eq!(table[usize::from(value)], expected);
+                assert_eq!(byte_mul(coefficient, value), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn parity_counts_outside_one_to_255_are_refused() {
+        assert_eq!(
+            ByteFieldCoder::new(0).unwrap_err(),
+            Error::InvalidParitySize
+        );
+        assert_eq!(
+            ByteFieldCoder::new(256).unwrap_err(),
+            Error::InvalidParitySize
+        );
+        assert!(ByteFieldCoder::new(1).is_ok());
+        assert!(ByteFieldCoder::new(255).is_ok());
+    }
+
+    /// Whatever the erasure list, a codeword that is already consistent is
+    /// left exactly as it was.
+    #[test]
+    fn a_clean_codeword_is_left_alone_whatever_the_erasure_list() {
+        let coder = ByteFieldCoder::new(4).unwrap();
+        let data = pseudorandom(20, 7);
+        let original = [data.as_slice(), &coder.encode(&data)].concat();
+        for erasures in [&[][..], &[0, 5, 23][..], &[0, 1, 2, 3, 4, 5][..]] {
+            let mut codeword = original.clone();
+            coder.correct_erasures(&mut codeword, erasures).unwrap();
+            assert_eq!(codeword, original, "erasures {erasures:?}");
+        }
+        let mut zeros = vec![0u8; 24];
+        coder.correct_erasures(&mut zeros, &[3]).unwrap();
+        assert!(zeros.iter().all(|&byte| byte == 0));
+    }
+
+    /// Requests the decoder cannot honour are refused by name and leave the
+    /// codeword untouched, never a guessed repair.
+    #[test]
+    fn malformed_decode_requests_are_refused_and_change_nothing() {
+        let coder = ByteFieldCoder::new(3).unwrap();
+        let data = b"adversarial";
+        let clean = [data.as_slice(), &coder.encode(data)].concat();
+        let mut damaged = clean.clone();
+        damaged[2] ^= 0x40;
+
+        let refusals: [(&[usize], Error); 4] = [
+            (&[clean.len()], Error::InvalidCodewordSize),
+            (&[], Error::DecodeFailed),
+            (&[2, 2], Error::DecodeFailed),
+            (&[0, 1, 2, 3], Error::TooManyErasures),
+        ];
+        for (erasures, error) in refusals {
+            let mut codeword = damaged.clone();
+            assert_eq!(coder.correct_erasures(&mut codeword, erasures), Err(error));
+            assert_eq!(codeword, damaged, "erasures {erasures:?}");
+        }
+        assert_eq!(
+            coder.correct_erasures(&mut [], &[]),
+            Err(Error::InvalidCodewordSize)
+        );
+        let mut long = vec![1u8; SYMBOL_LIMIT + 1];
+        assert_eq!(
+            coder.correct_erasures(&mut long, &[0]),
+            Err(Error::InvalidCodewordSize)
+        );
+        let mut codeword = damaged.clone();
+        coder.correct_erasures(&mut codeword, &[2]).unwrap();
+        assert_eq!(codeword, clean);
+    }
+
+    /// Every erasure pattern of every size on short codewords, including
+    /// full-length ones, where the last position's root is `a^0`.
+    #[test]
+    fn every_erasure_subset_up_to_the_budget_repairs_the_codeword() {
+        for &(data_len, parity) in &[(5usize, 3usize), (1, 4), (250, 5), (252, 3)] {
+            let coder = ByteFieldCoder::new(parity).unwrap();
+            let data = pseudorandom(data_len, 0xE7A5 + data_len as u64);
+            let clean = [data.as_slice(), &coder.encode(&data)].concat();
+            let len = clean.len();
+            // Small codewords try every subset; long ones every subset of the
+            // first and last few positions.
+            let candidates: Vec<usize> = if len <= 8 {
+                (0..len).collect()
+            } else {
+                (0..3).chain(len - 5..len).collect()
+            };
+            for mask in 1u32..(1 << candidates.len()) {
+                let erasures: Vec<usize> = candidates
+                    .iter()
+                    .enumerate()
+                    .filter(|&(bit, _)| mask & (1 << bit) != 0)
+                    .map(|(_, &position)| position)
+                    .collect();
+                let mut codeword = clean.clone();
+                for &position in &erasures {
+                    codeword[position] ^= 0x5a;
+                }
+                let result = coder.correct_erasures(&mut codeword, &erasures);
+                if erasures.len() > parity {
+                    assert_eq!(result, Err(Error::TooManyErasures));
+                } else {
+                    result.unwrap();
+                    assert_eq!(codeword, clean, "{data_len}+{parity} erasures {erasures:?}");
+                }
+            }
+        }
+    }
+
+    /// Random geometries and erasure patterns under, at and past the parity
+    /// budget, through the volume path: every decodable set rebuilds the
+    /// original volumes and agrees with the per-byte loop, and one erasure
+    /// too many is refused by name.
+    #[test]
+    fn random_erasure_patterns_rebuild_or_refuse() {
+        let mut state = 0x5EED_CAFE_u64;
+        let mut next = move |bound: usize| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as usize) % bound
+        };
+        let (mut at_limit, mut past_limit) = (0, 0);
+        for round in 0..80u64 {
+            let recovery_count = 1 + next(12);
+            let data_count = if round % 8 == 0 {
+                SYMBOL_LIMIT - recovery_count
+            } else {
+                1 + next(40)
+            };
+            let shard_len = 1 + next(if data_count > 100 { 16 } else { 300 });
+            let mut volumes: Vec<Vec<u8>> = (0..data_count)
+                .map(|index| pseudorandom(shard_len, round * 1000 + index as u64))
+                .collect();
+            let ragged = 1 + next(shard_len);
+            volumes[data_count - 1].truncate(ragged);
+            let parity = encode_columns(&volumes, recovery_count, shard_len);
+
+            // Distinct random picks: a partial shuffle of each index range.
+            let mut data_order: Vec<usize> = (0..data_count).collect();
+            let mut recovery_order: Vec<usize> = (0..recovery_count).collect();
+            for order in [&mut data_order, &mut recovery_order] {
+                for slot in 0..order.len() {
+                    let pick = slot + next(order.len() - slot);
+                    order.swap(slot, pick);
+                }
+            }
+            let wanted = 1 + next(recovery_count + 1);
+            let missing_data = (1 + next(wanted)).min(data_count);
+            // At least one recovery volume must survive to name the shard length.
+            let missing_recovery = (wanted - missing_data.min(wanted)).min(recovery_count - 1);
+            let erasures = missing_data + missing_recovery;
+
+            let mut present: Vec<Option<&[u8]>> =
+                volumes.iter().map(|shard| Some(shard.as_slice())).collect();
+            for &index in &data_order[..missing_data] {
+                present[index] = None;
+            }
+            let recovery: Vec<(usize, &[u8])> = recovery_order[missing_recovery..]
+                .iter()
+                .map(|&index| (index, parity[index].as_slice()))
+                .collect();
+
+            let rebuilt = reconstruct_data_volumes(&present, recovery_count, &recovery);
+            if erasures > recovery_count {
+                past_limit += 1;
+                assert_eq!(rebuilt, Err(Error::TooManyErasures), "round {round}");
+                continue;
+            }
+            at_limit += usize::from(erasures == recovery_count);
+            let rebuilt = rebuilt.unwrap_or_else(|error| panic!("round {round}: {error}"));
+            assert_eq!(
+                Ok(&rebuilt),
+                reconstruct_reference(&present, recovery_count, &recovery).as_ref(),
+                "round {round}"
+            );
+            for (index, volume) in volumes.iter().enumerate() {
+                assert_eq!(
+                    &rebuilt[index][..volume.len()],
+                    volume.as_slice(),
+                    "round {round}"
+                );
+                assert!(rebuilt[index][volume.len()..].iter().all(|&byte| byte == 0));
+            }
+        }
+        assert!(
+            at_limit > 0 && past_limit > 0,
+            "{at_limit} at, {past_limit} past"
+        );
+    }
+
+    /// The 64 MiB repair the clean-room spec measures: 16 data volumes of
+    /// 4 MiB, 3 recovery volumes, one data volume missing. Timing only; run
+    /// in release with `--ignored --nocapture` and read the best of seven.
+    #[test]
+    #[ignore = "timing harness, run by hand in release"]
+    fn rev3_repair_64mib_throughput() {
+        const SHARD: usize = 4 * 1024 * 1024;
+        let volumes: Vec<Vec<u8>> = (0..16)
+            .map(|index| pseudorandom(SHARD, 0xB3AC + index as u64))
+            .collect();
+        let parity = encode_columns(&volumes, 3, SHARD);
+        let mut present: Vec<Option<&[u8]>> =
+            volumes.iter().map(|shard| Some(shard.as_slice())).collect();
+        present[5] = None;
+        let recovery = [(0usize, parity[0].as_slice())];
+
+        let mut best = f64::MAX;
+        for _ in 0..7 {
+            let start = std::time::Instant::now();
+            let rebuilt = reconstruct_data_volumes(&present, 3, &recovery).unwrap();
+            best = best.min(start.elapsed().as_secs_f64());
+            assert_eq!(rebuilt[5], volumes[5]);
+        }
+        println!(
+            "rev3 64 MiB repair: best {:.2} ms, {:.0} MiB/s",
+            best * 1e3,
+            64.0 / best
+        );
     }
 }

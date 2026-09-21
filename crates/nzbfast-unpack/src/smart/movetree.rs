@@ -288,7 +288,7 @@ pub fn dst_is_src_or_inside(src: &Path, dst: &Path) -> bool {
 /// but renames. Different filesystems - a NAS share is the whole point
 /// of this helper - means the bytes have to be copied, so the tree is
 /// staged beside the destination and published only once it is whole:
-/// see [`staged_move`]. A name collision keeps the existing destination
+/// see `staged_move`. A name collision keeps the existing destination
 /// file and lands ours beside it with a " (n)" suffix - completed
 /// downloads are never overwritten. Empty source dirs are removed as
 /// they drain.

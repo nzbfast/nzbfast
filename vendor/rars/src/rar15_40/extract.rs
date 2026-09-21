@@ -4,21 +4,21 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
 enum CodecState {
-    Unpack15(Box<Unpack15>),
-    Unpack20(Box<Unpack20>),
-    Unpack29(Box<Unpack29>),
+    Rar15(Box<Rar15Decoder>),
+    Rar20Decoder(Box<Rar20Decoder>),
+    Rar29Decoder(Box<Rar29Decoder>),
 }
 
 impl CodecState {
     fn new_for(file: &FileHeader) -> Result<Self> {
         if file.unp_ver >= 29 {
-            return Ok(Self::Unpack29(Box::default()));
+            return Ok(Self::Rar29Decoder(Box::default()));
         }
         if file.unp_ver == 20 || file.unp_ver == 26 {
-            return Ok(Self::Unpack20(Box::default()));
+            return Ok(Self::Rar20Decoder(Box::default()));
         }
         if file.unp_ver == 15 {
-            return Ok(Self::Unpack15(Box::default()));
+            return Ok(Self::Rar15(Box::default()));
         }
         Err(Error::UnsupportedCompression {
             family: "RAR 1.5-4.x",
@@ -29,9 +29,9 @@ impl CodecState {
 
     fn supports(&self, file: &FileHeader) -> bool {
         match self {
-            Self::Unpack15(_) => file.unp_ver == 15,
-            Self::Unpack20(_) => file.unp_ver == 20 || file.unp_ver == 26,
-            Self::Unpack29(_) => file.unp_ver >= 29,
+            Self::Rar15(_) => file.unp_ver == 15,
+            Self::Rar20Decoder(_) => file.unp_ver == 20 || file.unp_ver == 26,
+            Self::Rar29Decoder(_) => file.unp_ver >= 29,
         }
     }
 
@@ -43,7 +43,7 @@ impl CodecState {
         password: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
         match self {
-            Self::Unpack15(decoder) => {
+            Self::Rar15(decoder) => {
                 if file.is_encrypted() {
                     let mut packed = file
                         .packed_reader_for_decode(archive, password)
@@ -62,11 +62,13 @@ impl CodecState {
                         .map_err(Into::into)
                         .map_err(|error| file.map_encrypted_payload_error(password, error))
                 } else {
-                    file.unpacked_data_with_unpack15(archive, decoder, solid)
+                    file.unpacked_data_with_rar15(archive, decoder, solid)
                 }
             }
-            Self::Unpack20(decoder) => file.unpacked_data_with_unpack20(archive, decoder, password),
-            Self::Unpack29(decoder) => {
+            Self::Rar20Decoder(decoder) => {
+                file.unpacked_data_with_unpack20(archive, decoder, password)
+            }
+            Self::Rar29Decoder(decoder) => {
                 if file.is_encrypted() {
                     let mut packed = file
                         .packed_reader_for_decode(archive, password)
@@ -99,11 +101,9 @@ impl CodecState {
         out: &mut impl Write,
     ) -> Result<()> {
         match self {
-            Self::Unpack15(decoder) => {
-                file.write_unpack15_to(archive, decoder, solid, password, out)
-            }
-            Self::Unpack20(decoder) => file.write_unpack20_to(archive, decoder, password, out),
-            Self::Unpack29(decoder) => {
+            Self::Rar15(decoder) => file.write_rar15_to(archive, decoder, solid, password, out),
+            Self::Rar20Decoder(decoder) => file.write_unpack20_to(archive, decoder, password, out),
+            Self::Rar29Decoder(decoder) => {
                 if file.is_encrypted() {
                     let mut crc = Crc32::new();
                     let mut crc_writer = CrcWriter {
@@ -174,15 +174,15 @@ impl CodecState {
         let target = usize::try_from(file.unp_size)
             .map_err(|_| Error::InvalidHeader("RAR 1.5 split unpacked size overflows usize"))?;
         match self {
-            Self::Unpack15(decoder) => decoder
+            Self::Rar15(decoder) => decoder
                 .decode_member_from_reader(input, target, solid, &mut crc_writer)
                 .map_err(Error::from)
                 .map_err(|error| file.map_encrypted_payload_error(password, error))?,
-            Self::Unpack20(decoder) => decoder
+            Self::Rar20Decoder(decoder) => decoder
                 .decode_member_from_reader(input, target, &mut crc_writer)
                 .map_err(Error::from)
                 .map_err(|error| file.map_encrypted_payload_error(password, error))?,
-            Self::Unpack29(decoder) => if solid {
+            Self::Rar29Decoder(decoder) => if solid {
                 decoder.decode_member_from_reader(input, target, &mut crc_writer)
             } else {
                 decoder.decode_non_solid_member_from_reader(input, target, &mut crc_writer)
@@ -2017,27 +2017,27 @@ mod tests {
         f.unp_ver = 15;
         assert!(matches!(
             CodecState::new_for(&f).unwrap(),
-            CodecState::Unpack15(_)
+            CodecState::Rar15(_)
         ));
         f.unp_ver = 20;
         assert!(matches!(
             CodecState::new_for(&f).unwrap(),
-            CodecState::Unpack20(_)
+            CodecState::Rar20Decoder(_)
         ));
         f.unp_ver = 26;
         assert!(matches!(
             CodecState::new_for(&f).unwrap(),
-            CodecState::Unpack20(_)
+            CodecState::Rar20Decoder(_)
         ));
         f.unp_ver = 29;
         assert!(matches!(
             CodecState::new_for(&f).unwrap(),
-            CodecState::Unpack29(_)
+            CodecState::Rar29Decoder(_)
         ));
         f.unp_ver = 36;
         assert!(matches!(
             CodecState::new_for(&f).unwrap(),
-            CodecState::Unpack29(_)
+            CodecState::Rar29Decoder(_)
         ));
         f.unp_ver = 14;
         f.method = 0x35;
@@ -2056,12 +2056,12 @@ mod tests {
         let mut f = file(b"a", 0);
 
         f.unp_ver = 15;
-        let unpack15 = CodecState::new_for(&f).unwrap();
-        assert!(unpack15.supports(&f));
+        let rar15 = CodecState::new_for(&f).unwrap();
+        assert!(rar15.supports(&f));
         f.unp_ver = 20;
-        assert!(!unpack15.supports(&f));
+        assert!(!rar15.supports(&f));
         f.unp_ver = 29;
-        assert!(!unpack15.supports(&f));
+        assert!(!rar15.supports(&f));
 
         f.unp_ver = 20;
         let unpack20 = CodecState::new_for(&f).unwrap();
@@ -2115,7 +2115,7 @@ mod tests {
 
         assert!(out.is_empty());
         assert_eq!(session.decoded_files, 4);
-        assert!(matches!(session.codec, Some(CodecState::Unpack29(_))));
+        assert!(matches!(session.codec, Some(CodecState::Rar29Decoder(_))));
     }
 
     #[test]
@@ -2505,19 +2505,19 @@ mod tests {
         f.unp_ver = 20;
         assert!(matches!(
             session.codec_for(&f).unwrap(),
-            CodecState::Unpack20(_)
+            CodecState::Rar20Decoder(_)
         ));
         let mut g = file(b"b", 0);
         g.unp_ver = 29;
         assert!(matches!(
             session.codec_for(&g).unwrap(),
-            CodecState::Unpack29(_)
+            CodecState::Rar29Decoder(_)
         ));
         let mut h = file(b"c", 0);
         h.unp_ver = 15;
         assert!(matches!(
             session.codec_for(&h).unwrap(),
-            CodecState::Unpack15(_)
+            CodecState::Rar15(_)
         ));
     }
 

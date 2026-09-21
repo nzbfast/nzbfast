@@ -94,7 +94,15 @@ pub enum SegMigState {
     /// Rows still to copy into the staging table. `copied` is the
     /// cursor; `total` the current highest rowid (an upper bound on the
     /// rows, not a count - the table has gaps).
-    Copying { copied: i64, total: i64 },
+    Copying {
+        /// The cursor: rows copied into the staging table so far, and
+        /// where the next slice resumes.
+        copied: i64,
+        /// The current highest rowid. An UPPER BOUND on the work, not
+        /// a row count - the table has gaps - so a progress figure
+        /// derived from it under-reports.
+        total: i64,
+    },
     /// The copy reached the end of the table; the swap is next.
     Swappable,
     /// Swapped; `files_old` still holds rows to delete.
@@ -104,7 +112,10 @@ pub enum SegMigState {
 /// What one copy slice did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SegMigCopy {
+    /// Rows this slice copied.
     pub rows: u64,
+    /// Transactions it used to do it. The slice commits in chunks so
+    /// it never holds one long write lock over the whole batch.
     pub chunks: u64,
     /// The slice ran out of rows: the copy is complete.
     pub finished: bool,

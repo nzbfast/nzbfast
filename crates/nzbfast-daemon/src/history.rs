@@ -965,7 +965,7 @@ pub(crate) fn publishes_as_failed(j: &Job) -> bool {
     sab_history_status_published(j).1 == "Failed"
 }
 
-/// [`publishes_as_failed`] for the whole history, keyed by nzo_id and
+/// `publishes_as_failed` for the whole history, keyed by nzo_id and
 /// taken OFF the global history lock - the same shape `history_page`
 /// opens with, and for the same reason.
 ///

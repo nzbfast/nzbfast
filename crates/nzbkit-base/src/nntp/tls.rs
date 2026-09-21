@@ -163,7 +163,7 @@ fn extra_ca_override() -> &'static std::sync::Mutex<Option<std::path::PathBuf>> 
 /// the environment, which `crates/nzbkit/tests/integration/` - one
 /// binary of twenty-odd modules on parallel threads, all reading
 /// `NZBFAST_*` - is not. Changing the anchors after a connection has
-/// been made takes effect: [`tls_client_config`] keys its cache on this
+/// been made takes effect: `tls_client_config` keys its cache on this
 /// path.
 pub fn set_extra_ca(path: Option<std::path::PathBuf>) {
     *extra_ca_override().lock_ok() = path;
@@ -313,7 +313,7 @@ pub(super) async fn tls_handshake(
 /// connection would, and report `(protocol, cipher suite)`. Answers the
 /// only question that matters when tuning the AEAD cost - what the
 /// server actually PICKED, which under TLS 1.3 is its choice from our
-/// offer, not ours (see [`tls_provider`]). No NNTP traffic, no
+/// offer, not ours (see `tls_provider`). No NNTP traffic, no
 /// credentials sent.
 pub async fn probe_tls(host: &str, port: u16) -> Result<(String, String), NntpError> {
     // Bounded like every production connect: a single-candidate dial gets

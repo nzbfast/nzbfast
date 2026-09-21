@@ -369,7 +369,7 @@ pub fn check_rejects(psw_check: &[u8; 8], stored: &[u8; 12]) -> bool {
 /// STRONGER than the 8-byte password check: it proves the key AND that
 /// every plaintext byte matches what the poster packed. That makes it a
 /// usable password gate for a set whose crypt record carries no
-/// (well-formed) check value at all - see [`Rar5Keys::hash_key`].
+/// (well-formed) check value at all - see `Rar5Keys::hash_key`.
 pub fn mac_crc32_with_key(hash_key: &[u8; 32], crc: u32) -> u32 {
     let mut mac =
         <HmacSha256 as MacKeyInit>::new_from_slice(hash_key).expect("HMAC accepts any key length");

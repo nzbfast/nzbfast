@@ -17,7 +17,8 @@ mod write;
 
 pub use extract::{
     extract_volume_sequence_to, extract_volume_sequence_to_with_progress, extract_volumes_to,
-    extract_volumes_to_with_progress, extract_volumes_to_with_redirections,
+    extract_volumes_to_concurrent, extract_volumes_to_with_progress,
+    extract_volumes_to_with_redirections, ConcurrentOpen,
 };
 pub use write::reference::{
     assemble, assemble_streamed, assemble_with_recovery, comment_header, member_header,
@@ -26,8 +27,9 @@ pub use write::reference::{
     ReferenceQuickOpen, ReferenceStreamedMember, ReferenceVolumeSet, RAR5_SIGNATURE,
 };
 pub use write::rev::{
-    data_volume_matches, default_recovery_volume_count, max_recovery_volume_count,
-    percent_recovery_volume_count, write_rev_volumes, RevSet,
+    data_volume_matches, data_volumes_match, default_recovery_volume_count,
+    max_recovery_volume_count, payload_matches, percent_recovery_volume_count, sources_match,
+    write_rev_volumes, RevSet, VerifyTarget,
 };
 pub use write::stream::{
     crc32_of_reader, write_compressed_archive_streamed, write_compressed_member_volumes_streamed,
@@ -676,7 +678,7 @@ impl Archive {
         let mut key_cache = Rar50KeyCache::default();
         let mut truncated_tail = false;
         let (main, blocks, _) = parse_archive_blocks(
-            archive_len,
+            &|| archive_len,
             password,
             &mut key_cache,
             |offset| parse_block_header_bytes(input, offset, archive_len, sfx_offset, tail),
@@ -804,14 +806,19 @@ impl Archive {
         // than the volume holds must not lift the stop above the walk's
         // own bound.
         let arrived = move || frontier.known_len().min(expected_len) as usize;
+        // Read at every use, not captured: a caller that does not yet
+        // know the volume's length passes an unbounded `expected_len` and
+        // the source narrows it once it does (`ArchiveSource::stream_len`).
+        // (nzbfast-local change, 21 Sep 2026; see VENDORING.md.)
+        let live_len = || source.stream_len().unwrap_or(archive_len);
         let mut truncated_tail = false;
         let (main, blocks, pending) = parse_archive_blocks(
-            archive_len,
+            &live_len,
             password,
             &mut key_cache,
-            |offset| read_block_header_from_source(&source, offset, archive_len, 0, tail),
+            |offset| read_block_header_from_source(&source, offset, live_len(), 0, tail),
             |offset, keys| {
-                read_encrypted_block_header_from_source(&source, offset, archive_len, 0, keys, tail)
+                read_encrypted_block_header_from_source(&source, offset, live_len(), 0, keys, tail)
             },
             incremental.then_some(&arrived as &dyn Fn() -> usize),
             tail,
@@ -921,19 +928,22 @@ impl Archive {
             _ => return Ok(()),
         };
         let source = &self.source;
+        // Live, as in `parse_stream_impl` (nzbfast-local change, 21 Sep
+        // 2026; see VENDORING.md).
+        let live_len = || source.stream_len().unwrap_or(archive_len);
         let tail = self.tail;
         let mut truncated_tail = self.truncated_tail;
         let mut key_cache = Rar50KeyCache::default();
         let mut blocks = std::mem::take(&mut self.blocks);
         let walked = walk_archive_blocks(
             pending.from,
-            archive_len,
+            &live_len,
             password,
             &mut key_cache,
             pending.header_keys.as_deref(),
-            |offset| read_block_header_from_source(source, offset, archive_len, 0, tail),
+            |offset| read_block_header_from_source(source, offset, live_len(), 0, tail),
             |offset, keys| {
-                read_encrypted_block_header_from_source(source, offset, archive_len, 0, keys, tail)
+                read_encrypted_block_header_from_source(source, offset, live_len(), 0, keys, tail)
             },
             arrived,
             &mut blocks,
@@ -976,7 +986,7 @@ impl Archive {
         let file_cell = std::cell::RefCell::new(file);
         let mut truncated_tail = false;
         let (main, blocks, _) = parse_archive_blocks(
-            archive_len,
+            &|| archive_len,
             password,
             key_cache,
             |offset| {
@@ -1672,20 +1682,10 @@ pub fn verify_rev5_payload(
     src: &dyn crate::recovery::stream::RangeSource,
     volume: &Rev5VolumeRef,
 ) -> Result<bool> {
-    let mut crc = crate::crc32::Crc32::new();
-    let mut buf = vec![0u8; 256 * 1024];
-    let mut position = volume.payload.start;
-    while position < volume.payload.end {
-        // Clamp in u64 BEFORE narrowing: on a 32-bit target a remaining span
-        // that is a multiple of 4 GiB casts to 0 and the loop never advances.
-        // (nzbfast-local change, 27 Aug 2026 - re-apply on the next rars
-        // re-sync, see vendor/rars/VENDORING.md.)
-        let take = (volume.payload.end - position).min(buf.len() as u64) as usize;
-        src.read_at(position, &mut buf[..take])?;
-        crc.update(&buf[..take]);
-        position += take as u64;
-    }
-    Ok(crc.finish() == volume.meta.payload_crc32)
+    // One payload at a time, on this thread. A caller with several of them -
+    // `rc` has one per recovery row - should hand them all to
+    // [`sources_match`] instead, which reads them while a worker CRCs.
+    payload_matches(src, &volume.payload, volume.meta.payload_crc32)
 }
 
 /// The on-disk data volumes feeding a REV reconstruction: one entry per
@@ -2379,7 +2379,7 @@ fn read_array_at<const N: usize>(input: &[u8], pos: &mut usize, end: usize) -> R
 /// [`Archive::parse_stream_incremental`], the only caller that passes it.
 #[allow(clippy::too_many_arguments)]
 fn parse_archive_blocks<F, G>(
-    archive_len: usize,
+    archive_len: &dyn Fn() -> usize,
     password: Option<&[u8]>,
     key_cache: &mut Rar50KeyCache,
     mut read_block: F,
@@ -2450,7 +2450,10 @@ where
 #[allow(clippy::too_many_arguments)]
 fn walk_archive_blocks<F, G>(
     mut pos: usize,
-    archive_len: usize,
+    // A closure rather than a figure: a streaming parse may learn the
+    // archive's length mid-walk (nzbfast-local change, 21 Sep 2026; see
+    // VENDORING.md).
+    archive_len: &dyn Fn() -> usize,
     password: Option<&[u8]>,
     key_cache: &mut Rar50KeyCache,
     header_keys: Option<&Rar50Keys>,
@@ -2467,7 +2470,7 @@ where
     G: FnMut(usize, &Rar50Keys) -> Result<ParsedBlockHeader>,
 {
     let mut first = read_first;
-    while pos < archive_len {
+    while pos < archive_len() {
         // The header at `pos` has not arrived: stop rather than block on
         // it. A file block's data area is skipped arithmetically, so the
         // next header sits a whole member's packed length ahead - on a
@@ -2826,8 +2829,24 @@ fn read_block_header_from_source(
     if remaining < 5 {
         return Err(Error::TooShort);
     }
+    // Byte-exact on the header-size vint, NOT a speculative 14-byte
+    // prefix clamped at `archive_len`. On a stream whose length is not
+    // yet known (nzbfast TODO 118.2 (b): a chased volume with an
+    // untrusted `size=`) `archive_len` is unbounded, and a 14-byte read
+    // over the 8-byte END block asks the source for six bytes past the
+    // volume - which a frontier that cannot tell "end" from "hole"
+    // parks on until the download is over. Reading the CRC and one vint
+    // byte, then one byte more while the continuation bit is set, only
+    // ever asks for bytes a well-formed header has; at most 14, as
+    // before. (nzbfast-local change, 21 Sep 2026; see VENDORING.md.)
     let prefix_len = remaining.min(14);
-    let prefix = source.read_range(sfx_offset + offset..sfx_offset + offset + prefix_len)?;
+    let start = sfx_offset + offset;
+    let mut prefix = source.read_range(start..start + 5)?;
+    while prefix.len() < prefix_len && prefix[prefix.len() - 1] & 0x80 != 0 {
+        let at = start + prefix.len();
+        let byte = source.read_range(at..at + 1)?;
+        prefix.push(byte[0]);
+    }
     let header_crc = read_u32(&prefix, 0)?;
     let (header_size, header_size_len) = read_vint_at(&prefix, 4, prefix.len())?;
     let header_body_len = usize_from_u64(header_size, "RAR 5 header size overflows usize")?;

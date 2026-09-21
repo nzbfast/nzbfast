@@ -247,11 +247,11 @@ pub(crate) fn try_rar_rr_repair_hinted(
     try_rar_rr_repair_hinted_why(dir, password, hint).is_ok()
 }
 
-/// [`try_rar_rr_repair_hinted`] that also carries OUT the ladder's own
+/// `try_rar_rr_repair_hinted` that also carries OUT the ladder's own
 /// reason for refusing, on the one class of refusal that has one - a
 /// bomb verdict, which is about the DISK and not the archive.
 ///
-/// Same contract as [`try_unrar_spent_why`], which this rung's two
+/// Same contract as `try_unrar_spent_why`, which this rung's two
 /// extraction attempts delegate to: `Err(None)` is the ordinary failure
 /// the caller words itself (the records could not save the set, or the
 /// repaired set still does not open), `Err(Some(why))` is a verdict that

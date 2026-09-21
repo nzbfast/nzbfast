@@ -1,8 +1,8 @@
 //! Work counters for the recovery paths whose tests used to assert a wall
 //! clock.
 //!
-//! nzbfast-local addition, 16 Sep 2026 - re-apply on the next rars
-//! re-sync, see `vendor/rars/VENDORING.md`.
+//! Added 16 Sep 2026, in nzbfast's `vendor/rars` first and ported here the
+//! same day (claim `rars-wallclock-assertions`).
 //!
 //! Why it exists: six tests in this crate bounded a hostile-input refusal
 //! with `Instant::elapsed()` - four at 500 ms, two at 5 s. Every one of

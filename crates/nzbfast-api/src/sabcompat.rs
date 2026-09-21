@@ -129,6 +129,25 @@ pub(super) fn sab_warnings(
         ));
     }
 
+    // A store that is there and could not be READ when the daemon
+    // started. Same terms as the line above: it is true now, it does not
+    // resolve itself (the file's owner or mode is wrong, or the volume
+    // is failing), and nothing else reports it - the daemon runs on,
+    // with an empty queue or history, refusing only the rewrite that
+    // would replace the unread rows. The remedy is the user's.
+    for (flag, which) in [
+        (&d.queue_store_unreadable, "queue"),
+        (&d.history_store_unreadable, "history"),
+    ] {
+        if flag.load(Ordering::Relaxed) {
+            out.push(format!(
+                "The saved {which} in the .spool folder exists but could not be read \
+                 when nzbfast started, so it is running without it and will not \
+                 overwrite it. Fix the file's permissions and restart nzbfast."
+            ));
+        }
+    }
+
     // Jobs that have stopped and will not move without the user. A
     // password prompt is invisible to an *arr, which just sees a job
     // that never finishes.
@@ -243,7 +262,7 @@ pub(super) fn newznab_category(kind: &str, stem: &str) -> u32 {
 /// cleartext http.
 ///
 /// Without `X-Forwarded-Proto` the fallback is what THIS listener bound
-/// with ([`Daemon::scheme`]), not a hardcoded `http`. A direct native-TLS
+/// with (`Daemon::scheme`), not a hardcoded `http`. A direct native-TLS
 /// request has no proxy to correct the scheme for it, so the old default
 /// handed Prowlarr, Sonarr and every player an `http://` link to a socket
 /// that only speaks TLS.
@@ -569,8 +588,10 @@ struct SlotCtx {
     /// Wall-clock seconds, for deriving each row's absolute `time_added`
     /// from its monotonic `queued_at` (issue #34).
     now_unix: u64,
-    /// Live speed over the ~5 s rolling window, for `timeleft`.
-    speed_bps: f64,
+    /// Each job on the wire at its OWN rate over the ~5 s window, for a
+    /// row's `timeleft` and `job_bps`. Never the whole-line figure: a row
+    /// divides its own bytes-left by its own rate (see `JobRates`).
+    job_rates: JobRates,
     /// Prefetch sidecar state (owner, bytes), matched per row.
     sc: Option<(String, u64)>,
     /// The pipeline's own activity token per job, plus the three reads the
@@ -632,7 +653,7 @@ fn slot_json(
         alt_auto_search,
         free_now,
         now_unix,
-        speed_bps,
+        job_rates,
         sc,
         activity_map,
         unpack_map,
@@ -646,11 +667,22 @@ fn slot_json(
         pause_cost,
     } = ctx;
     let mbleft = left as f64 / API_MB;
-    // Only a job actually on the wire has a rate to divide by.
-    let timeleft = if live && phase.is_none() && *speed_bps > 1.0 {
-        sab_timeleft(left as f64 / *speed_bps)
+    // Only a job actually on the wire has a rate to divide by, and the
+    // rate is ITS OWN: this used to be the whole line's, which adds the
+    // successor's bytes to a job draining behind it, so a job crawling
+    // at 1.7 MB/s beside a successor at 110 MB/s said "3 seconds left"
+    // for as long as the crawl lasted (21 Sep 2026). `None` is a job on
+    // neither slot - a queued row, or one that changed slots between the
+    // rate read and this row's - and answers the same 0:00:00 a stall
+    // does.
+    let job_bps = if live && phase.is_none() {
+        job_rates.of(&j.nzo_id)
     } else {
-        "0:00:00".to_string()
+        None
+    };
+    let timeleft = match job_bps {
+        Some(bps) if bps > 1.0 => sab_timeleft(left as f64 / bps),
+        _ => "0:00:00".to_string(),
     };
     // Live shape for the job that is actually downloading; the
     // latched one otherwise (a queued job that already ran once,
@@ -757,6 +789,15 @@ fn slot_json(
         "mb": format!("{:.2}", j.total_bytes as f64 / API_MB),
         "mbleft": format!("{mbleft:.2}"),
         "timeleft": timeleft,
+        // Ours, not SAB's (additive; the *arrs ignore unknown keys):
+        // THIS row's own rate in bytes/sec over the same ~5 s window
+        // the top-level `speed` uses for the whole line, which is the
+        // divisor `timeleft` above and the dashboard's row ETA use.
+        // A number, 0 for a job on the wire that is stalled or has no
+        // second sample yet; null for a row that is not on the wire at
+        // all (queued, or in its post-network tail), which has no rate
+        // of its own - the dashboard estimates those from the line.
+        "job_bps": job_bps.map(|b| b.max(0.0).round() as u64),
         // --- SABnzbd `build_queue` slot parity (issue #34) ---
         // Every key below is in real SAB's queue slot and was
         // missing from ours. A remote that deserializes the
@@ -846,11 +887,22 @@ fn slot_json(
         // `total` is 0 until the first volume set has been parsed, so
         // the page has a shape for "the count is known, the bytes are
         // not" as well as one for both.
-        "unpack": unpack_map.get(&j.nzo_id).map(|p| json!({
-            "volumes": p.volumes(),
-            "done": p.done(),
-            "total": p.total(),
-        })).unwrap_or(Value::Null),
+        // TODO 101: `eating` says this ladder is deleting each volume
+        // as it finishes with it, and `eaten`/`eaten_bytes` are what it
+        // has actually freed. False and 0 on every ordinary unpack,
+        // which the page reads as "say nothing about it" - so the row
+        // gains a clause only on the mode that earned one.
+        "unpack": unpack_map.get(&j.nzo_id).map(|p| {
+            let (eaten, eaten_bytes) = p.eaten();
+            json!({
+                "volumes": p.volumes(),
+                "done": p.done(),
+                "total": p.total(),
+                "eating": p.eating(),
+                "eaten": eaten,
+                "eaten_bytes": eaten_bytes,
+            })
+        }).unwrap_or(Value::Null),
         // ...and, while a REPAIR is inside the engine, which of its
         // four phases is running and how far through the whole repair
         // it is.
@@ -931,6 +983,15 @@ fn slot_json(
         // rule matched.
         "smart_rule": j.smart_rule,
         "duplicate_key": j.dupe_key.as_deref().unwrap_or(""),
+        // Ours: the row this one was held behind as a duplicate, or "".
+        // It outlives the hold. A copy released with download-anyway is
+        // Force and unpaused - `labels` above no longer says DUPLICATE -
+        // but still knows what it was a copy of, and that is the fact
+        // the page needs to offer the way BACK to the hold next to "stop
+        // forcing" (priority -3 on such a row is the hold again, see
+        // `apply_priority`). An id, so nothing about the original leaks
+        // beyond what the queue already lists.
+        "held_for": j.held_for,
         // §129 2b: the SAB pp level the add requested (null =
         // none named) and the job's script= override - the
         // drawer shows the one-pass mapping instead of the
@@ -1182,11 +1243,19 @@ pub fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, String>
         outages,
         pause_cost,
     } = prelock_reads(d);
+    // BEFORE the queue lock below, which is held across the whole body:
+    // this takes the queue lock itself, and a second acquisition on this
+    // thread would deadlock the poll.
+    let pause_exempt = d.pause_exempt();
     let q = d.queue.lock_ok();
     // Live speed over a ~5 s rolling window (see current_speed_bps): a
     // whole-job average hid stalls; idle or a fresh window reports 0,
     // never `bytes / ~zero elapsed`.
     let speed_bps = d.current_speed_bps();
+    // ...and each job on the wire at its own rate, for the rows. The
+    // header's `speed` / `timeleft` stay on the whole line above: the
+    // line is what the header is about, and a row is about its own job.
+    let job_rates = d.job_rates();
     let (peak_bps, peak_src, line_hint) = d.link_peak.chart(d.line_speed.load(Ordering::Relaxed));
     // SAB's queue call takes the same category filter as history (the
     // *arrs pass category=<their cat> when one is configured).
@@ -1239,7 +1308,8 @@ pub fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, String>
     // The snapshot every row below is built against - see `SlotCtx`. Each
     // field is moved from the read above it, in the order it was taken, so
     // building it changes nothing about WHEN anything was sampled;
-    // `free_now` and `speed_bps` are Copy and the header still reads them.
+    // `free_now` and `speed_bps` are Copy and the header still reads them
+    // (`speed_bps` is not in the ctx at all: the rows take `job_rates`).
     let ctx = SlotCtx {
         live_shape,
         pw_wanted,
@@ -1248,7 +1318,7 @@ pub fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, String>
         alt_auto_search,
         free_now,
         now_unix,
-        speed_bps,
+        job_rates,
         sc,
         activity_map,
         unpack_map,
@@ -1369,6 +1439,14 @@ pub fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, String>
         // time), and who set the speed cap ("user"|"schedule"|"api"|
         // "auto"). All three are presentation - the *arrs ignore them.
         "pause_source": if paused_now { json!(pause_source) } else { Value::Null },
+        // Ours: the jobs a queue pause is NOT stopping - Force priority
+        // runs through one (SAB semantics), and a header that says
+        // `paused` over a transfer at line rate reads as a pause that
+        // did nothing. Ids of the jobs on the wire despite the pause;
+        // empty whenever the queue is not paused. The *arrs ignore it,
+        // and it is derived from `paused_now`'s own tick, so the two
+        // cannot disagree about whether a pause is in force.
+        "pause_exempt": if paused_now { json!(pause_exempt) } else { json!([]) },
         "resume_at": resume_at,
         "limit_source": limit_source,
         // What is armed to happen when the queue runs dry, and the
@@ -2348,6 +2426,10 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                 for id in &moved {
                     super::api::queue::reposition_for_priority(&mut q, id);
                 }
+                // The wind-down takes the queue lock, so the write's own
+                // hold ends first - see `wind_down_after_priority`.
+                drop(q);
+                super::api::queue::wind_down_after_priority(d, &moved);
             }
             "HistoryDelete" | "HistoryFinalDelete" => {
                 // NOT SYNONYMS, and this arm treated them as one until
@@ -2898,6 +2980,9 @@ mod editqueue_param_tests;
 
 #[cfg(test)]
 mod tail_truth_tests;
+
+#[cfg(test)]
+mod unforce_tests;
 
 #[cfg(test)]
 mod delete_durability_tests;

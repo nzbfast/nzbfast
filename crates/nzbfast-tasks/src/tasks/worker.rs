@@ -258,7 +258,7 @@ pub fn spawn_download_worker(
 /// pick by construction, and never while the queue is paused - a global
 /// pause means stop, background errands included.
 async fn pick_for_start(d: &Arc<Daemon>, only_force: bool) -> Option<(Arc<Mutex<Job>>, bool)> {
-    let (job, insurance) = match d.pick_job(only_force) {
+    let (job, insurance) = match d.pick_job_for_start(only_force) {
         Some(j) => (j, false),
         None => (
             (!only_force).then(|| d.pick_insurance_job()).flatten()?,
@@ -854,6 +854,20 @@ async fn start_next(st: &mut Runner, quick: bool, carry: Carry<'_>, spill: Optio
         let verify_lean = d.verify_lean.load(Ordering::Relaxed);
         let par_cleanup = d.par_cleanup.load(Ordering::Relaxed);
         let skip_samples = d.skip_samples.load(Ordering::Relaxed);
+        // TODO 332: BOTH halves of the defer policy, ANDed here so the
+        // engine holds none of it. The setting is live like the ones
+        // above; the mark is the job's own, and it is what makes the
+        // policy "defer ONCE, then repair" rather than a job that
+        // forecasts the same long repair every pass and never finishes.
+        // An insurance fetch is excluded outright: it extracts nothing
+        // and repairs nothing, so there is no repair to stand back from
+        // and a defer would only cycle a row the user has not asked for
+        // yet.
+        let defer_long_repair = crate::job::defers_long_repair(
+            d.repair_defer_long.load(Ordering::Relaxed),
+            job.lock_ok().repair_deferred,
+            insurance,
+        );
         let mem_budget = st.mem_budget;
         tokio::spawn(async move {
             crate::get_with_progress(crate::JobSpec {
@@ -880,6 +894,7 @@ async fn start_next(st: &mut Runner, quick: bool, carry: Carry<'_>, spill: Optio
                 journal_owner: crate::JournalOwner::Caller,
                 par_cleanup,
                 skip_samples,
+                defer_long_repair,
                 password: job_password,
                 eat_consent: eat_ok,
                 donor_dirs,

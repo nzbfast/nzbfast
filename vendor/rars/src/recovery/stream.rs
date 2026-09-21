@@ -90,11 +90,25 @@ use crate::error::{Error, Result};
 /// them was per-record**: `read_chunk_at`'s CRC64 buffer, which allocated a full
 /// `IO_BUF` once per candidate `{RB}` record and now right-sizes to the record
 /// (`research/READ-CHUNK-AT-CRC-BUFFER-2026-09-17.md` section 5). The other six
-/// allocate once per CALL and stream a range with the buffer AS the stride, so
-/// every byte of the buffer is a byte wanted - the shape this constant is sized
-/// for. Do not read the right-sizing there as a licence to sprinkle it here:
-/// away from a per-record loop it buys nothing, which is why `crc32_of` above
-/// is still declined.
+/// allocate once per CALL, and **the 18 Sep 2026 round split those six THREE
+/// AND THREE** - which the 17 Sep census got wrong by lumping them, and which
+/// is the distinction to read this constant by.
+///
+/// **THREE STREAM A RANGE WITH THE BUFFER AS THE STRIDE** - `copy_range`,
+/// `copy_file_verified` and `crc32_of` - so every byte of the buffer is a byte
+/// wanted, which is the shape this constant is sized for, and `crc32_of` stays
+/// declined.
+///
+/// **THREE READ A GROUP SLICE AND LEAVE THE REST DEAD**: both arms of
+/// `shard_group_crcs` and `damaged_shards`. All three read
+/// `min(group.len, buf.len())`, and `rar5::recovery_groups` bounds every
+/// `group.len` at 64 KiB, so at most a QUARTER of an `IO_BUF` is ever touched
+/// there on any archive whatever. All three now size through
+/// `shard_crc_buf_len`. The lever is the dead TAIL, not the per-record
+/// frequency - which is the correction to what the 17 Sep paragraph concluded:
+/// a per-CALL site is worth right-sizing too when its buffer is not its stride.
+/// On musl the tail is faulted eagerly and the detection pass costs 0.583 of
+/// its old wall (`research/RCBUF-MINFLT-MUSL-2026-09-18.md`).
 const IO_BUF: usize = 256 * 1024;
 
 /// Marker-search window for the `{RB}` scan, and NOT the same job as
@@ -699,7 +713,14 @@ pub fn damaged_shards(
     }
     let group_count = plan.group_count;
     let mut damaged = Vec::new();
-    let mut buf = vec![0u8; IO_BUF];
+    // Right-sized through the same helper as `shard_group_crcs`, for the same
+    // reason: the loop below never reads past `group.len`, which the format
+    // caps at 64 KiB. NO PRODUCTION TIMING MOVES HERE - every caller of this
+    // function in the crate is a test, production reaching shard detection
+    // through `damaged_shards_by_group` - so this is consistency rather than a
+    // measured win, and it is what keeps a future promotion of this function
+    // from silently re-acquiring the dead tail.
+    let mut buf = vec![0u8; shard_crc_buf_len(std::slice::from_ref(&group))];
     for (index, expected) in states.iter().enumerate() {
         let start = (index as u64)
             .checked_mul(group_count)
@@ -710,7 +731,9 @@ pub fn damaged_shards(
         let mut state = 0u64;
         let mut position = start.min(end);
         while position < end {
-            let len = (end - position).min(IO_BUF as u64) as usize;
+            // The buffer's own length, not the constant: in range by
+            // construction rather than by argument.
+            let len = (end - position).min(buf.len() as u64) as usize;
             src.read_at(prefix_start + position, &mut buf[..len])?;
             state = crc64_update(&buf[..len], state);
             position += len as u64;
@@ -774,6 +797,51 @@ pub fn damaged_shards_by_group(
         .collect())
 }
 
+/// The CRC buffer `shard_crcs` wants: the largest group slice it can be asked
+/// to read, never more than `IO_BUF`.
+///
+/// `shard_crcs` reads `min(end - position, buf.len())` out of a range whose
+/// length is `min(group.len, protected_size - start)`, so a buffer larger than
+/// the largest `group.len` can never be filled past that point - and
+/// `rar5::recovery_groups` derives every `group.len` as
+/// `min(RAR5_RECOVERY_PARITY_PER_RECORD_MAX, group_count - offset)`, where that
+/// constant is 64 KiB. **So a flat `IO_BUF` here is at least 75% dead tail on
+/// EVERY archive, not on a corpus**, and much more on a small one: a 4 MiB
+/// volume has one group of `group_count` = 20,972 bytes, which is 8% of
+/// `IO_BUF`.
+///
+/// WHAT THE TAIL COSTS, and it is one platform's bill: `vec![0u8; n]` goes
+/// through `alloc_zeroed`, and on musl a 256 KiB allocation is faulted eagerly,
+/// every page every time. Measured on a Xeon D-1531 with both sizes in ONE
+/// binary behind an environment switch, warm, 32 runs a cell, A/A either side
+/// of every headline and every headline taken twice: the detection pass over a
+/// 16-volume set costs **0.5848 and 0.5831 of its old wall** against A/A floors
+/// of 1.0014 and 1.0003, with `minflt` 1,668,592 -> 439,885 a run; on a set of
+/// 4 MiB volumes, where the right size is 20,972 B, **0.1069 and 0.1067** with
+/// `minflt` 1,666,317 -> 3,566. On a quiet M1 Ultra the same change is a
+/// NO-OP - 1.0089 and 0.9926 inside an A/A band of 1.0047 and 0.9986, `minflt`
+/// flat at 610-621 - because libmalloc faults lazily and never touches the
+/// tail. So this is a musl win and an Apple no-op, not a trade.
+/// `research/RCBUF-MINFLT-MUSL-2026-09-18.md`.
+///
+/// SAFE ON HOSTILE INPUT: `IO_BUF` stays the ceiling through the `.min`, so a
+/// crafted `group_count` buys no more than the flat spelling allocated
+/// unconditionally, and the `.max(1)` keeps the read loop's `min(.., buf.len())`
+/// off a zero stride if a future layout ever yields a zero-length group.
+///
+/// ONE COPY, used by both arms: the two `shard_group_crcs` bodies are already a
+/// `cfg` pair that has drifted once, and a sizing rule spelled twice is the
+/// shape that lets them disagree again.
+fn shard_crc_buf_len(groups: &[rar5::RecoveryGroup]) -> usize {
+    groups
+        .iter()
+        .map(|group| group.len)
+        .max()
+        .unwrap_or(0)
+        .min(IO_BUF as u64)
+        .max(1) as usize
+}
+
 /// CRC64 of every (shard, group) slice, indexed `[shard][group]`.
 #[cfg(feature = "parallel")]
 fn shard_group_crcs(
@@ -785,10 +853,17 @@ fn shard_group_crcs(
     data_shards: usize,
 ) -> Result<Vec<Vec<u64>>> {
     use rayon::prelude::*;
+    // Hoisted out of the `map`, so the size is computed once and not 200 times.
+    let buf_len = shard_crc_buf_len(groups);
     (0..data_shards)
         .into_par_iter()
         .map(|shard| {
-            let mut buf = vec![0u8; IO_BUF];
+            // RIGHT-SIZED, not `IO_BUF`, and this is the allocation the whole
+            // rule exists for: rayon re-runs this body per SHARD - 200 a call -
+            // so a flat 256 KiB here is 52 MB of zeroed buffer a call, at least
+            // three quarters of it never read. `shard_crc_buf_len` says what
+            // that costs and on which platform.
+            let mut buf = vec![0u8; buf_len];
             shard_crcs(
                 src,
                 prefix_start,
@@ -811,7 +886,11 @@ fn shard_group_crcs(
     groups: &[rar5::RecoveryGroup],
     data_shards: usize,
 ) -> Result<Vec<Vec<u64>>> {
-    let mut buf = vec![0u8; IO_BUF];
+    // Right-sized for the same reason as the `parallel` arm above, though this
+    // one allocates once per CALL: the dead tail is the lever, not the
+    // frequency, and holding the two arms to one sizing rule is what keeps them
+    // from drifting apart again.
+    let mut buf = vec![0u8; shard_crc_buf_len(groups)];
     (0..data_shards)
         .map(|shard| {
             shard_crcs(
@@ -1323,6 +1402,97 @@ mod tests {
         for chunk in &scan.chunks {
             assert!(chunk.parity.end <= archive.len() as u64);
             assert_eq!(chunk.parity.end - chunk.parity.start, plan.group_count);
+        }
+    }
+
+    /// The sizing rule's ceiling, which is a FORMAT property and not a corpus
+    /// one: `recovery_groups` caps every `group.len` at 64 KiB, so a flat
+    /// `IO_BUF` is at least three quarters dead tail on any archive.
+    ///
+    /// The 16 Sep decline's limit 2 reserved a case - "a set whose largest
+    /// group exceeded `IO_BUF` would touch the whole buffer" - that this
+    /// asserts CANNOT occur, which is why it is pinned rather than argued:
+    /// the answer turns on a `const` in another module.
+    #[test]
+    fn shard_crc_buf_len_is_the_largest_group_and_never_a_quarter_of_io_buf() {
+        for prefix_len in [4_000usize, 32_000, 400_000, 40_000_000] {
+            let plan = rar5::plan_inline_recovery(prefix_len as u64, 5).unwrap();
+            let groups = rar5::recovery_groups(plan).unwrap();
+            let want = groups.iter().map(|g| g.len).max().unwrap() as usize;
+            let got = shard_crc_buf_len(&groups);
+            assert_eq!(got, want, "prefix {prefix_len}: sized to the largest group");
+            assert!(
+                got <= IO_BUF / 4,
+                "prefix {prefix_len}: {got} is more than a quarter of IO_BUF - \
+                 RAR5_RECOVERY_PARITY_PER_RECORD_MAX must have moved, and if it \
+                 ever exceeds IO_BUF the `.min` is what keeps this safe"
+            );
+        }
+        assert_eq!(shard_crc_buf_len(&[]), 1, "never a zero stride");
+    }
+
+    /// The buffer size must not change the ANSWER, which is the one thing
+    /// right-sizing could have broken: `shard_crcs` reads
+    /// `min(end - position, buf.len())`, so a smaller buffer splits a group's
+    /// read into more passes and a CRC64 folded over the wrong split would
+    /// differ.
+    #[test]
+    fn detection_finds_the_same_shards_at_any_buffer_size() {
+        let (archive, prefix_len) = archive_with_recovery(32_000, 20);
+        let mut damaged = archive.clone();
+        damaged[256..320].fill(0x5a);
+        let source = MemorySource(damaged);
+        let scan = scan_inline_recovery_chunks(&source, 1 << 20).unwrap();
+        let plan = scan.plan().unwrap();
+        let groups = rar5::recovery_groups(plan).unwrap();
+        let protected = scan.protected_size().unwrap();
+        assert_eq!(protected, prefix_len as u64);
+
+        let real =
+            damaged_shards_by_group(&source, 0, protected, plan, &groups, &scan.group_states)
+                .unwrap();
+        assert!(
+            real.iter().any(|g| !g.is_empty()),
+            "the fixture must actually report damage, or this proves nothing"
+        );
+
+        // The same walk at four buffer sizes, including the pre-18 Sep flat
+        // `IO_BUF` and a deliberately tiny one that forces many passes.
+        let data_shards = plan.data_shards as usize;
+        for cap in [1usize, 7, 4096, IO_BUF] {
+            let mut buf = vec![0u8; cap];
+            let crcs: Vec<Vec<u64>> = (0..data_shards)
+                .map(|shard| {
+                    shard_crcs(
+                        &source,
+                        0,
+                        protected,
+                        plan.group_count,
+                        &groups,
+                        shard,
+                        &mut buf,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let got: Vec<Vec<usize>> = scan
+                .group_states
+                .iter()
+                .enumerate()
+                .map(|(gi, states)| {
+                    if states.is_empty() {
+                        Vec::new()
+                    } else {
+                        (0..data_shards)
+                            .filter(|&s| crcs[s][gi] != states[s])
+                            .collect()
+                    }
+                })
+                .collect();
+            assert_eq!(
+                got, real,
+                "buffer size {cap} changed the damaged-shard list"
+            );
         }
     }
 

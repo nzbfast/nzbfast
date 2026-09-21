@@ -7,6 +7,8 @@
 //! file has all its parts. Incremental scans resume from each group's
 //! stored high-water mark.
 
+#![warn(missing_docs)]
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use tracing::warn;
@@ -110,6 +112,15 @@ pub use session::{SessionLink, SessionSibling, TitleSibling};
 pub use spots::*;
 pub use titles::*;
 
+/// An open index: the SQLite connection plus the capability flags the
+/// open discovered.
+///
+/// One connection and not a pool, which is what makes the reads and
+/// writes here serialize against each other - a settled READ is NOT a
+/// write mutex, and a caller that needs both must expect `busy` rather
+/// than assume exclusion. The flags are latched at open time, so an
+/// index built before a feature existed keeps taking the fallback path
+/// until it is next opened.
 pub struct Index {
     db: Connection,
     /// Ingest gate: release stem → keep? None = keep everything. Policy
@@ -197,6 +208,45 @@ pub struct Index {
     /// `String`. Written by [`Index::cards_total`], which is also where
     /// the rule for when a count is worth memoizing at all lives.
     cards_total_memo: std::cell::RefCell<Option<(std::time::Instant, String, u64)>>,
+    /// Per-group-pass totals for the generation-row bookkeeping that
+    /// `ingest_passes` used to report once per BATCH. See [`GenFold`].
+    gen_fold: GenFold,
+}
+
+/// What a group pass's ingest did with reposted postings, accumulated
+/// across its batches so it can be said once instead of once per batch.
+///
+/// The two lines this replaces were per-batch `warn!`s, and a group pass
+/// ingests in `INGEST_BATCH` chunks - so on a busy group they were the
+/// log. Measured on the dev daemon 18 Sep 2026, over the last 5,000
+/// lines of a live `daemon.log`: 3,356 were the reposted-postings line
+/// and 649 the dropped-articles line, together 80% of EVERY line the
+/// daemon wrote, at a sustained ~2,600 lines/hour. Folding them to one
+/// line per group per pass leaves 4 lines where there were 4,005, and
+/// loses no figure - the totals below are the same totals, summed.
+///
+/// Keyed by group, and flushed when the group CHANGES as well as by
+/// [`Index::flush_gen_fold`], so a caller that never flushes (the seed
+/// importer, a test) still gets its counts attributed to the group they
+/// came from rather than to whoever ingests next.
+#[derive(Default)]
+struct GenFold {
+    /// The group these totals are for; None when nothing is pending.
+    group: Option<String>,
+    /// Ingest calls folded in, so the line can say how many batches the
+    /// totals cover - the figure that says whether a pass was one chunk
+    /// or four thousand.
+    batches: u64,
+    /// Reposted postings given generation rows of their own.
+    minted: u64,
+    /// Postings refused a generation row by the sibling cap.
+    capped: u64,
+    /// Articles dropped because their (file, part) slot holds more
+    /// contradicting articles than the generation passes can place.
+    dropped: u64,
+    /// The deepest such slot seen, which is the number that names the
+    /// cause. A max across batches, not a sum.
+    deepest: usize,
 }
 
 /// A release a batch just touched that [`Index::set_watch_names`] said
@@ -205,6 +255,8 @@ pub struct Index {
 /// the watchlist pass against the database, not against this.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchHit {
+    /// The release row's id, which is what the watchlist pass then
+    /// re-reads from the database. Nothing else here is a decision.
     pub id: i64,
     /// The name the release is known by NOW - the fed name where one has
     /// been applied, the posted stem otherwise.
@@ -234,13 +286,33 @@ const WATCH_HITS_CAP: usize = 512;
 /// One indexed release (search result row).
 #[derive(Debug, Clone)]
 pub struct Release {
+    /// The release row's id, stable for as long as the row lives.
+    /// Rowids are RECYCLED after a delete, so this is not an identity
+    /// to hold across an eviction - pair it with a cursor value.
     pub id: i64,
+    /// The stem the post was made under, derived from the subjects.
+    /// Half of the clustering key, and the name to show only when
+    /// [`Self::pre_title`] is empty.
     pub stem: String,
+    /// The `From:` the articles carried, verbatim. The other half of
+    /// the clustering key.
     pub poster: String,
+    /// The newsgroup this release was clustered in.
     pub grp: String,
+    /// Summed article `bytes` over every file. ON-WIRE, so it carries
+    /// the yEnc overhead: a ratio against another on-wire figure is
+    /// fine, an absolute compared against a decoded size is ~3.2% high.
     pub total_bytes: u64,
+    /// How many files the release has been seen to have. Grows while a
+    /// post is still going up.
     pub files: u32,
+    /// At least one PAR2 file was seen. Says nothing about whether the
+    /// recovery data is complete or usable.
     pub has_par2: bool,
+    /// Every file seen has all of its parts. The binary verdict;
+    /// [`Self::have_parts`] and [`Self::need_parts`] are the figures
+    /// behind it, and a release can be incomplete simply because the
+    /// post is still in progress.
     pub complete: bool,
     /// Unix time of the earliest article seen (upload date).
     pub first_posted: i64,
@@ -254,12 +326,16 @@ pub struct Release {
     /// Exact segment tally across the release's files - the browse
     /// view's completeness percentage (complete is the binary verdict).
     pub have_parts: u64,
+    /// Segments the release's files declare between them. `have_parts
+    /// == need_parts` is what [`Self::complete`] reports.
     pub need_parts: u64,
     /// Parsed video codec / strongest audio track / dynamic range
     /// ('' = the name didn't say). What tells two encodes of the same
     /// film apart once resolution has tied.
     pub vcodec: String,
+    /// Strongest audio track the name declared ('' = it did not say).
     pub acodec: String,
+    /// Dynamic range the name declared ('' = it did not say).
     pub hdr: String,
     /// The real release name a pre feed gave this post ('' = never
     /// named that way). When set, this is what the UI should show: the
@@ -863,6 +939,8 @@ impl Index {
             .ok()
     }
 
+    /// Write one persisted key/value pair, replacing any previous
+    /// value. See [`Self::kv_get`].
     pub fn kv_set(&self, k: &str, v: &str) -> rusqlite::Result<()> {
         self.db.execute(
             "INSERT INTO kv(k, v) VALUES(?1, ?2)

@@ -1165,36 +1165,30 @@ fn encrypted_without_password_materializes_volume() {
 /// volume files left behind.
 #[test]
 fn real_rar_fixtures_extract_and_decrypt() {
-    let secret = include_bytes!("../../../nzbkit-base/testdata/rar5/secret.bin").to_vec();
+    let secret = nzbkit_base::testdata::RAR5_SECRET.to_vec();
     let cases: Vec<(&str, Vec<(&str, &[u8])>)> = vec![
         (
             "store",
-            vec![(
-                "enc-store.rar",
-                include_bytes!("../../../nzbkit-base/testdata/rar5/enc-store.rar"),
-            )],
+            vec![("enc-store.rar", nzbkit_base::testdata::RAR5_ENC_STORE)],
         ),
         (
             "hdrs",
-            vec![(
-                "enc-hdrs.rar",
-                include_bytes!("../../../nzbkit-base/testdata/rar5/enc-hdrs.rar"),
-            )],
+            vec![("enc-hdrs.rar", nzbkit_base::testdata::RAR5_ENC_HDRS)],
         ),
         (
             "vols",
             vec![
                 (
                     "enc-vols.part1.rar",
-                    include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part1.rar"),
+                    nzbkit_base::testdata::RAR5_ENC_VOLS_P1,
                 ),
                 (
                     "enc-vols.part2.rar",
-                    include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part2.rar"),
+                    nzbkit_base::testdata::RAR5_ENC_VOLS_P2,
                 ),
                 (
                     "enc-vols.part3.rar",
-                    include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part3.rar"),
+                    nzbkit_base::testdata::RAR5_ENC_VOLS_P3,
                 ),
             ],
         ),
@@ -1233,36 +1227,30 @@ fn real_rar_fixtures_extract_and_decrypt() {
 /// RAR5 gets: exact payload, no volume left on disk.
 #[test]
 fn real_rar4_fixtures_extract_and_decrypt() {
-    let secret = include_bytes!("../../../nzbkit-base/testdata/rar4/secret.bin").to_vec();
+    let secret = nzbkit_base::testdata::RAR4_SECRET.to_vec();
     let cases: Vec<(&str, Vec<(&str, &[u8])>)> = vec![
         (
             "store",
-            vec![(
-                "enc-store.rar",
-                include_bytes!("../../../nzbkit-base/testdata/rar4/enc-store.rar"),
-            )],
+            vec![("enc-store.rar", nzbkit_base::testdata::RAR4_ENC_STORE)],
         ),
         (
             "hdrs",
-            vec![(
-                "enc-hdrs.rar",
-                include_bytes!("../../../nzbkit-base/testdata/rar4/enc-hdrs.rar"),
-            )],
+            vec![("enc-hdrs.rar", nzbkit_base::testdata::RAR4_ENC_HDRS)],
         ),
         (
             "vols",
             vec![
                 (
                     "enc-vols.part1.rar",
-                    include_bytes!("../../../nzbkit-base/testdata/rar4/enc-vols.part1.rar"),
+                    nzbkit_base::testdata::RAR4_ENC_VOLS_P1,
                 ),
                 (
                     "enc-vols.part2.rar",
-                    include_bytes!("../../../nzbkit-base/testdata/rar4/enc-vols.part2.rar"),
+                    nzbkit_base::testdata::RAR4_ENC_VOLS_P2,
                 ),
                 (
                     "enc-vols.part3.rar",
-                    include_bytes!("../../../nzbkit-base/testdata/rar4/enc-vols.part3.rar"),
+                    nzbkit_base::testdata::RAR4_ENC_VOLS_P3,
                 ),
             ],
         ),
@@ -1271,15 +1259,15 @@ fn real_rar4_fixtures_extract_and_decrypt() {
             vec![
                 (
                     "enc-hdr-vols.part1.rar",
-                    include_bytes!("../../../nzbkit-base/testdata/rar4/enc-hdr-vols.part1.rar"),
+                    nzbkit_base::testdata::RAR4_ENC_HDR_VOLS_P1,
                 ),
                 (
                     "enc-hdr-vols.part2.rar",
-                    include_bytes!("../../../nzbkit-base/testdata/rar4/enc-hdr-vols.part2.rar"),
+                    nzbkit_base::testdata::RAR4_ENC_HDR_VOLS_P2,
                 ),
                 (
                     "enc-hdr-vols.part3.rar",
-                    include_bytes!("../../../nzbkit-base/testdata/rar4/enc-hdr-vols.part3.rar"),
+                    nzbkit_base::testdata::RAR4_ENC_HDR_VOLS_P3,
                 ),
             ],
         ),
@@ -1757,19 +1745,19 @@ fn a_failed_rekey_refeed_leaves_no_stashed_span_charged() {
 /// it; the fixture and the gate it exercises are unchanged.
 #[test]
 fn real_rar_split_fixture_verifies() {
-    let secret = include_bytes!("../../../nzbkit-base/testdata/rar5/secret.bin").to_vec();
+    let secret = nzbkit_base::testdata::RAR5_SECRET.to_vec();
     let vols: Vec<(&str, &[u8])> = vec![
         (
             "enc-vols.part1.rar",
-            include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part1.rar"),
+            nzbkit_base::testdata::RAR5_ENC_VOLS_P1,
         ),
         (
             "enc-vols.part2.rar",
-            include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part2.rar"),
+            nzbkit_base::testdata::RAR5_ENC_VOLS_P2,
         ),
         (
             "enc-vols.part3.rar",
-            include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part3.rar"),
+            nzbkit_base::testdata::RAR5_ENC_VOLS_P3,
         ),
     ];
     let dir = tmpdir("enc-split-fixture");
@@ -1799,8 +1787,7 @@ fn real_rar_split_fixture_verifies() {
 /// `checkless_encrypted_store_set_wrong_password_demotes_not_publishes`.
 #[test]
 fn real_rar_split_damaged_ciphertext_fails() {
-    let mut part2 =
-        include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part2.rar").to_vec();
+    let mut part2 = nzbkit_base::testdata::RAR5_ENC_VOLS_P2.to_vec();
     // Inside part2's data area (data_off 119, data_len 1790) - headers
     // and the stored check stay intact, only ciphertext is damaged.
     part2[119 + 800] ^= 0xff;
@@ -1808,12 +1795,12 @@ fn real_rar_split_damaged_ciphertext_fails() {
         let vols: Vec<(&str, &[u8])> = vec![
             (
                 "enc-vols.part1.rar",
-                include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part1.rar"),
+                nzbkit_base::testdata::RAR5_ENC_VOLS_P1,
             ),
             ("enc-vols.part2.rar", &part2),
             (
                 "enc-vols.part3.rar",
-                include_bytes!("../../../nzbkit-base/testdata/rar5/enc-vols.part3.rar"),
+                nzbkit_base::testdata::RAR5_ENC_VOLS_P3,
             ),
         ];
         let dir = tmpdir("enc-split-damaged");

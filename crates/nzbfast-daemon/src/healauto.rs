@@ -1,10 +1,12 @@
 //! §310: the SCHEDULED heal - verify the library on a cadence and repair
-//! what the settle manifests convict, without anybody clicking.
+//! what the settle manifests convict, without anybody clicking. It is the
+//! same two functions on a cadence, with the ceilings a road nobody
+//! clicked has to bring of its own.
 //!
 //! [`super::heal`] is the manual road and this module changes none of
-//! it: [`plan`](super::heal::plan) reads a folder's `.nzbfast.manifest`
+//! it: [`plan`] reads a folder's `.nzbfast.manifest`
 //! and groups the damage by the post that proved it, and
-//! [`Daemon::heal_one`] queues one repair with that folder as a donor.
+//! `Daemon::heal_one` queues one repair with that folder as a donor.
 //! The header on that file predicted this module in a sentence - "a
 //! scheduler would call the same two functions" - and that part was
 //! right. What it did not say is the part this file is mostly about.
@@ -133,14 +135,14 @@
 //!
 //! * **The cadence restarts with the process.** There is no persisted
 //!   "last swept" stamp - the first sweep is
-//!   [`HEAL_AUTO_SETTLE_SECS`] after start, then every
+//!   `HEAL_AUTO_SETTLE_SECS` after start, then every
 //!   `heal_auto_interval_h`. A daemon restarted more often than that
 //!   sweeps more often than that, and the thing that bounds what a
 //!   restart loop could spend is the per-sweep byte ceiling and
 //!   `heal_one`'s own refusal to queue a repair of a post already being
 //!   repaired in that folder, not the cadence.
 //! * **One sweep does not necessarily cover the library.** At most
-//!   [`HEAL_AUTO_FOLDERS_PER_SWEEP`] folders are verified per sweep and
+//!   `HEAL_AUTO_FOLDERS_PER_SWEEP` folders are verified per sweep and
 //!   the next sweep resumes after the last one it reached, in the
 //!   walk's own sorted order, so a large library is covered across
 //!   several sweeps rather than in one enormous read. That cursor is

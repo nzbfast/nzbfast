@@ -25,13 +25,32 @@ const COLLECTION_DECODED_TEXT_SCAN_CAP: usize = crate::nzb::limits::MAX_TEXT_BYT
 /// A named virtual NZB assembled from exact local file identities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NzbSeedCollection {
+    /// The seed set this was assembled for.
     pub set_id: i64,
+    /// The release name the set proved - what the assembled NZB is
+    /// called, and the reason this is worth having over the posted
+    /// stems.
     pub name: String,
+    /// The set's category, for the surfaces that file by it. Empty
+    /// when the set named none.
     pub category: String,
+    /// Summed on-wire bytes over every segment in [`Self::xml`].
     pub bytes: u64,
+    /// Required data files covered. A collection is only assembled
+    /// once every one of them has an exact local identity, so this is
+    /// the set's full count.
     pub data_files: usize,
+    /// Optional files (PAR2 and friends) that were also covered.
+    /// Unlike [`Self::data_files`] this may be short of what the set
+    /// declares without invalidating the collection.
     pub optional_files: usize,
+    /// The local release rows the segments were drawn from, deduped.
+    /// More than one is ordinary: a set's files can be spread over
+    /// several posts.
     pub release_ids: Vec<i64>,
+    /// The assembled NZB document. VIRTUAL - nothing posted this, it
+    /// is built here out of segments that were, so it has no
+    /// message-id of its own and no `<head>` the poster wrote.
     pub xml: String,
 }
 

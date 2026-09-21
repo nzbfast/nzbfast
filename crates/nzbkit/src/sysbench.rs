@@ -9,6 +9,8 @@
 //! missing-article vectors agree - telling the user which providers are
 //! redundant and which genuinely widen coverage.
 
+#![warn(missing_docs)]
+
 use std::sync::Arc;
 
 /// Whether this CPU has hardware AES, which decides which AEAD the TLS
@@ -155,12 +157,20 @@ pub async fn stat_presence(
 #[derive(Clone, Copy, serde::Serialize)]
 pub struct StageRate {
     pub(crate) one_core: f64,
+    /// GB/s with every core working. The figure that bounds a real
+    /// download, since the pipeline runs the stage across the pool.
     pub all_core: f64,
 }
 
+/// What the CPU can do per stage, measured on THIS machine rather than
+/// inferred from a model name. The ceiling figures are what
+/// `SystemReport` compares the network and disk against.
 #[derive(Clone, serde::Serialize)]
 pub struct ComputeReport {
+    /// Cores the all-core figures were measured across.
     pub cores: usize,
+    /// yEnc decode rate, which on every supported target is the SIMD
+    /// path (rapidyenc) rather than the scalar fallback.
     pub decode_simd: StageRate,
     pub(crate) crc32: StageRate,
     pub(crate) md5: StageRate,
@@ -642,8 +652,16 @@ pub async fn network_probe_multi(
 /// the achieved rate.
 #[derive(Clone, serde::Serialize)]
 pub struct LadderStep {
+    /// Sockets this step asked the provider for.
     pub connections: usize,
+    /// Sockets still connected at the measure point. Lower than
+    /// `connections` when the provider refused the rest, which is the
+    /// signal that the ladder has reached the account's own limit
+    /// rather than the link's.
     pub granted: usize,
+    /// Rate achieved at this step, measured over the actual transfer
+    /// time. Compared against the previous step to decide whether the
+    /// climb continues.
     pub gbps: f64,
     /// Raw bytes this step transferred (for the data-usage ledger).
     pub bytes: u64,
@@ -1169,6 +1187,9 @@ pub async fn conn_ladder(
 /// The whole-system verdict.
 #[derive(serde::Serialize)]
 pub struct SystemReport {
+    /// Download rate measured against a real provider. NOT a line-speed
+    /// test: it is one provider over a stated number of connections,
+    /// which is what `network_host` and `network_conns` exist to say.
     pub network_gbps: f64,
     /// The compute ceiling under the ACTIVE verify mode - this is what
     /// bounds `expected_gbps` and draws the compute bar. Equals
@@ -1181,10 +1202,18 @@ pub struct SystemReport {
     /// pair exists so a reader can see what fast verify actually buys
     /// on their box, whichever mode is active (TODO §10).
     pub compute_fast_gbps: f64,
+    /// Sustained write rate of the download target volume, GB/s.
     pub disk_gbps: f64,
+    /// Which of the three stages is the limit: `"network"`, `"cpu"` or
+    /// `"disk"`. The stable machine-readable half of the verdict, where
+    /// `advice` is the prose.
     pub bottleneck: String,
     /// Expected sustained download speed = min of the three.
     pub expected_gbps: f64,
+    /// One paragraph for the user saying what limits them and what
+    /// would change it, already written for the `bottleneck` that won.
+    /// Deliberately withholds a fast-verify recommendation when the two
+    /// compute ceilings came out inverted, which a loaded box can do.
     pub advice: String,
     /// What the network figure was actually measured over: the provider
     /// it pulled from and how many connections it opened. Without these
@@ -1193,6 +1222,9 @@ pub struct SystemReport {
     /// know, so the UI simply omits the qualifier.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub network_host: String,
+    /// Connections the network probe opened. Published beside the rate
+    /// so nobody reads a 4-connection figure as a line-speed result.
+    /// Zero means the caller did not know, and the UI omits it.
     #[serde(skip_serializing_if = "is_zero")]
     pub network_conns: usize,
     /// TODO 210 item (b): the machine's own network link, named when it
@@ -1352,8 +1384,11 @@ pub fn verdict(
 /// Per-server result of the overlap sweep.
 #[derive(Clone, serde::Serialize)]
 pub struct ServerProbe {
+    /// The server this row is about, by configured hostname.
     pub host: String,
     pub(crate) connect_ok: bool,
+    /// Round trip to the server in milliseconds. A distance reading,
+    /// not a capacity one: `speed_gbps` is the capacity half.
     pub rtt_ms: f64,
     /// Fraction of the shared sample this server HAD (0..1).
     pub availability: f64,
@@ -1366,7 +1401,10 @@ pub struct ServerProbe {
 /// One pair's infra-overlap score.
 #[derive(Clone, serde::Serialize)]
 pub struct OverlapPair {
+    /// One server of the pair, by hostname.
     pub a: String,
+    /// The other. The comparison is symmetric and each unordered pair
+    /// appears once.
     pub b: String,
     /// Jaccard similarity of the two servers' MISSING-article sets over
     /// the shared sample (1.0 = identical gaps = same backbone).
@@ -1375,10 +1413,24 @@ pub struct OverlapPair {
     pub verdict: String,
 }
 
+/// The overlap sweep's whole answer: every server probed, every pair
+/// scored, and what to do about it.
+///
+/// The question it answers is RECOVERY diversity, not capacity. Two
+/// servers on one backbone share takedowns and missing articles, so they
+/// add sockets and add nothing to the odds that a damaged set completes.
 #[derive(serde::Serialize)]
 pub struct DiversityReport {
+    /// One row per configured server, in configuration order. A server
+    /// that would not connect is still listed, with `connect_ok` false
+    /// and no scores.
     pub servers: Vec<ServerProbe>,
+    /// Every pair of servers that BOTH connected, scored on how much
+    /// their missing-article sets agree. Pairs involving a server that
+    /// did not connect are omitted rather than scored as diverse.
     pub pairs: Vec<OverlapPair>,
+    /// Prose for the user: which providers are redundant for recovery
+    /// and which genuinely widen coverage.
     pub recommendation: String,
 }
 

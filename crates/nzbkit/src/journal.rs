@@ -41,7 +41,7 @@
 //!                                          [`Journal::record_name_votes`])
 //!   ```
 //!
-//!   G <token>                              this open's generation claim
+//!   G `<token>`                            this open's generation claim
 //!                                          (X5-01): `Journal::remove`
 //!                                          unlinks only while the LAST
 //!                                          one is its own
@@ -498,14 +498,14 @@ impl ResumeState {
     /// WHAT THIS IS NOT, said here because the difference is the whole
     /// reason it is a separate question from [`restore`]: a record is
     /// not a promise the article will be trusted. `restore` re-reads the
-    /// bytes and checks them against [`Article::crc`], so a record whose
+    /// bytes and checks them against `Article::crc`, so a record whose
     /// crc is absent (an older binary) or whose bytes were torn by the
     /// very crash that ended run 1 is recorded here and REFETCHES
     /// anyway. So this is an upper bound on what a resume can reuse and
     /// a lower bound on nothing. It exists so a test can price the gap a
     /// crash left - the quantity `contract_crash_in_fault_window`
     /// measures - without growing a second reader of the record grammar
-    /// beside [`parse_lines`], which is what [`Journal::peek`]'s own
+    /// beside `parse_lines`, which is what [`Journal::peek`]'s own
     /// header refuses.
     pub fn recorded_ids(&self) -> HashSet<String> {
         self.completed
@@ -670,7 +670,7 @@ impl Journal {
     ///   records, so a peek taken mid-run undercounts by up to one
     ///   pending batch. Bounded, and in the direction that under-reports
     ///   a cost rather than inventing one.
-    /// * **It costs what a resume costs.** This is [`parse_lines`], the
+    /// * **It costs what a resume costs.** This is `parse_lines`, the
     ///   same parser `open` runs, so the transient allocation is the one
     ///   the very next run of this job makes anyway. A second, cheaper
     ///   parser that summed fragment lengths without building the state
@@ -1012,7 +1012,7 @@ impl Journal {
     /// read-back, and held-span drain all landed). From this line back,
     /// every placement recorded for the slot - fragments naming inner
     /// files the fallback deletes right after - ALSO sits at its final
-    /// offsets in the slot's own volume file, so [`parse_lines`]
+    /// offsets in the slot's own volume file, so `parse_lines`
     /// rewrites them to identity form and a retry restores those
     /// articles instead of refetching the whole post. Positional like
     /// `X`: records appended after this line already describe the

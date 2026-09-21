@@ -200,6 +200,29 @@ pub(super) use shape::{
 };
 
 impl Index {
+    /// RELEASE a seed savepoint, cleaning up when the RELEASE itself fails.
+    ///
+    /// A failed outermost RELEASE can leave its savepoint live (I/O/full/
+    /// busy), and this connection is the daemon's long-lived writer: the
+    /// callers hand it straight back on error, so a stranded savepoint
+    /// leaves every later write inside a never-committed transaction.
+    /// Clean up only when the connection still owns a transaction, since
+    /// some failures (a commit-hook refusal) have already rolled it back.
+    /// This mirrors the guard `nzb_seed_store_prepared_guarded` carries.
+    fn release_seed_savepoint(&self, name: &str) -> rusqlite::Result<()> {
+        match self.db.execute_batch(&format!("RELEASE {name}")) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if !self.db.is_autocommit() {
+                    let _ = self
+                        .db
+                        .execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"));
+                }
+                Err(error)
+            }
+        }
+    }
+
     pub(super) fn nzb_seed_schema_present_on(db: &Connection) -> rusqlite::Result<bool> {
         let mut stmt = db.prepare_cached(
             "SELECT COUNT(*) FROM sqlite_master
@@ -402,7 +425,7 @@ impl Index {
             Ok(())
         })();
         match install {
-            Ok(()) => self.db.execute_batch("RELEASE nzb_seed_schema")?,
+            Ok(()) => self.release_seed_savepoint("nzb_seed_schema")?,
             Err(error) => {
                 let _ = self
                     .db
@@ -420,11 +443,11 @@ impl Index {
     ///
     /// # Why these sets are otherwise dead
     ///
-    /// [`Self::verified_nzb_seed_membership_key`] recomputes a `sha256:` key
+    /// `Self::verified_nzb_seed_membership_key` recomputes a `sha256:` key
     /// from `nzb_seed_file_keys` and returns `None` unless it equals the
     /// stored `membership_key`. A legacy key is a bare MD5 hex digest, which
     /// can never equal a `sha256:`-prefixed string, so every replay files the
-    /// set `unsafe` ([`Self::reconcile_one_nzb_seed_locked`]) and it can never
+    /// set `unsafe` (`Self::reconcile_one_nzb_seed_locked`) and it can never
     /// name anything however far the reverse map fills. Measured on the live
     /// index 2 Sep 2026: 237 of 248 sets carrying a trusted external title
     /// were pinned this way, and the sweep kept re-reconciling them to the
@@ -530,7 +553,7 @@ impl Index {
             Ok(())
         })();
         match repair {
-            Ok(()) => self.db.execute_batch("RELEASE nzb_seed_rekey")?,
+            Ok(()) => self.release_seed_savepoint("nzb_seed_rekey")?,
             Err(error) => {
                 let _ = self
                     .db
@@ -559,7 +582,7 @@ impl Index {
     /// the short-manifest case beside it), and folding a delete into that
     /// branch would have meant rewriting what those tests assert. The
     /// predicate is not duplicated: this pass asks the same
-    /// [`Self::strong_key_from_stored_file_keys`] and acts only where it
+    /// `Self::strong_key_from_stored_file_keys` and acts only where it
     /// answers `None`, so the two passes cannot disagree about which sets
     /// are which. Order between them does not matter for correctness.
     ///
@@ -632,7 +655,7 @@ impl Index {
             Ok(())
         })();
         match purge {
-            Ok(()) => self.db.execute_batch("RELEASE nzb_seed_purge")?,
+            Ok(()) => self.release_seed_savepoint("nzb_seed_purge")?,
             Err(error) => {
                 let _ = self
                     .db
@@ -759,7 +782,7 @@ impl Index {
                 PRIMARY KEY(set_id,file_ord)) WITHOUT ROWID;",
         );
         match install {
-            Ok(()) => self.db.execute_batch("RELEASE nzb_seed_file_keys_schema")?,
+            Ok(()) => self.release_seed_savepoint("nzb_seed_file_keys_schema")?,
             Err(error) => {
                 let _ = self.db.execute_batch(
                     "ROLLBACK TO nzb_seed_file_keys_schema;
@@ -838,7 +861,7 @@ impl Index {
             Ok(())
         })();
         match install {
-            Ok(()) => self.db.execute_batch("RELEASE nzb_seed_capacity_schema")?,
+            Ok(()) => self.release_seed_savepoint("nzb_seed_capacity_schema")?,
             Err(error) => {
                 let _ = self.db.execute_batch(
                     "ROLLBACK TO nzb_seed_capacity_schema;
@@ -2459,6 +2482,11 @@ impl Index {
         })
     }
 
+    /// Every edge recorded for one seed set, by release id.
+    ///
+    /// Empty rather than an error when the seed schema has never been
+    /// created: a build that has not run a seed pass has no table to
+    /// read, and that is an absence of edges, not a failure.
     pub fn nzb_seed_matches(&self, set_id: i64) -> Result<Vec<NzbSeedMatch>, NzbSeedError> {
         if !self.nzb_seed_schema_present()? {
             return Ok(Vec::new());

@@ -11,10 +11,12 @@
 //! - Retry taxonomy from the NNTP response codes: transport failures retry (bounded); a 430
 //!   "no such article" is authoritative for this server - no retry.
 
+#![warn(missing_docs)]
+
 use crate::sync::MutexExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
@@ -47,12 +49,17 @@ pub struct ConnTarget {
 }
 
 impl ConnTarget {
+    /// A dial starting at `target`, clamped to at least one. Shared:
+    /// every worker watches it and the controller moves it.
     pub fn new(target: usize) -> Arc<Self> {
         Arc::new(Self {
             tx: tokio::sync::watch::channel(target.max(1)).0,
         })
     }
 
+    /// The live target - how many slots may hold a connection right
+    /// now. Not the fleet size: slots at or above this park without a
+    /// connection rather than going away.
     pub fn get(&self) -> usize {
         *self.tx.borrow()
     }
@@ -273,7 +280,11 @@ pub enum MissingCause {
     /// - Giganews's 451, or refusal text naming a removal). A hint for
     /// the failure summary and the availability oracle, never part of
     /// the verdict: the unanimity contract is identical either way.
-    Gone { takedown: bool },
+    Gone {
+        /// At least one refusal said REMOVED rather than not found.
+        /// A hint, never part of the verdict - see above.
+        takedown: bool,
+    },
     /// The article's age exceeds every configured server's
     /// `retention_days` - no server was ever asked.
     Retention,
@@ -291,21 +302,39 @@ pub enum MissingCause {
     /// mistake. `takedown` carries the same hint `Gone` does and is still
     /// worth having - a refusal naming a removal said something about the
     /// post, whichever other server went dark.
-    Unasked { takedown: bool, dark: u32 },
+    Unasked {
+        /// The same hint [`Self::Gone`] carries, and still worth
+        /// having here: a refusal naming a removal said something
+        /// about the post whichever other server went dark.
+        takedown: bool,
+        /// How many servers had been serving this run and were gone
+        /// before the article reached them. Non-zero by construction -
+        /// it is what makes the refusals short of unanimous.
+        dark: u32,
+    },
 }
 
 /// The decode consumer's per-article verdict, reported back through
 /// [`QueueControl::note_decoded`] (TODO 114 consumer steer). The
 /// consumer reports only what its own decode saw; the expected part
-/// number stays in the pool (`Work::part`, via the stashed [`queue::Handed`]
+/// number stays in the pool (`Work::part`, via the stashed `queue::Handed`
 /// copy), which does the split-brain identity comparison itself.
 #[derive(Debug, Clone, Copy)]
 pub enum DecodeReport<'a> {
     /// Decode succeeded; `part` is the body's declared yEnc part
     /// number (None when it declared none).
-    Clean { part: Option<u32> },
+    Clean {
+        /// The yEnc header's own part number, which the pool compares
+        /// against what it asked for. `None` when the body declared
+        /// none, which is not an error - single-part posts do not.
+        part: Option<u32>,
+    },
     /// yEnc decode / pcrc32 failed.
-    Bad { why: &'a str },
+    Bad {
+        /// Why, for the log. Free text from the decoder; nothing
+        /// branches on it.
+        why: &'a str,
+    },
 }
 
 /// What [`QueueControl::note_decoded`] decided about a reported body.
@@ -324,9 +353,23 @@ pub enum DecodeAck {
 #[derive(Debug)]
 pub enum FetchOutcome {
     /// Raw dot-stuffed body, ready for `yenc::decode`.
-    Done { id: Arc<str>, raw: Vec<u8> },
+    Done {
+        /// The article's message-id, without angle brackets - the same
+        /// id the work item carried.
+        id: Arc<str>,
+        /// The body as it came off the wire, still dot-stuffed and
+        /// still yEnc-encoded.
+        raw: Vec<u8>,
+    },
     /// No server can produce the article; `cause` says why.
-    Missing { id: Arc<str>, cause: MissingCause },
+    Missing {
+        /// The article's message-id, without angle brackets.
+        id: Arc<str>,
+        /// Which of the three missing verdicts this is. Only
+        /// [`MissingCause::Gone`] is evidence about the POST - see
+        /// that type.
+        cause: MissingCause,
+    },
     /// The pool gave up on the article without a body. `code` is the
     /// typed reason - not every one of them is a transport failure of
     /// the LINK, and a consumer that reads them all as evidence about
@@ -339,8 +382,12 @@ pub enum FetchOutcome {
     /// precisely so no reader has to parse the string to learn which
     /// kind of failure it was.
     Failed {
+        /// The article's message-id, without angle brackets.
         id: Arc<str>,
+        /// The typed reason. Branch on this, never on `error`.
         code: FailCode,
+        /// The same sentence as ever, in the OS's own words and
+        /// language, for the log and the SAB-compat surface.
         error: String,
     },
 }
@@ -1385,6 +1432,27 @@ struct Shared {
     /// [`SCAN_RETRY_MS`]; new work only appears via queue mutations, so
     /// the worst case is a one-tick delay picking it up.
     scan_futile: Vec<AtomicU64>,
+    /// Drain floor (21 Sep 2026): the last answer of
+    /// [`Self::untried_candidate_mask`], and the `run_ms` it was
+    /// computed at (`u64::MAX` = never computed).
+    ///
+    /// Cached because the floor is consulted from the 25 ms idle loop
+    /// of every idle worker on the fleet at once, and the answer is a
+    /// property of the RUN rather than of the asking server - so one
+    /// scan per [`UNTRIED_MASK_TTL_MS`] serves all of them. It is still
+    /// strictly cheaper than what the same loop already does:
+    /// `next_work` walks the whole queue under its lock per scan,
+    /// throttled by [`SCAN_RETRY_MS`], which is five times this window.
+    ///
+    /// Staleness is safe in the direction it happens. The mask SHRINKS
+    /// as articles go terminal or collect refusals, so a stale answer
+    /// holds a floor a few milliseconds longer than it had to; it grows
+    /// only on a requeue, where holding the old answer is also the safe
+    /// side. [`Self::complete_one`] invalidates it outright so the last
+    /// article landing lifts every floor at once rather than at the end
+    /// of a window.
+    untried_mask: AtomicU32,
+    untried_mask_at: AtomicU64,
     /// N6 endgame idle-spin gate: generation counter over the inflight
     /// map, bumped ([`Self::bump_inflight_gen`], hedge module) by every
     /// mutation that can create or advance a `pick_dup` candidate. The
@@ -1695,7 +1763,7 @@ const CAP_PROBE_BOUNCES: u32 = 75;
 /// change nobody asked for.
 const OUTAGE_BUDGET: Duration = Duration::from_secs(15 * 60);
 
-/// [`OUTAGE_BUDGET`] in whole minutes, which is the unit the daemon
+/// `OUTAGE_BUDGET` in whole minutes, which is the unit the daemon
 /// setting and the dashboard use. Exported so the shipped default lives
 /// in exactly one place - a constant here and a literal in the settings
 /// seed would drift the first time either moved.
@@ -1911,6 +1979,8 @@ impl Shared {
             promoted_pending: AtomicUsize::new(0),
             promoted_ids: std::sync::Mutex::new(HashSet::new()),
             scan_futile: (0..n_servers).map(|_| AtomicU64::new(u64::MAX)).collect(),
+            untried_mask: AtomicU32::new(0),
+            untried_mask_at: AtomicU64::new(u64::MAX),
             inflight_gen: AtomicU64::new(0),
             dup_futile: (0..n_servers).map(|_| AtomicU64::new(u64::MAX)).collect(),
             dup_futile_gen: (0..n_servers).map(|_| AtomicU64::new(0)).collect(),
@@ -2020,6 +2090,11 @@ impl Shared {
 
     /// Mark one article terminal; wakes every worker when the last lands.
     fn complete_one(&self) {
+        // The drain floor's cache is keyed on time, and this is the one
+        // event that can only ever SHRINK its mask - so invalidate here
+        // rather than let the last article of a run hold a floor for
+        // another window. See `Shared::untried_candidate_mask`.
+        self.untried_mask_at.store(u64::MAX, Ordering::Release);
         if self.pending.fetch_sub(1, Ordering::AcqRel) == 1 {
             #[cfg(test)]
             {

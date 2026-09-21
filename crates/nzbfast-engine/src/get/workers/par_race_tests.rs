@@ -24,6 +24,7 @@ fn slot(hint: &str, remaining: usize, missing: usize) -> Arc<FileSlot> {
         par2_name_demoted: Default::default(),
         par2_sniffed: AtomicBool::new(false),
         total_segments: 3,
+        posted_bytes: 0,
         remaining: AtomicUsize::new(remaining),
         missing: AtomicUsize::new(missing),
         errors: AtomicUsize::new(0),

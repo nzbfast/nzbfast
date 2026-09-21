@@ -96,7 +96,7 @@ fn imdb_of(rel: &serde_json::Value) -> String {
 ///
 /// QUEUES for its rate-limit slot, so it belongs on a background path
 /// (a finished download's identity pass), never on one a click is
-/// waiting behind - see [`try_search_p2p`].
+/// waiting behind - see `try_search_p2p`.
 pub fn search_p2p(query: &str) -> Vec<XrelRelease> {
     let Some(url) = url_for(query) else {
         return Vec::new();
@@ -135,25 +135,23 @@ fn url_for(query: &str) -> Option<String> {
 }
 
 fn fetch(url: &str) -> Vec<XrelRelease> {
-    match crate::netfetch::shared_enrich_agent()
-        .get(url)
-        .timeout(std::time::Duration::from_secs(10))
-        .call()
-    {
-        Ok(r) => r
-            .into_string()
-            .map(|b| parse_releases(&b))
-            .unwrap_or_default(),
+    match crate::netfetch::call_body(
+        crate::netfetch::shared_enrich_agent()
+            .get(url)
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(10)))
+            .build(),
+    ) {
+        Ok(b) => parse_releases(&b),
         Err(e) => {
-            if let ureq::Error::Status(code @ (429 | 503), r) = &e {
-                // They send GitHub-style headers; `X-RateLimit-Reset` is
-                // an absolute unix time, so it is not a wait in seconds
-                // and must not be handed to `penalise` as one. Only the
-                // standard header is trusted.
-                let wait = r
-                    .header("Retry-After")
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(if *code == 429 { 30 } else { 5 });
+            // They send GitHub-style headers; `X-RateLimit-Reset` is
+            // an absolute unix time, so it is not a wait in seconds
+            // and must not be handed to `penalise` as one. Only the
+            // standard header is trusted, which is the only one
+            // `Refusal::wait_secs` reads.
+            if e.is_slow_down()
+                && let Some(wait) = e.wait_secs()
+            {
                 ratelimit::penalise(Provider::Xrel, wait);
             }
             Vec::new()

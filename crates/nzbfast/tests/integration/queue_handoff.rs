@@ -832,6 +832,8 @@ struct DrainRig {
     /// read through `asked_for`, which filters it (the successor asks
     /// this server for its own articles too and is refused).
     a_wire: Arc<Mutex<nzbkit::mock::BodyLog>>,
+    /// ...and the one that holds B's, for the test that pauses BOTH.
+    b_wire: Arc<Mutex<nzbkit::mock::BodyLog>>,
     _slow: MockServer,
     _fast: MockServer,
     _d: crate::harness::Daemon,
@@ -883,6 +885,7 @@ async fn drain_rig(tag: &str) -> DrainRig {
     )
     .await;
     let a_wire = slow.body_log.clone();
+    let b_wire = fast.body_log.clone();
     let cfg = dir.join("config.json");
     std::fs::write(
         &cfg,
@@ -930,6 +933,7 @@ async fn drain_rig(tag: &str) -> DrainRig {
         b_xml: nzb_xml("drainB.bin", &b_segs),
         b_bytes,
         a_wire,
+        b_wire,
         dir,
         _slow: slow,
         _fast: fast,
@@ -984,10 +988,15 @@ fn decoded_mb(port: u16, id: &str) -> f64 {
 /// and counting them made A's wire look like it was serving hundreds of
 /// bodies a second and never falling silent.
 fn asked_for(wire: &Arc<Mutex<nzbkit::mock::BodyLog>>) -> usize {
+    asked_for_tag(wire, DRAIN_A_TAG)
+}
+
+/// The same count for any set's id tag.
+fn asked_for_tag(wire: &Arc<Mutex<nzbkit::mock::BodyLog>>, tag: &str) -> usize {
     wire.lock()
         .unwrap()
         .iter()
-        .filter(|id| id.starts_with(DRAIN_A_TAG))
+        .filter(|id| id.starts_with(tag))
         .collect::<HashSet<_>>()
         .len()
 }
@@ -1114,6 +1123,78 @@ async fn pausing_a_draining_predecessor_stops_its_wire_and_leaves_the_successor_
         let job_dir = PathBuf::from(b_slot["storage"].as_str().unwrap());
         assert!(job_dir.starts_with(dir.join("complete")), "{job_dir:?}");
         assert_eq!(std::fs::read(job_dir.join("drainB.bin")).unwrap(), b_bytes);
+    })
+    .await
+    .unwrap();
+}
+
+/// A QUEUE pause during a hand-over stops BOTH wires: the successor that
+/// owns the hub and the predecessor draining behind it, whose handles are
+/// in the drain slot. The pause-by-name tests above steer one job at a
+/// time; the header's Pause is the whole-queue case, and it has to reach
+/// the drain slot as well as the hub or the predecessor's metered traffic
+/// runs on under a `paused` header (the 21 Sep 2026 report's other
+/// candidate, ruled out by this test staying green).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queue_pause_during_a_hand_over_stops_both_wires() {
+    let rig = drain_rig("pauseall").await;
+    let (port, a_wire, b_wire) = (rig.port, rig.a_wire.clone(), rig.b_wire.clone());
+    let (log_path, a_xml, b_xml) = (rig.log_path.clone(), rig.a_xml.clone(), rig.b_xml.clone());
+    tokio::task::spawn_blocking(move || {
+        let (a_id, b_id) = arm_handoff(port, &log_path, &a_xml, &b_xml);
+
+        let r = http(port, "/api?mode=pause&apikey=sekrit&output=json", None);
+        assert!(
+            r.contains("\"status\": true") || r.contains("\"status\":true"),
+            "{r}"
+        );
+
+        // Both sets are 400 articles; neither may be fetched past a cut
+        // once the pause has landed. The bound is A's, as above, and the
+        // same for B, which was moving at full pace when the pause came.
+        let a_seen = wait_for_quiet_wire(&a_wire);
+        assert!(
+            a_seen <= DRAIN_CUT_SHORT,
+            "the queue pause did not cut the draining predecessor short: \
+             {a_seen} of {DRAIN_ARTICLES} articles"
+        );
+        let quiet = Duration::from_secs(2);
+        let mut last = asked_for_tag(&b_wire, "<db-");
+        let mut since = Instant::now();
+        let t0 = Instant::now();
+        while since.elapsed() < quiet {
+            let n = asked_for_tag(&b_wire, "<db-");
+            if n != last {
+                last = n;
+                since = Instant::now();
+            }
+            assert!(
+                t0.elapsed() < Duration::from_secs(25),
+                "the successor's wire never went quiet - {n} of {DRAIN_ARTICLES} articles \
+                 asked for and still climbing: the queue pause missed the hub owner"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            last < DRAIN_ARTICLES,
+            "the successor was fetched in full through a queue pause: {last} articles"
+        );
+
+        // Parked back in the queue under a paused queue - a queue pause
+        // reads `Queued` on the row once the wind-down has parked it (the
+        // per-job `Paused` word is the by-name tests' above).
+        wait_until("both jobs never left Downloading", || {
+            [&a_id, &b_id]
+                .iter()
+                .all(|id| queue_slot(port, id).is_some_and(|s| s["status"] != "Downloading"))
+        });
+        let slots = history_slots(port);
+        assert!(
+            !slots
+                .iter()
+                .any(|s| s["nzo_id"] == a_id || s["nzo_id"] == b_id),
+            "a paused job must not be filed in history: {slots:?}"
+        );
     })
     .await
     .unwrap();

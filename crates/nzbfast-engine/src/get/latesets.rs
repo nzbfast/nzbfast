@@ -659,6 +659,23 @@ pub(super) fn apply_nonactivated_disk_sets(
                 // the same reading on the download repair, and
                 // `RepairError::Cancelled` for what is left on disk.
                 Err(nzbkit::par2repair::RepairError::Cancelled) => break,
+                // NOR IS THE DAEMON'S OWN "NOT NOW" AN UNREADABLE SET -
+                // TODO 332, and the same placement argument as the
+                // cancel above: "could not be read (repair deferred)"
+                // blames a set nothing has touched.
+                //
+                // UNREACHABLE TODAY, and kept as a belt with its own
+                // name. This pass does not arm the long-repair veto -
+                // `repair::nativepass` is the one site that does, and
+                // its call says at length why the late-set round is not
+                // a place to stand a whole job down from (the sets here
+                // may belong to nobody in this job at all). Should a
+                // later lane widen it, `break` is what this loop needs
+                // and the misleading warn below is what it must not
+                // reach; that lane also owes the harder half, which is
+                // what `good` should say when a set this job VOUCHES
+                // for was deferred rather than repaired.
+                Err(nzbkit::par2repair::RepairError::Deferred { .. }) => break,
                 Err(e) if mine => {
                     if said.insert(id) {
                         warn!(
@@ -2169,6 +2186,7 @@ mod tests {
             par2_name_demoted: Default::default(),
             par2_sniffed: AtomicBool::new(false),
             total_segments: total,
+            posted_bytes: 0,
             remaining: AtomicUsize::new(0),
             missing: AtomicUsize::new(missing),
             errors: AtomicUsize::new(0),

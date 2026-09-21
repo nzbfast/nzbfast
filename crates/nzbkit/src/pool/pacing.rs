@@ -194,10 +194,6 @@ pub(super) fn sole_server_floor_ms() -> u64 {
 pub(super) fn adaptive_first_byte_min_ms() -> u64 {
     static M: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *M.get_or_init(|| {
-        // env-default-gate: the fallback is the local `base` below, which is
-        // `ADAPTIVE_FIRST_BYTE_MIN` in milliseconds - a `Duration` const read
-        // through a let binding, which a chain walker cannot follow. Check the
-        // doc row's 4000 against that const.
         let base = ADAPTIVE_FIRST_BYTE_MIN.as_millis() as u64;
         std::env::var("NZBFAST_TTFB_FLOOR_MS")
             .ok()

@@ -31,7 +31,7 @@ use super::*;
 ///   two valid FileDesc members that COLLIDE ON DISK while sharing no
 ///   complete string. One name is a file and the other needs it to be a
 ///   directory, so the claim map has to carry the prefix TOPOLOGY, not
-///   just the leaves - see [`PublishedNames::free_for`]. Measured on the
+///   just the leaves - see `PublishedNames::free_for`. Measured on the
 ///   30 Aug baseline in both completion orders: flat-first, the child's
 ///   `create_out_dirs` met a regular file; child-first, publishing the
 ///   flat name met a nonempty directory. Either way one verified payload

@@ -112,12 +112,13 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
     <li><a href="#automation">10 · Automazione</a></li>
     <li><a href="#arr">11 · Sonarr, Radarr e compagnia</a></li>
     <li><a href="#remotes">12 · Telefono e app remote</a></li>
-    <li><a href="#performance">13 · Strumenti per le prestazioni</a></li>
-    <li><a href="#updates">14 · Aggiornamenti</a></li>
-    <li><a href="#cli">15 · Riga di comando</a></li>
-    <li><a href="#api">16 · Panoramica dell'API</a></li>
-    <li><a href="#files">17 · File e percorsi</a></li>
-    <li><a href="#troubleshooting">18 · Risoluzione dei problemi</a></li>
+    <li><a href="#security">13 · Sicurezza e accesso</a></li>
+    <li><a href="#performance">14 · Strumenti per le prestazioni</a></li>
+    <li><a href="#updates">15 · Aggiornamenti</a></li>
+    <li><a href="#cli">16 · Riga di comando</a></li>
+    <li><a href="#api">17 · Panoramica dell'API</a></li>
+    <li><a href="#files">18 · File e percorsi</a></li>
+    <li><a href="#troubleshooting">19 · Risoluzione dei problemi</a></li>
   </ol>
 </nav>
 <main>
@@ -667,7 +668,7 @@ sue release sotto. Aprila con <b>&#9656;</b> o cliccando la riga; la casella sul
 titolo seleziona le release mostrate. Il raggruppamento vale solo per <b>Questo
 indice</b>; scegli <b>Indexer</b> o <b>Entrambi</b> e la tabella torna piatta, e lo
 dice.</li>
-<li><b>Un gruppo alla volta.</b> Clicca il nome del gruppo sotto una release e la pagina si restringe alle release pubblicate lì; una pillola sopra la tabella nomina il gruppo finché non la togli. Restringe la bacheca e la tabella allo stesso modo, quindi passare dall'una all'altra la mantiene. L'altra via d'accesso è Impostazioni &rarr; Organizzazione &rarr; <b>Indicizzazione</b> &rarr; <b>Gruppi da scansionare</b> &rarr; <b>Trova…</b>: apri un gruppo che già scansioni e premi <b>Release indicizzate</b>.</li>
+<li><b>Un gruppo alla volta.</b> Il menu <b>Gruppo</b> sopra la tabella elenca i gruppi che stai indicizzando; scegline uno e la pagina si restringe alle release pubblicate lì, e la barra degli indirizzi lo porta con sé, quindi un ricaricamento o un link condiviso lo conservano. Cliccare il nome del gruppo sotto una release sceglie lo stesso gruppo. Restringe la bacheca e la tabella allo stesso modo, quindi passare dall'una all'altra la mantiene. L'altra via d'accesso è Impostazioni &rarr; Organizzazione &rarr; <b>Indicizzazione</b> &rarr; <b>Gruppi da scansionare</b> &rarr; <b>Trova…</b>: apri un gruppo che già scansioni e premi <b>Release indicizzate</b>.</li>
 <li><b>Ogni release di un titolo</b> è elencata quando apri la sua scheda, con
 risoluzione, codec, formato audio e gamma dinamica (Dolby Vision, HDR10) letti dal
 nome della release, più dimensione, età e se ogni parte è ancora sul tuo provider.
@@ -712,7 +713,7 @@ simili insegna qualcosa al muro: propone un filtro da accettare con un clic
 («Nascondere tutti i titoli Reality d'ora in poi?»). Tutto ciò che hai nascosto, e ogni
 filtro appreso, si trova sotto <b>Nascosti e filtri</b> e lì si può annullare.</li>
 <li>Un piccolo <b>punto di disponibilità</b> su una scheda è il verdetto dell'oracolo
-(<a href="#performance">§13</a>): un «?» ambra significa incerto sui tuoi provider,
+(<a href="#performance">§14</a>): un «?» ambra significa incerto sui tuoi provider,
 rosso che le sue parti continuano a mancare. I gruppi in via di ripulitura portano un
 distintivo <b>ripulito</b>.</li>
 </ul>
@@ -803,12 +804,12 @@ entrare o uscire dal pool qualsiasi server. Ogni server ha:</p>
 <tr><th>Campo</th><th>Note</th></tr>
 <tr><td>Host / porta</td><td>Usa la porta SSL <b>563</b>. Il TLS non costa nulla di misurabile - nzbfast cifra sempre.</td></tr>
 <tr><td>Nome utente / password</td><td>Memorizzati in locale in <code>config.local.json</code>, mai rimandati al browser. Lasciare vuota la password in modifica mantiene quella memorizzata. Le password sono <a href="#passwords">offuscate su disco, non cifrate</a>.</td></tr>
-<tr><td>Connessioni</td><td>Connessioni simultanee per server. Usa <b>Ottimizzazione connessioni</b> (<a href="#performance">§13</a>) per trovare il punto ideale di ciascun provider invece di sparare alto.</td></tr>
+<tr><td>Connessioni</td><td>Connessioni simultanee per server. Usa <b>Ottimizzazione connessioni</b> (<a href="#performance">§14</a>) per trovare il punto ideale di ciascun provider invece di sparare alto.</td></tr>
 <tr><td>Livello (tier)</td><td>0 = primario; i livelli superiori sono server di riempimento, interpellati solo per gli articoli mancati da tutti i livelli inferiori. Metti gli account illimitati a 0, quelli a blocchi a 1+.</td></tr>
 <tr><td>Dimensione blocco (GB)</td><td>Per gli account a blocchi (a pagamento per GB): nzbfast traccia l'uso complessivo rispetto a questo valore e smette di usare il server a blocco esaurito (avviso all'85%).</td></tr>
-<tr><td>Ogni byte è a pagamento</td><td>Attivala per un account a consumo. I tuoi download usano il server esattamente come prima; ciò che si ferma è il traffico che nzbfast gli manderebbe per conto proprio - l'ottimizzazione automatica delle connessioni, la tappa di rete del benchmark di sistema e le scansioni delle intestazioni per l'indice integrato lo saltano tutti. Indipendente dal livello e dalla dimensione del blocco, perché un account a consumo può essere il tuo unico provider e uno illimitato può stare al livello 2. Spenta per impostazione predefinita. Il <b>Test</b> manuale in <b>Ottimizzazione connessioni</b> (<a href="#performance">§13</a>) funziona comunque su un server contrassegnato e chiede prima, perché lì sei tu a scegliere di spendere.</td></tr>
+<tr><td>Ogni byte è a pagamento</td><td>Attivala per un account a consumo. I tuoi download usano il server esattamente come prima; ciò che si ferma è il traffico che nzbfast gli manderebbe per conto proprio - l'ottimizzazione automatica delle connessioni, la tappa di rete del benchmark di sistema e le scansioni delle intestazioni per l'indice integrato lo saltano tutti. Indipendente dal livello e dalla dimensione del blocco, perché un account a consumo può essere il tuo unico provider e uno illimitato può stare al livello 2. Spenta per impostazione predefinita. Il <b>Test</b> manuale in <b>Ottimizzazione connessioni</b> (<a href="#performance">§14</a>) funziona comunque su un server contrassegnato e chiede prima, perché lì sei tu a scegliere di spendere.</td></tr>
 </table></div>
-<p><b>Lascia un po' di margine sotto il limite di connessioni del tuo account.</b> Impostare le connessioni poco sotto il limite non costa nulla: la velocità si appiattisce ben prima delle ultime una o due connessioni, e l'<b>Ottimizzazione connessioni</b> (<a href="#performance">§13</a>) si ferma comunque sotto. Sono quei posti liberi a permettere a un secondo dispositivo, a un altro client o a un nuovo tentativo dopo un socket caduto di entrare lo stesso, invece di essere rifiutati mentre questo occupa ogni posto.</p>
+<p><b>Lascia un po' di margine sotto il limite di connessioni del tuo account.</b> Impostare le connessioni poco sotto il limite non costa nulla: la velocità si appiattisce ben prima delle ultime una o due connessioni, e l'<b>Ottimizzazione connessioni</b> (<a href="#performance">§14</a>) si ferma comunque sotto. Sono quei posti liberi a permettere a un secondo dispositivo, a un altro client o a un nuovo tentativo dopo un socket caduto di entrare lo stesso, invece di essere rifiutati mentre questo occupa ogni posto.</p>
 <p><b>Non devi occuparti del limite di file aperti della tua macchina.</b> Il sistema conta
 ogni connessione come un file aperto, e macOS avvia un programma con un limite di 256, che
 un insieme completo di connessioni distribuite su più server può superare. Su macOS e
@@ -868,7 +869,7 @@ d'installazione, mostra cosa ha trovato e copia i server (saltando i duplicati).
 <li>Le modifiche ai server valgono dal <em>prossimo</em> download - nessun riavvio.</li>
 </ul>
 <div class="tip"><b>Consiglio</b>Due provider su backbone <em>diversi</em> battono
-tre sullo stesso. Esegui <b>Diversità dei server</b> (<a href="#performance">§13</a>)
+tre sullo stesso. Esegui <b>Diversità dei server</b> (<a href="#performance">§14</a>)
 per vedere quali dei tuoi provider diversificano davvero la tua copertura e quali
 sono copie ridondanti l'uno dell'altro.</div>
 
@@ -885,9 +886,9 @@ dell'interfaccia battono le opzioni da riga di comando).</p>
 <tr><th>Impostazione</th><th>Cosa fa</th></tr>
 <tr><td>Limite di velocità</td><td>Tetto in byte/sec (<code>50M</code>, <code>1G</code>, 0 = illimitato). Le app remote possono inviare percentuali - imposta la <i>Velocità della linea</i> perché vengano tradotte correttamente. La voce <b>personalizzato…</b> nell'intestazione imposta lo stesso tetto senza aprire le Impostazioni.</td></tr>
 <tr><td>Velocità automatica</td><td>Tetto governato dall'RTT che cede il passo al resto del traffico di casa e si riespande quando la linea è tranquilla.</td></tr>
-<tr><td>Rinvio automatico dei download lenti</td><td>Un job bloccato su un server lento mentre altri attendono viene spostato in fondo alla coda (avanzamento conservato). Vedi <a href="#performance">§13</a>.</td></tr>
-<tr><td>Prefetch sui server inattivi</td><td>I server inutili al job attivo avviano il prossimo in coda. Vedi <a href="#performance">§13</a>.</td></tr>
-<tr><td>Aggiornamento automatico / URL di controllo aggiornamenti</td><td>Vedi <a href="#updates">§14</a>.</td></tr>
+<tr><td>Rinvio automatico dei download lenti</td><td>Un job bloccato su un server lento mentre altri attendono viene spostato in fondo alla coda (avanzamento conservato). Vedi <a href="#performance">§14</a>.</td></tr>
+<tr><td>Prefetch sui server inattivi</td><td>I server inutili al job attivo avviano il prossimo in coda. Vedi <a href="#performance">§14</a>.</td></tr>
+<tr><td>Aggiornamento automatico / URL di controllo aggiornamenti</td><td>Vedi <a href="#updates">§15</a>.</td></tr>
 <tr><td>Velocità della linea</td><td>La velocità nominale della tua connessione - abilita i limiti percentuali dalle app compatibili SABnzbd.</td></tr>
 <tr><td>Pianificazione settimanale</td><td>Editor a righe per regole settimanali: pausa, ripresa o limite di velocità in giorni e orari dati (ora locale). Es.: limita a 20&nbsp;MB/s nei feriali 9–17, illimitato altrimenti.</td></tr>
 </table></div>
@@ -1110,7 +1111,7 @@ per ogni dispositivo che guarda questa installazione.</p>
 <h3>Avanzate: le manopole dietro a quelle ovvie</h3>
 <p>Sei impostazioni senza opzione da riga di comando. Ognuna ha ora una riga avanzata
 sulla scheda di impostazioni che la possiede, e resta impostabile dall'API
-(<a href="#api">§16</a>), ad es.
+(<a href="#api">§17</a>), ad es.
 <code>/api?mode=config&amp;name=verify_mode&amp;value=lean&amp;apikey=…</code>. Come
 tutte le altre finiscono in <code>settings.json</code>.</p>
 <div class="tblwrap"><table>
@@ -1118,7 +1119,7 @@ tutte le altre finiscono in <code>settings.json</code>.</p>
 <tr><td><code>verify_mode</code></td><td><code>full</code> | <code>fast</code> | <code>lean</code> (predefinito <code>fast</code>). <code>lean</code> è la spinta per CPU lente: come fast, ma salta anche il CRC yEnc per articolo non appena PAR2 copre un file, lasciando uno strato di CRC32 invece di due. I download senza PAR2 mantengono i CRC degli articoli, e la verifica e la riparazione di fine lavoro non cambiano in nessun caso. Il selettore <b>Controllo durante lo scaricamento</b> qui sopra è questa impostazione.</td></tr>
 <tr><td><code>auto_retry_mins</code></td><td>Attesa prima dell'<em>unico</em> ritentativo automatico concesso a un primo fallimento con articoli mancanti (predefinito 20). Il ritardo di propagazione è una causa reale di articoli mancanti e si risolve da sé; grazie al journal la ripetizione recupera solo ciò che manca ancora. I fallimenti per password o rimozione non rientrano mai.</td></tr>
 <tr><td><code>index_scan_par</code></td><td>Quanti gruppi l'indicizzatore analizza in parallelo (predefinito 3, limitato a 1-8).</td></tr>
-<tr><td><code>oracle_sample</code></td><td>Budget di STAT a riposo dell'oracolo di disponibilità (<a href="#oracle">§13</a>), sonde all'ora per server. Predefinito 300, massimo 3600, <code>0</code> disattiva del tutto il campionamento.</td></tr>
+<tr><td><code>oracle_sample</code></td><td>Budget di STAT a riposo dell'oracolo di disponibilità (<a href="#oracle">§14</a>), sonde all'ora per server. Predefinito 300, massimo 3600, <code>0</code> disattiva del tutto il campionamento.</td></tr>
 <tr><td><code>predb_max_rows</code></td><td>Quanti annunci pre conserva la tabella del feed (predefinito 250000, limitato a 10000-5000000). La pulizia oraria riduce a questo numero e l'importazione storica si rifiuta di partire se lo supererebbe, così un'importazione non aggiunge mai righe che la pulizia successiva cancella.</td></tr>
 <tr><td><code>predb_seed_days</code></td><td>Quanto indietro arriva un'importazione storica avviata senza una finestra propria (predefinito 180 giorni, massimo 366). Una finestra più ampia significa più richieste alla sorgente pre, cadenzata a una ogni due secondi.</td></tr>
 </table></div>
@@ -1319,7 +1320,7 @@ dashboard e bacheca hanno un layout touch completo. Il pannello Impostazioni →
 Accesso remoto mostra gli URL esatti e un codice QR da inquadrare.</p>
 
 <h3 id="remote-proxy">Raggiungere nzbfast da fuori casa</h3>
-<p>Non esiste una pagina di accesso, ed è una scelta voluta. Un login con cookie di sessione è una superficie di sicurezza da mantenere per sempre, e resterebbe comunque la serratura più debole di qualunque cosa esposta su Internet. nzbfast si autentica invece con la tua chiave API, e accetta quella chiave sia in un'intestazione della richiesta sia nell'URL (<code>X-Api-Key</code>, oppure <code>Authorization: Bearer</code>) - ed è proprio questo che permette a un servizio davanti a lui di gestire l'accesso come si deve.</p>
+<p>nzbfast si autentica con la tua chiave API, e accetta quella chiave sia in un'intestazione della richiesta sia nell'URL (<code>X-Api-Key</code>, o <code>Authorization: Bearer</code>), ed è questo che permette a qualcosa posto davanti di gestire l'accesso come si deve. C'è anche, facoltativo, un nome utente con password davanti al pannello nel browser, che non cambia nulla per Sonarr, Radarr o le app del telefono; <a href="#security">§13</a> confronta i due e dice quando ciascuno è la risposta giusta.</p>
 <p><b>La risposta più semplice è non pubblicarlo affatto.</b> Installa <b>Tailscale</b> su questa macchina e sul telefono: entrambi entrano nella stessa rete privata, non viene esposto nulla, non servono modifiche al router né certificati, e Impostazioni → Accesso remoto mostra un indirizzo che funziona ovunque non appena rileva Tailscale. Preferisci questa strada se non ti serve espressamente un dominio pubblico.</p>
 <p><b>nzbfast può anche servire HTTPS da sé.</b> Punta Impostazioni → Sicurezza →
 Certificato HTTPS / Chiave privata HTTPS a un certificato PEM e alla sua chiave (o
@@ -1361,7 +1362,145 @@ e tutto ciò che ci fai attraverserebbero Internet leggibili da chiunque sul
 percorso, e un'installazione senza alcuna chiave è aperta a chi la trova. Se
 apri comunque una porta, imposta prima una chiave API e attiva l'HTTPS.</div>
 
-<h2 id="performance">13 · Strumenti per le prestazioni</h2>
+<h2 id="security">13 · Sicurezza e accesso</h2>
+<p>nzbfast ha quattro modi di controllare chi può raggiungerlo, e non fanno lo
+stesso lavoro. Due sono credenziali che verifica da sé: la <b>chiave API</b>, che
+presenta ogni programma che gli parla, e l'<b>accesso al pannello</b>,
+facoltativo, un nome utente e una password davanti alle pagine nel browser. Gli
+altri due riguardano la rete più che la persona: su quale indirizzo risponde il
+demone e se qualcosa davanti a lui decide chi entra. Nessuno sostituisce gli
+altri. Un'installazione di casa su una rete fidata ha bisogno solo del primo;
+un'installazione pubblicata su internet ne vuole tre su quattro.</p>
+<div class="tblwrap"><table>
+<tr><th>Livello</th><th>Che cosa ferma</th><th>Dove</th></tr>
+<tr><td>Chiave API</td><td>qualunque chiamata all'API che non la presenti: un'altra macchina, un altro programma, una pagina web che ti capita di visitare</td><td>Impostazioni → Sicurezza. Creata al primo avvio</td></tr>
+<tr><td>Chiave NZB</td><td>niente da sola. È una chiave più debole da distribuire, autorizzata ad aggiungere download e nient'altro</td><td>Impostazioni → Sicurezza. Facoltativa</td></tr>
+<tr><td>Accesso al pannello</td><td>una persona davanti a un browser che non conosce la password</td><td>Impostazioni → Sicurezza. Disattivato di default</td></tr>
+<tr><td>La rete davanti</td><td>intere reti in un colpo solo: l'indirizzo di ascolto, il tuo firewall, un reverse proxy, una VPN</td><td>Impostazioni → Sicurezza, e fuori da nzbfast</td></tr>
+</table></div>
+
+<h3 id="sec-apikey">La chiave API</h3>
+<p>La chiave API è la credenziale principale. Protegge tutta l'API compatibile
+SAB (<a href="#api">§17</a>), cioè l'intera superficie di controllo: la coda, la
+cronologia, ogni impostazione, le password dei tuoi server, il comando di
+spegnimento. Tutto ciò che parla con nzbfast la usa. Sonarr, Radarr e il resto
+della famiglia *arr (<a href="#arr">§11</a>), nzb360 e LunaSea sul telefono
+(<a href="#remotes">§12</a>) ed estensioni del browser come NZB Unity e NZB
+Donkey presentano tutte la stessa chiave.</p>
+<p>Non devi crearne una. Al primo avvio nzbfast genera una chiave casuale, la
+salva accanto alle tue impostazioni in un file chiamato <code>apikey</code>
+(<a href="#files">§18</a>), la stampa una volta nel terminale e la conserva tra
+un riavvio e l'altro, che è ciò che permette agli *arr di tenersela.
+Impostazioni → Sicurezza la mostra di nuovo: il campo è vuoto di proposito,
+quindi premi <b>Mostra</b> per leggerla e <b>Crea nuova</b> per sostituirla. La
+sostituzione è immediata, e ogni applicazione che hai configurato smette di
+funzionare finché non ci incolli quella nuova.</p>
+<p>I client possono inviare la chiave nell'URL come <code>apikey=…</code> oppure
+in un'intestazione, <code>X-Api-Key</code> o <code>Authorization: Bearer</code>.
+L'intestazione è da preferire non appena qualcosa registra i tuoi URL, ed è ciò
+che permette a un reverse proxy di aggiungere la chiave per i client dietro di
+lui.</p>
+
+<h3 id="sec-nzbkey">La chiave NZB, solo per aggiungere</h3>
+<p>La chiave NZB è una seconda chiave, volutamente più debole, per tutto ciò il
+cui unico compito è consegnare un download a nzbfast. Chi la presenta può
+aggiungere un NZB, chiedere la versione, leggere il riepilogo di pausa, disco e
+avvisi, e recuperare i nomi delle categorie, cioè esattamente ciò che serve a
+un'estensione di invio per aggiungere una release e mostrarti un elenco di
+categorie. Non può leggere la coda né la cronologia, non può vedere o cambiare
+una sola impostazione, e non può mettere in pausa, eliminare, riprovare o
+spegnere nulla. Non è una versione ridotta della chiave API da impostare al posto
+di una vera: è qualcosa da incollare in un'estensione del browser, perché una
+macchina di cui non ti fidi del tutto non possa rileggere la tua
+configurazione.</p>
+
+<h3 id="sec-login">L'accesso al pannello</h3>
+<p>Imposta un nome utente e una password in Impostazioni → Sicurezza e nzbfast
+mette una pagina di accesso davanti al pannello e al muro dei poster. È
+disattivato di default, e finché uno dei due campi è vuoto non cambia nulla da
+nessuna parte. Esiste per una situazione: un'installazione che hai pubblicato
+oltre la tua rete, dove una chiave in un URL non è ciò che vuoi far digitare a
+una persona.</p>
+<p>La password deve avere almeno otto caratteri, e altre quattro forme vengono
+rifiutate perché sono le prime che prova chi indovina: il nome utente stesso,
+una delle password più tentate come <code>password123</code>, un solo carattere
+ripetuto come <code>aaaaaaaa</code> e una sequenza continua come
+<code>abcdefgh</code>. Il rifiuto dice quale regola è scattata. È memorizzata
+con hash Argon2id, il che significa che nzbfast non può rimostrartela, solo
+sostituirla: lascia il campo vuoto per tenere quella già salvata e scrivi un
+singolo spazio per rimuoverla. Cambiare uno qualsiasi dei due campi disconnette
+tutti i browser, questo compreso, e <b>Disconnetti tutti i browser</b> fa lo
+stesso su richiesta. Un browser connesso resta tale per quattordici giorni di
+utilizzo.</p>
+<p><b>Non cambia nulla per Sonarr, Radarr, nzb360, LunaSea o le tue
+estensioni.</b> È la domanda che si fanno tutti, e la risposta è che questo
+accesso è una credenziale del browser e basta. Quei programmi continuano a usare
+la chiave API esattamente come prima, e nessun programma deve compilare una
+pagina di accesso. Ciò che l'accesso copre è una persona con un browser: il
+pannello, il muro e le chiamate API che quelle pagine fanno una volta che sei
+entrato.</p>
+<p>L'unica cosa che non fa è proteggere un'installazione senza chiave API.
+L'accesso custodisce le pagine, non l'API: un demone senza chiave risponde ancora
+a qualunque cosa lo interroghi direttamente, pagina di accesso o no. Imposta
+anche una chiave. Su un'installazione pubblicata, impostale entrambe.</p>
+
+<h3 id="sec-outside">Raggiungerlo da fuori della tua rete</h3>
+<p>Funzionano tre risposte, e non sono equivalenti.
+<a href="#remote-proxy">§12</a> ha la configurazione di ciascuna; qui si tratta di
+come scegliere.</p>
+<div class="tblwrap"><table>
+<tr><th>Approccio</th><th>Che cosa ti dà</th><th>Che cosa costa</th></tr>
+<tr><td><b>Una rete privata</b> (Tailscale, WireGuard)</td><td>Non viene pubblicato proprio nulla. Non c'è alcun indirizzo pubblico da trovare, scansionare o indovinare, quindi la domanda su chi possa accedere non si pone nemmeno</td><td>La VPN deve girare su ogni dispositivo che vuoi usare. Nessun dominio pubblico, quindi non lo raggiunge nulla su cui non puoi installare software</td></tr>
+<tr><td><b>Un reverse proxy che autentica</b> (Caddy, nginx o Apache, con basic auth, Authelia, Authentik o oauth2-proxy)</td><td>Una vera porta d'ingresso su un vero dominio, con un certificato che già rinnovi, un accesso condiviso con gli altri tuoi servizi, e limitazione delle richieste e registri dove puoi vederli</td><td>Una seconda cosa da configurare e da tenere in piedi. I tuoi *arr e le app del telefono non possono compilare una pagina di accesso, quindi il proxy deve lasciar passare una richiesta che porti una chiave API valida</td></tr>
+<tr><td><b>nzbfast da solo</b> (<code>tls_cert</code> e <code>tls_key</code>, più l'accesso al pannello)</td><td>Un solo programma, nessun proxy. HTTPS da un capo all'altro e una pagina di accesso per le persone</td><td>Il rinnovo del certificato spetta a te. Ottieni l'accesso di nzbfast invece di quello di casa tua, e il limite sulle password sbagliate è contato per indirizzo</td></tr>
+</table></div>
+<p>Qualunque cosa tu scelga, <b>imposta anche una chiave API</b>. Un proxy è uno
+strato davanti, non una serratura sulla porta dietro: tutto ciò che raggiunge il
+demone direttamente, sulla rete locale o per un errore nella configurazione del
+proxy, incontra ciò che nzbfast stesso pretende. Un'origine senza chiave dietro un
+proxy che autentica è a una richiesta mal instradata dall'essere aperta.</p>
+<p>Se termini il certificato su un proxy, avvia nzbfast con
+<code>--bind 127.0.0.1</code>, così il proxy è davvero l'unica via d'ingresso. Se
+preferisci che sia nzbfast a servire HTTPS, punta Impostazioni → Sicurezza a un
+certificato PEM e alla sua chiave privata e riavvia. L'unica cosa da evitare è
+inoltrare la porta sul router senza né l'uno né l'altra: così pubblichi HTTP in
+chiaro, e la tua chiave e tutto ciò che ci fai attraversano internet leggibili da
+chiunque si trovi sul percorso.</p>
+
+<h3 id="sec-cors">Le estensioni del browser e a che serve <code>cors_origin</code></h3>
+<p><code>cors_origin</code> non è il livello di autenticazione, e vale la pena
+dirlo chiaramente perché l'impostazione sta nella stessa scheda. Decide quali
+<i>pagine web</i> un browser lascia leggere questa API, e nient'altro. Ognuna di
+quelle richieste ha comunque bisogno della chiave API; ciò che questa
+impostazione cambia è se il browser restituisce la risposta alla pagina che l'ha
+chiesta.</p>
+<p>Il valore di default è <code>*</code>, come in SABnzbd. È per questo che
+estensioni come NZB Unity e NZB Donkey funzionano appena ci incolli una chiave,
+senza impostare nulla qui. Per stringere, sostituiscilo con le origini che
+consenti (<code>https://example.com</code>), separate da virgole. Vuoto non invia
+alcuna intestazione, il che blocca ogni estensione.</p>
+
+<h3 id="sec-open">Che cosa non protegge nulla di tutto questo</h3>
+<p><b>Un'installazione senza chiave API è aperta.</b> Senza chiave non c'è alcuna
+credenziale da verificare, quindi ogni host che raggiunge la porta ha il controllo
+completo, e ce l'ha anche qualunque pagina web tu visiti, le cui richieste al tuo
+indirizzo di rete locale il demone non sa distinguere dalle tue. nzbfast lo dice
+all'avvio, nel registro e nel pannello, ogni volta che è vero. Manca un campo
+perché sia risolto.</p>
+<p><b>Una chiave protegge l'API, non la macchina.</b> Impostazioni → Sicurezza →
+<b>In ascolto su</b> decide quali indirizzi rispondono. <code>0.0.0.0</code>, il
+valore di default, risponde su ogni rete in cui si trova questa macchina, che è
+ciò che serve a un NAS o a un container. <code>127.0.0.1</code> risponde solo su
+questa macchina, così nient'altro sulla tua rete lo raggiunge nemmeno con la
+chiave. Attenzione: un indirizzo che questa macchina non ha impedisce del tutto
+l'avvio successivo, e l'unico modo di tornare indietro è correggere
+<code>settings.json</code> a mano.</p>
+<p><b>Il tuo backup delle impostazioni contiene tutto.</b> Il file di backup della
+stessa scheda porta con sé ogni impostazione, entrambe le chiavi e le password dei
+tuoi server Usenet in chiaro. Tienilo in un posto privato, e considera l'inviarlo
+a qualcuno come mandargli i tuoi account.</p>
+
+<h2 id="performance">14 · Strumenti per le prestazioni</h2>
 <h3 id="perf-benchmark">Benchmark di sistema</h3>
 <p>Un clic misura i tuoi tre tetti - velocità di rete (una vera sonda
 multi-connessione di 8 secondi), velocità di verifica della CPU e velocità di
@@ -1413,7 +1552,7 @@ provider viene interpellato per ultimo in quel download invece che per primo. No
 rimosso nulla, quindi un giudizio sbagliato costa un po' di tempo anziché il download.</li>
 </ul>
 <p class="dim">Il verdetto è una previsione basata su indizi, non una garanzia. Per una
-risposta netta su un NZB, <code>nzbfast check</code> (<a href="#cli">§15</a>) conta gli
+risposta netta su un NZB, <code>nzbfast check</code> (<a href="#cli">§16</a>) conta gli
 articoli reali. Entrambi contano risposte, non contenuti. Un controllo pulito significa che gli
 articoli c'erano quando sono stati chiesti, non che ciò che contengono sia integro: un
 piccolo numero di provider risponde per gli articoli rimossi con dati fittizi invece di
@@ -1477,7 +1616,7 @@ finirà sempre, e finirà correttamente; solo, non saturerà la linea.</p>
 <p class="dim">I benchmark vengono rieseguiti a ogni release; metodo e cifre per
 macchina sono pubblicati insieme ai risultati.</p>
 
-<h2 id="updates">14 · Aggiornamenti</h2>
+<h2 id="updates">15 · Aggiornamenti</h2>
 <ul>
 <li>Gli aggiornamenti sono <b>solo notifiche</b>: nzbfast non scarica né
 sostituisce mai il proprio binario, e non contiene codice in grado di farlo.
@@ -1495,12 +1634,12 @@ manifesto degli aggiornamenti; un URL di controllo vuoto fa lo stesso.</li>
 <p>Una sola regola vale per ogni installazione: <b>un aggiornamento sostituisce
 il programma, mai le tue impostazioni.</b> Tutto ciò che hai configurato -
 server, percorsi, la chiave API, la coda - vive in una manciata di file dentro
-un'unica cartella (<a href="#files">§17</a>), e nessun installer, pull di
+un'unica cartella (<a href="#files">§18</a>), e nessun installer, pull di
 immagine o aggiornamento di pacchetto tocca quella cartella. Quando le
 impostazioni sembrano comunque sparite dopo un aggiornamento, è quasi sempre
 perché la nuova installazione sta leggendo una cartella <em>diversa, vuota</em>,
 non perché qualcosa sia stato eliminato; i vecchi file sono ancora dove sono
-sempre stati. <a href="#settings-gone">§18</a> ha i passi per recuperarle.</p>
+sempre stati. <a href="#settings-gone">§19</a> ha i passi per recuperarle.</p>
 <div class="tblwrap"><table>
 <tr><th>Installazione</th><th>Come aggiornare</th></tr>
 <tr><td>App macOS</td><td>Apri il nuovo DMG e trascina <b>NzbFast</b> in
@@ -1538,7 +1677,7 @@ né una rimozione se li porta via.</td></tr>
 <tr><td>Debian / Ubuntu (.deb)<br>Fedora / RHEL (.rpm)</td><td>Installa il nuovo pacchetto sopra quello vecchio: <code>sudo dpkg -i nzbfast_*.deb</code> oppure <code>sudo rpm -U nzbfast-*.rpm</code>. La cartella delle impostazioni non fa parte del pacchetto, quindi un aggiornamento non può sostituire nulla al suo interno, e le tue modifiche a <code>/etc/nzbfast/nzbfast.env</code> vengono mantenute. Il servizio viene riavviato solo se era già in esecuzione.</td></tr>
 <tr><td>Homebrew</td><td><code>brew upgrade nzbfast</code></td></tr>
 <tr><td>Binario semplice</td><td>Sostituisci il binario. La tua config resta
-dove l'hai creata (<a href="#files">§17</a>).</td></tr>
+dove l'hai creata (<a href="#files">§18</a>).</td></tr>
 </table></div>
 <div class="tip"><b>Suggerimento</b>Se usi Docker e colleghi Sonarr o Radarr:
 metti la chiave API nella definizione stessa del container
@@ -1548,7 +1687,7 @@ del container, perché vive sull'host, nella definizione, e viene riapplicata a
 ogni avvio. Una chiave che imposti più tardi nelle Impostazioni prevale comunque
 su di essa.</div>
 
-<h2 id="cli">15 · Riga di comando</h2>
+<h2 id="cli">16 · Riga di comando</h2>
 <p>Tutto ciò che fa il daemon è anche scriptabile. I comandi di tutti i giorni:</p>
 <div class="tblwrap"><table>
 <tr><th>Comando</th><th>Scopo</th></tr>
@@ -1570,7 +1709,7 @@ comando accetta <code>--config</code> e <code>--help</code>. Si aggiunge <code>p
 yEnc e scrive l'NZB corrispondente. È uno strumento operativo, richiede un
 <code>--post-server</code> esplicito e non sceglie mai un server al posto tuo.</p>
 
-<h2 id="api">16 · Panoramica dell'API</h2>
+<h2 id="api">17 · Panoramica dell'API</h2>
 <p>Endpoint di base: <code>http://host:6789/api?mode=…&amp;apikey=…&amp;output=json</code> -
 compatibile SABnzbd, quindi le integrazioni SAB esistenti funzionano senza
 modifiche. Due chiavi: la <b>chiave API</b> (controllo completo) e la <b>chiave
@@ -1589,7 +1728,7 @@ NZB</b> (solo inserimento: <code>addfile</code>/<code>addurl</code>). <code>addn
 <tr><td>Monitoraggio</td><td><code>/metrics</code> risponde nel formato di esposizione testuale Prometheus 0.0.4: velocità di download, profondità e byte della coda, connessioni per provider, interruzioni e conteggi degli articoli, memoria per sottosistema e tempo di attività. Unità di base ovunque (byte, secondi), così è il cruscotto a convertire e nulla arriva pre-arrotondato. Solo GET, e per impostazione predefinita serve la chiave API completa. Imposta <code>metrics_open</code> per servirlo senza chiave, che è la disposizione abituale con Prometheus: non contiene nomi di lavori né percorsi, ma pubblica il nome host di ogni provider configurato a chiunque possa raggiungere la porta.</td></tr>
 </table></div>
 
-<h2 id="files">17 · File e percorsi</h2>
+<h2 id="files">18 · File e percorsi</h2>
 <p>Dove si trova la cartella delle impostazioni dipende da come nzbfast è stato
 installato. Questa sola cartella contiene tutto ciò che merita un backup:</p>
 <div class="tblwrap"><table>
@@ -1621,20 +1760,20 @@ l'installazione e indicata nel log di App Center; anche il file
 <tr><td>Strumenti esterni</td><td>Nessuno necessario - l'estrazione RAR e la riparazione PAR2 sono native. Se un set esotico dovesse mai richiedere un <code>unrar</code> o <code>par2</code> esterno come ripiego, nzbfast cerca accanto al proprio eseguibile, poi nel <code>$PATH</code>.</td></tr>
 </table></div>
 
-<h2 id="troubleshooting">18 · Risoluzione dei problemi</h2>
+<h2 id="troubleshooting">19 · Risoluzione dei problemi</h2>
 <div class="tblwrap"><table>
 <tr><th>Sintomo</th><th>Da controllare</th></tr>
 <tr><td>Download lenti</td><td>Chiedi prima al download stesso: mentre gira, la riga sotto la sua barra di avanzamento nomina lo strato che sta frenando <i>questo</i> lavoro, e un clic su quel verdetto apre la riga sulle prove (vedi <a href="#dash-queue">Coda</a>). Esegui il <b>Benchmark di sistema</b> - nomina il collo di bottiglia senza giri di parole. Se è la rete: esegui <b>Ottimizzazione connessioni</b>, controlla le connessioni per server e verifica che i tuoi provider non siano tutti sullo stesso backbone (<b>Diversità dei server</b>).</td></tr>
 <tr><td>Lento solo sui job molto grandi<br>(NAS o macchina con poca RAM)</td><td>Atteso, e misurabile: un budget di memoria affamato riversa le cache su disco e costa il 20–40% oltre ~87 GB. Vedi <a href="#memory">Budget di memoria</a> per le cifre e per quanta RAM dargli. I job più piccoli non ne risentono.</td></tr>
 <tr><td>Il download fallisce con "articles missing"</td><td>Il post è scaduto o è stato rimosso presso i tuoi provider. Un secondo provider su un backbone diverso salva la maggior parte di questi casi. <code>nzbfast check</code> lo predice prima di scaricare. E il muro segnala in anticipo quelle probabilmente sparite con il suo punto
-di disponibilità (<a href="#oracle">§13</a>). Un primo fallimento di questa forma si
+di disponibilità (<a href="#oracle">§14</a>). Un primo fallimento di questa forma si
 ritenta da solo una volta dopo un'attesa, perché il ritardo di propagazione ha lo stesso
 aspetto e si risolve da sé.</td></tr>
 <tr><td>L'archivio finito chiede una password</td><td>La riga dello Storico mostra 🔑 - inserisci lì la password; il job si completa sul posto. </td></tr>
 <tr><td>Un archivio non si estrae</td><td>Gli errori di password e di riparazione si presentano da soli nella riga dello Storico. Per tutto il resto c'è una via d'uscita: Impostazioni → Cartella monitorata e post-elaborazione → <b>Estrai con unrar esterno</b> (un'impostazione avanzata) affida l'estrazione al programma <code>unrar</code> installato sulla tua macchina invece che all'estrattore integrato. Altrimenti lascialo disattivato: il percorso integrato è più veloce su ogni forma che abbiamo misurato, e i post offuscati con nomi hash lo usano comunque sempre, perché unrar non può seguire la loro rinomina. Lo stesso interruttore per le esecuzioni di <code>nzbfast get</code> è la variabile d'ambiente <code>NZBFAST_NO_NATIVE_UNRAR=1</code>. Se unrar estrae un archivio che l'estrattore integrato ha rifiutato, segnalacelo così possiamo correggere il percorso integrato.</td></tr>
 <tr><td>Sonarr/Radarr non si collega</td><td>La porta 6789 è raggiungibile? Chiave API corretta (chiave completa, non chiave NZB)? Tipo di client impostato su SABnzbd?</td></tr>
 <tr><td>La dashboard chiede una chiave API che non ho mai impostato</td><td>Una nuova installazione se ne crea una da sé e la stampa una volta all'avvio (<a href="#firstrun-key">§2</a>). Sta nel file <code>apikey</code> accanto al tuo config, e nell'output di avvio. Oppure scrivi una chiave tua in Impostazioni → Sicurezza da un browser già autenticato.</td></tr>
-<tr id="settings-gone"><td>Tutte le mie impostazioni sembrano sparite dopo un aggiornamento<br>(server, percorsi, chiave API)</td><td>Niente in un aggiornamento elimina le impostazioni; significa che nzbfast sta leggendo una cartella diversa, vuota. Per prima cosa: il campo della chiave API nelle Impostazioni appare vuoto di proposito - clicca <b>Show</b> prima di concludere che è persa. Su Docker, confronta la mappatura <code>/config</code> del nuovo container con quella del vecchio: un percorso host cambiato, un percorso relativo eseguito da un'altra directory o una cartella appdata nuova fanno tutti ripartire nzbfast da zero mentre le tue impostazioni vere restano intatte al percorso precedente. Trova la vecchia cartella (cerca <code>settings.json</code>, il tuo file di config e <code>apikey</code> - i percorsi sono in <a href="#files">§17</a>), poi ripunta la mappatura su di essa oppure copia quei file nella nuova cartella e riavvia. Il log di avvio nomina il file di impostazioni esatto in uso: <code>[settings] applying saved settings from …</code></td></tr>
+<tr id="settings-gone"><td>Tutte le mie impostazioni sembrano sparite dopo un aggiornamento<br>(server, percorsi, chiave API)</td><td>Niente in un aggiornamento elimina le impostazioni; significa che nzbfast sta leggendo una cartella diversa, vuota. Per prima cosa: il campo della chiave API nelle Impostazioni appare vuoto di proposito - clicca <b>Show</b> prima di concludere che è persa. Su Docker, confronta la mappatura <code>/config</code> del nuovo container con quella del vecchio: un percorso host cambiato, un percorso relativo eseguito da un'altra directory o una cartella appdata nuova fanno tutti ripartire nzbfast da zero mentre le tue impostazioni vere restano intatte al percorso precedente. Trova la vecchia cartella (cerca <code>settings.json</code>, il tuo file di config e <code>apikey</code> - i percorsi sono in <a href="#files">§18</a>), poi ripunta la mappatura su di essa oppure copia quei file nella nuova cartella e riavvia. Il log di avvio nomina il file di impostazioni esatto in uso: <code>[settings] applying saved settings from …</code></td></tr>
 <tr><td>Niente sulla rete riesce a raggiungere il daemon</td><td>Controlla <code>--bind</code>: <code>127.0.0.1</code> serve solo la macchina su cui gira nzbfast. Il predefinito, <code>0.0.0.0</code>, serve ogni interfaccia. Poi controlla il firewall della macchina stessa per la porta 6789.</td></tr>
 <tr><td>La scheda Sfoglia resta piccola</td><td>L'indexer cresce in background - controlla che i gruppi in Impostazioni → Indicizzazione siano impostati, e dai all'Approfondimento per scansione il tempo di accumulare storico. "Scansiona ora" forza una passata; la riga di stato mostra l'avanzamento in tempo reale.</td></tr>
 <tr><td>La bacheca mostra copertine sbagliate o assenti</td><td>Scheda di dettaglio → ✎ Correggi corrispondenza o ↻ Aggiorna metadati. Le ricerche dei film migliorano con una chiave OMDb gratuita.</td></tr>

@@ -16,29 +16,57 @@
 //! source trees including the detached fuzz workspace - resolves with no
 //! consumer edit. Nothing in this crate may name `nzbkit`;
 //! `tools/modgraph.py --nzbkit --check` refuses the edge.
+//!
+//! # The front door
+//!
+//! The pipeline in three calls: a manifest names the articles, an
+//! article decodes to payload, and the payload says where it belongs.
+//! There is no reassembly step between them, which is what makes the
+//! download one pass.
+//!
+//! ```
+//! use nzbkit_base::{nzb, yenc};
+//!
+//! let xml = br#"<?xml version="1.0"?>
+//! <nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+//!   <file subject="[1/1] &quot;demo.bin&quot; yEnc (1/1)" poster="p" date="1700000000">
+//!     <groups><group>alt.binaries.test</group></groups>
+//!     <segments><segment bytes="120" number="1">a1@example.com</segment></segments>
+//!   </file>
+//! </nzb>"#;
+//!
+//! // 1. The manifest: which articles, in which groups, for which file.
+//! let manifest = nzb::Nzb::parse(xml).expect("well-formed NZB");
+//! let file = &manifest.files[0];
+//! assert_eq!(file.filename_hint(), Some("demo.bin"));
+//! assert_eq!(file.groups, ["alt.binaries.test"]);
+//! assert_eq!(file.segments[0].message_id, "a1@example.com");
+//!
+//! // 2. What `BODY <a1@example.com>` returns, minus the wire framing.
+//! //    (Here we build one instead of dialling a provider.)
+//! let body = yenc::encode("demo.bin", 4, None, 1, &[0, 1, 2, 3]);
+//!
+//! // 3. Decode. The article carries its own file offset, so the bytes
+//! //    go straight to a positioned write wherever they arrive.
+//! let article = yenc::decode(&body).expect("a well-formed article");
+//! assert_eq!(article.data, [0, 1, 2, 3]);
+//! assert_eq!(article.offset(), 0);
+//! ```
+//!
+//! From there: [`par2`] verifies what landed and [`par2repair`] puts
+//! back what did not, [`rar`] and [`zip`] read the containers, and
+//! [`names`] plus [`release`] turn posted file names into a release.
 
 pub mod audiotag;
 pub mod categories;
 pub mod config;
-/// The validated digest cache: a per-user record of a large file's
-/// whole-file MD5 beside its BLAKE3, consumed by a repeat create or
-/// whole-file verify only after BLAKE3 re-proves the content. Behind the
-/// `digest-cache` feature; without it, an inert stub with the same
-/// crate-internal surface, so the create and verify paths never branch
-/// on the feature themselves.
 #[cfg(feature = "digest-cache")]
 pub mod digest_cache;
 #[cfg(not(feature = "digest-cache"))]
 #[path = "digest_cache_off.rs"]
 pub mod digest_cache;
 pub mod disk;
-/// PLAN M31 stage 1: borrow a lost segment's bytes from a duplicate
-/// posting, proved block by block against the target's own PAR2 set.
 pub mod dupedonor;
-/// Role-aware fault selection for the chaos mock (TODO 283): resolve a
-/// FILE ROLE - payload, recovery index, volume N - to the ids the
-/// `Chaos` knobs apply to. Same status as `mock`: public for the rigs
-/// and the test suites, not a real API.
 #[doc(hidden)]
 pub mod fail;
 pub mod faultplan;
@@ -50,16 +78,11 @@ pub mod ff1;
 /// can build against it.
 #[doc(hidden)]
 pub mod gf16;
-/// One read of a file's first bytes, however many magic sniffs ask -
-/// see the module docs for the eighteen-sniffs-per-file measurement.
 pub mod headpeek;
 pub mod live;
 pub mod livetune;
 pub mod logtee;
 pub mod lossdoubt;
-/// The crate's MD5 hasher. Not part of the real API: public only
-/// because [`par2repair::Md5Resume`] names the type, and because
-/// nzbkit's own benches build against it.
 #[doc(hidden)]
 pub mod md5fast;
 pub mod media;
@@ -133,6 +156,18 @@ pub mod junk;
 // Nothing in it reaches past `std`.
 #[cfg(any(test, feature = "test-support"))]
 pub mod renameclaim;
+
+// The binary fixtures this crate owns, reachable from the facade above it.
+// Same gate as `renameclaim` and for the same reason - a `cfg(test)` item is
+// invisible from another crate whatever its visibility - but the motivation
+// is publication rather than test layering: `cargo package` includes only
+// files below the package root, so an `include_bytes!` written UP THERE and
+// pointing down HERE resolves to nothing in the published `.crate`. Forty
+// such sites were live on main until 21 Sep 2026.
+// `tools/package-escape-gate.py` is what refuses the next one; the module's
+// own header is the full story.
+#[cfg(any(test, feature = "test-support"))]
+pub mod testdata;
 
 // The scratch guard this crate's own unit tests reach for. Its `#[path]`
 // include is why the file below it sits under `tests/` - see the module

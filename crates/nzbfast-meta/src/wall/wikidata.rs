@@ -659,18 +659,18 @@ fn person_facts(qids: &[String]) -> HashMap<String, PersonFacts> {
     // The query service is a third Wikimedia service with its own
     // bucket, and every other network call in this file is paced.
     ratelimit::acquire(Provider::WikidataSparql);
-    let Some(body) = crate::netfetch::shared_enrich_agent()
-        .get(&format!(
-            "https://query.wikidata.org/sparql?query={}",
-            percent_encode(&query)
-        ))
-        .set("User-Agent", WIKI_UA)
-        .set("Accept", "application/sparql-results+json")
-        .timeout(std::time::Duration::from_secs(30))
-        .call()
-        .ok()
-        .and_then(|r| r.into_string().ok())
-    else {
+    let Ok(body) = crate::netfetch::call_body(
+        crate::netfetch::shared_enrich_agent()
+            .get(&format!(
+                "https://query.wikidata.org/sparql?query={}",
+                percent_encode(&query)
+            ))
+            .header("User-Agent", WIKI_UA)
+            .header("Accept", "application/sparql-results+json")
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .build(),
+    ) else {
         // Not marked unreachable: the title's own metadata is complete
         // without this, and the next enrichment of any film this person
         // appears in fills the blanks (`person_upsert` only ever writes

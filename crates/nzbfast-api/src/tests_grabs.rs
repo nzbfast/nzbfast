@@ -1130,6 +1130,114 @@ fn one_sound_engine_reaches_both_shell_pages() {
     }
 }
 
+/// TODO 19: ONE sign-out control, reaching both pages that sit behind the
+/// login gate - and exactly one copy of it.
+///
+/// Written WITH the wall's pill rather than after a drift, which is the
+/// only difference between this and the sound engine's test above. The
+/// argument is that test's history: the wall carried a hand fork of the
+/// dashboard's engine, it agreed until it did not, and nothing reported
+/// it. What must agree here is smaller and more consequential - the
+/// endpoint, the method, and where a signed-out browser lands - and all
+/// three are `route_logout`'s decisions, not the pages'.
+///
+/// The PILL MARKUP is deliberately not shared and so is not checked
+/// here: each page keeps its own `#navSignout` in its own nav, and
+/// `tools/nav-destinations-gate.py` is what holds the navs together.
+/// What IS checked is that both pages carry the pill, because a partial
+/// nothing calls is a control that does not exist.
+#[cfg(feature = "indexer")]
+#[test]
+fn one_signout_control_reaches_both_shell_pages() {
+    const MARK: &str = "__NZBFAST_UI_SIGNOUT__";
+    assert!(
+        !UI_SIGNOUT_HTML.contains(MARK),
+        "ui-signout.html names the placeholder, which re-emits it into every page"
+    );
+    // The partial itself, so a gutted file cannot pass: the two doors
+    // in, and the three facts that must agree between the pages.
+    for tok in [
+        "function signOut(",
+        "function revealSignoutPill(",
+        "'/logout'",
+        "method:'POST'",
+        "location.href = '/'",
+    ] {
+        assert!(
+            UI_SIGNOUT_HTML.contains(tok),
+            "the shared sign-out control lost {tok}"
+        );
+    }
+    for (name, page) in [("dashboard", DASHBOARD_HTML), ("wall", WALL_HTML)] {
+        assert!(page.contains(MARK), "{name} has no sign-out placeholder");
+        assert!(
+            !ui_themed(page).contains(MARK),
+            "{name} kept a stray placeholder"
+        );
+        // SCANNED WITH THE COMMENTS TAKEN OUT, and the negative control
+        // is why. Both pages EXPLAIN this pill in a comment beside it,
+        // and `revealSignoutPill(` appears in that prose - so deleting
+        // the real call left the page satisfying a plain `contains` and
+        // this test green over a pill that can never appear. Every arm
+        // below therefore reads `code`, never `page`.
+        let code = strip_html_comments(page);
+        // The control exists on this page at all. Hidden in the markup
+        // and revealed at run time, so the assertion is on the id and
+        // the call, not on visibility.
+        assert!(
+            code.contains("id=\"navSignout\""),
+            "{name} has no #navSignout pill - the shared partial reaches a page \
+             with nothing to reveal"
+        );
+        assert!(
+            code.contains("revealSignoutPill("),
+            "{name} never calls revealSignoutPill - the pill would stay hidden \
+             on an install that HAS a login form"
+        );
+        // The whole point. A page may CALL the control; it may not carry
+        // one. Anything here is copy number two being born, and it would
+        // drift the same silent way the sound engine's fork did.
+        for own in [
+            "function signOut(",
+            "function revealSignoutPill(",
+            "'/logout'",
+        ] {
+            assert!(
+                !code.contains(own),
+                "{name} declares `{own}` itself - the sign-out control is \
+                 web/ui-signout.html, shared by both pages. A second copy \
+                 agrees with the first until it does not."
+            );
+        }
+    }
+}
+
+/// A page with its `<!-- ... -->` blocks removed.
+///
+/// These pages are heavily commented on purpose, and a source-scanning
+/// assertion that reads the comments is an assertion the comments can
+/// satisfy on their own - which is a green verdict over code that is no
+/// longer there. An unterminated comment swallows the rest of the file,
+/// which is the safe direction: every arm above wants the string to be
+/// PRESENT except the three that want it absent, and an over-eager
+/// strip can only turn those three greener - so the `<script>` bans
+/// stay honest only because the pages have no unterminated comment, and
+/// the presence arms would fail loudly if one appeared.
+#[cfg(feature = "indexer")]
+fn strip_html_comments(page: &str) -> String {
+    let mut out = String::with_capacity(page.len());
+    let mut rest = page;
+    while let Some(at) = rest.find("<!--") {
+        out.push_str(&rest[..at]);
+        rest = match rest[at..].find("-->") {
+            Some(end) => &rest[at + end + 3..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
 /// BUG (HIGH): a second top-level `function num(v)` - a floor-and-clamp
 /// helper for three server-form boxes - was declared in the same single
 /// `<script>` block as the locale-aware `function num(v, d)` formatter.
@@ -2176,7 +2284,6 @@ fn a_unit_test_may_not_reach_a_named_host_outside_loopback() {
 /// identically-shaped helpers instead of on the pool they share.
 #[test]
 fn the_enrich_pool_refuses_the_wire_when_enrichment_is_off() {
-    use ureq::Resolver as _;
     // `NZBFAST_TEST_ALLOW_CALLOUT` is process-wide and inverts the very
     // state this measures, so the documented live-rig command line
     // (`NZBFAST_TEST_ALLOW_CALLOUT=1 cargo test ... -- --ignored`) would
@@ -2187,8 +2294,7 @@ fn the_enrich_pool_refuses_the_wire_when_enrichment_is_off() {
         return;
     }
 
-    let e = super::EnrichResolver
-        .resolve("8.8.8.8:443")
+    let e = nzbfast_core::netfetch::resolve_netloc(&super::EnrichResolver, "8.8.8.8:443")
         .expect_err("a public destination, with enrichment off");
     assert!(
         e.to_string().contains("enrichment is switched off"),
@@ -2198,7 +2304,7 @@ fn the_enrich_pool_refuses_the_wire_when_enrichment_is_off() {
     // Loopback stays reachable - it is what the fixtures are, including
     // `the_shared_enrich_agent_reuses_one_connection`, which drives this
     // very pool against a local listener.
-    assert!(super::EnrichResolver.resolve("127.0.0.1:9").is_ok());
+    assert!(nzbfast_core::netfetch::resolve_netloc(&super::EnrichResolver, "127.0.0.1:9").is_ok());
 }
 
 /// The daemon-API variant: a `--host` on an auto-IP LAN (169.254/16 via
@@ -2345,7 +2451,7 @@ fn a_supplied_link_may_not_downgrade_its_own_origin() {
 /// cross-origin private is the pivot being refused.
 #[test]
 fn an_enclosure_may_not_reach_a_private_address_its_indexer_does_not_own() {
-    use ureq::Resolver;
+    use nzbfast_core::netfetch::resolve_netloc;
     // Every origin here is a literal address, so what it answered the
     // search from is that same literal - the M9 half of the rule is
     // satisfied throughout and only the M12 half is under test.
@@ -2357,37 +2463,37 @@ fn an_enclosure_may_not_reach_a_private_address_its_indexer_does_not_own() {
     };
     let r = bound("http://127.0.0.1:9696/api", "127.0.0.1");
     // The indexer's own socket.
-    assert!(r.resolve("127.0.0.1:9696").is_ok());
+    assert!(resolve_netloc(&r, "127.0.0.1:9696").is_ok());
     // The finding's exact case: another service on the same loopback.
-    assert!(r.resolve("127.0.0.1:9697").is_err());
-    assert!(r.resolve("127.0.0.1:8080").is_err());
+    assert!(resolve_netloc(&r, "127.0.0.1:9697").is_err());
+    assert!(resolve_netloc(&r, "127.0.0.1:8080").is_err());
     // A different machine on the LAN.
-    assert!(r.resolve("192.168.1.9:80").is_err());
-    assert!(r.resolve("10.0.0.5:443").is_err());
+    assert!(resolve_netloc(&r, "192.168.1.9:80").is_err());
+    assert!(resolve_netloc(&r, "10.0.0.5:443").is_err());
     // Tailscale peers are inside the network too.
-    assert!(r.resolve("100.64.0.1:80").is_err());
+    assert!(resolve_netloc(&r, "100.64.0.1:80").is_err());
     // Public is fine - an indexer may serve its NZBs from elsewhere.
-    assert!(r.resolve("8.8.8.8:443").is_ok());
+    assert!(resolve_netloc(&r, "8.8.8.8:443").is_ok());
     // ...but never from the metadata endpoint, guard unchanged.
-    assert!(r.resolve("169.254.169.254:80").is_err());
+    assert!(resolve_netloc(&r, "169.254.169.254:80").is_err());
 
     // A LAN indexer owns its own socket and nothing else.
     let lan = bound("http://192.168.1.9:5076/api", "192.168.1.9");
-    assert!(lan.resolve("192.168.1.9:5076").is_ok());
-    assert!(lan.resolve("192.168.1.9:5077").is_err());
-    assert!(lan.resolve("127.0.0.1:5076").is_err());
+    assert!(resolve_netloc(&lan, "192.168.1.9:5076").is_ok());
+    assert!(resolve_netloc(&lan, "192.168.1.9:5077").is_err());
+    assert!(resolve_netloc(&lan, "127.0.0.1:5076").is_err());
 
     // The scheme's default port counts: an https indexer with no
     // explicit port owns :443.
     let dflt = bound("https://192.168.1.9/api", "192.168.1.9");
-    assert!(dflt.resolve("192.168.1.9:443").is_ok());
-    assert!(dflt.resolve("192.168.1.9:80").is_err());
+    assert!(resolve_netloc(&dflt, "192.168.1.9:443").is_ok());
+    assert!(resolve_netloc(&dflt, "192.168.1.9:80").is_err());
 
     // An origin we could not parse refuses every private target rather
     // than guessing - the safe direction.
     let blind = bound("not a url", "127.0.0.1");
-    assert!(blind.resolve("127.0.0.1:9696").is_err());
-    assert!(blind.resolve("8.8.8.8:443").is_ok());
+    assert!(resolve_netloc(&blind, "127.0.0.1:9696").is_err());
+    assert!(resolve_netloc(&blind, "8.8.8.8:443").is_ok());
 }
 
 /// M9, the residual the origin rule alone left open: the netloc is a
@@ -2399,19 +2505,19 @@ fn an_enclosure_may_not_reach_a_private_address_its_indexer_does_not_own() {
 /// answers the search from its LAN address and is grabbed from it.
 #[test]
 fn a_source_may_not_move_inside_the_network_between_search_and_grab() {
-    use ureq::Resolver;
+    use nzbfast_core::netfetch::resolve_netloc;
     let at = |ip: &str| vec![ip.parse::<std::net::IpAddr>().unwrap()];
     let bound = |o: &super::SourceOrigin| super::OriginBoundResolver::new(o);
 
     // A LAN indexer, witnessed where it lives: unchanged, still works.
     let lan = super::SourceOrigin::witnessed("http://192.168.1.9:5076/api", at("192.168.1.9"));
-    assert!(bound(&lan).resolve("192.168.1.9:5076").is_ok());
+    assert!(resolve_netloc(&bound(&lan), "192.168.1.9:5076").is_ok());
 
     // The same netloc, but the search was answered from a PUBLIC
     // address. The name now points inside the network: refused, and the
     // refusal says which half of the rule failed.
     let moved = super::SourceOrigin::witnessed("http://192.168.1.9:5076/api", at("203.0.113.7"));
-    let Err(e) = bound(&moved).resolve("192.168.1.9:5076") else {
+    let Err(e) = resolve_netloc(&bound(&moved), "192.168.1.9:5076") else {
         panic!("a rebound source was followed inside the network");
     };
     assert!(
@@ -2423,13 +2529,13 @@ fn a_source_may_not_move_inside_the_network_between_search_and_grab() {
     // the witness is per address, not per network.
     let neighbour =
         super::SourceOrigin::witnessed("http://192.168.1.9:5076/api", at("192.168.1.10"));
-    assert!(bound(&neighbour).resolve("192.168.1.9:5076").is_err());
+    assert!(resolve_netloc(&bound(&neighbour), "192.168.1.9:5076").is_err());
 
     // Nothing witnessed at all: private is refused, public is not.
     let blind = super::SourceOrigin::unwitnessed("http://192.168.1.9:5076/api");
-    assert!(bound(&blind).resolve("192.168.1.9:5076").is_err());
+    assert!(resolve_netloc(&bound(&blind), "192.168.1.9:5076").is_err());
     let pubsrc = super::SourceOrigin::unwitnessed("https://indexer.example/api");
-    assert!(bound(&pubsrc).resolve("8.8.8.8:443").is_ok());
+    assert!(resolve_netloc(&bound(&pubsrc), "8.8.8.8:443").is_ok());
 }
 
 /// M12 end to end over real sockets: two loopback listeners, one

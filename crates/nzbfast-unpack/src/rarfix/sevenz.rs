@@ -101,7 +101,7 @@ pub fn collect_sevenz_archives(dir: &std::path::Path) -> Result<Vec<Vec<PathBuf>
 /// collects members until the whole container has decoded, so a
 /// `release.7z` carrying a member named `release.7z` cannot truncate the
 /// inode still backing its own reader. The parts are read where they lie
-/// ([`SplitParts`]); nothing is copied before the first header is parsed.
+/// (`SplitParts`); nothing is copied before the first header is parsed.
 pub fn extract_sevenz(
     dir: &std::path::Path,
     jobs: &[Vec<PathBuf>],

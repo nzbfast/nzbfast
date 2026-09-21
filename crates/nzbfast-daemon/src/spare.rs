@@ -23,7 +23,7 @@
 //! Two indexer results for one release are very often the SAME articles
 //! re-indexed under a different NZB. Such a spare is worthless: it fails
 //! identically, article for article, because it IS the failed post. That
-//! is what [`admits`] refuses.
+//! is what `admits` refuses.
 //!
 //! The other half of that finding is the one worth writing down where it
 //! will be read. When two candidates are NOT the same post, their
@@ -753,6 +753,405 @@ impl Daemon {
             // combined hold, next to the mutation it authorises.
             self.drop_spares_if_still_stranded(owner);
         }
+    }
+}
+
+/// The live original a duplicate row was held for, when the row is the
+/// SAME POST as it.
+pub(crate) struct LiveOriginal {
+    pub id: String,
+    pub name: String,
+}
+
+impl Daemon {
+    /// The row `r` duplicates BY MESSAGE-ID IDENTITY, when that row is
+    /// still going to deliver the post: in the queue, not deleted, not
+    /// paused, and carrying (nearly) every article `r` declares.
+    ///
+    /// **WHY THIS QUESTION EXISTS (21 Sep 2026).** A held alternative is
+    /// only worth a download when the row it is held for can FAIL. A
+    /// byte-different NZB of the very same post cannot be that: it fails
+    /// identically, article for article, which is why
+    /// [`best_alternative`] refuses such a candidate at promotion and
+    /// [`admits`] refuses it at grab time, and why §292 holds one at add.
+    /// The escape from a hold - `priority` raised to Force, which is what
+    /// the dashboard's "download anyway" does - knew none of that. It
+    /// released the twin whatever it was a twin OF, and the runner then
+    /// started it beside its own original: 33 GB of a second copy of a
+    /// 63.75 GiB post was on disk before anybody noticed, in a run where
+    /// the daemon's log said nothing about why (the release is a plain
+    /// priority write and logs nothing).
+    ///
+    /// What this deliberately does NOT ask:
+    /// * a DIFFERENT post (a different release of the same film) is a
+    ///   real alternative, and "download anyway" on one is an informed
+    ///   choice that costs a second post's bytes on purpose. Untouched.
+    /// * an original that has already COMPLETED, or FAILED, is not "live":
+    ///   downloading the twin then is the user re-fetching a payload they
+    ///   may have deleted from disk, which is what the documented escape
+    ///   is for (`daemon_samepost`'s leg A measures exactly that).
+    /// * an original the user PAUSED. Forcing the twin past a paused
+    ///   original is a swap the user asked for, and refusing it would
+    ///   leave nothing downloading at all.
+    ///
+    /// The two archives are read OUTSIDE every store lock (the #38
+    /// lesson), and only after the cheap tests have said this row is a
+    /// duplicate at all - so an ordinary row costs one field read.
+    pub(crate) fn live_original_of_twin(&self, r: &Arc<Mutex<Job>>) -> Option<LiveOriginal> {
+        let (rid, held_for, r_path) = {
+            let g = r.lock_ok();
+            if g.held_for.is_empty() || g.tombstone || g.library {
+                return None;
+            }
+            (g.nzo_id.clone(), g.held_for.clone(), g.nzb_path.clone())
+        };
+        if held_for == rid {
+            return None;
+        }
+        let (name, o_path) = {
+            let q = self.queue.lock_ok();
+            let o = q.iter().find(|j| j.lock_ok().nzo_id == held_for)?;
+            let g = o.lock_ok();
+            // The original must itself be a row that is going to run: a
+            // held row is not delivering anything, a paused one was
+            // stopped by the user, and a tombstone is mid-delete.
+            if g.tombstone || g.paused || !g.held_for.is_empty() || g.state == JobState::Failed {
+                return None;
+            }
+            (g.name.clone(), g.nzb_path.clone())
+        };
+        let mine = self.post_ids_of(&rid, &r_path)?;
+        let theirs = self.post_ids_of(&held_for, &o_path)?;
+        post_covers(&theirs, &mine).then_some(LiveOriginal { id: held_for, name })
+    }
+
+    /// One row's post-id set: the memo `enqueue` primes, else the spool
+    /// (memoised on the way out). Under a demoted worker, because a large
+    /// NZB parse is real work and the caller may be a runtime thread.
+    /// `None` is "cannot tell", which no caller may treat as "same".
+    fn post_ids_of(&self, id: &str, path: &Path) -> Option<Arc<PostIds>> {
+        if let Some(ids) = self.post_ids.lock_ok().get(id) {
+            return Some(Arc::clone(ids));
+        }
+        let nzb = crate::persist::blocking_db(|| nzb_at(path))?;
+        let ids = Arc::new(post_ids(&nzb));
+        self.post_ids
+            .lock_ok()
+            .insert(id.to_string(), Arc::clone(&ids));
+        Some(ids)
+    }
+
+    /// The start door: is `r` a same-post twin of a row that is still
+    /// delivering the post? If so it is REMOVED from the queue - not
+    /// re-held, because a hold the user can lift again with the same
+    /// click is a refusal nobody can see - and the caller must pick
+    /// again. `true` means the row is gone and nothing may start it.
+    ///
+    /// Asked by the runner's pick and by the prefetch picker, the two
+    /// places a queued row becomes a download. Everything else that can
+    /// make a held row runnable (`apply_priority`, `apply_pause`, a
+    /// retry) ends at one of those two doors, which is why the rule
+    /// lives here and not at each release.
+    pub fn refuse_twin_start(&self, r: &Arc<Mutex<Job>>) -> bool {
+        let Some(orig) = self.live_original_of_twin(r) else {
+            return false;
+        };
+        self.drop_twin(r, &orig.id, &orig.name, "is still downloading it")
+    }
+
+    /// The completion half: `owner` just COMPLETED, so every row still
+    /// held for it that is the same post - and has been RELEASED by a
+    /// Force or a resume - has nothing left to deliver.
+    ///
+    /// Three shapes, and one rule for all of them:
+    ///
+    /// * QUEUED, waiting its turn: dropped, exactly as the owner's spares
+    ///   are ([`Self::drop_twin`]).
+    /// * ON THE WIRE - `Downloading` and not yet in its post-network
+    ///   tail, whether that is the hub, the drain slot behind a
+    ///   successor, or the prefetch - wound down and removed
+    ///   ([`Self::wind_down_twin`]). This is the case the start door
+    ///   cannot reach (the row is already running) and the one that
+    ///   costs the most: a whole second copy of the post, on the user's
+    ///   account and disk, that the queued arm was written to prevent.
+    ///   How it gets there is not one road: a release that lands while
+    ///   the original is between its network phase and its park (the
+    ///   runner has already picked, so no pick-time check ever saw it),
+    ///   a twin the early start took, or a twin started while the
+    ///   original was paused and then overtaken.
+    ///
+    /// A twin that is still HELD (paused) is left alone, deliberately:
+    /// it costs nothing, and lifting the hold on one after the owner is
+    /// in history is the re-download escape the start door leaves open.
+    /// A twin in its own POST-NETWORK TAIL is left alone too: the wire
+    /// is already idle, the articles are already paid for, and stopping
+    /// a repair or an unpack saves nothing. Spares are a different rule
+    /// (`drop_spares_for`) and are refused here by their origin, so the
+    /// two cannot drop each other's rows.
+    ///
+    /// Needed beside the start door because the runner starts the next
+    /// row while the owner is still in its post-network tail, when the
+    /// owner is still in the queue and the door fires - but a twin the
+    /// runner reaches only AFTER the owner has parked would otherwise
+    /// find no live original and download in full.
+    pub(crate) fn drop_released_twins_of(self: &Arc<Self>, owner: &str, owner_nzb: &Path) {
+        // Before the queue lock: the sidecar mutex under queue+job would
+        // be a new lock edge (see `sidecar_owner`).
+        let prefetching = self.sidecar_owner().map(|(id, _)| id);
+        let mut waiting: Vec<Arc<Mutex<Job>>> = Vec::new();
+        let mut on_the_wire: Vec<Arc<Mutex<Job>>> = Vec::new();
+        for j in self.queue.lock_ok().iter() {
+            let g = j.lock_ok();
+            if g.held_for != owner
+                || g.paused
+                || g.tombstone
+                || g.library
+                || is_spare_origin(&g.origin)
+            {
+                continue;
+            }
+            match g.state {
+                // A prefetch serves a still-Queued record.
+                JobState::Queued if prefetching.as_deref() == Some(g.nzo_id.as_str()) => {
+                    on_the_wire.push(j.clone());
+                }
+                JobState::Queued => waiting.push(j.clone()),
+                JobState::Downloading if !g.suspended && self.tail_phase(&g.nzo_id).is_none() => {
+                    on_the_wire.push(j.clone());
+                }
+                _ => {}
+            }
+        }
+        if waiting.is_empty() && on_the_wire.is_empty() {
+            return;
+        }
+        // Not knowing is not a reason to delete a user's row.
+        let Some(ids_o) = self.post_ids_of(owner, owner_nzb) else {
+            return;
+        };
+        let (name, owner_dir) = self
+            .history
+            .lock_ok()
+            .iter()
+            .find_map(|j| {
+                let g = j.lock_ok();
+                (g.nzo_id == owner).then(|| (g.name.clone(), g.out_dir.clone()))
+            })
+            .map_or_else(|| (owner.to_string(), None), |(n, d)| (n, Some(d)));
+        let same_post = |t: &Arc<Mutex<Job>>| -> bool {
+            let (tid, tpath) = {
+                let g = t.lock_ok();
+                (g.nzo_id.clone(), g.nzb_path.clone())
+            };
+            self.post_ids_of(&tid, &tpath)
+                .is_some_and(|ids_t| post_covers(&ids_o, &ids_t))
+        };
+        for t in waiting {
+            if same_post(&t) {
+                self.drop_twin(&t, owner, &name, "has just finished it");
+            }
+        }
+        for t in on_the_wire {
+            if same_post(&t) {
+                self.wind_down_twin(&t, owner, &name, owner_dir.clone());
+            }
+        }
+    }
+
+    /// Stop a released same-post twin that is already TRANSFERRING, then
+    /// remove it - the on-the-wire arm of [`Self::drop_released_twins_of`].
+    ///
+    /// Two steps, and the first is the ordinary per-job pause:
+    /// `paused` is set BEFORE [`Self::suspend_matching`] (so the tail
+    /// parks the row back into the queue paused, which nothing then
+    /// starts, and so a Force twin is not exempted by
+    /// [`runs_through_queue_pause`]), and `suspend_matching` does the
+    /// rest - the graceful drain aimed at the twin BY ID on whichever
+    /// slot holds it (hub, drain slot, or the prefetch), the ten-second
+    /// escalation, and the re-fire loop for the launch window. It never
+    /// signals a stranger: a successor holding the hub while the twin
+    /// drains behind it is not touched. Graceful means in-flight
+    /// articles finish and journal, so nothing the wire already paid
+    /// for is dropped mid-read.
+    ///
+    /// The second step is a reaper: the transfer has stopped when the
+    /// row is back to `Queued` with nothing on the prefetch slot, and
+    /// only then is it safe to remove (a partial payload deleted under a
+    /// live writer is recreated by the next positioned write and
+    /// orphaned - the reason `CustodyBatch::plan` defers a running job's
+    /// removal to `park()`, which a paused-and-parked twin never
+    /// reaches). Bounded like every wind-down at 60 s; a twin that has
+    /// not stopped by then is left PAUSED in the queue, which is safe -
+    /// nothing will start it - and is logged, because a row that will
+    /// not stop is a finding.
+    ///
+    /// A twin that FINISHES despite the drain files itself into history
+    /// like any completion and leaves the queue, which the reaper takes
+    /// as done; and a twin whose pause the user lifted meanwhile is the
+    /// user's explicit re-download, and is left alone.
+    fn wind_down_twin(
+        self: &Arc<Self>,
+        t: &Arc<Mutex<Job>>,
+        owner: &str,
+        owner_name: &str,
+        owner_dir: Option<PathBuf>,
+    ) {
+        let (tid, tname) = {
+            let mut g = t.lock_ok();
+            if g.tombstone {
+                return;
+            }
+            g.paused = true;
+            (g.nzo_id.clone(), g.name.clone())
+        };
+        let msg = format!(
+            "{tid} ({tname:?}) is the same post as {owner_name:?} ({owner}), which has just \
+             finished it - stopping the copy that is still downloading and removing it, \
+             because fetching it too would download the same articles twice"
+        );
+        info!(target: "queue", "{msg}");
+        self.note_event("queue", msg);
+        self.suspend_matching(true, |g| g.nzo_id == tid);
+        let d = Arc::clone(self);
+        let owner = owner.to_string();
+        let owner_name = owner_name.to_string();
+        std::thread::spawn(move || {
+            for _ in 0..240 {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                let Some(j) = d.queue_job(&tid) else {
+                    // Finished anyway, or deleted by the user: not ours.
+                    return;
+                };
+                {
+                    let g = j.lock_ok();
+                    if g.tombstone || !g.paused {
+                        return;
+                    }
+                    if g.state != JobState::Queued {
+                        continue;
+                    }
+                }
+                if d.sidecar_owner().is_some_and(|(id, _)| id == tid) {
+                    continue;
+                }
+                if d.drop_stopped_twin(&j, &owner, &owner_name, owner_dir.as_deref()) {
+                    return;
+                }
+            }
+            warn!(
+                target: "queue",
+                "{tid} ({tname:?}) did not stop within 60 s of being wound down as a copy of \
+                 {owner_name:?} ({owner}) - it is paused in the queue, delete it to be rid of it"
+            );
+        });
+    }
+
+    /// Remove a twin that has been wound down: the row, its spool copy
+    /// and the partial payload it fetched. `false` when the row is no
+    /// longer a plain parked one (started again, deleted, relocating).
+    ///
+    /// The payload goes through the queue delete's own custody batch -
+    /// the reservation that keeps `dir_claim` from handing the folder to
+    /// a new job mid-removal, the early-published copies taken back, the
+    /// Trash setting honoured and a refusal raised as the kept-files
+    /// notice - rather than a hand-copy of it, because a fourth copy of
+    /// that choreography is what this repo keeps being bitten by. Except
+    /// where the twin's folder IS the original's: a completed download's
+    /// files are never a twin's to delete, so only the record goes.
+    fn drop_stopped_twin(
+        self: &Arc<Self>,
+        r: &Arc<Mutex<Job>>,
+        orig_id: &str,
+        orig_name: &str,
+        owner_dir: Option<&Path>,
+    ) -> bool {
+        let sidecar = self.sidecar_owner();
+        let mut custody = CustodyBatch::default();
+        let mut held = std::collections::HashMap::new();
+        let (id, name) = {
+            let mut q = self.queue.lock_ok();
+            let Some(pos) = q.iter().position(|j| Arc::ptr_eq(j, r)) else {
+                return false;
+            };
+            let mut g = r.lock_ok();
+            if g.state != JobState::Queued
+                || g.tombstone
+                || !g.paused
+                || g.relocating > 0
+                || sidecar.as_ref().is_some_and(|(sid, _)| *sid == g.nzo_id)
+            {
+                return false;
+            }
+            // Tombstoned as the queue delete does for a row leaving right
+            // here: a prefetch's late Ok would otherwise park it again.
+            g.tombstone = true;
+            let del_files = owner_dir != Some(g.out_dir.as_path());
+            custody.plan(self, &mut g, sidecar.as_ref(), del_files);
+            park_or_drop_spool(&mut g, del_files, false, &mut held);
+            let out = (g.nzo_id.clone(), g.name.clone());
+            drop(g);
+            q.remove(pos);
+            out
+        };
+        custody.settle(self, sidecar.as_ref(), &mut held);
+        let msg = format!(
+            "{id} ({name:?}) was stopped and removed: it is the same post as {orig_name:?} \
+             ({orig_id}), which has just finished it - its partial download and queue entry \
+             are gone"
+        );
+        info!(target: "queue", "{msg}");
+        self.note_event("queue", msg);
+        self.save_queue_soon();
+        true
+    }
+
+    /// Remove `r` from the queue as a twin of `orig_id`, and unlink its
+    /// spool copy. `false` (and nothing touched) when the row is no
+    /// longer a plain waiting row - started, deleted, or already gone -
+    /// which is the start door's cue to let the ordinary checks decide.
+    fn drop_twin(&self, r: &Arc<Mutex<Job>>, orig_id: &str, orig_name: &str, why: &str) -> bool {
+        let rid = r.lock_ok().nzo_id.clone();
+        // A row a prefetch is downloading is a Queued row with bytes
+        // landing. Stopping that is the delete path's business, not a
+        // silent retain, so it is left to run - the sidecar's own picker
+        // is the door that keeps a twin from ever getting there.
+        let on_the_wire = self
+            .sidecar
+            .lock_ok()
+            .as_ref()
+            .is_some_and(|s| s.nzo_id == rid);
+        if on_the_wire {
+            return false;
+        }
+        let (id, path, name) = {
+            let mut q = self.queue.lock_ok();
+            let Some(pos) = q.iter().position(|j| Arc::ptr_eq(j, r)) else {
+                return false;
+            };
+            {
+                let g = r.lock_ok();
+                if g.state != JobState::Queued || g.tombstone || g.relocating > 0 {
+                    return false;
+                }
+            }
+            q.remove(pos);
+            let g = r.lock_ok();
+            (g.nzo_id.clone(), g.nzb_path.clone(), g.name.clone())
+        };
+        // `drop_spool` and not a bare unlink, for the reason
+        // `finish_spare_drop` gives: `recover_orphaned_spool` adopts any
+        // spooled NZB no record names, and a refused unlink would put
+        // this very row back at the next start.
+        drop_spool(&path);
+        let msg = format!(
+            "{id} ({name:?}) was not downloaded: it is the same post as {orig_name:?} \
+             ({orig_id}), which {why} - fetching it too would download the same \
+             articles twice"
+        );
+        info!(target: "queue", "{msg}");
+        self.note_event("queue", msg);
+        self.save_queue_soon();
+        true
     }
 }
 

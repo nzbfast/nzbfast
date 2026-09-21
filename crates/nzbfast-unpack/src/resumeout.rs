@@ -57,7 +57,7 @@
 //! like any other container - and it takes the plan only when there is
 //! a ledger to plan against, since a tar's member list costs a whole
 //! extra read of the container. What they share is
-//! [`plan_pass`] and [`ResumeWriter`], and that sharing is the point:
+//! `plan_pass` and `ResumeWriter`, and that sharing is the point:
 //! the duplicate-name refusal and the clear-before-extract step are
 //! guards a per-arm copy would quietly ship without.
 //!

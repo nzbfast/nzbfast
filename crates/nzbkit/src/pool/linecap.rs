@@ -38,7 +38,7 @@
 //! * **Every reading it takes is an ACHIEVED rate, which is a LOWER
 //!   bound on the line** (`min(line, supply)`), and this curve only
 //!   ever sizes UP from it. That is the same fact that makes DIVIDING
-//!   by such a reading unsafe - see [`Shared::line_cap_tick`] for the
+//!   by such a reading unsafe - see `Shared::line_cap_tick` for the
 //!   download that rule cost - and it points the other way here: a
 //!   fleet that has been observed to move 7 Gbps is proof the line
 //!   carries 7 Gbps, whatever the supply was doing.
@@ -153,7 +153,7 @@
 //! `Shared::workers_dialling`, which subtracts the parked ones; read
 //! its doc before changing any of them.
 //!
-//! The in-run GOVERNOR and SHED ([`Shared::line_cap_tick`]) hold the
+//! The in-run GOVERNOR and SHED (`Shared::line_cap_tick`) hold the
 //! live targets inside a cap that may itself grow during the run.
 //! [`fleet_step`] is the growth rule and it is deliberately sticky: a
 //! reading has to hold for [`LINE_CAP_RAISE_TICKS`] consecutive seconds
@@ -162,7 +162,7 @@
 //! moves nothing at all, and the cap NEVER falls within a run. The shed
 //! half still stands down without the daemon's persisted link anchor,
 //! and that requirement is left exactly where the download that bought
-//! it put it - see [`Shared::line_cap_tick`] for the measurement. What
+//! it put it - see `Shared::line_cap_tick` for the measurement. What
 //! it says is that a run with no independent estimate of its line dials
 //! what it was told and is not resized DOWN mid-flight; a raise is not
 //! covered by it, because a raise cannot be the arithmetic mistake that
@@ -276,7 +276,7 @@ pub const LINE_CAP_SUPPLY_MAX_FLEET: usize = 100;
 /// 100 Mbit line - the configuration the rules cannot otherwise
 /// distinguish - keeps today's ceiling exactly.
 ///
-/// `grant` is [`seed_uncapped`]: what this fleet would dial with the
+/// `grant` is `seed_uncapped`: what this fleet would dial with the
 /// cap taking nothing out, each account's own `connections` and any
 /// host cap already applied, and a PINNED server contributing 0 because
 /// the cap takes nothing from one. **0 means "no claim" and never "no
@@ -392,7 +392,7 @@ pub const LINE_CAP_SOCKET_BPS: u64 = 18_750_000;
 /// rung produces the same fleet and nothing moves at all.
 pub const LINE_CAP_RUNG: usize = 5;
 
-/// How many consecutive [`LINE_CAP_TICK_MS`] ticks a bigger reading has
+/// How many consecutive `LINE_CAP_TICK_MS` ticks a bigger reading has
 /// to hold before the in-run governor follows it. The other half of the
 /// hysteresis, and the half that covers a genuine burst: the provisional
 /// gauge reading is a windowed rate, so a single fast second is exactly
@@ -963,7 +963,7 @@ pub(super) fn seed_uncapped(servers: &[(ServerConfig, PoolConfig)]) -> usize {
 /// a view of any of it. What arrives here is already the answer - a
 /// knee that applies, that is past its re-probe appointment, and that
 /// is really lowering what this server would otherwise dial - so
-/// [`seed_knee`] only ever adds numbers up. Putting the staleness test
+/// `seed_knee` only ever adds numbers up. Putting the staleness test
 /// in here would be a second spelling of a rule that already exists,
 /// which is this repo's most repeated defect.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -992,7 +992,7 @@ pub struct ServerKnee {
 /// send the reader to. `None` when no server carries one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FleetKnee {
-    /// The stalest knee'd server; see [`seed_knee`] for why that one.
+    /// The stalest knee'd server; see `seed_knee` for why that one.
     pub host: String,
     /// That server's knee, as [`ServerKnee::at`].
     pub at: usize,

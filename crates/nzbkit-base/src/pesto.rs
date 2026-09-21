@@ -113,7 +113,7 @@ impl PestoDesc {
 /// whose first-16-KiB MD5 the bytes actually match - or None, in which
 /// case NO name may be written for this candidate. Matches ANY
 /// FileDesc, not just the first: a multi-file set whose first-posted
-/// file is not FileDesc[0] read as unresolved in the census when it
+/// file is not FileDesc0 read as unresolved in the census when it
 /// was actually linkable.
 ///
 /// Only a FileDesc covering the FULL hash span may match. A shorter

@@ -36,11 +36,16 @@ pub type ResolveFuture<'a> =
 /// Resolve a host to the candidate addresses a dial may walk, in the
 /// order the resolver wants them tried.
 ///
-/// The order is advisory: [`order_candidates`] still applies the
+/// The order is advisory: `order_candidates` still applies the
 /// `bind_ip` family filter and the server's family preference on top,
 /// and a stable sort means same-family candidates keep the resolver's
 /// order.
 pub trait Resolve: Send + Sync {
+    /// Resolve `host`:`port` to the addresses a dial may try, in the
+    /// resolver's preferred order.
+    ///
+    /// An empty result is a resolution failure the caller reports as
+    /// such, not an invitation to fall back to another resolver.
     fn resolve<'a>(&'a self, host: &'a str, port: u16) -> ResolveFuture<'a>;
 }
 

@@ -357,6 +357,7 @@ pub async fn get_with_progress(job: JobSpec<'_>) -> Result<()> {
         skip_samples,
         password,
         eat_consent,
+        defer_long_repair,
         donor_dirs,
         donor_nzbs,
         progress,
@@ -517,6 +518,15 @@ pub async fn get_with_progress(job: JobSpec<'_>) -> Result<()> {
     // §129: this run's recovery-fetch cancel handle - see
     // `install_tail_cancel`.
     let side_cancel = install_tail_cancel(&hub, stream_owner);
+    // TODO 332: arm this run's long-repair veto, ONCE, before any repair
+    // site can build a control from the handle. Every one of them does
+    // (`SideCancel::repair_control`), so this single line is what puts
+    // the veto in front of the disk repair, the late-set round, the
+    // nested ladder and the no-set walk alike. See `JobSpec::
+    // defer_long_repair` for who decides the two halves of the policy.
+    if defer_long_repair {
+        side_cancel.arm_repair_defer();
+    }
     let cancel = Some(side_cancel.as_ref());
     // The seek/promote ladder and the hub publish: see install_seek in
     // get/vrig.rs. slot_arts is taken - the SeekCtl owns it from here.

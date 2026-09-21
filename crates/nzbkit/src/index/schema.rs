@@ -1336,7 +1336,7 @@ impl Index {
     /// for the indexer lap's maintenance leg. `Index::open` gets two
     /// seconds of it; on an index of any size that is a start and not a
     /// finish, and the lap is what finishes it. Returns true when the
-    /// pass is COMPLETE. See [`quality_backfill`].
+    /// pass is COMPLETE. See `quality_backfill`.
     pub fn quality_backfill_slice(&mut self, budget: std::time::Duration) -> bool {
         quality_backfill_slice(&mut self.db, budget)
     }
@@ -1389,7 +1389,7 @@ impl Index {
         n
     }
 
-    /// See [`OPEN_COUNT`]; counts the calling thread's opens only.
+    /// See `OPEN_COUNT`; counts the calling thread's opens only.
     pub fn open_count() -> u64 {
         OPEN_COUNT.with(|c| c.get())
     }
@@ -1422,6 +1422,14 @@ impl Index {
         Self::open_with_cache(path, SCRATCH_CACHE_MIB)
     }
 
+    /// Open the index at `path`, creating and migrating the schema if
+    /// needed, with the WRITER page cache.
+    ///
+    /// This is the connection that holds the compaction and migration
+    /// transactions, and there is meant to be ONE of it. A scan
+    /// scratch connection, of which the daemon opens one per group,
+    /// takes [`Self::open_scratch`] instead - the cache figure is per
+    /// connection, so eight of these is eight times the heap.
     pub fn open(path: &Path) -> rusqlite::Result<Index> {
         Self::open_with_cache(path, WRITER_CACHE_MIB)
     }
@@ -1521,6 +1529,7 @@ impl Index {
             stats_cache: Default::default(),
             wall_window: Self::wall_window_armed(),
             cards_total_memo: Default::default(),
+            gen_fold: Default::default(),
             deadline: Default::default(),
         };
         // Existing prototype catalogs may carry sampled Message-ID claims
@@ -1662,6 +1671,7 @@ impl Index {
             stats_cache: Default::default(),
             wall_window: Self::wall_window_armed(),
             cards_total_memo: Default::default(),
+            gen_fold: Default::default(),
             deadline: Default::default(),
         };
         // Disarmed; the daemon arms it per borrow, because how long an

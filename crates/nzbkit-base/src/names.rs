@@ -4,6 +4,25 @@
 //! state - moved out of `extract/mod.rs` bodily so that file stays inside
 //! its size-gate baseline (TODO 106 pattern; re-exported from `mod.rs`,
 //! so every `nzbkit::extract::release_stem` caller is unchanged).
+//!
+//! ```
+//! use nzbkit_base::names;
+//!
+//! // Every part of one posted set reduces to the same stem, which is
+//! // what groups a post into one release.
+//! for part in ["demo.part01.rar", "demo.part02.rar", "demo.vol000+01.par2"] {
+//!     assert_eq!(names::release_stem(part), "demo");
+//! }
+//!
+//! // Volumes sort in the order the archive has to be read in.
+//! let mut vols = vec!["demo.r01", "demo.rar", "demo.r00"];
+//! vols.sort_by_key(|n| names::vol_sort_key(n));
+//! assert_eq!(vols, ["demo.rar", "demo.r00", "demo.r01"]);
+//!
+//! // A container extension that IS the deliverable: never unpack it.
+//! assert!(names::is_final_name("comic.cbr"));
+//! assert!(!names::is_final_name("demo.part01.rar"));
+//! ```
 
 /// Strip release-file suffixes down to the shared stem:
 /// `x.part01.rar`/`x.r00`/`x.vol000+01.par2`/`x.par2`/`x.rar` → `x`,
@@ -96,7 +115,7 @@ pub fn is_final_file(path: &std::path::Path) -> bool {
 
 /// [`is_final_file`] over a bare file name (any case).
 ///
-/// Reads the extension through [`crate::disk::trimmed_extension`], not
+/// Reads the extension through `crate::disk::trimmed_extension`, not
 /// `Path::extension()`: a trailing dot or space - the exact tail Windows
 /// folds away - defeats `Path::extension()` and answered `false` on
 /// `comic.cbr.` and `comic.cbr `, earning the comic the RAR chase (T6).

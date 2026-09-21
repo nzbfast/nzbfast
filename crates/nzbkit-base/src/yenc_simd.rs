@@ -1,4 +1,5 @@
-//! SIMD yEnc decoder - rapidyenc (vendor/rapidyenc) via FFI.
+//! SIMD yEnc decoder - rapidyenc (`vendor/rapidyenc`, under this crate)
+//! via FFI.
 //!
 //! Drop-in replacement for [`crate::yenc::decode`]: same `Decoded` result,
 //! same error cases, differentially tested against that oracle. The shape
@@ -41,8 +42,9 @@ use std::sync::Once;
 use crate::yenc::{Decoded, Meta, YencError, field_hex, field_name, field_u64};
 
 // SAFETY: these declarations must match the C definitions exported by the
-// vendored rapidyenc library (vendor/rapidyenc, see module doc). Pointer
-// contracts are documented and upheld at each call site below.
+// vendored rapidyenc library (`vendor/rapidyenc` under this crate, see
+// module doc). Pointer contracts are documented and upheld at each call
+// site below.
 unsafe extern "C" {
     fn rapidyenc_decode_init();
     fn rapidyenc_crc_init();
@@ -478,7 +480,7 @@ pub fn decode(body: &[u8]) -> Result<Decoded, YencError> {
 
 /// Decode a full article body into `out` (cleared first), returning
 /// everything but the payload. `out` is meant to be a recycled buffer
-/// (see [`crate::pool::BufPool`]); its existing capacity absorbs the
+/// (see `crate::pool::BufPool`); its existing capacity absorbs the
 /// decoded bytes, so the hot path does no per-article payload allocation.
 pub fn decode_into(body: &[u8], out: &mut Vec<u8>) -> Result<Meta, YencError> {
     decode_into_delegable(body, out, true).map(|(m, _)| m)

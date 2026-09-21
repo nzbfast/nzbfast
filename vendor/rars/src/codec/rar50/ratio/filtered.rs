@@ -158,8 +158,8 @@ mod tests {
                     let mut ring =
                         FilteredEncoder::new(dictionary, optimal).with_tree_search(false);
                     let mut tree = FilteredEncoder::new(dictionary, optimal);
-                    let mut reference = Unpack50Encoder::with_options(ring.options);
-                    let mut decoder = Unpack50Decoder::new();
+                    let mut reference = Rar50Encoder::with_options(ring.options);
+                    let mut decoder = Rar50Decoder::new();
                     for (bytes, solid) in [
                         (input.as_slice(), false),
                         (&[][..], true),
@@ -167,7 +167,7 @@ mod tests {
                         (&input[17..], false),
                     ] {
                         if !solid {
-                            reference = Unpack50Encoder::with_options(ring.options);
+                            reference = Rar50Encoder::with_options(ring.options);
                         }
                         let specs = if bytes.is_empty() {
                             Vec::new()
@@ -218,7 +218,7 @@ mod tests {
             ),
         ];
         let mut tree = FilteredEncoder::new(4 << 20, true);
-        let mut reference = Unpack50Encoder::with_options(tree.options);
+        let mut reference = Rar50Encoder::with_options(tree.options);
         let mut ring = FilteredEncoder::new(4 << 20, true).with_tree_search(false);
         let expected = reference
             .encode_member_with_filters_chunked(&input, 0, &filters)
@@ -227,7 +227,7 @@ mod tests {
         let packed = tree.encode(&input, &filters, false).unwrap();
         assert_eq!(tree.history, reference.history);
         assert_eq!(
-            Unpack50Decoder::new()
+            Rar50Decoder::new()
                 .decode_member_with_dictionary(
                     &packed,
                     0,

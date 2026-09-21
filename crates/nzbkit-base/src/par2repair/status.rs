@@ -6,6 +6,13 @@
 
 use super::*;
 
+/// Everything one completed directory repair did, as totals plus the
+/// same accounting per target in [`Self::per_file`].
+///
+/// The three name lists overlap by construction - `files_created` is a
+/// subset of `files_patched`, and `files_renamed` a subset of
+/// `files_created` - so a caller summing them counts the same file
+/// three times. Read them as narrowings, not as categories.
 #[derive(Debug)]
 pub struct RepairReport {
     /// Input blocks reconstructed via Reed-Solomon.
@@ -53,6 +60,9 @@ pub struct RepairReport {
     pub per_file: Vec<FileRepair>,
 }
 
+/// How a directory repair ended. [`Self::Unrepairable`] is a verdict
+/// about the SET and not about every member of it: it still carries a
+/// report of what was published anyway.
 #[derive(Debug)]
 pub enum RepairStatus {
     /// Every recovery-set file already verifies - nothing written.
@@ -60,14 +70,20 @@ pub enum RepairStatus {
     /// Damage found and repaired; every patched file re-verified by MD5.
     Repaired(RepairReport),
     /// Not enough recovery slices on disk for the damage found, with
-    /// what adoption found and already subtracted - see [`adopt`].
+    /// what adoption found and already subtracted - see `adopt`.
     ///
     /// The set as a whole is not repairable; individual MEMBERS of it
     /// may still be, and `partial` is what this pass managed to publish
     /// anyway - see the field's own note.
     Unrepairable {
+        /// Blocks still owed to recovery data once adoption had been
+        /// subtracted - the shortfall, not the original damage.
         needed: usize,
+        /// Usable recovery slices found on disk: present and
+        /// MD5-valid.
         have: usize,
+        /// Blocks the adoption scan recovered from extra files, and so
+        /// already removed from `needed`.
         adopted: usize,
         /// What was published DESPITE the shortfall: every target of
         /// this set whose own blocks were all accounted for (present on
@@ -103,8 +119,8 @@ pub enum RepairStatus {
         /// decided that; the courtesy publish was added on top of a
         /// verdict already reached, and the error path fell out of the
         /// implementation. It now costs the member and nothing else:
-        /// [`publish_failed`] carries the ruling and the argument, and
-        /// [`drop_unpublished`] takes the member back out of the report
+        /// `publish_failed` carries the ruling and the argument, and
+        /// `drop_unpublished` takes the member back out of the report
         /// so this field describes what is actually on disk.
         ///
         /// What that protects is the ARITHMETIC, and it is worth more

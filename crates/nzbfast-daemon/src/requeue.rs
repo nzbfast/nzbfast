@@ -4,7 +4,7 @@
 //! next run pay that an uninterrupted run would not?" - asked from two
 //! places that could not be further apart in the daemon:
 //!
-//! * the slow-job watchdog ([`crate::tasks`]), at a demotion it
+//! * the slow-job watchdog (`crate::tasks`), at a demotion it
 //!   is about to fire, so the `defer_reason` the queue drawer prints
 //!   names what the trip back cost (TODO 309(d));
 //! * the queue payload ([`Daemon::pause_cost`]), on the poll path, so
@@ -280,7 +280,7 @@ impl Daemon {
     /// The runner claiming the wire for `id`: remember where its journal
     /// lives, for [`Daemon::pause_cost`], and push the job it displaced
     /// into the second slot rather than over the edge. See
-    /// [`PauseCostState::owners`] for why that second slot exists.
+    /// `PauseCostState::owners` for why that second slot exists.
     ///
     /// Idempotent for the job already holding the wire, which is what
     /// keeps a repeated claim from shifting a live drainer out from
@@ -317,7 +317,7 @@ impl Daemon {
     /// downloading behind it, and pausing stops BOTH, so an answer for
     /// one of them is silence about the other's whole loss. The page
     /// takes the worst of what it is given; this hands over everything
-    /// that has something to lose. [`PauseCostState::owners`] carries
+    /// that has something to lose. `PauseCostState::owners` carries
     /// the incident.
     ///
     /// Two things stand between this and a journal parse on every poll,
@@ -346,8 +346,8 @@ impl Daemon {
     /// soundness condition and [`requeue_cost`] carries the derivation
     /// at the guard. Do not restate the threshold as a constant here.
     ///
-    /// **The cache**, for what gets past it: [`PAUSE_COST_TTL`], one
-    /// entry per owner ([`WireOwner::answer`]). The journal read happens
+    /// **The cache**, for what gets past it: `PAUSE_COST_TTL`, one
+    /// entry per owner (`WireOwner::answer`). The journal read happens
     /// with the lock DOWN - it is `blocking_db` I/O on an HTTP worker's
     /// path, and holding a daemon mutex across it is how the queue
     /// drawer once wedged the whole worker pool. Two polls racing past a

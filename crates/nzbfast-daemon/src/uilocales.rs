@@ -13,14 +13,14 @@
 //! name this file for the tag and `assets.rs` for everything else.
 
 /// §5 i18n phase 1: the supported UI locales. Their catalogues are
-/// embedded beside the pages in [`super::assets`]; English is the source
+/// embedded beside the pages in `super::assets`; English is the source
 /// language and lives inline in the pages, so it has no catalogue.
-/// Adding a locale = drop web/i18n/<tag>.json, add it here and to
+/// Adding a locale = drop `web/i18n/<tag>.json`, add it here and to
 /// `assets::i18n_catalog` (and LOCALE_NAMES in dashboard.html - both
-/// Interface <select>s are built from that one table at boot):
+/// Interface `<select>`s are built from that one table at boot):
 /// translation-only, no new engineering.
 /// Tier 1b (21 Jul) added pt/sv/da/nb/fi/tr/ro - UI only; these have no
-/// translated manual or website yet, so /manual/<tag> falls back to
+/// translated manual or website yet, so `/manual/<tag>` falls back to
 /// English and they're absent from the site pickers.
 /// Phase 2a added the Slavic set (ru/pl/cs/uk - CLDR one|few|many plurals,
 /// handled by tn()'s Intl.PluralRules) plus Greek (el); likewise UI-only.

@@ -437,7 +437,7 @@ jobs:
       # reached by nothing here.
       #
       # NZBFAST_FUZZ_YENC_KERNEL pins the kernel for a run, through
-      # rapidyenc's own per-kernel setters (crates/nzbkit/csrc/
+      # rapidyenc's own per-kernel setters (crates/nzbkit-base/csrc/
       # yenc_kernel_pin.cc). A pin only ever goes DOWN, so a runner covers
       # everything at or below what its CPU supports - typically generic,
       # sse2, ssse3, avx and avx2 on a GitHub x86 runner - and a kernel

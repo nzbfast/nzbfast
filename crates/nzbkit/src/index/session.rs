@@ -53,7 +53,10 @@ impl SessionLink {
 /// One session sibling of an anchor release.
 #[derive(Debug, Clone)]
 pub struct SessionSibling {
+    /// The sibling release itself.
     pub rel: Release,
+    /// What linked it to the anchor. The sort key ahead of `dt`, so
+    /// the strongest link kind comes first whatever the times say.
     pub link: SessionLink,
     /// Candidate minus anchor `first_posted`, seconds. Display only -
     /// pesto randomizes Date headers, so this can lie for counter-
@@ -224,7 +227,11 @@ impl Index {
 /// title-scoped callers (the wall sheet shows one title, not one row).
 #[derive(Debug, Clone)]
 pub struct TitleSibling {
+    /// The sibling, exactly as a row-scoped scan found it.
     pub sib: SessionSibling,
+    /// Which of the title's releases it was linked THROUGH. A title
+    /// scan runs several anchors, so without this a caller cannot say
+    /// what a sibling is a sibling of.
     pub anchor_id: i64,
 }
 

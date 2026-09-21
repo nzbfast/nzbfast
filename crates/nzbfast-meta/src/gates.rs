@@ -116,7 +116,7 @@ impl Gates {
         self.allows_with(stem, &[])
     }
 
-    /// [`allows_with`] applies the user's custom categories first: a
+    /// `allows_with` applies the user's custom categories first: a
     /// stem a category claims carries that category's slug as its kind,
     /// so `"kinds": ["movie", "formula-1"]` does what it reads as.
     pub fn allows_with(&self, stem: &str, cats: &[nzbkit::categories::CustomCategory]) -> bool {

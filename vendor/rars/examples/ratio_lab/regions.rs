@@ -1,7 +1,7 @@
 //! Sample-guided regional filters. Probes are heuristics; the caller retains
 //! a complete baseline archive because dictionary interactions are not additive.
 use rars::codec::rar50::{
-    EncodeOptions, Rar50FilterKind as Kind, Rar50FilterSpec as Spec, Unpack50Encoder,
+    EncodeOptions, Rar50FilterKind as Kind, Rar50FilterSpec as Spec, Rar50Encoder,
 };
 
 pub fn select(data: &[u8], options: EncodeOptions, span: usize, merge: bool) -> Vec<Spec> {
@@ -36,7 +36,7 @@ pub fn select(data: &[u8], options: EncodeOptions, span: usize, merge: bool) -> 
             let mut cost = 0;
             for &offset in &starts {
                 let sample = &region[offset..offset + sample_len];
-                let mut encoder = Unpack50Encoder::with_options(options);
+                let mut encoder = Rar50Encoder::with_options(options);
                 let packed = if let Some(kind) = kind {
                     encoder.encode_member_with_filter(sample, 0, Spec::new(kind))
                 } else {

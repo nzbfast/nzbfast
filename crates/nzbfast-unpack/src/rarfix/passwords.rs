@@ -48,7 +48,7 @@ pub const PW_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(
 
 /// May this candidate pay for a KDF this deep? Structured candidates
 /// (the operator-supplied job password) always may; harvested ones only
-/// up to [`PW_KDF_MAX_LG2`].
+/// up to `PW_KDF_MAX_LG2`.
 pub fn kdf_candidate_allowed(lg2_count: u8, structured: bool) -> bool {
     structured || lg2_count <= PW_KDF_MAX_LG2
 }
@@ -69,7 +69,7 @@ pub struct PwCandidate {
 /// level k+1's password in a text file beside it. Sources, most-likely
 /// first: the job's own password (M24 ordering, resolved upstream), then
 /// trimmed lines of small .txt/.nfo/.diz sidecars, then the release stem
-/// and sibling file stems. Deduped and capped at [`MAX_PW_CANDIDATES`].
+/// and sibling file stems. Deduped and capped at `MAX_PW_CANDIDATES`.
 pub fn harvest_password_candidates(
     dir: &std::path::Path,
     provided: Option<&str>,

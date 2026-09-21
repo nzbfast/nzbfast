@@ -1,5 +1,6 @@
 //! PLAN M31 stage 1: borrow a lost segment's BYTES from a duplicate
-//! posting of the same release.
+//! posting of the same release, proved block by block against the
+//! target's own PAR2 set.
 //!
 //! # The mechanism, and why it is cheap
 //!
@@ -833,7 +834,7 @@ impl BlockHealer {
     /// Offer `data`, which belongs at file offset `off`. Returns how many
     /// bytes landed in a block that still wants them; bytes outside every
     /// open block, and bytes over a range some earlier offer already
-    /// filled, are ignored (see [`Assembly::fill`]).
+    /// filled, are ignored (see `Assembly::fill`).
     pub fn offer(&mut self, off: u64, data: &[u8]) -> u64 {
         if data.is_empty() || self.block_size == 0 {
             return 0;
@@ -953,7 +954,7 @@ impl BlockHealer {
     /// restores is the block's IDENTITY rather than its bytes: nothing
     /// the bad donor wrote survives, so the next donor's coverage is
     /// judged alone and first-bytes-win is untouched (see
-    /// [`Assembly::fill`]). A block that has already been PROVED never
+    /// `Assembly::fill`). A block that has already been PROVED never
     /// reaches this list at all, so no accepted block can be reopened
     /// and lost.
     ///

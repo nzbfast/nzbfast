@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>nzbfast</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<!-- Same pair as the dashboard, and for the same reason: a meta tag is
+     read before any stylesheet and takes no custom property, so these
+     two literals ARE the palette's --bg (ui-tokens.html) and move with
+     it. Unlike the dashboard this page has no theme PICKER, so nothing
+     overwrites them at runtime - the OS preference is the whole rule
+     here, which is what somebody who is not signed in has told us. -->
+<meta name="theme-color" content="#eef0f5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1014" media="(prefers-color-scheme: dark)">
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/icons/favicon-16.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<!-- Shared design tokens + the pre-paint theme script, substituted by
+     assets.rs from web/ui-tokens.html - the same partial both other
+     shells get. A sign-in page in somebody else's colours is the one
+     page of the product a stranger sees, so it gets the real palette
+     rather than a hand-made approximation of it. -->
+__NZBFAST_UI_TOKENS__
+<!--
+  nzbfast sign-in (TODO 19, public request #4).
+
+  Deliberately TINY and deliberately its own page. The dashboard is
+  1.2 MB of application; handing all of it to somebody who has not
+  signed in would be slower, would show them a UI whose every call is
+  about to be refused, and would publish the whole interface to an
+  unauthenticated visitor. So the router redirects `/` here and serves
+  this instead.
+
+  No custom.css link: that file is the OWNER's stylesheet, read from
+  their config folder, and a page in front of the credential check is
+  not where user-supplied CSS belongs.
+-->
+<style>
+ html,body{height:100%}
+ body{margin:0;background:var(--bg);color:var(--fg);
+      font:14px/1.5 var(--font,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif);
+      display:flex;align-items:center;justify-content:center;padding:24px;
+      box-sizing:border-box}
+ .box{width:100%;max-width:360px}
+ h1{font-size:20px;margin:0 0 4px;font-weight:600;letter-spacing:.2px}
+ .sub{color:var(--dim);margin:0 0 20px}
+ label{display:block;font-size:12px;color:var(--dim);margin:12px 0 4px}
+ input{width:100%;box-sizing:border-box;padding:9px 10px;border-radius:8px;
+       border:1px solid var(--line);background:var(--panel);color:var(--fg);
+       font:inherit}
+ input:focus{outline:2px solid var(--accent);outline-offset:1px}
+ button{width:100%;margin-top:18px;padding:10px;border:0;border-radius:8px;
+        background:var(--accent);color:var(--accent-fg,#fff);font:inherit;
+        font-weight:600;cursor:pointer}
+ button[disabled]{opacity:.6;cursor:default}
+ /* Reserved rather than shown-and-hidden: an error appearing must not
+    shift the button out from under the pointer that is about to press
+    it again. */
+ .err{min-height:1.5em;margin-top:12px;color:var(--bad);font-size:13px}
+ .note{margin-top:22px;color:var(--dim);font-size:12px;
+       border-top:1px solid var(--line);padding-top:12px}
+</style>
+</head>
+<body>
+<div class="box">
+  <h1 data-i18n="login.title">Sign in</h1>
+  <p class="sub" data-i18n="login.sub">This nzbfast asks for a name and password before it opens the dashboard.</p>
+  <form id="f" autocomplete="on">
+    <label for="u" data-i18n="login.user">Username</label>
+    <input id="u" name="username" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+    <label for="p" data-i18n="login.pass">Password</label>
+    <input id="p" name="password" type="password" autocomplete="current-password" required>
+    <button id="go" type="submit" data-i18n="login.go">Sign in</button>
+  </form>
+  <div class="err" id="e" role="alert" aria-live="polite"></div>
+  <p class="note" data-i18n="login.apinote">Sonarr, Radarr and phone apps are not affected: they keep using the API key. This form is only for the dashboard in a browser.</p>
+</div>
+<script>
+"use strict";
+// ---- i18n (§5) - the same contract the dashboard and the wall use:
+// English lives inline (data-i18n markup + t() defaults), and
+// /i18n/<lang>.json overrides it. Locale = the browser's saved choice →
+// the daemon default stamped in here → navigator.language.
+//
+// A hand-rolled small copy of the two pages' loader rather than a shared
+// partial, because what this page needs is four lines of it: no plurals,
+// no number formatting, no title/placeholder attributes.
+const DAEMON_LOCALE='__NZBFAST_LOCALE__';
+const LOCALES=['en','fr','de','it','es','nl','pt','sv','da','nb','fi','tr','ro','ru','pl','cs','uk','el','ja','he','ar','fa','hu','sk','hr','sr','bg','sl'];
+const RTL_LOCALES=['he','ar','fa'];
+const LOCALE=(()=>{
+  const ALIAS={no:'nb',nn:'nb',sh:'sr'};
+  const norm=v=>{ const p=String(v||'').toLowerCase().split(/[-_]/)[0]; return ALIAS[p]||p; };
+  let saved='';
+  try{ saved=localStorage.nzbfastLocale||''; }catch(_){}
+  for(const c of [saved, DAEMON_LOCALE.startsWith('__')?'':DAEMON_LOCALE, navigator.language])
+    { const p=norm(c); if(LOCALES.includes(p)) return p; }
+  return 'en';
+})();
+let I18N={};
+function t(k,en){ return I18N[k]??en; }
+function applyI18n(){
+  document.querySelectorAll('[data-i18n]').forEach(el=>{
+    const tr=I18N[el.dataset.i18n]; if(tr!=null) el.textContent=tr;
+  });
+}
+if(LOCALE!=='en'){
+  document.documentElement.lang=LOCALE;
+  if(RTL_LOCALES.includes(LOCALE)) document.documentElement.dir='rtl';
+  fetch('/i18n/'+LOCALE+'.json').then(r=>r.ok?r.json():{}).then(d=>{
+    I18N=d; applyI18n();
+  }).catch(()=>{});
+}
+// The daemon answers a refusal with a KEY (`login.bad`, `login.blocked`,
+// …), never a sentence: the string a reader sees belongs to the page and
+// its catalogue, and a daemon that shipped English prose here would be
+// the one untranslated line on a translated page. An unknown code falls
+// back to its own text so a future daemon talking to an older page still
+// says something.
+// Every branch is a LITERAL t(key, default) call, and that is required
+// rather than tidy: web/i18n/extract.js scrapes the English reference out
+// of exactly that shape, so a `t(code, ...)` with a computed key would
+// leave these five strings out of every catalogue and untranslated in all
+// 27 locales, with the i18n gate green.
+function errText(code){
+  switch(code){
+    case 'login.busy':
+      return t('login.busy','nzbfast is checking other sign-ins right now. Try again in a moment.');
+    case 'login.blocked':
+      return t('login.blocked','Too many tries from this address. Wait a minute, then try again.');
+    case 'login.crosssite':
+      return t('login.crosssite',"Sign in from nzbfast's own page.");
+    case 'login.off':
+      return t('login.off','This nzbfast has no login set up. Open the dashboard directly.');
+    case 'login.nornd':
+      return t('login.nornd','nzbfast could not start a session. Its log says why.');
+    default:
+      return t('login.bad','That name and password were not accepted.');
+  }
+}
+const f=document.getElementById('f'), e=document.getElementById('e'),
+      go=document.getElementById('go');
+f.addEventListener('submit', async ev => {
+  ev.preventDefault();
+  e.textContent='';
+  const was=go.textContent;
+  go.disabled=true; go.textContent=t('login.working','Signing in…');
+  try{
+    const body=new URLSearchParams({
+      username:document.getElementById('u').value,
+      password:document.getElementById('p').value,
+    });
+    // The daemon caps how many password checks run at once (19 MiB and
+    // ~16 ms each, on the shared worker pool) and answers 503 with
+    // `Retry-After` to a sign-in that cannot get a slot inside a quarter
+    // of a second. That is NOT a refusal of this password - it was never
+    // read - so the page asks again by itself rather than showing the
+    // reader an error they can do nothing about. ONE retry: if a second
+    // attempt is refused too, something is wrong enough to be worth
+    // saying out loud, and retrying in a loop would be this page joining
+    // the flood it is waiting on.
+    //
+    // 400 ms and not the second the header names: a slot frees every
+    // ~16 ms, so the header's figure is the conservative answer for a
+    // machine client that may be one of many, and a human at a form
+    // deserves the more eager one.
+    const post=()=>fetch('/login',{method:'POST',body,
+      headers:{'Content-Type':'application/x-www-form-urlencoded'}});
+    let r;
+    try{
+      r=await post();
+      if(r.status===503){
+        await new Promise(res=>setTimeout(res,400));
+        r=await post();
+      }
+    }catch(_){
+      e.textContent=t('login.unreachable','nzbfast did not answer. Is it still running at this address?');
+      return;
+    }
+    let j=null;
+    try{ j=await r.json(); }catch(_){}
+    if(j&&j.status){
+      // A full navigation, not history.replaceState: the dashboard is a
+      // different document and the cookie is already set, so this is the
+      // one place a reload is the right answer.
+      location.href='/';
+      return;
+    }
+    e.textContent=errText((j&&j.error)||'login.bad');
+    document.getElementById('p').select();
+  } finally {
+    go.disabled=false; go.textContent=was;
+  }
+});
+document.getElementById('u').focus();
+</script>
+</body></html>

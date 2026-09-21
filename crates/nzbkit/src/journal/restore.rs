@@ -589,7 +589,7 @@ fn article_authentic(
 /// an extracted inner file) are COPIED back into the volume file - a
 /// local disk copy instead of a network refetch - and plaintext-once
 /// fragments (`D` records) are RE-ENCRYPTED back into posted bytes via
-/// [`restore_crypto`]. An article counts as restored only when every
+/// `restore_crypto`. An article counts as restored only when every
 /// fragment succeeds; anything else refetches. Never fails: a missing
 /// source file just drops its articles.
 pub fn restore(out_dir: &Path, resume: &ResumeState, password: Option<&str>) -> Restored {

@@ -501,6 +501,12 @@ pub(super) fn unpack_tail(
         let forecast = crate::eatvol::forecast(out_dir, vol_bytes, encrypted);
         let verdict = crate::eatvol::decide(crate::eatvol::mode(), all_good, eat_consent, forecast);
         if verdict.eats() {
+            // TODO 101: and tell the queue row, so the phase text says
+            // the parts are going as they are used rather than leaving
+            // the user to discover it from a report afterwards. Armed
+            // here, ahead of the first delete, and read straight off
+            // this job's live unpack cell by the queue payload.
+            crate::unpackprog::mark_eating();
             info!(
                 target: "extract",
                 "volume-eating unpack armed ({}): {} volume(s) on disk, {:.1} GB free, \
@@ -1572,10 +1578,17 @@ pub(super) fn print_mem_summary(
         if cs.trim_passes > 0 {
             info!(
                 target: "mem",
-                "chase trim {} drop-eligible pass(es): {} dropped, {} vetoed by loss, {} by pace, {} by set size; {} saw backpressure parked; {} volume drop(s) spilled unvouched, parity ruled out {}",
+                "chase trim {} drop-eligible pass(es): {} dropped, {} vetoed by loss, {} by nesting, {} by the drop switch, {} by pace, {} by set size; {} saw backpressure parked; {} volume drop(s) spilled unvouched, parity ruled out {}; engine watermark peak {} MB, {} pass(es) saw none",
                 cs.trim_passes,
                 cs.trim_drops,
+                // `by loss` is a VERDICT and the other four are not.
+                // The two configuration arms were folded into this
+                // count until 20 Sep 2026, which made every nested leg
+                // report a loss it never had (`TrimVeto` in
+                // nzbkit/src/extract/chasestat.rs says it at length).
                 cs.trim_veto_loss,
+                cs.trim_veto_nested,
+                cs.trim_veto_off,
                 cs.trim_veto_pace,
                 cs.trim_veto_size,
                 cs.trim_parked,
@@ -1586,6 +1599,30 @@ pub(super) fn print_mem_summary(
                 // `Extractor::parity_ruled_out` (3 Sep 2026).
                 cs.trim_vouch_spills,
                 if cs.no_parity { "yes" } else { "no" },
+                // What the ENGINE had consumed when a pass ran. A
+                // `chase trimmed 0` leg means one of two unrelated
+                // things and this is what tells them apart - see
+                // `chasestat::trim_watermark`. Peak 0 over N passes is
+                // an engine that had published nothing; a peak under
+                // half the holds cap is the release bar holding a
+                // watermark that HAD moved.
+                cs.trim_wm_peak / 1_000_000,
+                cs.trim_wm_zero,
+            );
+        }
+        // The PROGRESS trim (TODO 13 stage 2), its own line and only
+        // when it engaged: a nested chase releasing its consumed prefix
+        // as the engine's read frontier passes it, rather than under
+        // pressure. Separate from the drop-eligible line above because
+        // a progress pass never drops and never forfeits, so folding
+        // them would make both unreadable - and because a leg reporting
+        // ZERO of these has an arm that never fired, which an A/B has
+        // to be able to tell from the arm being off.
+        if cs.progress_passes > 0 {
+            info!(
+                target: "mem",
+                "chase progress trim {} pass(es): a nested chase released consumed bytes behind the engine's read frontier without waiting for the holds cap",
+                cs.progress_passes,
             );
         }
     }
@@ -2869,6 +2906,7 @@ mod tests {
             par2_name_demoted: Default::default(),
             par2_sniffed: std::sync::atomic::AtomicBool::new(false),
             total_segments: 1,
+            posted_bytes: 0,
             remaining: AtomicUsize::new(0),
             missing: AtomicUsize::new(missing),
             errors: AtomicUsize::new(0),

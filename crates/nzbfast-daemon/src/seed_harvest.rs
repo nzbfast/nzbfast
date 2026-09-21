@@ -478,6 +478,26 @@ pub fn tick(d: &Arc<Daemon>, state: &mut HarvestState) -> HarvestReport {
     tick_with_gate(d, state, None)
 }
 
+/// What a pass that `db_maintenance_ok` declined tells the stall clock.
+/// `None` when the index is not wanted at all - the indexer and Spotnet
+/// both off, or the daemon exiting - because then the durable replay is
+/// not OWED and a lane that is not owed work is not starving. Until
+/// 20 Sep 2026 this arm said "index maintenance is closed" too, and
+/// the ten-minute stall line in [`spawn`] repeated for the life of
+/// every daemon whose owner had simply left the indexer off (reported
+/// on Reddit as a WARN every ten minutes with no setting to explain
+/// it). The transient closures - paused, offline, a download running
+/// under pause-on-download - still name the gate, because those are
+/// the states where the replay IS owed and the 2 Sep 2026 stall could
+/// hide again.
+fn maintenance_stall(d: &Daemon) -> Option<&'static str> {
+    if d.index_db_wanted() {
+        Some("index maintenance is closed")
+    } else {
+        None
+    }
+}
+
 pub fn tick_with_gate(
     d: &Arc<Daemon>,
     state: &mut HarvestState,
@@ -489,7 +509,7 @@ pub fn tick_with_gate(
         report.deferred = state.pending.len().max(1);
         report.pending = state.pending.len();
         report.blocked = true;
-        report.stalled_at = Some("index maintenance is closed");
+        report.stalled_at = maintenance_stall(d);
         return report;
     }
 
@@ -695,7 +715,7 @@ pub fn tick_with_gate(
     if !d.db_maintenance_ok() {
         report.deferred += active.len().max(1);
         report.blocked = true;
-        report.stalled_at = Some("index maintenance is closed");
+        report.stalled_at = maintenance_stall(d);
         for item in active {
             state.queue_candidate(item.candidate);
         }
@@ -2383,6 +2403,36 @@ mod tests {
                  the scan lap holds for tens of minutes"
             );
             drop(held);
+        });
+    }
+
+    #[test]
+    fn indexer_off_is_idle_not_stalled() {
+        // The ten-minute stall WARN in `spawn` fires on any pass that
+        // names a gate. With the indexer and Spotnet both off the
+        // replay is not owed, so the pass must name nothing; with the
+        // indexer ON but paused it must still name the gate.
+        with_daemon("idle-off", |d| {
+            d.index_enabled.store(false, Ordering::Relaxed);
+            d.spot_enabled.store(false, Ordering::Relaxed);
+            let mut state = HarvestState::new(d.index_era());
+            let report = tick(d, &mut state);
+            assert!(report.blocked, "{report:?}");
+            assert_eq!(
+                report.stalled_at, None,
+                "an indexer that is OFF is not a starving replay - this \
+                 is the line a Reddit user saw every ten minutes forever"
+            );
+
+            d.index_enabled.store(true, Ordering::Relaxed);
+            d.index_paused.store(true, Ordering::Relaxed);
+            let report = tick(d, &mut state);
+            assert_eq!(
+                report.stalled_at,
+                Some("index maintenance is closed"),
+                "a paused indexer still owes the replay and must say so"
+            );
+            d.index_paused.store(false, Ordering::Relaxed);
         });
     }
 }

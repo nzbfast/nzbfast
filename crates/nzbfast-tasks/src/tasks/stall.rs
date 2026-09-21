@@ -1478,11 +1478,6 @@ pub fn spawn_slow_job_watchdog(
         // when it clears - so "send me the log" captures a flatline
         // after the fact. Observation only, and always on: it runs
         // BEFORE the auto-defer/prefetch gates below.
-        // env-default-gate: the 10 the doc row states is the literal on
-        // the next line, but it reaches the env read through this file's
-        // own local `secs` helper wrapped in `Duration::from_secs` at the
-        // call, which is not one of the helper shapes the resolver
-        // discovers.
         let mut stall = StallTracker::new(std::time::Duration::from_secs(secs(
             "NZBFAST_STALL_LOG_SECS",
             10,
@@ -1702,8 +1697,13 @@ pub fn spawn_slow_job_watchdog(
             // idle for the DRAINING job is busy for it - a sidecar
             // built on that reading would be a second full fleet on
             // the server the successor is filling.
+            //
+            // Nor while offline, which outranks everything: a resume
+            // clears `paused` and leaves `offline` standing (TODO 65), so
+            // `paused` alone is not the whole promise.
             if d.auto_prefetch.load(Ordering::Relaxed)
                 && !d.paused.load(Ordering::Relaxed)
+                && !d.offline.load(Ordering::Relaxed)
                 && d.quota.load(Ordering::Relaxed) == 0
                 && d.sidecar.lock_ok().is_none()
                 && !handing_over
@@ -1731,8 +1731,14 @@ pub fn spawn_slow_job_watchdog(
                         }
                     }
                     if let Some((_, nj)) = best {
-                        spawn_sidecar(&d, &config, &nj, &fleet, &deltas, mem_budget, borrow);
-                        attempted.insert(nj.lock_ok().nzo_id.clone());
+                        // The same door the runner's pick keeps: a twin of
+                        // the row this fleet is ALREADY fetching would
+                        // download the same articles beside it, on the
+                        // servers the original leaves idle.
+                        if !d.refuse_twin_start(&nj) {
+                            spawn_sidecar(&d, &config, &nj, &fleet, &deltas, mem_budget, borrow);
+                            attempted.insert(nj.lock_ok().nzo_id.clone());
+                        }
                     }
                 }
             }

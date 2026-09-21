@@ -39,6 +39,9 @@ impl Default for RateLimit {
 }
 
 impl RateLimit {
+    /// A limiter capped at `bytes_per_sec`, or unlimited at 0. Shared:
+    /// every worker on the capped fleet prices its reads against the
+    /// same one.
     pub fn new(bytes_per_sec: u64) -> Arc<RateLimit> {
         let rl = RateLimit::default();
         rl.set(bytes_per_sec);
@@ -65,6 +68,10 @@ impl RateLimit {
         self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// The cap in bytes per second, 0 for unlimited. A plain read off
+    /// the atomic and NOT under the `next` mutex, so it is a display
+    /// figure - a reservation that must agree with the clock and the
+    /// generation takes the lock instead.
     pub fn get(&self) -> u64 {
         self.bytes_per_sec.load(Ordering::Relaxed)
     }

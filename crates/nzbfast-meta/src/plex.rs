@@ -49,8 +49,19 @@ pub const PAGE_SIZE: usize = 300;
 /// that ignores the container offsets cannot loop for ever.
 pub const MAX_PAGES: usize = 20;
 /// Where the PIN flow starts.
-pub const PIN_URL: &str = "https://plex.tv/api/v2/pins?strong=true";
-/// The page the user approves the code on.
+///
+/// No `strong=true` here, and that is the whole of GH #91. Plex hands out
+/// two kinds of pin from this endpoint: the default one is the
+/// four-character code that [`LINK_PAGE`] takes, and `strong=true` is a
+/// long alphanumeric code meant for the `app.plex.tv/auth#?code=` flow
+/// that a client opens itself. From 11 Aug to 20 Sep 2026 this asked for
+/// the strong kind and then sent the user to `plex.tv/link`, so the
+/// dashboard showed a code the page it opened could not accept - which
+/// is what the reporter saw as "a lot of digits instead of PIN".
+/// `pin_url_asks_for_the_short_code` holds it.
+pub const PIN_URL: &str = "https://plex.tv/api/v2/pins";
+/// The page the user approves the code on. It takes the four-character
+/// code and nothing longer.
 pub const LINK_PAGE: &str = "https://plex.tv/link";
 /// What we tell Plex we are, in `X-Plex-Product`. It is what the user
 /// sees in their Plex account's authorised-devices list, so it is the
@@ -453,6 +464,16 @@ mod tests {
         // The empty title counted (it was a film), the artist did not
         // (it was never a watchlist title of a kind we take).
         assert_eq!(seen, 2);
+    }
+
+    /// GH #91. `plex.tv/link` takes the short code, so the request must
+    /// not ask for the strong one - the two differ by this one query
+    /// parameter, and the mismatch showed as a code the page refused.
+    #[test]
+    fn pin_url_asks_for_the_short_code() {
+        assert!(!PIN_URL.contains("strong"), "{PIN_URL}");
+        assert!(PIN_URL.starts_with("https://plex.tv/api/v2/pins"));
+        assert_eq!(LINK_PAGE, "https://plex.tv/link");
     }
 
     /// The PIN flow, both halves. `authToken: null` is the normal answer

@@ -8,6 +8,7 @@
 //! 2,945 to 4,037 lines in one afternoon and crossed it; the BASELINE_FILES
 //! entry that stood in for this move was deleted in the same commit.
 
+use super::rarfixtures as rf;
 use super::*;
 
 /// A profile whose `[container]` table is `extra`, over two small
@@ -408,27 +409,21 @@ fn an_encrypted_multi_member_split_builds_either_way() {
 /// Two OS draws of a 16-byte salt colliding has probability 2^-128.
 #[test]
 fn os_entropy_is_still_drawn_fresh_every_run() {
-    assert_eq!(rars::Entropy::default(), rars::Entropy::Os);
+    assert!(
+        rf::default_entropy_is_the_os(),
+        "the RAR writer's default moved off the operating system"
+    );
     assert_eq!(
         sevenz_rust2::Entropy::default(),
         sevenz_rust2::Entropy::Os,
         "the 7z writer's default moved off the operating system"
     );
     let write = || {
-        let mut f = FeatureSet::store_only();
-        f.file_encryption = true;
-        let opts = rars::rar50::WriterOptions::new(rars::ArchiveVersion::Rar50, f);
-        rars::rar50::Rar50Writer::new(opts)
-            .encrypted_stored_entries(&[rars::rar50::EncryptedStoredEntry {
-                name: b"locked.bin",
-                data: &[9u8; 4096],
-                mtime: None,
-                attributes: 0,
-                host_os: 0,
-                password: b"not-a-real-password",
-            }])
-            .finish()
-            .expect("the encrypted writer builds an archive")
+        rf::encrypted_stored_archive_at_default_entropy(
+            b"locked.bin",
+            &[9u8; 4096],
+            b"not-a-real-password",
+        )
     };
     assert_ne!(
         write(),
@@ -2244,80 +2239,11 @@ fn stream_members() -> Vec<(String, Vec<u8>)> {
 }
 
 fn in_memory_archive(c: &Container, members: &[(String, Vec<u8>)]) -> Vec<u8> {
-    let opts = rar50_opts(c, rars::Entropy::Seeded(STREAM_SEED), Packing::LAZY);
-    let recovery = (c.recovery_record_pct > 0).then_some(u64::from(c.recovery_record_pct));
-    let w = rars::rar50::Rar50Writer::new(opts).recovery_percent(recovery);
-    if c.encryption == Encryption::None {
-        let e: Vec<_> = members
-            .iter()
-            .map(|(n, d)| rars::rar50::StoredEntry {
-                name: n.as_bytes(),
-                data: d.as_slice(),
-                mtime: None,
-                attributes: 0,
-                host_os: 0,
-            })
-            .collect();
-        w.stored_entries(&e)
-            .finish()
-            .expect("the in-memory writer builds it")
-    } else {
-        let pw = c.password.as_bytes();
-        let e: Vec<_> = members
-            .iter()
-            .map(|(n, d)| rars::rar50::EncryptedStoredEntry {
-                name: n.as_bytes(),
-                data: d.as_slice(),
-                mtime: None,
-                attributes: 0,
-                host_os: 0,
-                password: pw,
-            })
-            .collect();
-        w.encrypted_stored_entries(&e)
-            .finish()
-            .expect("the in-memory writer builds it")
-    }
+    rf::in_memory_stored_archive(c, STREAM_SEED, Packing::LAZY, members)
 }
 
 fn in_memory_volumes(c: &Container, members: &[(String, Vec<u8>)]) -> Vec<Vec<u8>> {
-    let opts = rar50_opts(c, rars::Entropy::Seeded(STREAM_SEED), Packing::LAZY);
-    let recovery = (c.recovery_record_pct > 0).then_some(u64::from(c.recovery_record_pct));
-    let per_volume = usize::try_from(c.volume_bytes).unwrap();
-    let w = rars::rar50::Rar50VolumeWriter::new(opts)
-        .max_payload_per_volume(per_volume)
-        .recovery_percent(recovery);
-    if c.encryption == Encryption::None {
-        let e: Vec<_> = members
-            .iter()
-            .map(|(n, d)| rars::rar50::StoredEntry {
-                name: n.as_bytes(),
-                data: d.as_slice(),
-                mtime: None,
-                attributes: 0,
-                host_os: 0,
-            })
-            .collect();
-        w.stored_entries(&e)
-            .finish()
-            .expect("the in-memory set writer builds it")
-    } else {
-        let pw = c.password.as_bytes();
-        let e: Vec<_> = members
-            .iter()
-            .map(|(n, d)| rars::rar50::EncryptedStoredEntry {
-                name: n.as_bytes(),
-                data: d.as_slice(),
-                mtime: None,
-                attributes: 0,
-                host_os: 0,
-                password: pw,
-            })
-            .collect();
-        w.encrypted_stored_entries(&e)
-            .finish()
-            .expect("the in-memory set writer builds it")
-    }
+    rf::in_memory_stored_volume_set(c, STREAM_SEED, Packing::LAZY, members)
 }
 
 /// The four single-archive stored shapes, streamed, are the bytes the
@@ -2368,7 +2294,7 @@ fn a_streamed_stored_volume_set_is_the_in_memory_bytes() {
 #[test]
 fn an_encrypted_recovery_record_falls_back_to_the_in_memory_writer() {
     let c = container_of("kind = \"rar-stored\"\nencryption = \"data\"\npassword = \"hunter2\"\n");
-    let opts = rar50_opts(&c, rars::Entropy::Seeded(STREAM_SEED), Packing::LAZY);
+    let opts = rf::options_for(&c, STREAM_SEED, Packing::LAZY);
     assert!(streamed_stored_opts(opts, None, true).is_some());
     assert!(streamed_stored_opts(opts, Some(10), false).is_some());
     assert!(
@@ -2386,28 +2312,21 @@ fn an_encrypted_recovery_record_falls_back_to_the_in_memory_writer() {
 fn setting_the_recovery_feature_flag_moves_no_byte() {
     let members = stream_members();
     let c = container_of("kind = \"rar-stored\"\nrecovery_record_pct = 10\n");
-    let opts = rar50_opts(&c, rars::Entropy::Seeded(STREAM_SEED), Packing::LAZY);
-    let mut flagged = opts;
-    flagged.features.recovery_record = true;
-    let e: Vec<_> = members
-        .iter()
-        .map(|(n, d)| rars::rar50::StoredEntry {
-            name: n.as_bytes(),
-            data: d.as_slice(),
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-        })
-        .collect();
-    let off = rars::rar50::Rar50Writer::new(opts)
-        .recovery_percent(Some(10))
-        .stored_entries(&e)
-        .finish()
-        .unwrap();
-    let on = rars::rar50::Rar50Writer::new(flagged)
-        .recovery_percent(Some(10))
-        .stored_entries(&e)
-        .finish()
-        .unwrap();
+    let off = rf::in_memory_stored_archive_with_record_flag(
+        &c,
+        STREAM_SEED,
+        Packing::LAZY,
+        &members,
+        10,
+        false,
+    );
+    let on = rf::in_memory_stored_archive_with_record_flag(
+        &c,
+        STREAM_SEED,
+        Packing::LAZY,
+        &members,
+        10,
+        true,
+    );
     assert_eq!(off, on);
 }

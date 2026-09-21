@@ -1297,24 +1297,37 @@ pub(crate) fn stream_cmd(
     // path here. Generous timeout - an `addurl` submit waits for the
     // daemon to fetch the NZB from wherever it lives.
     let agent = crate::netfetch::daemon_api_agent(120);
-    let mut req = agent.request(if body.is_empty() { "GET" } else { "POST" }, &url);
-    if let Some(k) = apikey {
-        req = req.set("X-Api-Key", k);
-    }
+    // ureq 3 types the request builder by whether the method carries a
+    // body, so the GET and POST halves are built separately rather than
+    // through ureq 2's one `request(method, url)`.
     let sent = if body.is_empty() {
-        req.call()
+        let mut req = agent.get(&url);
+        if let Some(k) = apikey {
+            req = req.header("X-Api-Key", k);
+        }
+        crate::netfetch::call_keeping_refusal(req)
     } else {
-        req.set(
+        let mut req = agent.post(&url).header(
             "Content-Type",
             &format!("multipart/form-data; boundary={STREAM_BOUNDARY}"),
-        )
-        .send_bytes(&body)
+        );
+        if let Some(k) = apikey {
+            req = req.header("X-Api-Key", k);
+        }
+        crate::netfetch::send_keeping_refusal(req, &body[..])
     };
     let (code, text) = match sent {
-        Ok(r) => (r.status(), r.into_string().unwrap_or_default()),
-        Err(ureq::Error::Status(c, r)) => (c, r.into_string().unwrap_or_default()),
-        Err(ureq::Error::Transport(t)) => {
-            let brief = crate::notify::transport_brief(&t);
+        Ok(r) => (
+            r.status().as_u16(),
+            r.into_body().read_to_string().unwrap_or_default(),
+        ),
+        Err(e) if e.code().is_some() => (e.code().unwrap_or_default(), e.body_text()),
+        Err(e) => {
+            // `Refusal`'s Display is `netfetch::error_brief`, the
+            // URL-free one - which matters here because `--host` can
+            // carry an api key in the query if somebody spells it that
+            // way, and this string is printed to the terminal.
+            let brief = e.to_string();
             // Our OWN guard refusing the address is not "nothing is
             // listening", and telling that user to start a daemon sends
             // them to look in the wrong place.

@@ -79,7 +79,7 @@ pub struct Expectation {
     /// two kinds of "repair complete" apart. A row that damages nothing
     /// and still reports a repair is the recovery set NAMING an intact
     /// file (an adoption), which is the whole point of a P3 row and a
-    /// defect in an F4 one. [`expects_repair`] is where the rule is
+    /// defect in an F4 one. `expects_repair` is where the rule is
     /// written.
     pub repairs: bool,
     /// The identification rung the layout is expected to survive.

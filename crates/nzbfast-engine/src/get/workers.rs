@@ -668,9 +668,10 @@ fn clamp_and_commit(
     out: &mut Vec<u8>,
     dec: &nzbkit::yenc::Meta,
     wire_crc: Option<u32>,
+    posted_bytes: u64,
 ) -> (Option<u32>, u32) {
     let mut article_crc = wire_crc;
-    clamp_to_declared_size(out, dec, &mut article_crc);
+    clamp_to_declared_size(out, dec, &mut article_crc, posted_bytes);
     (article_crc, content_commitment(article_crc, out))
 }
 
@@ -773,7 +774,7 @@ fn decode_and_decrypt(
     Ok((dec, integrity))
 }
 
-/// Drop any bytes an article writes past its OWN declared file size,
+/// Drop any bytes an article writes past the file's declared size,
 /// truncating `out` in place and returning the article CRC that still
 /// applies (`None` once truncated).
 ///
@@ -784,17 +785,54 @@ fn decode_and_decrypt(
 /// hostile post. On the no-set path (no PAR2/FileDesc) nothing downstream
 /// truncated the bogus tail, so a rogue trailing part declaring a huge
 /// `begin` ballooned the delivered file far past its declared size while
-/// the job still reported a clean download. Clamping to the article's own
-/// size can never drop legitimate bytes on any path; a truncated span is
-/// no longer vouched by the whole-article CRC.
+/// the job still reported a clean download. A truncated span is no
+/// longer vouched by the whole-article CRC.
+///
+/// WHICH BOUND, though, is the whole question, and until 20 Sep 2026
+/// this said "clamping to the article's own size can never drop
+/// legitimate bytes on any path". It can, and it did: a poster in the
+/// wild (the `Kitsune` release NZB in TODO 118.2, 88 volumes of 200 MB)
+/// writes a FRESH RANDOM `=ybegin size=` on every article - 4.8 MB to
+/// 15.6 MB against a 200 MB volume, a different figure in every part of
+/// the same file, alongside a random `total=` and a random `name=` -
+/// while `=ypart begin/end` and the pcrc32 are exact. Every article
+/// whose offset lay past its own random `size=` clamped to ZERO bytes,
+/// each volume was written out at whatever its first article happened
+/// to claim, all 88 were marked complete after 0.9 GB of a 17.7 GB job,
+/// and PAR2 needed 2,829 blocks against 145. The same post downloads
+/// and unpacks in SABnzbd and NZBGet, which never read `size=` at all.
+///
+/// So the bound is the article's own `size=` ONLY while the article's
+/// own `=ypart` range fits inside it. When `end` runs past `size=`, the
+/// size claim is provably false and can bound nothing; the NZB's posted
+/// bytes for the file take over (`FileSlot::posted_bytes`: the sum of
+/// the segments' `bytes=`, ENCODED bytes, so at or above the decoded
+/// length of any honest yEnc post - the one size bound the download
+/// holds that the article itself did not write). The balloon defence
+/// survives intact: a rogue part positioned past the file's posted
+/// extent is still cut there. Only an NZB that declares no bytes at all
+/// (`posted_bytes == 0`) falls back to the old rule, because there is
+/// then nothing independent to bound against. A self-consistent article
+/// (`end <= size`) is never truncated by either rule - `room` is at
+/// least `len` by construction - so the only behaviour that moved is
+/// the self-inconsistent one, from "trust the lie" to "trust the NZB".
 fn clamp_to_declared_size(
     out: &mut Vec<u8>,
     dec: &nzbkit::yenc::Meta,
     article_crc: &mut Option<u32>,
+    posted_bytes: u64,
 ) {
     if dec.file_size == 0 {
         return;
     }
+    // `end` is the article's own `=ypart end=` (1-based, inclusive), or
+    // `size=` itself when the article carried no `=ypart` - which is why
+    // a single-part article always takes the first arm.
+    let bound = if dec.end <= dec.file_size || posted_bytes == 0 {
+        dec.file_size
+    } else {
+        posted_bytes
+    };
     // Clamp in u64 BEFORE narrowing, the house rule at
     // `nzbkit::live::slotstate::head_want`: `(file_size - offset) as
     // usize` truncates on the shipped 32-bit
@@ -804,12 +842,91 @@ fn clamp_to_declared_size(
     // was cut to it and had its wire CRC discarded - a legitimate part
     // silently truncated, which is the corruption this clamp exists to
     // prevent rather than cause.
-    let room = dec.file_size.saturating_sub(dec.offset());
+    let room = bound.saturating_sub(dec.offset());
     if out.len() as u64 > room {
         // Only reached once `room` is proved smaller than `out.len()`,
         // which is a `usize`, so this narrowing is exact on any width.
         out.truncate(room as usize);
         *article_crc = None;
+    }
+}
+
+/// TODO 118.2: the PAR2 set's length for this slot, handed to the RAR
+/// mapper the first time the verifier binds the slot to a FileDesc by
+/// CONTENT - its first Ok block confirming a name, or its own first
+/// 16 KiB nominating a unique unclaimed descriptor (118.2d: on the
+/// random-name poster the nomination is all there is before finish).
+/// The third exact witness beside [`exact_size_witness`]'s two, and
+/// the one that lands first on this pipeline: the set is fetched ahead
+/// of the payload, and both bindings are usually made in the first
+/// article or two - long before the last segment. Keyed by SLOT through
+/// `LiveVerifier::slot_confirmed_length`, never by yEnc name: the poster
+/// 118.2 was measured on randomizes `name=` per article too, so a
+/// name-keyed lookup would have missed on the very post it exists for.
+///
+/// Runs AFTER the span is fed, because the feed is what confirms the
+/// binding; the extractor closes an open-ended mapper's bound whenever
+/// the size arrives, so one article's lag costs nothing. A recovery
+/// slot is never asked - it is not in any FileDesc. `told` is the
+/// thread's own memo, so a slot is asked once per thread until it
+/// answers and never again after.
+fn corroborate_from_set(
+    slot: &FileSlot,
+    sidx: usize,
+    verifier: &nzbkit::live::LiveVerifier,
+    extractor: &nzbkit::extract::Extractor,
+    told: &mut [bool],
+) {
+    if slot.is_par2() || told.get(sidx).copied().unwrap_or(true) {
+        return;
+    }
+    let Some(len) = verifier.slot_confirmed_length(sidx) else {
+        return;
+    };
+    told[sidx] = true;
+    if let Err(e) = extractor.corroborate_size(sidx, len) {
+        warn!(target: "get", "corroborate size from set, slot {sidx}: {e}");
+    }
+}
+
+/// TODO 118.2: the one exact length this article can vouch for, if it
+/// can vouch for any - what [`nzbkit::extract::Extractor::corroborate_size`]
+/// takes as the RAR mapper's volume bound. The PAR2 set's length is the
+/// other witness, [`corroborate_from_set`].
+///
+/// `=ybegin size=` is a poster-written field no decoder verifies, and a
+/// live poster (research/RANDOM-YENC-SIZE-POSTER-2026-09-20.md) writes
+/// a fresh random one on every article of the same file, so the
+/// extractor no longer bounds a volume by it alone. Two witnesses do not
+/// depend on that field being honest, and both are exact when they hold:
+///
+/// - the LAST segment's `=ypart end` - the segment number equals the
+///   NZB's count for the file (`total_segments`), and `end` is 1-based
+///   inclusive, so it IS the file length. The random poster's
+///   `=ypart` lines are exact (its part001 #261 ends at 200,000,000 of a
+///   200,000,000-byte volume). An NZB listing fewer segments than the
+///   post has makes a middle article read as last and understates the
+///   length; that download is incomplete regardless, and the mapper's
+///   refusal then is the demote it would have taken anyway.
+/// - an article whose own `=ypart end` lands EXACTLY on its `size=`: two
+///   fields of one header agreeing that this is the file's last byte,
+///   which a randomized field does not do by accident.
+/// - a single-article file (no `=ypart`, one segment): the decoded
+///   payload IS the file, and its length was checked against `=yend`.
+///
+/// `posted_bytes` is deliberately not a witness: it is an ENCODED upper
+/// bound, and TODO 62a says why a yEnc expansion band needs corpus
+/// evidence before it is enforced as anything.
+fn exact_size_witness(dec: &nzbkit::yenc::Meta, total_segments: usize) -> Option<u64> {
+    match dec.part {
+        None => (total_segments == 1 && dec.len > 0).then_some(dec.len as u64),
+        Some(n) => {
+            if dec.end == 0 || dec.end < dec.begin {
+                return None;
+            }
+            let last = usize::try_from(n).is_ok_and(|n| n == total_segments);
+            (last || dec.end == dec.file_size).then_some(dec.end)
+        }
     }
 }
 
@@ -1036,6 +1153,11 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
         backfill: &backfill,
         rt: &rt,
     };
+    // TODO 118.2: which slots this thread has already handed the set's
+    // length to (`corroborate_from_set`). Per thread rather than on the
+    // slot: the extractor makes a repeat a no-op, so a second consumer
+    // telling it once more costs one lock and changes nothing.
+    let mut set_size_told = vec![false; slots.len()];
     loop {
         let batch = drain_outcome_batch(&rx, &journal);
         if batch.is_empty() {
@@ -1107,8 +1229,12 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                             // This article is now accounted for,
                             // whatever the write below makes of it.
                             fetch_done.fetch_add(nbytes, Ordering::Relaxed);
-                            let (article_crc, commitment) =
-                                clamp_and_commit(&mut out, &dec, integrity.verified_article_crc);
+                            let (article_crc, commitment) = clamp_and_commit(
+                                &mut out,
+                                &dec,
+                                integrity.verified_article_crc,
+                                slot.posted_bytes,
+                            );
                             let crc_checked = integrity.crc_checked;
                             // Borrowed, not cloned: this runs per article on
                             // every decode thread, and the only consumers that
@@ -1165,6 +1291,18 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                             // alone would miss it.
                             if !slot.is_par2() {
                                 seek_names.note_slot_name(sidx, name);
+                            }
+                            // TODO 118.2: an exact length this article
+                            // vouches for reaches the extractor BEFORE
+                            // the span, so the mapper bounds the volume
+                            // by it rather than by the poster's `size=`.
+                            // At most one or two articles per file take
+                            // this branch; the extractor makes a repeat
+                            // a no-op.
+                            if let Some(exact) = exact_size_witness(&dec, slot.total_segments)
+                                && let Err(e) = extractor.corroborate_size(sidx, exact)
+                            {
+                                warn!(target: "get", "corroborate size {name}: {e}");
                             }
                             match extractor.write_verified(
                                 sidx,
@@ -1268,6 +1406,13 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                                         crc_checked,
                                         article_crc,
                                         &verifier,
+                                    );
+                                    corroborate_from_set(
+                                        slot,
+                                        sidx,
+                                        &verifier,
+                                        &extractor,
+                                        &mut set_size_told,
                                     );
                                 }
                             }
@@ -2068,6 +2213,9 @@ pub(super) fn spawn_deadlock_watchdog(
 // 24 Aug 2026). `declared_volumes` is re-exported because get/mod.rs
 // prices a job's declared recovery off it by the `workers::` path.
 mod recovery;
+// The bounded wait on furniture the job completes without: see the
+// module's own header, and `recovery::spawn_tail_giveup` for the arm.
+mod metatail;
 pub(super) use recovery::declared_volumes;
 use recovery::{par_race_missing_blocks, spawn_par_race, spawn_spec_prefetch, spawn_tail_giveup};
 
@@ -2716,7 +2864,7 @@ mod commitment_tests {
             "the fixture must carry a checked pcrc32, or the clamp has \
              nothing to clear and this test proves nothing"
         );
-        clamp_to_declared_size(&mut out, &dec, &mut article_crc);
+        clamp_to_declared_size(&mut out, &dec, &mut article_crc, 0);
         assert_eq!(out.len(), 5_000, "the over-long tail is dropped");
         assert_eq!(article_crc, None, "the posted CRC no longer applies");
         assert_eq!(
@@ -2787,7 +2935,7 @@ mod commitment_tests {
              proves nothing"
         );
 
-        clamp_to_declared_size(&mut out, &dec, &mut article_crc);
+        clamp_to_declared_size(&mut out, &dec, &mut article_crc, 0);
 
         assert_eq!(
             out.len(),
@@ -2799,6 +2947,209 @@ mod commitment_tests {
             article_crc.is_some(),
             "nothing was dropped, so the posted CRC still describes the span"
         );
+    }
+
+    /// TODO 118.2, measured 20 Sep 2026 on a live post: a poster that
+    /// writes a fresh random `=ybegin size=` on every article. This is
+    /// article 20 of `part001.rar` as it came off the wire - `size=`
+    /// 6,655,723 for a 200,000,000-byte volume, `=ypart` 14,592,001 to
+    /// 15,360,000, pcrc32 good - and its offset lies past its own size
+    /// claim, so the old rule clamped it to zero bytes. The NZB's posted
+    /// bytes for the file are the bound now, and the article keeps
+    /// every byte and its CRC.
+    fn meta(
+        part: Option<u32>,
+        begin: u64,
+        end: u64,
+        file_size: u64,
+        len: usize,
+    ) -> nzbkit::yenc::Meta {
+        nzbkit::yenc::Meta {
+            name: String::new(),
+            file_size,
+            part,
+            begin,
+            end,
+            len,
+            encryption: None,
+        }
+    }
+
+    /// TODO 118.2: the random-`size=` poster's own articles, byte for
+    /// byte from research/RANDOM-YENC-SIZE-POSTER-2026-09-20.md. Only
+    /// the last segment can vouch for the volume's length, and it
+    /// vouches for exactly 200,000,000 - never for its random `size=`.
+    #[test]
+    fn only_the_last_segment_of_the_random_size_poster_is_an_exact_witness() {
+        // part001 #1: size= 14,733,359, =ypart 1-768,000, of 261.
+        assert_eq!(
+            exact_size_witness(&meta(Some(1), 1, 768_000, 14_733_359, 768_000), 261),
+            None
+        );
+        // part001 #20: size= 6,655,723, =ypart 14,592,001-15,360,000.
+        assert_eq!(
+            exact_size_witness(
+                &meta(Some(20), 14_592_001, 15_360_000, 6_655_723, 768_000),
+                261
+            ),
+            None
+        );
+        // part001 #261: size= 7,135,614, =ypart 199,680,001-200,000,000.
+        assert_eq!(
+            exact_size_witness(
+                &meta(Some(261), 199_680_001, 200_000_000, 7_135_614, 320_000),
+                261
+            ),
+            Some(200_000_000)
+        );
+        // part088 #215 of 215: the short final volume.
+        assert_eq!(
+            exact_size_witness(
+                &meta(Some(215), 164_352_001, 164_664_510, 12_353_836, 312_510),
+                215
+            ),
+            Some(164_664_510)
+        );
+    }
+
+    /// An honest poster's last article agrees with itself - `end` lands
+    /// on `size=` - and is a witness whatever the NZB counts; a middle
+    /// article of the same post is not, even when the NZB's count is
+    /// wrong in its favour.
+    #[test]
+    fn an_article_whose_end_is_its_size_is_exact_and_a_middle_one_is_not() {
+        assert_eq!(
+            exact_size_witness(&meta(Some(3), 1_536_001, 2_000_000, 2_000_000, 464_000), 5),
+            Some(2_000_000)
+        );
+        assert_eq!(
+            exact_size_witness(&meta(Some(2), 768_001, 1_536_000, 2_000_000, 768_000), 5),
+            None
+        );
+    }
+
+    /// A single-article file has no `=ypart`: its decoded length is the
+    /// file. The same header on a multi-segment file vouches for nothing.
+    #[test]
+    fn a_partless_article_is_the_whole_file_only_when_the_nzb_has_one_segment() {
+        assert_eq!(
+            exact_size_witness(&meta(None, 0, 81_036, 81_036, 81_036), 1),
+            Some(81_036)
+        );
+        assert_eq!(
+            exact_size_witness(&meta(None, 0, 81_036, 81_036, 81_036), 4),
+            None
+        );
+        assert_eq!(exact_size_witness(&meta(None, 0, 0, 0, 0), 1), None);
+    }
+
+    /// Degenerate geometry (`end` below `begin`, or zero) vouches for
+    /// nothing even on the last segment.
+    #[test]
+    fn a_last_segment_with_broken_geometry_is_no_witness() {
+        assert_eq!(
+            exact_size_witness(&meta(Some(4), 900, 100, 5_000, 100), 4),
+            None
+        );
+        assert_eq!(
+            exact_size_witness(&meta(Some(4), 1, 0, 5_000, 100), 4),
+            None
+        );
+    }
+
+    #[test]
+    fn a_size_claim_its_own_range_contradicts_yields_to_the_nzb_posted_bytes() {
+        const LIE: u64 = 6_655_723;
+        const OFFSET: u64 = 14_592_000;
+        const LEN: usize = 768_000;
+        // The NZB's `bytes=` sum for part001.rar: 261 encoded articles.
+        const POSTED: u64 = 206_442_584;
+        let payload: Vec<u8> = (0..LEN).map(|i| (i % 251) as u8).collect();
+        let art = nzbkit::yenc::encode(
+            "fd27de68fde596556445639c0849e3e9",
+            LIE,
+            Some((20, 451)),
+            OFFSET + 1,
+            &payload,
+        );
+        let mut out = Vec::new();
+        let (dec, integrity) =
+            nzbkit::yenc_simd::decode_into_integrity(&art, &mut out, true).unwrap();
+        assert_eq!(dec.offset(), OFFSET);
+        assert_eq!(dec.file_size, LIE);
+        assert!(
+            dec.end > dec.file_size,
+            "the fixture must contradict itself, or it exercises the old arm"
+        );
+        let wire = integrity.verified_article_crc;
+        assert!(wire.is_some(), "the fixture must carry a checked pcrc32");
+
+        let mut article_crc = wire;
+        clamp_to_declared_size(&mut out, &dec, &mut article_crc, POSTED);
+        assert_eq!(
+            out.len(),
+            LEN,
+            "a CRC-good article is not cut to a false size claim"
+        );
+        assert_eq!(out, payload);
+        assert_eq!(
+            article_crc, wire,
+            "nothing dropped, so the posted CRC still applies"
+        );
+        assert_eq!(content_commitment(article_crc, &out), wire.unwrap());
+
+        // The old rule still holds where the NZB gives nothing to bound
+        // against: no posted bytes, and the same article clamps to
+        // nothing - which is exactly what shipped, and what the redditor
+        // saw as 88 volumes complete at a tenth of their size.
+        let mut out2 = Vec::new();
+        nzbkit::yenc_simd::decode_into_integrity(&art, &mut out2, true).unwrap();
+        let mut crc2 = wire;
+        clamp_to_declared_size(&mut out2, &dec, &mut crc2, 0);
+        assert!(
+            out2.is_empty(),
+            "with no independent bound the article's own claim rules"
+        );
+        assert_eq!(crc2, None);
+    }
+
+    /// The balloon defence the clamp exists for survives the fallback:
+    /// the NZB's posted extent still cuts a part positioned past it,
+    /// whether the part straddles the end or lies wholly beyond it.
+    #[test]
+    fn the_posted_bytes_still_bound_a_part_positioned_past_the_file() {
+        const LIE: u64 = 6_655_723;
+        const OFFSET: u64 = 14_592_000;
+        const LEN: usize = 768_000;
+        let payload: Vec<u8> = (0..LEN).map(|i| (i % 251) as u8).collect();
+        let art = nzbkit::yenc::encode("x.bin", LIE, Some((20, 451)), OFFSET + 1, &payload);
+
+        // Straddling: the file's posted extent ends 408,000 bytes into
+        // this part, so that much is kept and the CRC no longer applies.
+        let mut out = Vec::new();
+        let (dec, integrity) =
+            nzbkit::yenc_simd::decode_into_integrity(&art, &mut out, true).unwrap();
+        let mut article_crc = integrity.verified_article_crc;
+        assert!(article_crc.is_some());
+        clamp_to_declared_size(&mut out, &dec, &mut article_crc, OFFSET + 408_000);
+        assert_eq!(out.len(), 408_000);
+        assert_eq!(out[..], payload[..408_000]);
+        assert_eq!(
+            article_crc, None,
+            "a cut span is not vouched by the whole-article CRC"
+        );
+        assert_eq!(content_commitment(article_crc, &out), crc32fast::hash(&out));
+
+        // Wholly beyond: a rogue part a long way past the posted extent
+        // writes nothing, which is the sparse-balloon case the clamp
+        // was written against.
+        let mut out = Vec::new();
+        let (dec, integrity) =
+            nzbkit::yenc_simd::decode_into_integrity(&art, &mut out, true).unwrap();
+        let mut article_crc = integrity.verified_article_crc;
+        clamp_to_declared_size(&mut out, &dec, &mut article_crc, 10_000_000);
+        assert!(out.is_empty());
+        assert_eq!(article_crc, None);
     }
 
     /// The same order rule at the PAR2 capture mirror: the cap is tested
@@ -3014,6 +3365,7 @@ mod cause_split_tests {
             par2_name_demoted: Default::default(),
             par2_sniffed: AtomicBool::new(false),
             total_segments: 1,
+            posted_bytes: 0,
             remaining: AtomicUsize::new(0),
             missing: AtomicUsize::new(0),
             errors: AtomicUsize::new(0),

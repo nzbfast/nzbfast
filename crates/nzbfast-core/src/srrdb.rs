@@ -122,23 +122,24 @@ fn fetch(crc: u32) -> (Option<SrrHit>, bool) {
     // Upper hex, no separator, as the endpoint's own examples write it.
     let url = format!("https://api.srrdb.com/v1/search/archive-crc:{crc:08X}");
     ratelimit::acquire(Provider::Srrdb);
-    let resp = crate::netfetch::shared_enrich_agent()
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(10))
-        .call();
+    let resp = crate::netfetch::call_body(
+        crate::netfetch::shared_enrich_agent()
+            .get(&url)
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(10)))
+            .build(),
+    );
     match resp {
-        Ok(r) => match r.into_string() {
-            Ok(body) => (parse_archive_crc(&body), true),
-            Err(_) => (None, false),
-        },
+        Ok(body) => (parse_archive_crc(&body), true),
         Err(e) => {
             // Back off the whole lane on an explicit "slow down", so the
             // next finished download does not walk into the same wall.
-            if let ureq::Error::Status(code @ (429 | 503), r) = &e {
-                let wait = r
-                    .header("Retry-After")
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(if *code == 429 { 30 } else { 5 });
+            // `wait_secs` carries the service's own `Retry-After` when it
+            // sent one - see `netfetch::Refusal` for why reading it takes
+            // a helper at all now.
+            if e.is_slow_down()
+                && let Some(wait) = e.wait_secs()
+            {
                 ratelimit::penalise(Provider::Srrdb, wait);
             }
             (None, false)

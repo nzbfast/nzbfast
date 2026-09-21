@@ -77,21 +77,7 @@ fn store_rar(name: &str, inner: &[u8]) -> Vec<u8> {
 /// pins that it really did, so a writer that fell back to store cannot
 /// turn this fixture into a second store test in silence.
 fn compressed_rar(name: &str, data: &[u8]) -> Vec<u8> {
-    use rars::rar15_40::{FileEntry, WriterOptions, write_compressed_archive};
-    use rars::{ArchiveVersion, FeatureSet};
-    write_compressed_archive(
-        &[FileEntry {
-            name: name.as_bytes(),
-            data,
-            file_time: 0,
-            file_attr: 0x20,
-            host_os: 3,
-            password: None,
-            file_comment: None,
-        }],
-        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
-    )
-    .unwrap()
+    crate::rarfixtures::rar4_compressed_archive(&[(name, data)])
 }
 
 /// Half-entropy bytes: compressible enough that the RAR4 writer keeps
@@ -415,25 +401,8 @@ fn a_multi_volume_store_set_is_proven_by_every_volume() {
 /// exactly the rule [`layer_stores_everything`] enforces, and the
 /// control in the test below pins that it really did.
 fn charging_layer(name: &str, inner: &[u8], filler: &str, seed: u64) -> Vec<u8> {
-    use rars::rar15_40::{FileEntry, WriterOptions, write_compressed_archive};
-    use rars::{ArchiveVersion, FeatureSet};
     let noise = noisy(20_000, seed);
-    fn mk<'a>(n: &'a str, d: &'a [u8]) -> FileEntry<'a> {
-        FileEntry {
-            name: n.as_bytes(),
-            data: d,
-            file_time: 0,
-            file_attr: 0x20,
-            host_os: 3,
-            password: None,
-            file_comment: None,
-        }
-    }
-    write_compressed_archive(
-        &[mk(name, inner), mk(filler, &noise)],
-        WriterOptions::new(ArchiveVersion::Rar29, FeatureSet::store_only()),
-    )
-    .unwrap()
+    crate::rarfixtures::rar4_compressed_archive(&[(name, inner), (filler, &noise)])
 }
 
 /// The tail's entry depth costs EXACTLY ONE level of the disk pass's own

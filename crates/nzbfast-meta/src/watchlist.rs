@@ -208,7 +208,7 @@ pub struct InstantGrab {
 /// only means the watchlist pass is worth waking, and that pass then
 /// applies the whole ladder (quality, scope, age, packs, duplicates)
 /// against the database as it always has. So the contract is one-sided -
-/// it must never say no to something [`matches`] would accept, and it is
+/// it must never say no to something `matches` would accept, and it is
 /// free to say yes to things that go on to be rejected.
 ///
 /// That is why it tests token containment rather than title equality:
@@ -670,7 +670,7 @@ fn title_ok(item: &WatchItem, stem: &str, p: &Parsed) -> bool {
 }
 
 /// Does a parsed release satisfy this watch item? Titles compare per
-/// [`title_ok`]; an item with a pinned year rejects releases naming a
+/// `title_ok`; an item with a pinned year rejects releases naming a
 /// DIFFERENT year (year-less stems still match - many posts omit it).
 /// Audio-language tags other than English / multi are rejected for the
 /// built-in kinds; untagged means English by scene convention.

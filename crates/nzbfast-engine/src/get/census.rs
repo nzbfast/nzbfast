@@ -101,6 +101,26 @@ impl SpareRule {
     }
 }
 
+/// The names every adopted recovery set covers, normalised the way the
+/// census and settle compare them; `None` when the post carries no set
+/// at all (a different statement from "no set names this file").
+///
+/// ONE copy since the metadata tail bound needed it mid-run: it asks
+/// this same question of a file whose article is still unresolved, and
+/// a second spelling of "does a set cover it" is the drift that
+/// [`SpareRule`] exists to prevent.
+pub(super) fn covered_set_names(
+    verifier: &nzbkit::live::LiveVerifier,
+) -> Option<std::collections::HashSet<String>> {
+    let sets = verifier.sets();
+    (!sets.is_empty()).then(|| {
+        sets.iter()
+            .flat_map(|set| set.files.iter())
+            .map(|f| nzbkit::disk::sanitize_out_name(&f.name).to_lowercase())
+            .collect()
+    })
+}
+
 /// What the settle/repair phase and the failure summary need to know
 /// about how the network phase ended.
 pub(super) struct Census {
@@ -404,15 +424,7 @@ pub(super) fn take_census(
     // `None` still means "this post carries no set at all", which is a
     // different statement from "no set names this file" and is what the
     // census below branches on.
-    let set_names: Option<std::collections::HashSet<String>> = {
-        let sets = verifier.sets();
-        (!sets.is_empty()).then(|| {
-            sets.iter()
-                .flat_map(|set| set.files.iter())
-                .map(|f| nzbkit::disk::sanitize_out_name(&f.name).to_lowercase())
-                .collect()
-        })
-    };
+    let set_names = covered_set_names(verifier);
     let reconciled: std::collections::HashSet<usize> =
         sniff.state.lock_ok().reconciled.iter().copied().collect();
     // Slots that arrived complete by every counter and STILL do not
@@ -703,6 +715,7 @@ mod tests {
             par2_name_demoted: Default::default(),
             par2_sniffed: Default::default(),
             total_segments: 1,
+            posted_bytes: 0,
             remaining: Default::default(),
             missing: Default::default(),
             errors: Default::default(),
@@ -846,6 +859,7 @@ mod tests {
             par2_name_demoted: Default::default(),
             par2_sniffed: std::sync::atomic::AtomicBool::new(false),
             total_segments: total,
+            posted_bytes: 0,
             remaining: AtomicUsize::new(remaining),
             missing: AtomicUsize::new(missing),
             errors: AtomicUsize::new(errors),

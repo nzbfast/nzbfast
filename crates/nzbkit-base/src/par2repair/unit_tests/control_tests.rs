@@ -16,7 +16,7 @@
 //! bar that never moves, which is the defect this work removes.
 
 use super::*;
-use crate::par2repair::control::{PauseGate, ProgressSink, RepairControl, RepairPhase};
+use crate::par2repair::control::{PauseGate, ProgressSink, RepairControl, RepairPhase, SolveArm};
 // `lock_ok()` (already in scope through `use super::*`) rather than the
 // unwrapping form, even though this is test code and
 // `tools/lock-gate.py` exempts tests. Its walk is ONE level - a file is
@@ -39,6 +39,11 @@ struct Rec {
     /// is the half that says it was announced BEFORE the sweep it
     /// frames rather than somewhere inside it.
     slabs: Mutex<Vec<(usize, usize, usize)>>,
+    /// Every `solve_arm(arm)`, and WHERE in `calls` it landed - the
+    /// same pairing the sweeps get, and for the same reason: an arm
+    /// announced after the entry it frames would be read in the wrong
+    /// band. See `control::SolveArm`.
+    arms: Mutex<Vec<(SolveArm, usize)>>,
     /// Raised when `at` of the named phase has been passed, so a test
     /// can cancel FROM INSIDE the phase it wants to interrupt rather
     /// than by racing a timer.
@@ -49,6 +54,11 @@ impl ProgressSink for Rec {
     fn slab(&self, index: usize, of: usize) {
         let at = self.calls.lock_ok().len();
         self.slabs.lock_ok().push((index, of, at));
+    }
+
+    fn solve_arm(&self, arm: SolveArm) {
+        let at = self.calls.lock_ok().len();
+        self.arms.lock_ok().push((arm, at));
     }
 
     fn progress(&self, phase: RepairPhase, done: u64, total: u64) {
@@ -96,6 +106,31 @@ impl SurveyObserver for Watch {
 /// enough to be free: four members over 64-byte blocks, with parity for
 /// every block. Returns the directory and the members' true bytes.
 fn damaged_set(tag: &str, damage: &[(usize, usize)]) -> (PathBuf, Vec<(String, Vec<u8>)>) {
+    // Parity for a third of the set - far more than any test here
+    // damages, so a shortfall can never be the reason a repair stops -
+    // and CONSECUTIVE, which is what every real poster writes and what
+    // sends the repair down the structured (Forney) arm.
+    let exps: Vec<u32> = (0..60u32).collect();
+    damaged_set_with_exps(tag, damage, &exps)
+}
+
+/// [`damaged_set`] with the recovery exponents named.
+///
+/// Separated 20 Sep 2026 for the one test that needs the UNSTRUCTURED
+/// arm: `selection_structured` sends a consecutive exponent run (and a
+/// relabelable progression) to Forney, which computes no matrix inverse
+/// at all, so a set built the ordinary way cannot exercise the
+/// Gauss-Jordan half of `control::SolveArm`.
+///
+/// Both drivers pick the SMALLEST available exponents, so it is the
+/// smallest `m` of these that decides the arm - and a PROGRESSION is
+/// relabelled onto the structured arm too, so `[0, 4, 8, 12]` is not
+/// enough and `[0, 1, 3, 7]` is.
+fn damaged_set_with_exps(
+    tag: &str,
+    damage: &[(usize, usize)],
+    exps: &[u32],
+) -> (PathBuf, Vec<(String, Vec<u8>)>) {
     let dir = tmpdir(tag);
     let files: Vec<(String, Vec<u8>)> = (0..4)
         .map(|i| (format!("member{i}.bin"), payload(BS * 40, 7 + i as u64)))
@@ -105,12 +140,9 @@ fn damaged_set(tag: &str, damage: &[(usize, usize)]) -> (PathBuf, Vec<(String, V
         .map(|(n, d)| (n.as_str(), d.as_slice()))
         .collect();
     std::fs::write(dir.join("set.par2"), par2_index(SET, BS, &refs)).unwrap();
-    // Parity for a third of the set - far more than any test here
-    // damages, so a shortfall can never be the reason a repair stops.
-    let exps: Vec<u32> = (0..60u32).collect();
     std::fs::write(
-        dir.join("set.vol000+60.par2"),
-        par2_volume(SET, BS, &refs, &exps),
+        format!("{}/set.vol000+{}.par2", dir.display(), exps.len()),
+        par2_volume(SET, BS, &refs, exps),
     )
     .unwrap();
     for (name, data) in &files {
@@ -219,6 +251,7 @@ fn a_cancel_raised_mid_fold_ends_the_repair_before_it_writes() {
     let rec = Arc::new(Rec {
         calls: Mutex::new(Vec::new()),
         slabs: Mutex::new(Vec::new()),
+        arms: Mutex::new(Vec::new()),
         // From INSIDE the fold, at the phase's SIZING call - a timer
         // would either fire before the fold or after the repair on a
         // box of a different speed.
@@ -344,6 +377,7 @@ fn a_fold_that_never_ran_does_not_report_a_finished_fold() {
     let rec = Arc::new(Rec {
         calls: Mutex::new(Vec::new()),
         slabs: Mutex::new(Vec::new()),
+        arms: Mutex::new(Vec::new()),
         // `at` of ZERO: the phase's own sizing call, which is the first
         // thing anybody hears about the fold.
         trip: Some((RepairPhase::Fold, 0, gate.clone())),
@@ -416,6 +450,7 @@ fn a_cancel_raised_mid_write_leaves_a_directory_a_re_run_recovers() {
     let rec = Arc::new(Rec {
         calls: Mutex::new(Vec::new()),
         slabs: Mutex::new(Vec::new()),
+        arms: Mutex::new(Vec::new()),
         trip: Some((RepairPhase::Write, 1, gate.clone())),
     });
     let mut o = watching(rec.clone(), Some(gate.clone()));
@@ -712,6 +747,7 @@ fn the_controlled_entry_carries_progress_and_a_cancel_of_its_own() {
     let rec2 = Arc::new(Rec {
         calls: Mutex::new(Vec::new()),
         slabs: Mutex::new(Vec::new()),
+        arms: Mutex::new(Vec::new()),
         // The phase's sizing call, for the reason the surveying
         // headline's own trip gives.
         trip: Some((RepairPhase::Fold, 0, gate.clone())),
@@ -855,6 +891,231 @@ fn a_slabbed_repair_announces_every_sweep_before_the_sweep_reports() {
         solves >= SLABS && solves % SLABS == 0,
         "the solve was entered {solves} time(s) over {SLABS} sweep(s) - not a whole \
          number of entries per sweep, so this is no longer per-sweep behaviour"
+    );
+}
+
+/// THE TWO SOLVE ARMS ANNOUNCE THEMSELVES, in the order they run, and
+/// the inverse announces BEFORE the fold it precedes.
+///
+/// `RepairPhase::Solve` is entered twice within one sweep on the
+/// unstructured arm - the Gauss-Jordan inverse of the explicit m x m
+/// during construction, in matrix COLUMNS, and the back-substitution
+/// after the feed, in fold UNITS - and from the `progress` calls alone
+/// the two are indistinguishable. A sink that weighs the phases into
+/// one bar gave them one band, so the first walked it to the top and
+/// the monotone bar swallowed the second whole: measured 18 Sep 2026 on
+/// the m = 10,000 gapped fixture, the queue row read `95%` unchanged
+/// for 19.0 s of a 63.7 s repair (TODO 352).
+///
+/// The POSITIONS are the half that matters as much as the order. The
+/// inverse is announced before its own sizing call and before the first
+/// folded byte, which is what lets a band table put it UNDER the fold
+/// rather than over it - banded above the feed it publishes past every
+/// fold reading of an unstructured repair, and a monotone bar discards
+/// them all.
+#[test]
+fn the_two_solve_arms_announce_themselves_around_the_fold_between_them() {
+    // NOT `damaged_set`: its consecutive exponents are structured, and
+    // the structured arms compute no inverse. These are scattered far
+    // enough apart to be neither a run nor a relabelable progression.
+    let exps = [0u32, 5, 11, 20, 34, 55, 89, 144];
+    let (dir, files) = damaged_set_with_exps(
+        "control-solve-arms",
+        &[(0, 3), (1, 7), (2, 11), (3, 19)],
+        &exps,
+    );
+    let rec = Arc::new(Rec::default());
+    let mut o = watching(rec.clone(), Some(PauseGate::new()));
+    let status = repair_dir_set_surveyed(&dir, &SET, &[], &mut o)
+        .expect("the repair runs")
+        .expect("the observer said Repair");
+    assert!(matches!(status, RepairStatus::Repaired(_)), "{status:?}");
+    assert!(intact(&dir, &files), "the unstructured arm is byte-exact");
+
+    let arms = rec.arms.lock_ok().clone();
+    assert_eq!(
+        arms.iter().map(|&(a, _)| a).collect::<Vec<_>>(),
+        vec![SolveArm::Inverse, SolveArm::BackSub],
+        "the unstructured arm did not announce its two solves once each, in order - if          this set stopped taking the dense arm the test is measuring nothing"
+    );
+    let (inv_at, back_at) = (arms[0].1, arms[1].1);
+
+    // EACH ANNOUNCEMENT SIZES THE ENTRY IT FRAMES. `begin` is the one
+    // call a phase makes exactly once per entry (`done == 0`), so the
+    // call sitting at the announcement's index is that arm's own
+    // opening - a sink reading the arm at any later call would weigh
+    // part of it in the previous arm's band.
+    let calls = rec.calls();
+    for (what, at) in [("inverse", inv_at), ("back-substitution", back_at)] {
+        let (phase, done, _) = *calls
+            .get(at)
+            .unwrap_or_else(|| panic!("the {what} was announced past the end of the repair"));
+        assert_eq!(
+            (phase, done),
+            (RepairPhase::Solve, 0),
+            "the {what} was announced at call {at}, which is not the opening of a solve"
+        );
+    }
+
+    // AND THE FOLD IS BETWEEN THEM, which is why one band cannot hold
+    // both: the inverse runs before a block has been read and the
+    // back-substitution after the whole feed is in.
+    let folded = |lo: usize, hi: usize| {
+        calls[lo..hi]
+            .iter()
+            .any(|&(p, d, _)| p == RepairPhase::Fold && d > 0)
+    };
+    assert!(
+        folded(inv_at, back_at),
+        "no fold byte was reported between the two solve arms: {calls:?}"
+    );
+    assert!(
+        !folded(0, inv_at),
+        "the fold had already reported bytes before the inverse announced itself - the          inverse is supposed to run ahead of the feed, and a band under the fold would          then be a bar going backwards: {calls:?}"
+    );
+}
+
+/// TODO 353: a slabbed repair builds its back-substitution plan ONCE,
+/// not once per sweep - and on the unstructured arm that plan is the
+/// `O(m^3)` Gauss-Jordan inverse.
+///
+/// THE READING THAT OPENED 353, and what it cost. Both drivers call
+/// `Reconstructor::new_controlled` inside their slab loop, and until
+/// 20 Sep 2026 that constructor derived the whole plan itself. The plan
+/// is a function of the recovery EXPONENTS and the input base logs, both
+/// drivers pin one recovery selection for the whole repair (the disk
+/// driver refuses outright if it changes between slabs), and a slab is a
+/// byte range over that same system - so every sweep past the first
+/// rebuilt a plan it already had. This test run against the code as it
+/// stood saw the inverse built FOUR times over four sweeps, with `m`
+/// identical and only the slab WIDTH moving, which is the input the plan
+/// does not read. At m = 10,000 that inverse was 39.6 s of a 61.6 s
+/// repair at ONE slab (`research/REPAIR-ROW-ACCEPTANCE-2026-09-18.md`).
+///
+/// What is asserted now is the contract after the hoist: `SLABS` sweeps,
+/// ONE computed plan, `SLABS - 1` reuses. The pre-hoist code fails the
+/// count, which is what makes this a regression guard rather than a
+/// restatement of the fix.
+///
+/// It does NOT assert a cost. This fixture is 64-byte blocks and `m` is
+/// 4, where the inverse is microseconds; the saving is measured at size
+/// and written up in `research/REPAIR-BACKSUB-HOIST-2026-09-20.md`.
+#[test]
+fn a_slabbed_repair_builds_one_backsub_plan_for_all_its_sweeps() {
+    use crate::par2repair::reconstruct::{BacksubPlanTally, ForcedSlabWidth};
+    const SLABS: usize = 4;
+    // Neither consecutive nor an arithmetic progression, so the four
+    // smallest - which is what a four-block repair selects - land on
+    // the arm with no structure to exploit.
+    let (dir, files) = damaged_set_with_exps(
+        "control-slab-backsub",
+        &[(0, 3), (1, 7), (2, 11), (3, 19)],
+        &[0, 1, 3, 7, 12, 20, 33, 47],
+    );
+    let rec = Arc::new(Rec::default());
+    let mut o = watching(rec.clone(), Some(PauseGate::new()));
+    let tally = BacksubPlanTally::take();
+    let status = {
+        let _w = ForcedSlabWidth::set(BS / SLABS);
+        repair_dir_set_surveyed(&dir, &SET, &[], &mut o)
+            .expect("the repair runs")
+            .expect("the observer said Repair")
+    };
+    assert!(matches!(status, RepairStatus::Repaired(_)), "{status:?}");
+    // THE ANSWER IS STILL RIGHT, which is the half a count cannot say:
+    // a hoisted plan that had gone stale between sweeps would write
+    // bytes that look repaired and are not.
+    assert!(intact(&dir, &files), "a slabbed repair is byte-exact");
+    assert_eq!(
+        rec.slabs.lock_ok().len(),
+        SLABS,
+        "the fixture did not slab, so this test says nothing about slabs"
+    );
+
+    let plans = tally.plans();
+    // THE FIXTURE'S OWN PRECONDITION. A consecutive exponent run takes
+    // the Vandermonde or Forney arm, where the plan is cheap and 353
+    // does not bite; a test that silently landed there would pass for
+    // the wrong reason.
+    assert!(
+        plans.iter().all(|&(label, _, _)| label == "gauss-jordan"),
+        "the fixture left the unstructured arm: {plans:?}"
+    );
+    // ONE CONSTRUCTION PER SWEEP - the shape the hoist has to preserve.
+    // A test that only counted computations would also pass if slabbing
+    // itself had broken.
+    assert_eq!(
+        plans.len(),
+        SLABS,
+        "the constructor was entered {} time(s) over {SLABS} sweep(s)",
+        plans.len()
+    );
+    // ...AND EXACTLY ONE OF THEM SOLVED A SYSTEM. This was `SLABS`
+    // before the hoist, which is the number 353 was opened over.
+    let computed = tally.computed();
+    assert_eq!(
+        computed, 1,
+        "the O(m^3) inverse was built {computed} time(s) for one answer"
+    );
+    // ...AND THE SWEEPS REALLY DID RUN AT DIFFERENT SLAB WIDTHS' worth
+    // of payload over one unmoving system: `m` is what the inverse is
+    // cubic in, and the slab width is the only input that moves.
+    let ms: Vec<usize> = plans.iter().map(|&(_, m, _)| m).collect();
+    assert_eq!(ms, vec![4; SLABS], "the missing set moved between sweeps");
+    let widths: Vec<usize> = plans.iter().map(|&(_, _, w)| w).collect();
+    assert_eq!(
+        widths,
+        vec![BS / SLABS; SLABS],
+        "the sweeps did not all run at the forced slab width"
+    );
+
+    // AND THE ONE INVERSE THAT IS LEFT IS STILL INSIDE SWEEP 0's FRAME.
+    // This is what makes the hoist invisible to a sink that weighs the
+    // phases into per-sweep bands: sweep 0 reports exactly what it
+    // always reported, and sweeps 1..N stop announcing an inverse,
+    // which is the "no inverse" case such a sink already handles. The
+    // plan is therefore filled INSIDE the slab loop and not above it -
+    // above it, the inverse would report before the first
+    // `slab(0, of)` and land in no sweep's frame at all.
+    let calls = rec.calls();
+    let sweep_at: Vec<usize> = rec.slabs.lock_ok().iter().map(|&(.., at)| at).collect();
+    let solve_opens: Vec<usize> = calls
+        .iter()
+        .enumerate()
+        .filter(|&(_, &(p, d, _))| p == RepairPhase::Solve && d == 0)
+        .map(|(i, _)| i)
+        .collect();
+    // The dense arm opens Solve TWICE in the sweep that computes the
+    // plan (the inverse, then the back-substitution) and once in every
+    // other sweep.
+    // The dense arm opens Solve TWICE per sweep in the back-substitution
+    // alone - once sized in missing blocks and once re-sized to the
+    // fold's unit grid, which is finer (`finish_blocks_reported`) - and
+    // the sweep that computes the plan opens it a THIRD time for the
+    // Gauss-Jordan inverse. So the shape is 3 in sweep 0 and 2 after,
+    // where before the hoist it was 3 in every sweep.
+    assert_eq!(
+        solve_opens.len(),
+        3 + 2 * (SLABS - 1),
+        "solve was opened {} time(s) over {SLABS} sweep(s); {} before the hoist",
+        solve_opens.len(),
+        3 * SLABS
+    );
+    let in_sweep = |at: usize| sweep_at.iter().rposition(|&s| s <= at);
+    let per_sweep = (0..SLABS)
+        .map(|i| {
+            solve_opens
+                .iter()
+                .filter(|&&at| in_sweep(at) == Some(i))
+                .count()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        per_sweep,
+        std::iter::once(3usize)
+            .chain(std::iter::repeat_n(2, SLABS - 1))
+            .collect::<Vec<_>>(),
+        "the surviving inverse did not land in sweep 0's frame"
     );
 }
 
@@ -1060,12 +1321,108 @@ fn the_mapped_driver_reports_a_rising_fraction_through_all_four_phases() {
     }
     // The FOLD is the phase this exists for, so it alone is held to a
     // rising fraction rather than merely to a landing.
+    //
+    // WHAT IS ASSERTED HERE IS "THE BAR MOVED", AND NOT A SAMPLE COUNT.
+    // It read `fold.len() >= 3` from 17 Sep 2026 until 18 Sep, and that
+    // number is a property of the MACHINE rather than of the reporting
+    // code: the fold reports once per unit of its own work grid, and
+    // that grid's width comes from `mem::fold_workers()`, from the L2
+    // the part reports, and from how many batches the feed merged the
+    // read into - none of which this fixture controls. It reddened
+    // `windows-unit` shard 1/6 on main on 18 Sep 2026 (run 35368239605,
+    // sha 6cfd0136, claim `red-windows-unit-6cfd0136`), where the whole
+    // feed arrived as ONE batch over a ONE-unit grid and the phase
+    // reported exactly its announcement and its landing: two samples,
+    // 0 and full.
+    //
+    // THAT IS HONEST BEHAVIOUR FOR A 360 KB FIXTURE AND NOT THE DEFECT
+    // THIS TEST GUARDS. A real repair's grid is many units wide, so the
+    // bar moves there; a fixture this small cannot force a multi-unit
+    // grid on a machine whose cores or cache geometry answer otherwise,
+    // and no sizing of it can - `col_splits` is clamped to
+    // `words.div_ceil(MIN_COL_WORDS)`, which is 1 for any block this
+    // test could afford, so the grid's only dimension left is rows, and
+    // rows chunk by core count. MEASURED on the dev Mac by pinning the
+    // width with `mem::FoldWidthCap`: widths 1 and 2 report exactly
+    // THREE samples, one above the old floor, and widths 3, 4 and 8
+    // report five. So `>= 3` was passing by one sample on ordinary
+    // hardware and was never a statement the code could keep.
+    //
+    // AND THE WIDTH IS NOT EVEN THE DISCRIMINATOR - re-measured 20 Sep
+    // 2026, twenty COLD processes per box (nextest gives every test its
+    // own process, so a cold one is what CI runs), the same fixture:
+    //
+    //   aarch64 desktop, 32 cores, loaded  : 3 (x3), 5 (x15), 7, 11
+    //   x86_64 Linux, 12-core Xeon D-1531  : 4 (x7), 5 (x13)
+    //   the 18 Sep windows-unit runner     : 2
+    //
+    // The count varies RUN TO RUN at a FIXED pinned width (width 2 read
+    // 3 on one process and 5 on the next two), so the table above is a
+    // set of single samples and not a function of the width: what moves
+    // it is how many batches the feed merged the read into, which is a
+    // scheduling outcome. THE LINUX x86 MARGIN, which the 18 Sep handoff
+    // left unmeasured, is 2 samples above this floor at its worst of
+    // twenty; the aarch64 desktop's is 1.
+    //
+    // THE FLOOR OF 2 IS THE REPORTING CODE'S STRUCTURAL MINIMUM, which
+    // is why it is the right number: `linalg::fold_parallel_controlled`'s
+    // own doc says a grid of ONE unit "says its bytes once, at the end",
+    // so the fewest a passing run can emit is the phase announcement plus
+    // that one report - 0 and full. A floor of 1 would assert nothing;
+    // anything above 2 is the box's number and not the code's, which is
+    // the mistake this comment records.
+    //
+    // AND THE FLOOR IS SAFE FOR A SECOND REASON, MEASURED 20 Sep 2026 ON
+    // A WINDOWS BOX (claim `fold-grid-windows-one-unit-why-20sep`), which
+    // matters because it holds at ANY grid width: `RepairControl::announce`
+    // reads `done` FRESH under its lock and says nothing when another
+    // worker has already reported a larger bucket, so a MULTI-unit grid
+    // can report exactly twice as well. That is what the 18 Sep runner
+    // did - see the assertion's own note below. No sample-count floor
+    // above 2 is safe at any core count or any fixture size, and sizing
+    // the fixture up would not buy one.
+    //
+    // The two things that ARE the code's to keep, and that the failure
+    // message named all along, are asserted instead: the phase must be
+    // updated after it is announced, and the fraction it reports must
+    // actually RISE. A run that announces and never updates is one
+    // sample; a run that reports a flat sequence is caught by the strict
+    // rise, which the old count-based floor would have passed. NOT a
+    // loosening to make a red agree: it is the same property, stated in
+    // terms of the bar rather than of the box the test happened to run
+    // on.
+    //
+    // THAT RUNNER'S GRID WAS NEVER ONE UNIT WIDE - chased to a line on a
+    // Windows box 20 Sep 2026, claim `fold-grid-windows-one-unit-why-20sep`,
+    // and all three of the candidates this comment used to list are wrong.
+    // An ASUS Zenbook (Core Ultra 9 386H, 16 cores, no SMT, Windows 11)
+    // builds the same TWO-unit grid this fixture gets everywhere -
+    // rows=3, words=4096, row_threads=1, col_splits=2 - and reads
+    // `available_parallelism` 16, `mem::fold_workers()` 16,
+    // `linalg::physical_cores()` Some(16) and `unit_dst_budget()` the
+    // 512 KiB default off a 4 MiB L2. Twenty unpinned cold runs there
+    // gave 5 samples nineteen times and 4 once. The red reproduces at
+    // that ORDINARY core count once the fold is oversubscribed: 50 cold
+    // runs with the process on four CPUs and six spinners on the same
+    // four gave 2 (x4), 3 (x7), 4 (x9), 5 (x30), and every samples=2 run
+    // was ONE merged feed batch over a TWO-unit grid whose two
+    // announcements coalesced in `announce`. A one-core fold does give 2
+    // samples as well (`NZBFAST_CPU_WORKERS=1`, 3 of 3, `col_splits`
+    // falling to 1 with it) but nothing needs it to explain the red.
+    // `l2_per_core_bytes()` cannot reach this fixture at all: its budget
+    // is consulted only on the `rows >= cores` branch, which three rows
+    // do not take on any box with four cores or more.
     let fold = rec.of(RepairPhase::Fold);
     assert!(
-        fold.len() >= 3,
+        fold.len() >= 2,
         "the fold reported {} call(s) - a phase announced and never updated is the \
          bar that does not move",
         fold.len()
+    );
+    assert!(
+        fold[0].0 < fold[fold.len() - 1].0,
+        "the fold's fraction never rose - it was announced and landed with nothing \
+         in between, which is a bar that does not move: {fold:?}"
     );
     assert!(
         fold.windows(2).all(|w| w[0].0 <= w[1].0),
@@ -1458,4 +1815,93 @@ fn a_cancelled_no_set_walk_stops_on_its_set_and_is_not_a_run_of_broken_ones() {
     assert_eq!(again.len(), 2, "{again:?}");
     assert!(intact(&dir, &truth), "the re-run is byte-exact");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TODO 332 at the DRIVER: an armed veto turns a long repair into
+/// `RepairError::Deferred` and leaves the directory bit-for-bit alone.
+///
+/// # Why the set is this shape, which is the whole of the test's design
+///
+/// The veto fires on `RepairForecast::is_long` - an UNSTRUCTURED solve
+/// past `MAX_REPAIR_DIM` - so a test of the real path needs more than
+/// 8,192 missing blocks. Blocks are four bytes here, the format's own
+/// floor, so 8,193 of them is 32 KB of payload.
+///
+/// The recovery set is deliberately SHORT (three scattered exponents)
+/// rather than full-with-a-gap, and that is a price rather than a
+/// shortcut: parity for 8,193 blocks costs the generator an 8,193 x
+/// 8,194 fold, which is minutes in a unit suite, while three exponents
+/// is instant. It reaches the same forecast by the same route -
+/// `select_consecutive_run` cannot return a consecutive run of 8,193
+/// out of three, so `solve` is `Unstructured` and `is_long` is true.
+///
+/// AND IT DOCUMENTS A REAL PROPERTY rather than dodging one: the
+/// forecast is ADVISORY and is taken BEFORE the recovery slices are
+/// picked, so a set that is going to turn out short defers first and
+/// reports the shortfall on the pass after. That is exactly as true of
+/// the "large repair ahead" WARN this veto acts on, and deliberately so
+/// - the whole design is a caller acting on the same fact the log
+/// already prints, at the same instant, rather than on a second one.
+#[test]
+fn an_armed_veto_stops_a_long_repair_before_a_byte_is_written() {
+    const B: usize = 4;
+    const N: usize = crate::par2repair::MAX_REPAIR_DIM + 1;
+    let dir = tmpdir("defer-long");
+    let data = payload(B * N, 31);
+    let files: Vec<(&str, &[u8])> = vec![("long.bin", data.as_slice())];
+    std::fs::write(dir.join("set.par2"), par2_index(SET, B, &files)).unwrap();
+    std::fs::write(
+        dir.join("set.vol000+03.par2"),
+        par2_volume(SET, B, &files, &[0u32, 5, 9]),
+    )
+    .unwrap();
+    // Every block wrong, so `missing` is the whole set.
+    let wrecked = vec![0xA5u8; B * N];
+    std::fs::write(dir.join("long.bin"), &wrecked).unwrap();
+
+    let gate = crate::par2repair::DeferGate::armed();
+    let control = RepairControl::new(Some(Arc::new(Rec::default())), Some(PauseGate::new()))
+        .with_defer(Some(gate.clone()));
+    let err = crate::par2repair::repair_dir_set_with_donors_controlled_as(
+        &dir,
+        &SET,
+        &[],
+        Default::default(),
+        control,
+    )
+    .expect_err("an armed veto refuses a long repair");
+    match err {
+        crate::par2repair::RepairError::Deferred { missing_blocks, .. } => {
+            assert_eq!(missing_blocks, N as u64);
+        }
+        other => panic!("expected Deferred, got {other:?}"),
+    }
+    assert_eq!(
+        gate.fired().map(|d| d.missing_blocks),
+        Some(N as u64),
+        "the gate carries what it stopped, so the caller can say WHY"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("long.bin")).unwrap(),
+        wrecked,
+        "NOTHING IS WRITTEN. The veto is answered before the fold, the \
+         solve and the patch, so the payload is bit-for-bit what the \
+         download left and the next pass repairs it from the same \
+         recovery data"
+    );
+
+    // AND WITH NO GATE the identical call reaches the shortfall it
+    // always did - the negative control, without which the assertions
+    // above would pass over a door that refused everything.
+    let plain = crate::par2repair::repair_dir_set_with_donors_controlled_as(
+        &dir,
+        &SET,
+        &[],
+        Default::default(),
+        RepairControl::default(),
+    );
+    assert!(
+        matches!(plain, Ok(RepairStatus::Unrepairable { .. })),
+        "an unarmed caller sees this set's real verdict: {plain:?}"
+    );
 }

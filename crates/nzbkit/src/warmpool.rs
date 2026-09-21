@@ -501,7 +501,7 @@ impl WarmPool {
     ///
     /// Anything else must be closed instead - see the module docs. This
     /// is the JOB's park, and it restarts the idle-release clock; a
-    /// background dialler's park is [`WarmPool::give_spare`].
+    /// background dialler's park is `WarmPool::give_spare`.
     pub async fn give(&self, server: &ServerConfig, conn: Connection) {
         self.park(server, conn, true).await;
     }

@@ -141,12 +141,42 @@ async fn nested_zip_split_with_the_gate_off_lands_and_the_disk_pass_joins_it() {
 /// land behind the set's last byte, so a set that does not fit the
 /// holds cap forfeits in the chase - and the nested disk pass's
 /// `zip::scan` step joins the landed parts. `--mem-limit` floors at 64
-/// MiB, whose 45% slice is 30,198,960 bytes; a 31 MiB set is over it
-/// whatever else the chain is holding. Six parts, not three, so each
-/// part (5.4 MiB) sits under the quarter-cap pre-sniff window
-/// (7.5 MiB) and only the SET bound can fire - the per-part bound has
-/// its own unit test. Same payload out, byte-exact, a job that
-/// completes: the forfeit is a memory verdict, never a lost download.
+/// MiB, whose 45% slice is 30,198,960 bytes. Ten parts, not three, so
+/// each part (4.8 MiB) sits under the quarter-cap pre-sniff window
+/// (7,549,740 bytes) and only the SET bound can fire - the per-part
+/// bound has its own unit test. Same payload out, byte-exact, a job
+/// that completes: the forfeit is a memory verdict, never a lost
+/// download.
+///
+/// THE SET IS 48 MiB, AND "OVER THE CAP" IS NOT WHAT DECIDES THIS.
+/// This fixture was 31 MiB until 20 Sep 2026, on the reasoning that a
+/// 31 MiB set "is over the cap whatever else the chain is holding".
+/// That arithmetic is about the set's TOTAL, and the forfeit keys on
+/// neither the total nor the declared size: `routing.rs` forfeits on
+/// `inner.budget.over()`, the LIVE held bytes at the instant an
+/// article routes, and the drop-behind trim drains that window as the
+/// child consumes the prefix. So what the run has to do is cross the
+/// cap BEFORE the entry header that closes the count routes - and that
+/// header sits behind the set's last byte by construction (the module
+/// doc calls this bound structural). At 31 MiB the cap sat at 93% of
+/// the set, which left ~2.3 MB - about eight 300 KB articles - between
+/// "cap crossed first" and "count landed first", and four connections
+/// reorder that much on their own. Measured that day with `--retries 0`
+/// at box load 78 to 127: 8 of 18 legs did not forfeit at all, and the
+/// split one-passed whole instead (`extracted 2 file(s) in-stream`,
+/// holds peak 28-29 MB against the 30 MB cap); every leg that did
+/// forfeit had peaked at exactly 30. It is an arrival-order race, not a
+/// load threshold, and it is NOT the holds park absorbing the overage -
+/// re-run with `NZBFAST_NO_HOLDS_PARK=1` the rates were the same
+/// (5 of 10) with the park confirmed off.
+///
+/// At 48 MiB the cap sits at 60% of the set, which is ~20 MB of margin
+/// against that ~2.3 MB of reordering. Measured the same day, same
+/// binary, `--retries 0`, box load 136 to 181: 10 of 10 legs forfeited,
+/// every one at holds peak 30 MB. Keep the margin if this fixture
+/// moves: shrinking the set back towards the cap buys nothing but the
+/// race, and growing the PARTS past a quarter of the cap fires the
+/// per-part bound instead and stops testing this road at all.
 #[tokio::test(flavor = "multi_thread")]
 async fn nested_zip_split_over_the_holds_cap_forfeits_and_the_disk_pass_joins_it() {
     if !have_par2() {
@@ -154,13 +184,13 @@ async fn nested_zip_split_over_the_holds_cap_forfeits_and_the_disk_pass_joins_it
         return;
     }
     let mut fx = Fixture::new("rarzipsplitcap");
-    let movie = incompressible(31 << 20, 54);
+    let movie = incompressible(48 << 20, 54);
     let arch =
         nzbkit::zip::fixtures::zip_of(&[nzbkit::zip::fixtures::Spec::stored("movie.mkv", &movie)]);
-    let parts: Vec<&[u8]> = arch.chunks(arch.len().div_ceil(6)).collect();
-    assert_eq!(parts.len(), 6, "fixture must really split");
+    let parts: Vec<&[u8]> = arch.chunks(arch.len().div_ceil(10)).collect();
+    assert_eq!(parts.len(), 10, "fixture must really split");
     let readme = b"release notes\n".repeat(200);
-    let names: Vec<String> = (1..=6).map(|i| format!("inner.zip.{i:03}")).collect();
+    let names: Vec<String> = (1..=10).map(|i| format!("inner.zip.{i:03}")).collect();
     let mut entries: Vec<(&str, u64, &[u8], bool, bool)> = names
         .iter()
         .zip(parts.iter())
@@ -189,7 +219,7 @@ async fn nested_zip_split_over_the_holds_cap_forfeits_and_the_disk_pass_joins_it
     // and the disk pass joined them - the same split-zip step the
     // gate-off leg above exercises, reached by the budget this time.
     assert!(
-        log.contains("extracted 7 file(s) in-stream"),
+        log.contains("extracted 11 file(s) in-stream"),
         "the parts did not land as plain files:\n{log}"
     );
     assert!(

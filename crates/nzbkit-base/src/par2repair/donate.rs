@@ -245,7 +245,7 @@ fn ambiguous_names(set: &Par2Set) -> std::collections::HashSet<String> {
 /// THAT file and keeps going: the fetch plan simply keeps the articles
 /// it would have struck out, which is exactly today's behaviour. So
 /// does a copy whose own bytes do not add up to the member's MD5 - see
-/// [`copy_verified`], which is the rung that judges the COPY rather
+/// `copy_verified`, which is the rung that judges the COPY rather
 /// than the read that chose it.
 ///
 /// # What the caller owes this pass

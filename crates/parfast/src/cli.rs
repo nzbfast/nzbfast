@@ -22,7 +22,7 @@
 //! option. A new single-dash letter would collide with the reference's
 //! next release and break the drop-in claim in silence on the day it did.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// What the command line asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,7 +113,7 @@ pub struct Options {
     /// `--std-naming`: write the PAR2 spec's own `vol<first>-<last>`
     /// volume names rather than par2cmdline's `vol<first>+<count>`.
     /// Not a reference switch. See [`crate::create::final_volume_names`]
-    /// for the two spellings and [`apply_switch`] for why the long form.
+    /// for the two spellings and `apply_switch` for why the long form.
     pub std_naming: bool,
     /// `--volume-blocks=N`: the largest number of recovery slices ONE
     /// volume may carry. Not a reference switch, and the only way to
@@ -148,6 +148,17 @@ pub struct Options {
     /// instant it looked, and two creates started together on one base
     /// both walk through it.
     pub no_clobber: bool,
+    /// `--progress`: one bar, 0 to 100, over the whole run, drawn
+    /// whatever `-q` says (GH #88, second round). The default meters
+    /// follow par2cmdline: two labels in sequence on a create
+    /// (`Processing:` then `Writing:`), and a `-q` casualty. A script
+    /// that wants "nothing but a percentage" - parpar's `--progress`
+    /// shape - gets it from `-q -q --progress`: the result lines go
+    /// with the second `-q`, and this keeps the bar. Not a reference
+    /// switch, so a long option per spec R.3, and accepted on every
+    /// command for `--slow`'s wrapper reason; on verify and repair it
+    /// only lifts the `-q` gate off the meters they already draw.
+    pub progress: bool,
     /// `-a`, with the reference's `.par2` suffix already appended when
     /// the switch did not carry one. NOT folded into `par2` at parse
     /// time, because the two commands resolve the pair differently:
@@ -613,6 +624,10 @@ fn apply_switch(
         // three above, and OFF by default because the reference
         // overwrites and this is a drop-in.
         '-' if value == "no-clobber" => o.no_clobber = true,
+        // One bar over the whole run, immune to `-q` (see
+        // `Options::progress`). A long option for spec R.3's reason,
+        // accepted on every command for the same wrapper reason.
+        '-' if value == "progress" => o.progress = true,
         // An explicit ceiling on one volume's recovery slice count.
         // The engine has honoured an arbitrary ceiling all along
         // (`par2gen::CreatePlan::max_blocks_per_volume`); what was
@@ -728,4 +743,80 @@ fn read_listing(path: &str) -> Result<Vec<String>, ParseError> {
         .filter(|l| !l.is_empty())
         .map(str::to_owned)
         .collect())
+}
+
+/// The reference's SET-NAME wildcard refusal, which is POSIX-ONLY.
+///
+/// Returns the exit code to fail with when the recovery-file name the
+/// user gave carries a wildcard, and `None` when it does not. Call it
+/// for `c`, `v` and `r` alike - par2cmdline checks the par filename
+/// once, wherever it came from, and refuses `-a*.par2` even when a real
+/// `set.par2` was also named (measured, dev Mac, pinned 1.3.0,
+/// 21 Sep 2026).
+///
+/// Both lines and exit 3 are the reference's, copied rather than
+/// invented: `par2 file must not have a wildcard in it.` then
+/// `failed to set the main par file`, both on stderr, nothing written.
+///
+/// # Why this is `cfg(not(windows))` and why that is not a rot hazard
+///
+/// **The two halves of par2cmdline do not agree here, and the windows
+/// half never reaches this check.** Measured on a native x86-64
+/// Windows box, 21 Sep 2026, against the pinned 1.3.0 and turbo 1.5.0 the
+/// windows conformance tables are captured from: `par2 c -b32 *.par2
+/// text.txt` there exits **6**, not 3, with an OS filename error
+/// (`Could not create "...\*.check.par2"`) and leaves nothing behind,
+/// because `*` is not a legal character in a Win32 filename and the
+/// create falls through to the file-creation failure instead. `parfast`
+/// exits 6 on the same line for the same reason, so **the two already
+/// agree on windows** and refusing at exit 3 there would MANUFACTURE a
+/// divergence out of a fix. The same applies to `v -q *.par2`, where
+/// all three binaries print one line and exit 3 on windows and only the
+/// posix reference prints the wildcard line above it.
+///
+/// The gate is pinned rather than trusted: the `create-wildcard-setname`
+/// and `verify-wildcard-setname` rows in `tools/conformance/run.py` are
+/// minted for EVERY platform, so the windows tables record the exit-6
+/// agreement as their own expectation and deleting this `cfg` reds both
+/// windows legs.
+#[cfg(not(windows))]
+pub fn refuse_wildcard_set_name(par2: &Path, sink: &mut crate::out::Sink) -> Option<u8> {
+    if !has_wildcard(par2) {
+        return None;
+    }
+    sink.err("par2 file must not have a wildcard in it.");
+    sink.err("failed to set the main par file");
+    Some(crate::EXIT_INVALID_ARGS)
+}
+
+/// The windows arm of [`refuse_wildcard_set_name`], which refuses
+/// NOTHING on purpose. See that function's doc for the measurement.
+#[cfg(windows)]
+pub fn refuse_wildcard_set_name(_par2: &Path, _sink: &mut crate::out::Sink) -> Option<u8> {
+    None
+}
+
+/// Does this argument carry a wildcard METACHARACTER - `*` or `?`?
+///
+/// # Why this exists and why it tests the WHOLE path
+///
+/// par2cmdline expands wildcards ITSELF, on every platform, in both
+/// halves of `diskfile.cpp` - the unix arm calls `opendir`/`fnmatch`,
+/// the windows arm hands the pattern to `FindFirstFileW`. `parfast`
+/// expands none, so every caller of this function is a place where the
+/// reference would have done something we cannot, and the answer is a
+/// refusal rather than a guess. See `create::collect` and
+/// `verify::locate` for the two of them and the argument at each.
+///
+/// The test is over the whole path string and not just the final
+/// component, because that is what the reference's own set-name check
+/// does: measured against the pinned 1.3.0 on 21 Sep 2026,
+/// `par2 c -b32 'sub*/out.par2' text.txt` is refused with
+/// `par2 file must not have a wildcard in it.` exactly as `'*.par2'`
+/// is, so the directory half counts. `[` is deliberately NOT a
+/// metacharacter here: par2cmdline's own matcher handles `*` and `?`
+/// and nothing else, so treating a bracket as one would refuse an
+/// ordinary filename the reference opens without comment.
+pub fn has_wildcard(p: &Path) -> bool {
+    p.to_string_lossy().contains(['*', '?'])
 }

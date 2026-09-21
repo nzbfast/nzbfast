@@ -35,6 +35,12 @@ mod repair_progress_tests;
 #[path = "daemon_payload_tests/prefetch_progress_tests.rs"]
 mod prefetch_progress_tests;
 
+// A row's time left is its own bytes over its own rate, not the line's
+// (21 Sep 2026: a job crawling at 1.7 MB/s behind a successor at
+// 110 MB/s read "3 seconds left" for minutes). Same #[path] requirement.
+#[path = "daemon_payload_tests/job_rate_tests.rs"]
+mod job_rate_tests;
+
 // B5's queue window, out for the ceiling and carrying the same
 // #[path] requirement.
 #[path = "daemon_payload_tests/queue_window_tests.rs"]

@@ -1029,7 +1029,7 @@ pub fn pick_rar_media_name(head: &RarHead) -> Option<(String, Option<String>)> {
 /// and the malformed case is somebody else's error to report.
 ///
 /// Bomb-gated like the in-stream twin: the end-header window is read
-/// and held to [`encoded_header_bomb`]'s caps BEFORE `Archive::read` is
+/// and held to `encoded_header_bomb`'s caps BEFORE `Archive::read` is
 /// allowed to decode it, and a declared `header_size` past
 /// [`SEVENZ_END_MAX`] is refused before this function buffers it. A
 /// refused file lands in the same "not a readable 7z" bucket as any
@@ -1123,7 +1123,7 @@ pub fn sevenz_is_encrypted(f: &mut (impl Read + Seek)) -> bool {
 /// `pub`. True means refuse: the start header declares an end header
 /// past [`SEVENZ_END_MAX`] (which `Archive::read` buffers whole), or
 /// the window is a `kEncodedHeader` whose declared decode cost
-/// [`encoded_header_bomb`] rejects, or the start header is the zeroed
+/// `encoded_header_bomb` rejects, or the start header is the zeroed
 /// shape that would send `Archive::read` into its end-header recovery
 /// scan (see the body). False means the geometry gave no reason to
 /// refuse - including every OTHER malformed shape (short file, bad
@@ -1151,7 +1151,7 @@ pub fn sevenz_disk_header_bomb(f: &mut (impl Read + Seek)) -> bool {
 /// one, and for a packed (`kEncodedHeader`) one by decoding the header
 /// in-process first - a decode the header caps above have already
 /// bounded to 2 MiB of output. The verdict itself is
-/// [`content_declared_bomb`]'s proportionality rule.
+/// `content_declared_bomb`'s proportionality rule.
 ///
 /// What this cannot see, it lets pass rather than guess: an
 /// AES-encrypted header (`-mhe`) hides its content declarations from
@@ -2499,11 +2499,21 @@ mod tests {
     /// input the fuzzer actually found, kept in the tree (as
     /// `fuzz/seeds/rar_name_probe/`, replayed into the corpus by
     /// fuzz-smoke.yml) rather than left to expire with the CI artifact.
+    ///
+    /// READ FROM THIS CRATE'S OWN `testdata/`, and the seed under
+    /// `crates/nzbkit/fuzz/seeds/` is a SECOND COPY that stays where it
+    /// is: it is the fuzz corpus's, in a detached workspace, and
+    /// fuzz-smoke.yml replays it from there. This test used to reach
+    /// across to it, which `cargo package` cannot follow - the bytes
+    /// would simply be absent from a published `nzbkit-base`
+    /// (`tools/package-escape-gate.py`, TODO 84 blocker 2's class).
+    /// Nothing holds the two copies equal and nothing needs to: a crash
+    /// repro is a frozen artifact, and a NEW crash arrives as a new
+    /// seed with a new name rather than as an edit to this one.
     #[test]
     fn the_torn_comment_header_repro_answers_rather_than_panicking() {
-        const REPRO: &[u8] = include_bytes!(
-            "../../nzbkit/fuzz/seeds/rar_name_probe/crash-f064a660a000d079ef552779894d5aa9ba76d15c"
-        );
+        const REPRO: &[u8] =
+            include_bytes!("../testdata/nameprobe/crash-f064a660a000d079ef552779894d5aa9ba76d15c");
         // Both feed shapes the target drives, and both volume-size
         // configurations: the 19-byte half is the one that panicked.
         for head in [REPRO, &REPRO[..REPRO.len() / 2]] {

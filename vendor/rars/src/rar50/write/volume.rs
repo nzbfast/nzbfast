@@ -208,7 +208,7 @@ fn resolve_compressed_volume_member(
     let sample_then_encode = || -> Result<Option<Vec<u8>>> {
         let mut report = member_progress(progress);
         if !sampled_filters.is_empty() {
-            return crate::codec::rar50::Unpack50Encoder::with_options(encode_options)
+            return crate::codec::rar50::Rar50Encoder::with_options(encode_options)
                 .encode_member_with_filters_pooled(
                     entry.data,
                     algorithm_version,
@@ -756,7 +756,7 @@ pub(super) fn write_encrypted_compressed_volume_set_impl(
                 let sampled_filters =
                     super::filter_policy::select_sampled_filters(data, encode_options);
                 if !sampled_filters.is_empty() {
-                    let packed = crate::codec::rar50::Unpack50Encoder::with_options(encode_options)
+                    let packed = crate::codec::rar50::Rar50Encoder::with_options(encode_options)
                         .encode_member_with_filters_pooled(
                             data,
                             algorithm_version,

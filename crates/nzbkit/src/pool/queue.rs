@@ -261,6 +261,10 @@ pub struct Walker {
     /// walk at 100k pending used to allocate the whole id set twice
     /// (here, and again in `give_up_covered`'s claim set).
     pub id: Arc<str>,
+    /// The article's ordinal in the run's done-bit map, recorded at
+    /// census time. The id-to-ordinal map is rebuilt when the commit
+    /// runs, so this is the only thing that can still name the claim's
+    /// bit afterwards - never re-derive it from the id.
     pub ord: u32,
 }
 
@@ -378,7 +382,7 @@ impl QueueControl {
     }
 
     /// Responses so far that advanced an article without resolving it
-    /// (see [`Shared::deferred`]). A caller's stall watchdog must count
+    /// (see `Shared::deferred`). A caller's stall watchdog must count
     /// a change here as liveness: a refusal-only run can spend a whole
     /// pass in the `soft_430` confirming repeat, moving neither decoded
     /// bytes nor the outstanding count while working perfectly. `None`
@@ -765,6 +769,38 @@ impl QueueControl {
     /// commit runs has no queue or inflight record left to look its
     /// ordinal up in - the census is where the pair is captured.
     pub fn verdict_walkers(&self) -> Option<Vec<Walker>> {
+        self.pending_census(true, &|_| true)
+    }
+
+    /// The bounded-wait census for files that are NOT payload: every
+    /// article the run still owes, in ANY state (untried and queued,
+    /// in flight clean, walking a refusal ladder), and only when
+    /// `accept` says yes to every one of them. The moment a single
+    /// pending article fails `accept` the answer is `None`, so a caller
+    /// that passes "belongs to a file the job can complete without"
+    /// hears about the tail exactly when no payload, recovery data or
+    /// unclassified article is left in it, and never otherwise.
+    ///
+    /// [`Self::verdict_walkers`] cannot answer that question: it opens
+    /// only on a PURE refusal tail, so a missing `.nfo` article that is
+    /// still queued behind a connection cap, or riding a slow first ask
+    /// to a hung server, keeps it shut and the run waits on the
+    /// article's own ladder however long that takes. Same guards as the
+    /// walker census (closed while draining or aborted, and whenever the
+    /// snapshot cannot account for every pending article), same
+    /// `{id, ordinal}` currency, same commit half
+    /// ([`Self::give_up_covered`]). `accept` runs under the pool's
+    /// queue and in-flight locks, so it must be a lookup and nothing
+    /// heavier.
+    pub fn pending_census_if(&self, accept: &dyn Fn(&str) -> bool) -> Option<Vec<Walker>> {
+        self.pending_census(false, accept)
+    }
+
+    fn pending_census(
+        &self,
+        walkers_only: bool,
+        accept: &dyn Fn(&str) -> bool,
+    ) -> Option<Vec<Walker>> {
         let sh = self
             .shared
             .lock_ok()
@@ -811,10 +847,15 @@ impl QueueControl {
                 if done.contains(e.ord) {
                     continue; // already terminal - a lingering original
                 }
-                if e.tried_430 == 0 {
+                if walkers_only && e.tried_430 == 0 {
                     drop(inf);
                     closed("a clean article is on the wire");
                     return None; // a clean article is still on the wire
+                }
+                if !accept(id) {
+                    drop(inf);
+                    closed("an unwanted article is on the wire");
+                    return None;
                 }
                 ids.insert(id.clone(), e.ord);
             }
@@ -838,10 +879,15 @@ impl QueueControl {
             if done.contains(w.ord) {
                 continue; // already terminal - a zombie queue entry
             }
-            if w.tried_430 == 0 && w.soft_430 == 0 {
+            if walkers_only && w.tried_430 == 0 && w.soft_430 == 0 {
                 drop(q);
                 closed("untried payload still queued");
                 return None; // untried payload still queued
+            }
+            if !accept(&w.id) {
+                drop(q);
+                closed("an unwanted article is still queued");
+                return None;
             }
             ids.insert(w.id.clone(), w.ord);
         }
@@ -955,7 +1001,7 @@ impl QueueControl {
     /// "No elsewhere" is the ONE obstacle that no longer finalizes,
     /// since 31 Aug 2026: a failed CRC with no eligible peer is re-asked
     /// from the server that just served it, under the run's
-    /// [`REASK_WASTE_CAP`] budget, because a corrupt article otherwise
+    /// `REASK_WASTE_CAP` budget, because a corrupt article otherwise
     /// got no second ask of any kind while a genuinely missing one was
     /// requeued and could still complete. A part mismatch is excluded by
     /// name; the block below says why.
@@ -1333,11 +1379,6 @@ impl QueueControl {
                 .is_some_and(|sh| sh.draining.load(Ordering::Acquire))
     }
 
-    /// Network-tail visibility (tail-prefetch experiment): Some(pending
-    /// article count) once a primary worker has found the queue dry
-    /// with articles still in flight - the pool's own tail latch - and
-    /// None before that moment or once the run is gone. `Some(0)` means
-    /// the tail completed; a live tail is `Some(n)` with `n > 0`.
     /// TODO 208 item 3: the shallowest pipeline depth the endgame taper
     /// handed out, `usize::MAX` if it never bit (or the run is gone).
     /// The `[pool]` line carries the same number; this is the handle a
@@ -1354,6 +1395,11 @@ impl QueueControl {
         sh.taper_min.load(Ordering::Relaxed)
     }
 
+    /// Network-tail visibility (tail-prefetch experiment): `Some`
+    /// pending article count once a primary worker has found the queue
+    /// dry with articles still in flight - the pool's own tail latch -
+    /// and `None` before that moment or once the run is gone. `Some(0)`
+    /// means the tail completed; a live tail is `Some(n)` with `n > 0`.
     pub fn tail_pending(&self) -> Option<usize> {
         let sh = {
             let g = self.shared.lock_ok();

@@ -31,7 +31,7 @@ pub(super) fn fetch_isc_descriptions() -> std::result::Result<Vec<(String, Strin
     let resp = ssrf_safe_agent(3, 30)
         .get(ISC_NEWSGROUPS_URL)
         .call()
-        .map_err(|e| format!("ISC descriptions: {e}"))?;
+        .map_err(|e| format!("ISC descriptions: {}", crate::netfetch::error_brief(&e)))?;
     // Bytes, then a lossy decode. The file is decades old and is NOT
     // valid UTF-8 - read_to_string on it fails outright with "stream did
     // not contain valid UTF-8", which is how this was found. Group names
@@ -40,7 +40,8 @@ pub(super) fn fetch_isc_descriptions() -> std::result::Result<Vec<(String, Strin
     // the other 45,000.
     let mut raw = Vec::new();
     use std::io::Read as _;
-    resp.into_reader()
+    resp.into_body()
+        .into_reader()
         .take(ISC_MAX_BYTES)
         .read_to_end(&mut raw)
         .map_err(|e| format!("ISC descriptions: {e}"))?;

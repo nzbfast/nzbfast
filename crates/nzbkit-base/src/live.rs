@@ -481,7 +481,7 @@ impl ChaseGate for SlotGate {
 }
 
 /// How the backfill pass must re-feed one slot's pre-activation spans -
-/// the public half of [`Src`], returned by
+/// the public half of `Src`, returned by
 /// [`LiveVerifier::take_pre_spans`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PreSpanSrc {
@@ -1421,13 +1421,59 @@ impl LiveVerifier {
     /// carries the real name.
     ///
     /// BOUND, which after settle is the same thing as CLAIMED: a
-    /// name-only binding ([`SlotState::confirmed`]) is either promoted or
+    /// name-only binding (`SlotState::confirmed`) is either promoted or
     /// dropped by `finish_slot`, so no slot reaches a caller of this
     /// still holding one. Mid-run it answers about the binding, which is
     /// what the pre-nomination code answered too.
     pub fn slot_in_set(&self, slot: usize) -> bool {
         matches!(&*self.plan.read_ok(), Plan::Active(_))
             && self.slots[slot].lock_ok().file.is_some()
+    }
+
+    /// TODO 118.2: the exact length of the PAR2 FileDesc this slot is
+    /// bound to by CONTENT - a confirmed binding, or the `md5_16k`
+    /// tier's nomination of a unique unclaimed descriptor by the slot's
+    /// own first 16 KiB (`SlotState::head_nominated`) - and `None`
+    /// while the binding rests on the yEnc NAME alone. This is the set's
+    /// answer to "how long is this file", and it is keyed by SLOT, which
+    /// is what makes it usable on a post whose yEnc names are randomized
+    /// per article. The engine hands it to the RAR mapper as the volume
+    /// bound (`Extractor::corroborate_size`), which is irrevocable.
+    ///
+    /// WHY A HEAD NOMINATION ANSWERS (118.2d, 21 Sep 2026), when the
+    /// verifier itself holds it revocable until `settle_binding` at
+    /// finish: on the random-name poster 118.2 was measured on the name
+    /// tier never fires, `promote_binding` deliberately does not promote
+    /// a head nomination on an Ok block (M4-103: a head two files share
+    /// is whole blocks they share), so with `confirmed` alone this
+    /// witness was silent for the whole download on the very post it
+    /// exists for. What the extractor DOES with a wrong length is what
+    /// makes the nomination enough: the corroborated length lands in
+    /// `Slot::exact_size`, which ONLY the mapper's bound reads, so a
+    /// wrong one can understate - `data area exceeds volume` refuses and
+    /// the slot demotes to a materialized volume, correct and slower -
+    /// or overstate, which leaves the mapper where an open-ended bound
+    /// already leaves it and the settle's tiling and coverage checks
+    /// judge; it never moves preallocation or the coverage census. And
+    /// the shape that makes a unique head match WRONG - an uncovered
+    /// payload sharing a member's first 16 KiB (the zero-filled head
+    /// M4-103 is priced against) - never reaches a mapper at all unless
+    /// both files are RAR volumes, whose first 16 KiB carry the volume's
+    /// own headers (per-volume packed CRC and size) and so agree only
+    /// when the bytes agree. Two set members sharing a head are not this
+    /// case: the tier declines them as ambiguous and answers nothing.
+    /// The stated limit is the CRC-collision or hand-crafted RAR pair,
+    /// whose worst outcome is the demote above. The name-only tentative
+    /// state stays `None`: a name knows nothing about content, and the
+    /// head can deny it on the next article.
+    pub fn slot_confirmed_length(&self, slot: usize) -> Option<u64> {
+        let plan = self.plan.read_ok();
+        let Plan::Active(active) = &*plan else {
+            return None;
+        };
+        let s = self.slots[slot].lock_ok();
+        let fi = s.file?;
+        (s.confirmed || s.head_nominated).then(|| active.file(fi).length)
     }
 
     /// Did the matcher never reach a VERDICT for this slot - neither a
@@ -1635,7 +1681,7 @@ impl LiveVerifier {
     /// [`on_data`](Self::on_data) with the decoder's verified CRC32 over
     /// EXACTLY `data` in hand. Same trust, same claims; the CRC is spent
     /// on the blocks the span covers so their bytes are not hashed a
-    /// second time (see the reuse section note above [`GeomTally`]). A
+    /// second time (see the reuse section note above `GeomTally`). A
     /// CRC that does not match `data` can only turn a block Bad, never Ok:
     /// a block derived from it composes to the wrong value and fails the
     /// IFSC compare, which settle read-back then re-hashes off disk.
@@ -2276,7 +2322,7 @@ impl LiveVerifier {
     }
 
     /// This verifier's EFFECTIVE partial-buffer cap: what
-    /// [`Self::with_partials_cap`] was handed (or [`default_partials_cap`]
+    /// [`Self::with_partials_cap`] was handed (or `default_partials_cap`
     /// for a bare [`Self::new`]), floored. The figure a memory rig should
     /// print beside the peak from [`Self::partials_stats`], so a run that
     /// never got the production cap says so out loud - the single line
@@ -2306,9 +2352,9 @@ impl LiveVerifier {
     }
 
     /// Drop every in-stream Ok verdict for a slot back to Pending so the
-    /// next [`finish_slot`] re-hashes those blocks from the bytes actually
+    /// next `finish_slot` re-hashes those blocks from the bytes actually
     /// on disk. Settle calls this for a slot whose writer saw an
-    /// overlapping write ([`crate::extract::Extractor::slot_had_rewrite`]):
+    /// overlapping write (`crate::extract::Extractor::slot_had_rewrite`):
     /// an in-stream Ok proves the bytes that WERE hashed, not the bytes on
     /// disk now, and a maliciously-duplicated article can overwrite a
     /// verified block after it was marked Ok. Re-hashing from disk is the
@@ -3082,7 +3128,7 @@ fn src_md5(src: &ReadAt<'_>, expect_len: u64) -> io::Result<[u8; 16]> {
 /// own index and their slices reach `recovery_blocks_seen`.
 ///
 /// This replaced `pick_set`, which parsed each input ALONE and kept
-/// `max_by_key(files.len())` - see [`Active`] for what that cost GH
+/// `max_by_key(files.len())` - see `Active` for what that cost GH
 /// #63's reporter. Two things about the old fallback are worth keeping
 /// in mind, because both are fixed here rather than merely widened:
 /// parsing an input alone gives a volume-only file no Main packet and

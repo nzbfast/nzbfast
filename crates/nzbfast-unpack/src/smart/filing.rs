@@ -28,14 +28,14 @@ use super::{EpisodeTitles, SUBTITLE_EXTS, VIDEO_EXTS, ext_of, nzbname, tv_path};
 
 /// File a completed TV job: move everything in `out_dir` into
 /// `dest_parent/[Show]/Season NN/`, renaming video files to
-/// "Show - S01E02[ suffix].ext" (each video's own name is parsed first, so
+/// "Show - S01E02\[ suffix\].ext" (each video's own name is parsed first, so
 /// a season pack renames per episode; samples keep their names). `suffix`
-/// is the auto-rename quality tag (" [1080p]"), or "" for none. Existing
+/// is the auto-rename quality tag (" \[1080p\]"), or "" for none. Existing
 /// targets are never overwritten. Returns the new directory, or None if
 /// the stem didn't parse as TV (job left untouched).
 ///
 /// `titles` decorates each episode with its own name when the cache knows
-/// it ("Show - S01E02 - Children [1080p].mkv"); an empty one is the
+/// it ("Show - S01E02 - Children \[1080p\].mkv"); an empty one is the
 /// ordinary case and leaves every name exactly as it was.
 pub fn tv_organize(
     dest_parent: &Path,
@@ -311,7 +311,7 @@ pub fn tv_organize(
 }
 
 /// Auto-rename for TV when the job ISN'T being Season-filed: rename video
-/// files IN PLACE to "Show - S01E02[ title][ suffix].ext" (season packs
+/// files IN PLACE to "Show - S01E02\[ title\]\[ suffix\].ext" (season packs
 /// rename per episode; samples untouched). Never overwrites an existing
 /// target. Returns how many files were renamed.
 pub fn tv_rename(dir: &Path, stem: &str, suffix: &str, titles: &EpisodeTitles) -> usize {
@@ -633,7 +633,7 @@ fn names_the_release(name: &str) -> bool {
 /// nothing either: "movie.mkv", "video.mkv", "1.mkv". Those are the
 /// encoder's default output name, not a name a human chose for THIS
 /// post, so there is nothing to preserve. The list is exact and closed
-/// (see [`is_generic_stem`]) - a stem we do not recognise keeps its name.
+/// (see `is_generic_stem`) - a stem we do not recognise keeps its name.
 ///
 /// Widening what we fire on has to be paid for on the other side, so the
 /// release name now has to earn the job: it must parse to a non-empty
@@ -699,7 +699,7 @@ pub fn nameless_video(dir: &Path) -> Option<PathBuf> {
 /// reaches the same apply path. The two differ only in where the name
 /// came from and therefore in what has to be proven about it first: a
 /// release name has to earn the job by carrying provenance facts (see
-/// [`names_the_release`]), while an identified film's name has already
+/// `names_the_release`), while an identified film's name has already
 /// been earned by the acceptance gate - which is a far higher bar, and
 /// one a title like "Supergirl 2026" could never clear by grammar
 /// alone.

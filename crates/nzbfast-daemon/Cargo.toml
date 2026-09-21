@@ -1,6 +1,6 @@
 [package]
 name = "nzbfast-daemon"
-version = "1.6.0"
+version = "1.7.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -45,7 +45,7 @@ notify = "8.2.0"
 libc = "0.2"
 # Outbound HTTP for the update check, the indexer probes and the webhook
 # sender.
-ureq = "2"
+ureq = "3"
 # §129 4a webhook signing (X-NzbFast-Signature) and the update manifest's
 # payload digest.
 sha2 = "0.11"
@@ -53,6 +53,10 @@ hex = "0.4"
 ed25519-dalek = "3"
 # The first-run API key comes from the platform CSPRNG, not RandomState.
 getrandom = "0.4"
+# TODO 19: Argon2id for the optional dashboard password. Already in the
+# tree (nzbkit-base and nzbkit both take it for archive key derivation),
+# so this adds no new licence for `cargo deny` to judge.
+argon2 = "0.6"
 # Startup-time certificate sanity for --tls-cert, and the ServerConfig the
 # wiring layer hands to tiny_http prebuilt.
 rustls = { version = "0.23", features = ["aws-lc-rs"] }

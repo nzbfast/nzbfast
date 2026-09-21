@@ -11,7 +11,7 @@ use super::*;
 
 /// M12: the newznab facade - enough of the protocol for Sonarr/Radarr
 /// to use the built-in index as an indexer (caps, search, tvsearch,
-/// movie; results link to /getnzb/<id>).
+/// movie; results link to `/getnzb/<id>`).
 #[cfg(feature = "indexer")]
 pub fn newznab_xml(
     d: &Daemon,

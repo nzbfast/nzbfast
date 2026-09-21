@@ -568,7 +568,7 @@ impl Extractor {
 
     /// Late-head grace gate (see `NZBFAST_NO_HEAD_GRACE`, latched at
     /// construction; default on). Off: a slot whose offset-0 sniff has
-    /// not arrived spills at [`unclassified_spill`] exactly as it did
+    /// not arrived spills at `unclassified_spill` exactly as it did
     /// before the grace existed.
     pub fn set_head_grace(&self, on: bool) {
         self.inner.lock_ok().head_grace_on = on;
@@ -612,7 +612,7 @@ impl Extractor {
     }
 
     /// The chain's EFFECTIVE held-span cap right now: what
-    /// [`Self::set_holds_cap`] last stored (or [`default_holds_cap`] at
+    /// [`Self::set_holds_cap`] last stored (or `default_holds_cap` at
     /// construction), less any senior ledger seat's charge. The figure a
     /// memory rig should print beside its peak so a run that never got
     /// the production cap says so out loud (TODO 260).

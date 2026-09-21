@@ -38,7 +38,7 @@ pub struct Rule {
     /// Category to file the job under (empty = keep the caller's).
     #[serde(default)]
     pub category: String,
-    /// File as TV at completion: [Show]/Season NN/ + video rename.
+    /// File as TV at completion: \[Show\]/Season NN/ + video rename.
     #[serde(default)]
     pub tv_sort: bool,
 }
@@ -268,7 +268,7 @@ const JUNK_EXTS: &[&str] = &[
 
 /// Is this extension Usenet furniture rather than payload?
 ///
-/// The one reader of [`JUNK_EXTS`] outside this module is the post-drain
+/// The one reader of `JUNK_EXTS` outside this module is the post-drain
 /// census (issue #23): a metadata file the recovery set does not cover
 /// must not fail a download whose payload is whole. Exposed as a
 /// predicate rather than the list so the exclusions that make the list
@@ -628,7 +628,7 @@ pub fn measured_res(dir: &Path) -> Option<&'static str> {
 /// poster's subject line stands unchallenged - for a title whose only
 /// offence was spelling.
 ///
-/// [`sample::is_teaser_beside`] keeps the protective half: a mislabelled
+/// `sample::is_teaser_beside` keeps the protective half: a mislabelled
 /// post whose biggest video really is named after a smaller sibling is
 /// still ruled out, and a job whose ONLY video is marker-named is the
 /// release the user asked for and is now answered rather than skipped.
@@ -699,7 +699,7 @@ fn named_feature(dir: &Path) -> Option<(PathBuf, String)> {
 /// name, and the house rule since `wave4-fix-exact-name-authority` is
 /// that a name may nominate and only CONTENT may finalize.
 ///
-/// The set read is [`setclaim::set_declared_paths`], the same oracle
+/// The set read is `setclaim::set_declared_paths`, the same oracle
 /// both sweeps already trust and bounded the same way. Two things
 /// follow from that and are stated rather than left to be found. It is
 /// only readable HERE because the sweep is what deletes the `.par2`
@@ -784,7 +784,7 @@ fn cleanup_selects(entry: &str, ext: &str, name: &str, rel: &str) -> bool {
 /// recovery data go".
 ///
 /// An entry is a bare extension or a pattern - see [`parse_ext_list`]
-/// and [`cleanup_selects`]. The par2 half of the count is taken off the
+/// and `cleanup_selects`. The par2 half of the count is taken off the
 /// file's own extension either way, so a pattern that happens to sweep
 /// recovery files still reports them as recovery files.
 pub fn cleanup(dir: &Path, exts: &[String]) -> (usize, usize) {
@@ -854,7 +854,7 @@ pub fn cleanup(dir: &Path, exts: &[String]) -> (usize, usize) {
 ///
 /// A recoverable delete NEVER becomes a permanent one. When no Trash will
 /// take the path this returns an error and the file stays exactly where it
-/// is - see [`trash_attempt`]. It used to hard-delete instead, on the
+/// is - see `trash_attempt`. It used to hard-delete instead, on the
 /// reasoning that leaving clutter forever was worse; that reasoning had it
 /// backwards. Every caller of this is a heuristic ("this looks like junk",
 /// "this looks like a sample"), the Trash is the only thing that makes a
@@ -2204,7 +2204,9 @@ pub use crate::pwfile::read_password_file;
 // password unlocked which site's / poster's downloads and try the
 // likely line first.
 mod pwassoc;
-pub use pwassoc::{dominant_poster, nzb_poster, order_passwords, record_password_assoc};
+pub use pwassoc::{
+    dominant_poster, nzb_poster, order_passwords, order_passwords_indexed, record_password_assoc,
+};
 
 // M4-81: the walk that answers "which file is the movie". Its own
 // file for `sample`'s reason below - smart.rs sits under a size-gate

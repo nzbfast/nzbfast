@@ -173,10 +173,23 @@ impl Post {
 }
 
 fn have_par2() -> bool {
-    Command::new("par2")
+    let ok = Command::new("par2")
         .arg("-V")
         .output()
-        .is_ok_and(|o| o.status.success())
+        .is_ok_and(|o| o.status.success());
+    // Every caller of this SKIPS when it is false, which reads in the
+    // run log as a green pass over silently reduced coverage. The jobs
+    // that mean to cover these tests install par2 on purpose and set
+    // NZBFAST_REQUIRE_PAR2, which turns the skip into a failure - this
+    // copy of the guard was the one that ignored it. Added 17 Sep 2026
+    // with the Windows half of the same defect
+    // (research/WINDOWS-PAR2-SKIP-CENSUS-2026-09-17.md).
+    assert!(
+        ok || std::env::var_os("NZBFAST_REQUIRE_PAR2").is_none(),
+        "NZBFAST_REQUIRE_PAR2 is set but `par2 -V` does not run - the PAR2 tests \
+         would have skipped and the run would have looked green"
+    );
+    ok
 }
 
 /// A `serve` command for one leg: its own data directory, its own

@@ -482,7 +482,7 @@ pub(super) fn block_evidence(
 /// be read, which is what a member whose every article failed looks
 /// like - and is never a denial. Only `read > 0 && hit == 0` says the
 /// file was there to be judged and is not this descriptor's. That is
-/// [`SlotState::settle_binding`]'s own rule ("dropping needs
+/// `SlotState::settle_binding`'s own rule ("dropping needs
 /// positive denial, not merely an absence"), and a caller that
 /// collapses the pair loses it.
 ///

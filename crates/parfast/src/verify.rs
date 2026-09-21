@@ -224,6 +224,24 @@ pub fn file_threads(opts: &Options, members: usize) -> usize {
 /// reference verifies `set.par2` and exits 0. A candidate that refused
 /// would fail the switch probe.
 pub fn locate(opts: &Options, sink: &mut Sink) -> Result<(PathBuf, PathBuf, [u8; 16]), u8> {
+    // THE SET-NAME WILDCARD CHECK RUNS BEFORE THE `-a` FALLBACK, which
+    // is the reference's own order: `par2 v -a*.par2 set.par2` is
+    // refused there even though `set.par2` is a real set sitting beside
+    // it, so the check is on the name the user TYPED and not on the one
+    // the fallback would settle on. Both spellings are tested for that
+    // reason. `parfast` already exited 3 on `v -q *.par2`, but on the
+    // second line alone - the explanatory line above it was missing, so
+    // a user (or a parser) was told the set could not be read rather
+    // than that the argument was never a set name. See
+    // `cli::refuse_wildcard_set_name`, including why it is posix-only.
+    for cand in [opts.archive.as_deref(), opts.par2.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(code) = crate::cli::refuse_wildcard_set_name(cand, sink) {
+            return Err(code);
+        }
+    }
     let named = match opts.archive.clone().filter(|p| p.exists()) {
         Some(a) => a,
         None => match opts.par2.clone() {
@@ -1429,7 +1447,7 @@ fn survey_inner(
 /// name for "the FileDesc whole-file MD5 matched at the declared
 /// length", which is exactly this module's `Target::Found` - the same
 /// `verify_pass1` verdict, EARLY STOP included, that [`survey`] itself
-/// reads through [`present_blocks`]. The two must agree or one tool
+/// reads through `present_blocks`. The two must agree or one tool
 /// prints two answers for one set, which is why neither decides the
 /// withheld digest.
 ///
@@ -1711,7 +1729,7 @@ pub fn print_verdict(loaded: &Loaded, survey: &Survey, sink: &mut Sink) -> u8 {
     }
     print_extra_scan(loaded, survey, &[], sink);
     sink.line(Level::Terse, "Repair is required.");
-    print_damage_detail(survey, sink);
+    print_damage_detail(survey, &[], sink);
     if survey.repairable() {
         sink.line(Level::Terse, "Repair is possible.");
         print_repairable_detail(survey, sink);
@@ -1729,38 +1747,99 @@ pub fn print_verdict(loaded: &Loaded, survey: &Survey, sink: &mut Sink) -> u8 {
     }
 }
 
+/// The members the extra-file scan proved are sitting under another
+/// name: the reference's `renamedfilecount`, and the set the other three
+/// census counters must not also count.
+///
+/// DISTINCT TARGETS, not donors and not scanned files, which is the one
+/// thing about this count that has to be measured rather than assumed.
+/// Measured against the reference 17 Sep 2026, three shapes that
+/// separate the three candidate rules:
+///
+///   * two donors wholly matching ONE member (a payload copied to two
+///     hash names): the reference says `1 file(s) have the wrong name.`
+///     and calls the second donor `no data found.`, so it is per
+///     TARGET, not per donor.
+///   * one donor carrying TWO members' blocks (a joined set): the
+///     reference counts NOTHING and leaves both members in
+///     `2 file(s) are missing.`, which is why [`ExtraFileMatch::target`]
+///     being `None` is excluded here rather than counted as one.
+///   * a member damaged and THEN renamed (a partial match under a hash
+///     name): the reference counts nothing and keeps it missing, which
+///     is why the filter is `whole_file` and not "has a target".
+///
+/// Fixtures and the captured transcripts:
+/// `research/SAB-PARFAST-METER-DROPIN-2026-09-17.md` addendum A.
+fn wrong_name_targets(matches: &[par2repair::ExtraFileMatch]) -> std::collections::BTreeSet<&str> {
+    matches
+        .iter()
+        .filter(|m| m.whole_file)
+        .filter_map(|m| m.target.as_deref())
+        .collect()
+}
+
 /// The per-file damage census.
 ///
 /// DEFAULT level, not `-v`. The captured `sweep/B` row passes neither
 /// `-q` nor `-v` and carries all five of these lines, and `verify-damaged`
 /// passes `-q` and carries none of them, which fixes the rung exactly.
-pub fn print_damage_detail(survey: &Survey, sink: &mut Sink) {
+///
+/// THE FOUR COUNTERS ARE MUTUALLY EXCLUSIVE, as the reference's are, and
+/// that is what `matches` is for. A member the extra-file scan just
+/// proved is lying under a hash name is `Target::Missing` in the survey,
+/// because the survey ran BEFORE that scan and looked only at the
+/// member's own name. The reference reclassifies it: it prints
+/// `N file(s) have the wrong name.` and does NOT also print it as
+/// missing. Adding our line without the subtraction would have given a
+/// three-member set a census counting four files, which is a worse
+/// answer than the silence it replaced - so the two halves land
+/// together or not at all.
+///
+/// `matches` is empty on every route with no engine answer (`v`, and
+/// the repair's own fallback), and an empty list prints exactly what
+/// this printed before 18 Sep 2026. See the deferral comment in
+/// `repair::announce` for where the answer comes from and why it is
+/// late.
+pub fn print_damage_detail(
+    survey: &Survey,
+    matches: &[par2repair::ExtraFileMatch],
+    sink: &mut Sink,
+) {
     if !sink.shows(Level::Normal) {
         return;
     }
-    let damaged = survey
-        .targets
-        .iter()
-        .filter(|(_, t)| matches!(t, Target::Damaged { .. }))
-        .count();
-    let ok = survey
-        .targets
-        .iter()
-        .filter(|(_, t)| matches!(t, Target::Found))
-        .count();
-    let missing = survey
-        .targets
-        .iter()
-        .filter(|(_, t)| matches!(t, Target::Missing))
-        .count();
+    let renamed = wrong_name_targets(matches);
+    let count = |pred: fn(&Target) -> bool| {
+        survey
+            .targets
+            .iter()
+            .filter(|(name, t)| pred(t) && !renamed.contains(name.as_str()))
+            .count()
+    };
+    let damaged = count(|t| matches!(t, Target::Damaged { .. }));
+    let ok = count(|t| matches!(t, Target::Found));
+    let missing = count(|t| matches!(t, Target::Missing));
+    if !renamed.is_empty() {
+        sink.line(
+            Level::Normal,
+            &format!("{} file(s) have the wrong name.", renamed.len()),
+        );
+    }
+    // MISSING BEFORE DAMAGED, which is the reference's order and was
+    // not ours until 18 Sep 2026. It is only visible on a set carrying
+    // BOTH, and no captured conformance row does: measured that day on
+    // a four-member set (one renamed, one missing, one damaged, one ok)
+    // the reference prints wrong-name, missing, damaged, ok and we
+    // printed the middle pair the other way round. Same block, same
+    // claim, zero rows moved.
+    if missing > 0 {
+        sink.line(Level::Normal, &format!("{missing} file(s) are missing."));
+    }
     if damaged > 0 {
         sink.line(
             Level::Normal,
             &format!("{damaged} file(s) exist but are damaged."),
         );
-    }
-    if missing > 0 {
-        sink.line(Level::Normal, &format!("{missing} file(s) are missing."));
     }
     if ok > 0 {
         sink.line(Level::Normal, &format!("{ok} file(s) are ok."));
@@ -1800,6 +1879,63 @@ pub fn print_damage_detail(survey: &Survey, sink: &mut Sink) {
 /// `nzbkit::par2repair::scan_members_for_blocks`. Reading this walk as
 /// the whole of parfast's misplaced-block story is what left G4 open
 /// (`research/CLI-SUBSTITUTION-2026-09-03.md`).
+///
+/// AND IT IS THE WHOLE CANDIDATE SET, WHATEVER ARGV LISTED. par2cmdline
+/// scans exactly the extra files it was handed; this walk reads the
+/// data directory, and nothing on the command line narrows it. The
+/// trailing `[files]` arguments are not consulted here at all: the
+/// repair route forwards them to the engine, where they are APPENDED to
+/// the engine's own walk of the same directory as further donors
+/// (`adoption_candidates` in `par2repair/adopt.rs`), so an argv list can
+/// ADD a candidate from outside the directory and can never REMOVE one
+/// from inside it. That asymmetry is a deliberate drop-in divergence,
+/// and SABnzbd is what makes it load-bearing: on a job with two or more
+/// par2 sets it narrows its trailing wildcard to `<dir>/<setname>*` and
+/// runs the binary with no shell, so the binary decides what the
+/// argument means. par2cmdline-turbo 1.4.0 takes it at its word, the
+/// narrowed pattern excludes an obfuscated member of its own set along
+/// with every other set's files, and the job FAILS for want of blocks
+/// the directory was holding. parfast completes the identical command
+/// line, because the members are candidates whatever the pattern says
+/// (six real SABnzbd 5.1.2 arms, `research/SAB-MULTISET-WILDCARD-2026-09-20.md`
+/// sections 3 and 5).
+///
+/// THE COST IS TWO REGIMES, NOT ONE SIZE, and this sentence used to say
+/// "real and small" over both of them. Measured 20 Sep 2026,
+/// `research/PARFAST-WHOLE-DIR-EXTRA-SCAN-COST-2026-09-20.md`:
+///
+/// * On the shape this divergence EXISTS for - a complete member under
+///   an obfuscated name - it is free. The engine's whole-file fast path
+///   rejects a neighbouring set's member on a `u64` length compare
+///   against metadata the walk already had, so an 8 GiB neighbouring set
+///   costs -0.02 G instructions against a 12.72 G repair, inside the
+///   instrument's noise. Eight neighbours at exactly our member length
+///   cost +0.46 G, which is eight 16 KiB head hashes and nothing more.
+/// * On a donor the ROLLING scan has to find - shifted, split, embedded
+///   - the neighbour's bytes really are read, at 39.3 G instructions per
+///   neighbour GiB. That is bounded only when our own donors sort EARLY:
+///   at 8 and 16 GiB of neighbour the early-ordered cost saturates at
+///   about +193 G (the adoption fan-out is capped at 8), and the
+///   late-ordered cost is linear and unbounded, extrapolating to
+///   ~1,967 G on a 50 GiB neighbour. Which of the two a given job gets
+///   is decided by the FIRST CHARACTER of the obfuscated filename,
+///   because the candidate order is `sort()` over the path.
+///
+/// AND THE OPENING AND HASHING IS NOT THIS FUNCTION'S. This is a name
+/// walk; it opens nothing. The bytes are read by the engine's
+/// `adopt::adoption_candidates`, which does its OWN walk of the same
+/// directory - recursive, where this one is flat - so narrowing this
+/// walk would change what is PRINTED and not one byte of what is read.
+///
+/// A caller who narrows the list to keep parfast away from a
+/// neighbouring set's bytes does not get what it asked for. That is not
+/// a correctness risk, because adoption is by checksum in the engine's
+/// `adopt_blocks` and a file that matches nothing contributes nothing.
+/// DO NOT "FIX" IT BY HONOURING THE LIST:
+/// that would re-open the SABnzbd failure above, and it is a drop-in
+/// contract decision rather than a defect - see "A deliberate divergence
+/// no row of this matrix reaches" in `tools/conformance/README.md`,
+/// which is also why the oracle will never flag it.
 pub fn extra_candidates(loaded: &Loaded, survey: &Survey) -> Vec<PathBuf> {
     let claimed: std::collections::HashSet<PathBuf> = survey
         .targets
@@ -2115,6 +2251,142 @@ mod tests {
         assert_eq!(
             extra_match_line(&several),
             "File: \"joined.001\" - found 4 data blocks from several target files."
+        );
+    }
+
+    fn whole(donor: &str, target: &str) -> par2repair::ExtraFileMatch {
+        par2repair::ExtraFileMatch {
+            whole_file: true,
+            blocks: 10,
+            target_blocks: 10,
+            ..a_match(donor, Some(target))
+        }
+    }
+
+    fn census(targets: Vec<(&str, Target)>, matches: &[par2repair::ExtraFileMatch]) -> Vec<String> {
+        let survey = Survey {
+            targets: targets
+                .into_iter()
+                .map(|(n, t)| (n.to_string(), t))
+                .collect(),
+            total_blocks: 100,
+            available_blocks: 50,
+            recovery_blocks: 5,
+        };
+        let mut sink = crate::out::Sink::buffered();
+        print_damage_detail(&survey, matches, &mut sink);
+        sink.take()
+            .0
+            .lines()
+            .filter(|l| l.contains("file(s)"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The whole damage census against the reference, on the four-way
+    /// shape that separates every counter: one member renamed to a hash,
+    /// one gone, one damaged at its own name, one clean.
+    ///
+    /// Captured from par2cmdline v1.3.0 on 18 Sep 2026 (`par2cmdline130
+    /// r set.par2 *` over that set), which prints these four lines in
+    /// THIS order. Two things fail without the production change: the
+    /// wrong-name line is absent, and the renamed member is counted a
+    /// second time as missing - a three-line census over a four-member
+    /// set that adds up to five.
+    #[test]
+    fn the_census_is_the_references_four_counters_in_its_order() {
+        assert_eq!(
+            census(
+                vec![
+                    ("w.bin", Target::Missing),
+                    ("m.bin", Target::Missing),
+                    (
+                        "d.bin",
+                        Target::Damaged {
+                            have: 24,
+                            total: 25
+                        }
+                    ),
+                    ("o.bin", Target::Found),
+                ],
+                &[whole("0123456789abcdef", "w.bin")],
+            ),
+            [
+                "1 file(s) have the wrong name.",
+                "1 file(s) are missing.",
+                "1 file(s) exist but are damaged.",
+                "1 file(s) are ok.",
+            ]
+        );
+    }
+
+    /// DISTINCT TARGETS, which is the whole content of the count and the
+    /// one part of it that cannot be guessed from the struct.
+    ///
+    /// Three shapes, all measured against the reference on 18 Sep 2026:
+    /// two donors carrying ONE member's bytes is `1`, not 2, and the
+    /// reference calls the loser `no data found.`; a donor feeding
+    /// SEVERAL members is not counted at all and its members stay
+    /// missing; and a PARTIAL match under a hash name is not a rename
+    /// either. Counting donors passes the first assertion here and
+    /// fails the second one it is paired with.
+    #[test]
+    fn the_wrong_name_count_is_targets_and_not_donors() {
+        let two_donors_one_member = vec![("s.bin", Target::Missing), ("t.bin", Target::Found)];
+        assert_eq!(
+            census(
+                two_donors_one_member,
+                &[whole("copy1aaaa", "s.bin"), whole("copy2bbbb", "s.bin")],
+            ),
+            ["1 file(s) have the wrong name.", "1 file(s) are ok."]
+        );
+        // A joined donor: no single target, so the reference counts
+        // nothing and both members stay missing.
+        assert_eq!(
+            census(
+                vec![
+                    ("p.bin", Target::Missing),
+                    ("q.bin", Target::Missing),
+                    ("r.bin", Target::Found),
+                ],
+                &[par2repair::ExtraFileMatch {
+                    blocks: 65,
+                    ..a_match("joined.dat", None)
+                }],
+            ),
+            ["2 file(s) are missing.", "1 file(s) are ok."]
+        );
+        // Damaged and THEN renamed: a partial match, and the reference
+        // leaves it missing rather than calling it a wrong name.
+        assert_eq!(
+            census(
+                vec![("u.bin", Target::Missing), ("v.bin", Target::Found)],
+                &[par2repair::ExtraFileMatch {
+                    blocks: 49,
+                    target_blocks: 50,
+                    ..a_match("deadbeefcafe0001", Some("u.bin"))
+                }],
+            ),
+            ["1 file(s) are missing.", "1 file(s) are ok."]
+        );
+    }
+
+    /// No engine answer prints what this printed before the wrong-name
+    /// line existed. `v` never repairs and the repair's own fallback
+    /// route runs the engine without an observer, so both hand an empty
+    /// list here, and a route with no answer must degrade to the old
+    /// census rather than to a wrong claim.
+    #[test]
+    fn an_empty_match_list_is_the_old_census() {
+        assert_eq!(
+            census(
+                vec![
+                    ("w.bin", Target::Missing),
+                    ("d.bin", Target::Damaged { have: 1, total: 2 }),
+                ],
+                &[],
+            ),
+            ["1 file(s) are missing.", "1 file(s) exist but are damaged.",]
         );
     }
 

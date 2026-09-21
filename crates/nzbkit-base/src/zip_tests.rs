@@ -1453,3 +1453,77 @@ fn the_committed_prefixed_sector_fixtures_keep_their_meaning() {
         assert_eq!(extract(&ar, 0).unwrap(), a, "{name}");
     }
 }
+
+/// A CP437-encoded entry name must decode to its real characters, and
+/// two names differing only in a high byte must stay two names. A plain
+/// UTF-8-lossy decode turns both into the SAME U+FFFD string, which the
+/// disk pass then buckets as a collision and writes one over the other.
+#[test]
+fn cp437_entry_names_decode_instead_of_collapsing() {
+    let a = payload(64, 5);
+    let b = payload(64, 11);
+    // Placeholder names of the right LENGTH; the high byte is patched in
+    // below, because the fixture writer takes a `&str`.
+    let mut z = fixtures::zip_of(&[Spec::stored("Zrger.mkv", &a), Spec::stored("Yrger.mkv", &b)]);
+    for (from, to) in [(b'Z', 0x8Eu8), (b'Y', 0x8Fu8)] {
+        let pat = {
+            let mut p = vec![from];
+            p.extend_from_slice(b"rger.mkv");
+            p
+        };
+        let mut i = 0;
+        while i + pat.len() <= z.len() {
+            if z[i..i + pat.len()] == pat[..] {
+                z[i] = to;
+            }
+            i += 1;
+        }
+    }
+    let (_d, ar) = open_bytes("rd-cp437-names", &z);
+    let ar = ar.unwrap();
+    let names: Vec<&str> = ar.entries().iter().map(|e| e.name.as_str()).collect();
+    // CP437 0x8E is A-diaeresis, 0x8F is A-ring.
+    assert_eq!(names, vec!["\u{c4}rger.mkv", "\u{c5}rger.mkv"]);
+    assert!(
+        !names.iter().any(|n| n.contains('\u{fffd}')),
+        "a high byte was replaced instead of decoded: {names:?}"
+    );
+    assert_eq!(extract(&ar, 0).unwrap(), a);
+    assert_eq!(extract(&ar, 1).unwrap(), b);
+}
+
+/// A UTF-8 name is still decoded as UTF-8 when bit 11 is clear, which is
+/// what most modern writers emit - the flag must not be the only
+/// discriminator.
+#[test]
+fn utf8_names_without_the_flag_are_not_reinterpreted() {
+    let a = payload(32, 7);
+    let z = fixtures::zip_of(&[Spec::stored("\u{c4}rger.mkv", &a)]);
+    let (_d, ar) = open_bytes("rd-utf8-noflag", &z);
+    let ar = ar.unwrap();
+    assert_eq!(ar.entries()[0].name, "\u{c4}rger.mkv");
+}
+
+/// An entry count of exactly 65535 is legal and NOT saturated: a writer
+/// that emits the zip64 record only past that limit leaves a plain
+/// 22-byte EOCD with no locator behind it, and the reader must fall
+/// back to the 32-bit fields rather than refusing the archive.
+#[test]
+fn an_entry_count_of_65535_without_a_zip64_locator_opens() {
+    const N: usize = u16::MAX as usize;
+    let a = payload(4, 13);
+    let specs: Vec<Spec> = (0..N).map(|_| Spec::stored("a.bin", &a)).collect();
+    let z = fixtures::zip_of(&specs);
+    let eocd = z.len() - 22;
+    assert_eq!(&z[eocd..eocd + 4], b"PK\x05\x06");
+    assert_eq!(rd_u16(&z[eocd + 10..]) as usize, N, "count is not 65535");
+    assert_ne!(
+        &z[eocd - 20..eocd - 16],
+        b"PK\x06\x07",
+        "the fixture grew a zip64 locator, so it no longer pins this"
+    );
+    let (_d, ar) = open_bytes("rd-65535-nolocator", &z);
+    let ar = ar.unwrap_or_else(|e| panic!("refused a legal 65535-entry archive: {e}"));
+    assert_eq!(ar.entries().len(), N);
+    assert_eq!(extract(&ar, N - 1).unwrap(), a);
+}

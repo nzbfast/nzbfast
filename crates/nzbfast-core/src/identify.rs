@@ -194,7 +194,7 @@ pub struct Outcome {
     /// h264, eac3, audio en, subs en fr"). Shown whatever the verdict.
     pub facts: String,
     /// Candidates inside the runtime window, across every source, best
-    /// first. Capped - see [`SHORTLIST_MAX`].
+    /// first. Capped - see `SHORTLIST_MAX`.
     pub shortlist: Vec<String>,
     /// What this install could ask, and what answered. See
     /// [`Catalogues`] - it is what lets the note tell a one-catalogue
@@ -474,24 +474,22 @@ fn wikidata_candidates(years: (u32, u32), minutes: u32, lang: Option<&str>) -> S
     let sparql = wikidata_sparql(years, minutes, lang);
     ratelimit::acquire(Provider::WikidataQlever);
     let url = format!("{QLEVER}?query={}", percent_encode(&sparql));
-    let resp = crate::netfetch::shared_enrich_agent()
-        .get(&url)
-        .set("Accept", "application/sparql-results+json")
-        .timeout(std::time::Duration::from_secs(30))
-        .call();
+    let resp = crate::netfetch::call_body(
+        crate::netfetch::shared_enrich_agent()
+            .get(&url)
+            .header("Accept", "application/sparql-results+json")
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .build(),
+    );
     let body = match resp {
-        Ok(r) => match r.into_string() {
-            Ok(b) => b,
-            Err(_) => return out,
-        },
+        Ok(b) => b,
         Err(e) => {
             // Same courtesy as the enricher: a 429/503 slows the whole
             // lane, not just this call.
-            if let ureq::Error::Status(code @ (429 | 503), r) = &e {
-                let wait = r
-                    .header("Retry-After")
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(if *code == 429 { 30 } else { 5 });
+            if e.is_slow_down()
+                && let Some(wait) = e.wait_secs()
+            {
                 ratelimit::penalise(Provider::WikidataQlever, wait);
             }
             warn!(target: "identify", "wikidata: {e}");
@@ -632,24 +630,18 @@ fn tmdb_candidates(key: &str, years: (u32, u32), minutes: u32, lang: Option<&str
             url.push_str(&format!("&with_original_language={l}"));
         }
         ratelimit::acquire(Provider::Tmdb);
-        let body = match crate::netfetch::shared_enrich_agent()
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(15))
-            .call()
-        {
-            Ok(r) => match r.into_string() {
-                Ok(b) => b,
-                Err(_) => {
-                    any_failed = true;
-                    continue;
-                }
-            },
+        let body = match crate::netfetch::call_body(
+            crate::netfetch::shared_enrich_agent()
+                .get(&url)
+                .config()
+                .timeout_global(Some(std::time::Duration::from_secs(15)))
+                .build(),
+        ) {
+            Ok(b) => b,
             Err(e) => {
-                if let ureq::Error::Status(code @ (429 | 503), r) = &e {
-                    let wait = r
-                        .header("Retry-After")
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .unwrap_or(if *code == 429 { 30 } else { 5 });
+                if e.is_slow_down()
+                    && let Some(wait) = e.wait_secs()
+                {
                     ratelimit::penalise(Provider::Tmdb, wait);
                 }
                 // NEVER format the whole error: the request URL carries
@@ -663,16 +655,13 @@ fn tmdb_candidates(key: &str, years: (u32, u32), minutes: u32, lang: Option<&str
                 // key's spelling or position in the query ever changes.
                 // The trigger is not exotic: the 429/503 branch directly
                 // above exists because rate-limiting is expected.
-                match &e {
-                    ureq::Error::Status(code, _) => {
-                        warn!(target: "identify", "tmdb: status code {code}")
-                    }
-                    ureq::Error::Transport(t) => warn!(
-                        target: "identify",
-                        "tmdb: {}{}",
-                        t.kind(),
-                        t.message().map(|m| format!(": {m}")).unwrap_or_default(),
-                    ),
+                match e.code() {
+                    Some(code) => warn!(target: "identify", "tmdb: status code {code}"),
+                    // `Refusal`'s own Display is the URL-free one
+                    // (`netfetch::error_brief`), which is where that
+                    // rule now lives for every caller rather than at
+                    // each site that remembers it.
+                    None => warn!(target: "identify", "tmdb: {e}"),
                 }
                 any_failed = true;
                 continue;
@@ -754,13 +743,14 @@ const DETAIL_BUDGET: usize = 20;
 fn tmdb_runtime(key: &str, id: i64) -> Option<Option<u32>> {
     ratelimit::acquire(Provider::Tmdb);
     let url = format!("https://api.themoviedb.org/3/movie/{id}?api_key={key}");
-    let body = crate::netfetch::shared_enrich_agent()
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(15))
-        .call()
-        .ok()?
-        .into_string()
-        .ok()?;
+    let body = crate::netfetch::call_body(
+        crate::netfetch::shared_enrich_agent()
+            .get(&url)
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(15)))
+            .build(),
+    )
+    .ok()?;
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
     Some(v["runtime"].as_i64().filter(|m| *m > 0).map(|m| m as u32))
 }

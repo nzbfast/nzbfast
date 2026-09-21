@@ -4,7 +4,7 @@ use super::*;
 /// plays (and on first play, downloads) the job.
 ///
 /// Neither half of that URL is a placeholder any more. `scheme` is what
-/// this run's listener actually bound ([`Daemon::scheme`]) - there is no
+/// this run's listener actually bound (`Daemon::scheme`) - there is no
 /// request here to read a forwarded scheme off, the file is written at
 /// finalize and read back possibly months later, so a hardcoded `http`
 /// on a TLS daemon wrote a pointer that could never play. `authority`
@@ -62,7 +62,7 @@ pub fn write_strm(
 /// host, and they break the same way the moment it does not (another box,
 /// or a bridged container, where loopback is the container's own).
 ///
-/// This is the BIND and not [`public_base`], and the difference is not a
+/// This is the BIND and not `public_base`, and the difference is not a
 /// preference: `public_base` does the right header arithmetic but takes a
 /// `&tiny_http::Request`, and there is no request in scope at finalize -
 /// the file is written when the job settles and read back months later.
@@ -587,7 +587,7 @@ pub fn stream_request(
                     j.state = JobState::Queued;
                     // Force priority: pick_job starts it even while the
                     // queue is paused (the M14a semantics).
-                    j.priority = 2;
+                    j.set_priority(2, "a /stream request started the download");
                     j.paused = false;
                     true
                 } else {

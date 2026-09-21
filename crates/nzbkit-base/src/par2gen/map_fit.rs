@@ -128,21 +128,34 @@ pub(super) fn map_scan_and_fold_enabled() -> bool {
 /// +160 MiB. Accumulator-alone predicts zero shift on every one of those
 /// lines. Both halves stay.
 ///
-/// What that round leaves RECORDED rather than owed: the term still
-/// overshoots the crossover, and by a little more at the wider pool, so it
-/// counts somewhat more arena than the knee moves by. The likeliest
-/// mechanism is not the arenas but the reading below - `limit - (usage -
-/// cache)` has already deducted the create's anon charge at the moment it is
-/// asked, and part of what the term then adds is charge that deduction has
-/// already taken. Tightening that is a claim about the reading's
-/// composition, not a reason to drop a term.
+/// **THAT ROUND'S RESIDUAL IS NOW MEASURED, AND IT WAS THE READING - 18 Sep
+/// 2026, section 10.** It recorded the overshoot as likeliest being the
+/// reading rather than the arenas, and was right: `limit - (usage - cache)`
+/// had already deducted the accumulator at the moment the gate was asked, and
+/// the gross term added it a second time. Read at the decision point on the
+/// same box, shape and fixture, with the binary printing its own figures - a
+/// 107,347,968 B accumulator against a 112,021,504 B anon RSS and a
+/// 114,008,064 B unreclaimable charge, so the accumulator is 96% of
+/// everything this create has resident when it asks. Both halves separate
+/// cleanly: `NZBFAST_NTT_THREADS=16` DOUBLES the arenas to 321,503,232 B and
+/// moves the charge by 8 KB, while `-r10` doubles the accumulator to
+/// 214,761,472 B and the charge follows it to 221,761,536 B. So the charge is
+/// the accumulator and never the gross term - at `-r10` the gross is
+/// 496,353,280 B and the charge 219,512,832 B - and the ~4.7 MB by which anon
+/// exceeds the accumulator is constant across all three legs and is this
+/// create's genuine other anon. [`headroom_net`] is the arithmetic that
+/// stopped paying for it twice. The arena half's own smaller over-count
+/// stands, RECORDED and not tuned.
 ///
 /// **The term is applied to the cgroup reading ONLY, and that asymmetry is
 /// measured rather than cautious.** [`crate::mem::cgroup_available_ram`] is
 /// `limit - (usage - cache)`: a HARD limit less the charge that cannot be
 /// reclaimed, taken at a moment when this create has allocated its
-/// accumulators lazily and touched none of them. The bytes it is about to
-/// touch are charged to the same limit the mapping is, so they are genuinely
+/// accumulators and - measured 18 Sep 2026, contrary to what this paragraph
+/// claimed until then - already TOUCHED every page of them, which is what
+/// [`headroom_net`] credits back. The bytes it has NOT yet touched, the
+/// arenas, are charged to the same limit the mapping is, so they are
+/// genuinely
 /// not in that reading and subtracting them is the arithmetic the reading
 /// already implies. [`crate::mem::available_ram`] is a different object -
 /// `MemAvailable`, Windows' `ullAvailPhys`, macOS's free-plus-purgeable - an
@@ -180,6 +193,21 @@ pub(super) fn mapped_payload_fits_memory(payload: u64, headroom: u64) -> bool {
     let host = crate::mem::available_ram();
     let cgroup = crate::mem::cgroup_available_ram();
     let fits = mapped_payload_fits(payload, headroom, host, cgroup);
+    if std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
+        // THE COMPOSITION, on BOTH the admit and the refuse path, because the
+        // question "is this create's own charge counted twice" is answered by
+        // the parts and not by the verdict - and an admitted leg is exactly
+        // the leg whose parts say whether the refusal next door was right.
+        // A shell reading /sys/fs/cgroup around the create reads a different
+        // instant: the accumulators are allocated before this call and touched
+        // after it, so the charge moves by more than the difference under test.
+        for line in crate::mem::cgroup_probe_lines() {
+            tracing::info!(target: "repair-timing", "create map gate: {line}");
+        }
+        if let Some(rss) = crate::mem::self_rss_probe() {
+            tracing::info!(target: "repair-timing", "create map gate: {rss}");
+        }
+    }
     if !fits && std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
         // WHICH reading bound it, because on Linux they can differ by an
         // order and a reader of the refusal cannot otherwise tell a small
@@ -219,12 +247,24 @@ fn mapped_payload_fits(
 /// blocks on 8 threads, ~1.5 GiB on a 24 GiB member at 768 KiB blocks on 16).
 ///
 /// - `count * bs` is `recovery_slices`' accumulator, `vec![vec![0u16; words];
-///   count]`, allocated BEFORE this gate is asked and charged only as the
-///   fold or the transform writes into it, because a zeroed `Vec` is lazy
-///   pages the cgroup has not been billed for yet. That is why the create's
-///   anon charge read ~50 MiB at the gate on a shape whose accumulator is
-///   107 MiB. (`NZBFAST_CREATE_WS_LOCK=1` touches them up front; it is a
-///   bench knob and off by default, and the term is the same either way.)
+///   count]`, allocated BEFORE this gate is asked and **fully resident by the
+///   time it is**. This bullet claimed the opposite until 18 Sep 2026 - that a
+///   zeroed `Vec` is lazy pages the cgroup has not been billed for, and that
+///   the anon charge at the gate was therefore ~50 MiB on a shape whose
+///   accumulator is 102 MiB. Both halves were wrong. The INNER `vec![0u16;
+///   words]` is lazy, because `u16` is `IsZero` and that specialisation
+///   reaches `alloc_zeroed`; the OUTER `vec![inner; count]` is not, because
+///   `Vec<u16>` is not `IsZero`, so `from_elem` CLONES the inner vector
+///   `count - 1` times and every clone memcpys into every destination page.
+///   It is the same line the 17 Sep hit-wall round priced at 3.3 ms per row
+///   (`research/HIT-WALL-LINEAR-TERM-2026-09-17.md`), which is a measurement
+///   of those writes. Measured directly at the gate on 18 Sep: 107,347,968 B
+///   of accumulator against a 112,021,504 B anon RSS. [`headroom_net`]
+///   credits it back for that reason, and would stop crediting it on its own
+///   if that allocation were ever made lazy. (`NZBFAST_CREATE_WS_LOCK=1`
+///   claims to touch them up front; note it is `#[cfg(windows)]` - a
+///   `VirtualLock` loop - so it is a NO-OP on the only platform where a
+///   cgroup reading exists at all, and cannot be used as a control arm here.)
 /// - [`ntt_range::worker_arenas`] is what `create_ntt_window` already
 ///   subtracts from the transform's budget for exactly this reason, so the
 ///   crate has one name for "what the transform needs besides the corpus"
@@ -238,7 +278,92 @@ fn mapped_payload_fits(
 /// Not counted: the short-tail pad arena, which is bounded by the mapped
 /// path's own `pad_cap` and is a few MiB next to either term above.
 pub(super) fn create_map_headroom(bs: usize, first: usize, count: usize) -> u64 {
-    headroom_from(bs, count, ntt_range::worker_arenas(bs, first, count))
+    let arenas = ntt_range::worker_arenas(bs, first, count);
+    let gross = headroom_from(bs, count, arenas);
+    let accumulator = (count as u64).saturating_mul(bs as u64);
+    let own = if own_charge_credit_enabled() {
+        crate::mem::self_anon_rss()
+    } else {
+        None
+    };
+    let net = headroom_net(accumulator, arenas as u64, own);
+    if std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
+        // The halves NAMED, and the credit beside them: the two halves are
+        // separable only by the worker pin, so a reader of one total cannot
+        // tell which moved, and the credit is the term a reader of a moved
+        // boundary would otherwise attribute to the wrong half.
+        tracing::info!(
+            target: "repair-timing",
+            "create map headroom: net {net} B = accumulator {accumulator} B \
+             ({count} rows x {bs} B) + arenas {arenas} B - own-anon credit {} B \
+             (gross {gross}, own anon {})",
+            gross.saturating_sub(net),
+            own.map_or_else(|| "none".to_string(), |v| v.to_string()),
+        );
+    }
+    net
+}
+
+/// Whether the own-charge credit [`headroom_net`] applies is read once and is
+/// off only under `NZBFAST_PAR2GEN_MAP_OWN_CHARGE=0` - the A/B door the
+/// bracketing round drove, kept because it is the only way to walk one
+/// binary's boundary both ways on one fixture, which is what a composition
+/// change has to be shown by.
+fn own_charge_credit_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("NZBFAST_PAR2GEN_MAP_OWN_CHARGE")
+                .ok()
+                .as_deref(),
+            Some("0") | Some("off")
+        )
+    })
+}
+
+/// The headroom term LESS the part of it this create has already made
+/// resident, which [`crate::mem::cgroup_available_ram`] has already deducted.
+///
+/// **This is the double count the 16 Sep round recorded and the 18 Sep round
+/// measured.** The reading is `limit - (usage - cache)`, and `usage - cache`
+/// is the cgroup's unreclaimable charge AT THE INSTANT THE GATE IS ASKED. The
+/// gross term is what the create will hold BESIDES the corpus. Those two
+/// overlap by whatever of the term is resident already, and adding the whole
+/// term to a reading that has already deducted it charges the overlap twice -
+/// worth 102 MiB of a ~140 MiB overshoot on the measured shape, paid as a
+/// refused mapping on every containerised create in the band.
+///
+/// **The overlap is the ACCUMULATOR and not the arenas, which is why the
+/// credit is capped at the accumulator rather than taken whole.** The
+/// accumulator is `vec![vec![0u16; words]; count]` in `recovery_slices`,
+/// allocated before this gate is asked - and `Vec<u16>` is not `IsZero`, so
+/// `from_elem` CLONES the inner vector `count - 1` times and every clone
+/// writes every destination page. It is therefore fully resident and fully
+/// charged by the time the gate runs, whatever the older reasoning here said
+/// about a zeroed `Vec` being lazy pages. The arenas do not exist yet:
+/// `create_ntt_window` allocates them inside the attempt this gate admits, so
+/// their bytes are genuinely absent from the reading and genuinely have to be
+/// found.
+///
+/// So the credit is `min(own resident anon, accumulator)`, and both bounds
+/// are load-bearing:
+///
+/// - capping at the ACCUMULATOR keeps a co-tenant honest. A create inside a
+///   daemon's container shares the process with an index, a queue and every
+///   other allocation, and crediting its whole `RssAnon` would cancel the
+///   arena half too - which would readmit the 3.4x collapse this term was
+///   added to prevent.
+/// - capping at OWN ANON keeps the credit self-correcting. Make that
+///   allocation lazy - it costs 3.3 ms per row, so somebody will - and the
+///   accumulator stops being resident at the gate, `RssAnon` falls, and the
+///   term comes back without a line changing here.
+///
+/// `None` (every non-Linux platform, and a Linux that will not report it)
+/// takes no credit at all, so the host decision this term never reached is
+/// unreachable still.
+fn headroom_net(accumulator: u64, arenas: u64, own_anon: Option<u64>) -> u64 {
+    let gross = accumulator.saturating_add(arenas);
+    gross.saturating_sub(own_anon.unwrap_or(0).min(accumulator))
 }
 
 /// Pure half of [`create_map_headroom`]. Split out because the arena half is
@@ -271,7 +396,7 @@ fn map_mode() -> MapMode {
 
 #[cfg(test)]
 mod map_fit_tests {
-    use super::{create_map_headroom, headroom_from, mapped_payload_fits};
+    use super::{create_map_headroom, headroom_from, headroom_net, mapped_payload_fits};
 
     const GIB: u64 = 1 << 30;
 
@@ -393,6 +518,97 @@ mod map_fit_tests {
         assert!(sixteen > accumulator * 3, "{sixteen} vs {accumulator}");
     }
 
+    /// THE DOUBLE COUNT, which is what the 18 Sep round measured and the
+    /// 16 Sep round had only recorded as a likely mechanism.
+    ///
+    /// The measured shape, one 2 GiB member at 5% on eight workers: a
+    /// 107,347,968 B accumulator, 160,751,616 B of arenas, and a cgroup
+    /// unreclaimable charge of ~113 MiB at the instant the gate is asked -
+    /// which is the accumulator, because `vec![vec![0u16; words]; count]`
+    /// clones and every clone writes every page. The gross term adds that
+    /// accumulator to a reading that has already deducted it.
+    #[test]
+    fn the_headroom_term_credits_what_the_reading_has_already_deducted() {
+        let (accumulator, arenas) = (107_347_968u64, 160_751_616u64);
+        let gross = accumulator + arenas;
+        // No figure to credit against - every non-Linux platform - is the old
+        // term exactly. This is the property that keeps the host decision,
+        // every Mac and every Windows box unchanged.
+        assert_eq!(headroom_net(accumulator, arenas, None), gross);
+        // The measured charge credits the accumulator and NOT the arenas,
+        // which do not exist yet at the gate.
+        let own = 118_259_712; // 112.8 MiB, read off the 2,150 MiB cell.
+        assert_eq!(headroom_net(accumulator, arenas, Some(own)), arenas);
+        // CAPPED AT THE ACCUMULATOR: a co-tenant's anon must not cancel the
+        // arena half. A daemon holding an index in the same container can read
+        // an arbitrarily large RssAnon and still owes the arenas in full.
+        assert_eq!(headroom_net(accumulator, arenas, Some(8 << 30)), arenas);
+        assert_eq!(headroom_net(accumulator, arenas, Some(u64::MAX)), arenas);
+        // CAPPED AT OWN ANON, so the credit is self-correcting: make that
+        // allocation lazy and the term comes back on its own.
+        assert_eq!(headroom_net(accumulator, arenas, Some(0)), gross);
+        assert_eq!(
+            headroom_net(accumulator, arenas, Some(accumulator / 2)),
+            gross - accumulator / 2
+        );
+        // And the credit can never take the term below the arena half, at any
+        // shape, which is the one invariant a later tidy-up must not lose.
+        for own in [0, 1 << 20, 50 << 20, accumulator, 1 << 40, u64::MAX] {
+            assert!(
+                headroom_net(accumulator, arenas, Some(own)) >= arenas,
+                "own {own}"
+            );
+        }
+    }
+
+    /// What the credit BUYS, in the quantity the round measures: where the
+    /// admission boundary sits for the measured shape.
+    ///
+    /// 16 Sep bracketed the mapped route's crossover at (2,270, 2,280) MiB of
+    /// cgroup limit and measured the gross term putting the boundary at
+    /// ~2,417 - about 140 MiB past it, paid as 20-23% of wall at 2,300 and
+    /// 2,350 where the mapping was right. The credit moves the boundary down
+    /// by the accumulator.
+    #[test]
+    fn the_credit_moves_the_boundary_onto_the_measured_crossover() {
+        const MIB: u64 = 1 << 20;
+        let payload = 2 * 1024 * MIB;
+        let (accumulator, arenas) = (107_347_968u64, 160_751_616u64);
+        let own = 118_259_712;
+        // The reading at a given limit, as `cgroup_available_from` composes
+        // it: the limit less this create's own unreclaimable charge.
+        let avail = |limit_mib: u64| Some(limit_mib * MIB - own);
+        let gross = headroom_net(accumulator, arenas, None);
+        let net = headroom_net(accumulator, arenas, Some(own));
+        // GROSS: 2,300 and 2,350 refuse, which is the 20-23% the round paid.
+        assert!(!mapped_payload_fits(payload, gross, None, avail(2300)));
+        assert!(!mapped_payload_fits(payload, gross, None, avail(2350)));
+        // NET: the boundary lands at 2,314 MiB - `payload + arenas + own` -
+        // so 2,350 recovers and 2,300 does NOT. The credit is worth the
+        // accumulator, 102.4 MiB of a 140 MiB overshoot, and the residual it
+        // leaves is the ARENA half over-counting, which is the term the
+        // worker-pin contrast already attributes and this change does not
+        // touch. Reported rather than tuned: the crossover is an
+        // interpolation between two rungs on one box.
+        assert!(mapped_payload_fits(payload, net, None, avail(2350)));
+        assert!(mapped_payload_fits(payload, net, None, avail(2320)));
+        assert!(!mapped_payload_fits(payload, net, None, avail(2310)));
+        // The boundary moved by exactly the accumulator and no more.
+        let boundary = |h: u64| payload + h + own;
+        assert_eq!(boundary(gross) - boundary(net), accumulator);
+        assert!(boundary(net) / MIB == 2314, "{} MiB", boundary(net) / MIB);
+        // And the losing rungs below the crossover still refuse - 2,180 and
+        // 2,220 measured 18.5 s and 19.4 s mapped against the copied
+        // windows' 5.4.
+        assert!(!mapped_payload_fits(payload, net, None, avail(2180)));
+        assert!(!mapped_payload_fits(payload, net, None, avail(2220)));
+        // And the far cells the first round banked do not move: 1 and 2 GiB
+        // refuse (147 s and 39 s mapped), 3 GiB admits (4.3 s).
+        assert!(!mapped_payload_fits(payload, net, None, avail(1024)));
+        assert!(!mapped_payload_fits(payload, net, None, avail(2048)));
+        assert!(mapped_payload_fits(payload, net, None, avail(3072)));
+    }
+
     /// The term is made of the accumulator and the arenas, and BOTH move with
     /// the shape - a constant fitted to either measured shape is wrong at the
     /// other by an order.
@@ -413,7 +629,40 @@ mod map_fit_tests {
             create_map_headroom(64 << 10, 0, 0),
             create_map_headroom(64 << 10, 0, 0)
         );
-        assert!(create_map_headroom(64 << 10, 0, 1_638) >= 1_638 * (64 << 10));
-        assert!(create_map_headroom(768 << 10, 0, 1_638) >= 1_638 * (768 << 10));
+        // ...and the arena half is asserted through `headroom_net` with the
+        // credit PINNED, not through `create_map_headroom`, which passes it
+        // `mem::self_anon_rss()` - this process's own anonymous RSS, live, at
+        // call time. `net >= accumulator` on that answer reduces to
+        // `arenas >= min(own_anon, accumulator)`, which is a property of how
+        // big THIS process happens to be and not a property of the shape, so
+        // it holds in a small process and fails in a large one. It did:
+        // `one-process-loaded` went red in 11 of 11 runs on a6b911c3
+        // (20 Sep 2026) with 1,656 tests' worth of RSS already grown, while
+        // `one-process-light` and `one-process-heavy` passed on that same sha.
+        // Pinning the credit to `None` keeps the real `worker_arenas` in the
+        // assertion - which is the half this test is about - and removes the
+        // only term the box could move. NZBFAST_PAR2GEN_MAP_OWN_CHARGE=0 is
+        // NOT the fix: `own_charge_credit_enabled()` latches in a `OnceLock`,
+        // so in a one-process run whichever test calls first decides for the
+        // whole binary.
+        //
+        // MEASURED on the dev Mac (18 cores, so `worker_arenas` is 621 MiB
+        // for both shapes here), which names the failing line exactly:
+        //   bs=64 KiB   accumulator 102 MiB, arenas 621 MiB -> even a FULL
+        //               credit leaves 621 MiB, so that line held whatever
+        //               the RSS was and never was the red;
+        //   bs=768 KiB  accumulator 1228 MiB, arenas 621 MiB -> a full
+        //               credit leaves 621 MiB, under the accumulator, so
+        //               this line fails once own-anon RSS passes
+        //               1228 - 621 = 607 MiB.
+        // A 4 vCPU CI runner has SMALLER arenas, so its threshold is lower
+        // than 607 MiB again - which is why the loaded job failed 11 of 11
+        // rather than intermittently.
+        let arenas_only = |bs: usize| {
+            let arenas = super::ntt_range::worker_arenas(bs, 0, 1_638) as u64;
+            headroom_net(1_638u64 * bs as u64, arenas, None)
+        };
+        assert!(arenas_only(64 << 10) >= 1_638 * (64 << 10));
+        assert!(arenas_only(768 << 10) >= 1_638 * (768 << 10));
     }
 }

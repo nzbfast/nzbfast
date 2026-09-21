@@ -1880,7 +1880,7 @@ pub(super) fn watchlist_grab(
                     if let Some(j) = q.iter().find(|j| j.lock_ok().nzo_id == nzo) {
                         let mut g = j.lock_ok();
                         if g.priority == -3 {
-                            g.priority = 0;
+                            g.set_priority(0, "watchlist grab released the hold");
                             g.paused = false;
                         }
                     }

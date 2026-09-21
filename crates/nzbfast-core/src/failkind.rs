@@ -35,7 +35,7 @@ use nzbkit::fail::FailCode;
 ///
 /// Re-derivable from `fail_message`, and since TODO 307 item 1's
 /// job-level carry also STATED by the producer and stored on the job as
-/// [`Job::fail_code`](crate::serve::job::Job) - see [`job_kind`] for
+/// `Job::fail_code` - see [`job_kind`] for
 /// which of the two answers, and why the older reading of this paragraph
 /// ("a field would be this same match written one layer earlier plus a
 /// second thing to keep in step with the sentence") was half right: it
@@ -143,7 +143,7 @@ pub fn fail_kind_token(k: FailKind) -> &'static str {
 /// [`fail_kind_token`] read back, for the persisted job record.
 ///
 /// TODO 307 item 1's job-level carry needs a wire spelling for
-/// [`Job::fail_code`](crate::serve::job::Job), and this reuses the one
+/// `Job::fail_code`, and this reuses the one
 /// `history_json` has already published for years rather than minting a
 /// second vocabulary for the same six values - two spellings of one enum
 /// is a table that goes stale the first time a kind is added.
@@ -344,7 +344,7 @@ pub fn fail_kind_of(code: Option<FailCode>, msg: &str) -> FailKind {
 /// **THE DESIGN JUDGEMENT, stated rather than smuggled in.** The pool's
 /// [`FailCode`] could not serve here and never will: `nzbkit::fail`'s
 /// own header forbids that type growing into an application
-/// classification, and [`kind_of_code`] records the measurement behind
+/// classification, and `kind_of_code` records the measurement behind
 /// it - all four of its variants map to [`FailKind::Transport`], because
 /// `FetchOutcome::Failed` is one article's fetch ending without a body
 /// and NOT ONE of its causes is evidence about the post. A job's

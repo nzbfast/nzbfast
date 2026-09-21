@@ -29,6 +29,65 @@
 //!   IFSC MD5 and CRC32.
 //! - Packets are **duplicated across volumes** (every .volNN+MM file repeats
 //!   the critical packets), so the parser dedupes by packet MD5.
+//!
+//! A set, written and then read back the way a downloader reads one.
+//! [`crate::par2gen`] is the creating direction; everything after
+//! `parse` here is verification only.
+//!
+//! ```
+//! use nzbkit_base::{par2, par2gen};
+//! use std::fs;
+//!
+//! // A PAR2 set describes files on disk, so the creator needs some.
+//! let unique = std::time::SystemTime::now()
+//!     .duration_since(std::time::UNIX_EPOCH)
+//!     .unwrap()
+//!     .as_nanos();
+//! let dir = std::env::temp_dir().join(format!("nzbkit-par2-doc-{unique}"));
+//! fs::create_dir_all(&dir).unwrap();
+//! let payload = vec![7u8; 40_000];
+//! fs::write(dir.join("demo.bin"), &payload).unwrap();
+//!
+//! // Redundancy 0 is an INDEX-ONLY set: it names every member and
+//! // carries their block checksums, with no recovery slices. Raise it
+//! // to get `.volNN+MM.par2` volumes beside the index.
+//! let members = vec![par2gen::Member {
+//!     name: "demo.bin".to_string(),
+//!     path: dir.join("demo.bin"),
+//! }];
+//! let spec = par2gen::Par2Spec { redundancy_pct: 0, block_size: Some(4096) };
+//! let written = par2gen::create_into(&dir, &members, "demo", &spec).unwrap();
+//! assert_eq!(written, ["demo.par2"]);
+//!
+//! // Parse takes the packet bytes of every recovery file you have; one
+//! // index is enough, because every volume repeats the critical packets.
+//! let bytes = fs::read(dir.join("demo.par2")).unwrap();
+//! let set = par2::Par2Set::parse(&[&bytes]).unwrap();
+//! assert_eq!(set.block_size, 4096);
+//! assert_eq!(set.files.len(), 1);
+//! assert_eq!(set.files[0].name, "demo.bin");
+//! assert_eq!(set.files[0].length, 40_000);
+//! // 40000 bytes over 4096-byte blocks is 10 blocks, the last padded.
+//! assert_eq!(set.files[0].blocks.len(), 10);
+//!
+//! // Verify the bytes against the descriptor. Per-block flags are what
+//! // makes verification incremental: a block is judged as it lands.
+//! let v = par2::verify_file(&set.files[0], set.block_size, &payload);
+//! assert!(v.md5_ok && v.md5_16k_ok);
+//! assert!(v.blocks.iter().all(|&ok| ok));
+//!
+//! // Damage one block and only that block fails.
+//! let mut damaged = payload.clone();
+//! damaged[5000] ^= 0xff;
+//! let v = par2::verify_file(&set.files[0], set.block_size, &damaged);
+//! assert!(!v.md5_ok);
+//! assert_eq!(v.blocks.iter().filter(|&&ok| !ok).count(), 1);
+//! assert!(!v.blocks[1]);
+//!
+//! fs::remove_dir_all(&dir).unwrap();
+//! ```
+
+#![warn(missing_docs)]
 
 use crate::md5fast::{Digest, Md5};
 use std::collections::HashMap;
@@ -257,8 +316,15 @@ pub fn md5_16k_of_head(head: &[u8], file_length: u64) -> Option<[u8; 16]> {
     let want = file_length.min(16384) as usize;
     (want > 0 && head.len() >= want).then(|| Md5::digest(&head[..want]).into())
 }
+/// Packet type at offset 48 of the Main packet, which declares the
+/// block size and the recovery set's membership. A set with no valid
+/// Main packet cannot be used at all.
 pub const TYPE_MAIN: &[u8; 16] = b"PAR 2.0\0Main\0\0\0\0";
+/// Packet type of a File Description packet: one file's id, length,
+/// whole-file MD5, 16 KiB-prefix MD5 and name.
 pub const TYPE_FILEDESC: &[u8; 16] = b"PAR 2.0\0FileDesc";
+/// Packet type of an Input File Slice Checksum packet: the per-block
+/// MD5 and CRC32 pairs that make block-by-block verification possible.
 pub const TYPE_IFSC: &[u8; 16] = b"PAR 2.0\0IFSC\0\0\0\0";
 pub(crate) const TYPE_RECVSLIC: &[u8; 16] = b"PAR 2.0\0RecvSlic";
 /// The optional Unicode Filename packet (PAR2 spec 2.0). MultiPar and
@@ -282,6 +348,10 @@ const HEADER_LEN: u64 = 64;
 /// MD5 of the first this-many bytes of a file = the FileDesc "hash16k" field.
 pub(crate) const HASH16K_LEN: usize = 16384;
 
+/// Why a set of PAR2 inputs could not be turned into one usable
+/// recovery set. Every variant is a refusal to guess: the block
+/// geometry decides what every checksum and every repair plan means, so
+/// a set that does not state it once and consistently is not used.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Par2Error {
     /// No valid Main packet found in any input - we can't even know the
@@ -309,8 +379,21 @@ pub enum Par2Error {
 /// One source file described by the recovery set.
 #[derive(Debug, Clone)]
 pub struct Par2File {
+    /// The spec's File ID: the MD5 of the file's 16 KiB-prefix hash,
+    /// length and name taken together, as the FileDesc packet records
+    /// it. This is the identity the Main packet's membership list and
+    /// every other packet use to refer to the file, and it is what the
+    /// global slice-index order sorts on.
     pub file_id: [u8; 16],
+    /// Name as the FileDesc packet stores it, or as a Unicode Filename
+    /// packet overrode it. Poster-supplied and untrusted: it may carry
+    /// path separators or traversal, so it is not safe to join to a
+    /// directory without the caller's own sanitising.
     pub name: String,
+    /// Declared length of the file in bytes. This is what defines the
+    /// block grid: the file occupies `ceil(length / block_size)` slices
+    /// of the global index space, and the last one is zero-padded for
+    /// its checksums.
     pub length: u64,
     /// MD5 of the entire file.
     pub md5: [u8; 16],
@@ -318,7 +401,7 @@ pub struct Par2File {
     /// short-file case is NOT zero-padded).
     pub md5_16k: [u8; 16],
     /// Per-block checksums, in file order, ALWAYS spanning the declared
-    /// length when non-empty - see [`fit_ifsc`], which reconciles the
+    /// length when non-empty - see `fit_ifsc`, which reconciles the
     /// IFSC packet to the grid the FileDesc declares. Empty when no IFSC
     /// packet for this file survived parsing; entries a short packet
     /// never described are [`BlockCheck::UNPROVEN`].
@@ -343,6 +426,9 @@ pub(crate) use verify::{ifsc_covers_every_block, verify_blocks_path_or_streaming
 /// Parsed metadata of one PAR2 recovery set.
 #[derive(Debug, Clone)]
 pub struct Par2Set {
+    /// The 16-byte Recovery Set ID every packet in the set carries at
+    /// offset 32. Packets whose id differs belong to a different set and
+    /// are not part of this one, however they arrived.
     pub recovery_set_id: [u8; 16],
     /// Slice/block size in bytes (multiple of 4 per spec).
     pub block_size: u64,
@@ -993,7 +1079,7 @@ impl Par2Set {
     ///
     /// Within the chosen set, two valid packets that CONTRADICT each
     /// other resolve to nothing rather than to whichever came first -
-    /// see [`Claim`]. A contradicted Main is fatal
+    /// see `Claim`. A contradicted Main is fatal
     /// ([`Par2Error::ContradictoryPackets`]), because the block geometry
     /// is what every checksum and every repair plan is derived from; a
     /// contradicted FileDesc drops just that file, exactly as a MISSING

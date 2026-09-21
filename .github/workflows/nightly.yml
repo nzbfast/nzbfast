@@ -2308,6 +2308,45 @@ jobs:
       # all-interfaces listener, which on Windows raises the Defender
       # Firewall dialog and a hosted runner has nobody to click it. Same
       # rationale as windows-daemon above.
+      # THE ROSTER, and THIS is the job it was written for: the 5 Sep
+      # 2026 red that exposed the gap was this job's, in
+      # `gf16::tests::xor_mul_multi_matches_single_source_folds`, and the
+      # whole diagnosis turned on whether the runner had GFNI - which
+      # this log could not say. `gf16`'s tests FORCE every SIMD kernel
+      # arm the part can run so the test name pins which kernel failed,
+      # and each forced arm skips IN SILENCE when the probe is false, so
+      # `ok` meant five kernels or one indistinguishably
+      # (research/GF16-AVX2-MULTI-5SEP-2026-09-18.md).
+      #
+      # `windows-latest` rotates across cpu models, which is exactly why
+      # a per-run reading is worth having here rather than a fact looked
+      # up once: the same workflow on two nights can exercise different
+      # kernels. That rotation is also what made the 5 Sep defect read as
+      # flaky when it was deterministic per cpu model.
+      #
+      # It is INSTRUMENTATION and NOT a gate - a `SKIPPED` row is a fact
+      # about the runner. The one thing it refuses is its own blindness:
+      # libtest exits 0 on a filter matching nothing, so a run carrying
+      # no roster line means the test name stopped resolving.
+      #
+      # The `--workspace --exclude` list is the build step's, verbatim
+      # and deliberately: a narrower `-p nzbkit-base` resolves a
+      # different feature set and would rebuild. Every other binary runs
+      # zero tests under this filter and costs a process start.
+      - name: show which gf16 kernel arms this runner exercised
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=$(cargo test --locked --workspace --exclude rars --exclude tiny_http \
+            --exclude nzbfast-ffi --lib --bins \
+            -- --exact --nocapture gf16::tests::gf16_kernel_arm_roster 2>&1)
+          echo "$out"
+          if ! grep -q "gf16-kernel-roster:" <<<"$out"; then
+            echo "::error::the roster printed no line - the test name no longer resolves."
+            echo "::error::libtest exits 0 on a filter that matches nothing, so this step checks."
+            exit 1
+          fi
       - name: every first-party unit binary, one process each
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
@@ -2319,7 +2358,79 @@ jobs:
       - name: how to read a red run
         if: ${{ failure() && steps.build.outcome == 'success' }}
         run: |
-          echo "::error title=A Windows unit binary failed with its tests sharing one process::If windows-unit is green on this same commit then no individual test is broken IN ISOLATION - but this step runs libtest PARALLEL (no --test-threads), so there are TWO shapes and only one has a polluter. (a) POLLUTION: an earlier test left process-global state that this one read. (b) A CONCURRENT RACE on a process-global: two tests on different THREADS raced a counter, which '-- --test-threads=1' structurally CANNOT reproduce - so do not narrow with it and do not add it to make the red go away. Do NOT make the victim order-independent either: find the cause. 'tools/pollution-bisect.py -p <crate> <the failing test>' names the polluter for (a) in minutes and needs a Windows box to do it on, and it is meaningless on a FLAKY victim - it refuses one that fails alone, and otherwise converges on an innocent neighbour with the confidence of a real answer. A third shape, a test that depends on a wall-clock duration it never sets, needs LOAD rather than neighbours and is 'one-process-loaded' above."
+          echo "::error title=A Windows unit binary failed with its tests sharing one process::If windows-unit is green on this same commit then no individual test is broken IN ISOLATION - but this step runs libtest PARALLEL (no --test-threads), so there are TWO shapes and only one has a polluter. (a) POLLUTION: an earlier test left process-global state that this one read. (b) A CONCURRENT RACE on a process-global: two tests on different THREADS raced a counter, which '-- --test-threads=1' structurally CANNOT reproduce - so do not narrow with it and do not add it to make the red go away. Do NOT make the victim order-independent either: find the cause. 'tools/pollution-bisect.py -p <crate> <the failing test>' names the polluter for (a) in minutes and needs a Windows box to do it on, and it is meaningless on a FLAKY victim - it refuses one that fails alone, and otherwise converges on an innocent neighbour with the confidence of a real answer. A third shape, a test that depends on a wall-clock duration it never sets, needs LOAD rather than neighbours and is 'one-process-loaded' above. (d) A PLATFORM SEMANTIC no other box has - mandatory file locks (LockFileEx returns ERROR_LOCK_VIOLATION 33 where POSIX flock is advisory and the same read just works), path length, case folding, handle lifetime. Reproduce it by reading the API CONTRACT, not by loading the box: a dilation campaign or a pollution bisect will find nothing, forever. That is what 'spill_takes_the_next_name_when_its_own_is_held' was on 15 Sep 2026. (e) A WRONG ANSWER from a test whose fixture is DETERMINISTIC (a fixed seed, no clock, no concurrency of its own) is none of the four above: neither a margin nor a polluted global explains it. ASK WHAT THE WRONG ANSWER IS, not merely that it is wrong - a deterministic fixture makes the expected value computable anywhere, including by hand on another architecture, and the shape of the difference names the mechanism before any box is booked. Do NOT reach first for a stray write from a parallel neighbour: that was the standing advice here until 18 Sep 2026 and it was REFUTED on the one recorded instance. 'gf16::tests::xor_mul_multi_matches_single_source_folds' on 5 Sep 2026 logged 'got' == the UNTOUCHED input vector, which is a zero multiplier table and nothing else; the cause was a caller building tables the dispatch had elected not to populate, the runner's cpu model was the variable, and an AddressSanitizer campaign would have come back clean for a day. The recomputation cost seconds: research/GF16-AVX2-MULTI-5SEP-2026-09-18.md. THIS JOB NOW PRINTS WHICH SIMD KERNEL ARMS THE RUNNER EXERCISED (the 'gf16-kernel-roster:' lines in the step above), which is the fact that diagnosis needed and this log could not give it."
+
+      # =================================================================
+      # THE ONLY PLACE ANY .ps1 IN THIS REPOSITORY RUNS UNDER WINDOWS
+      # POWERSHELL 5.1, added 18 Sep 2026. Before it, none ever had,
+      # anywhere, by anything: the sole `.ps1` execution in CI was
+      # `rig-selftest.yml`'s `plib-selftest` job, which is a MACOS runner
+      # under pwsh 7, and `tools/ps1-parse-gate.py` parses the roster
+      # under pwsh 7 on ubuntu. Every rig on the fleet launches
+      # `powershell.exe`, which is 5.1, so the dialect that actually runs
+      # these drivers was spoken by no job in the repository.
+      #
+      # WHY HERE AND NOT A JOB OF ITS OWN. Six `windows-latest` jobs
+      # already exist (four in ci-private.yml, two here) and a Windows
+      # runner bills at 2x on a private repo, so a seventh for ~40
+      # seconds of work would be the most expensive possible way to run
+      # it. Both steps need nothing but the checkout: the selftest is
+      # hermetic (temp `$env:USERPROFILE`, stubbed CPU counter and
+      # process table, collapsed sleeps) and the parse is a parse.
+      #
+      # WHY NIGHTLY AND NOT PER PUSH, which is the judgement call and is
+      # about the TRIGGER rather than the cost. ci-private's four Windows
+      # jobs are all gated on `needs.changes.outputs.build == 'true'`,
+      # and that classifier holds `research/*` INERT - so a push that
+      # edits nothing but a harness driver, which is precisely the push
+      # this arm is for, skips every one of them. They would fire on
+      # Rust pushes that touch no PowerShell at all and stay silent on
+      # the one that matters, which is the wrong trigger in both
+      # directions. Worse, `windows-build` is a concurrency-throttled
+      # gate on the release path that six `windows-unit` shards hang
+      # off: a plib failure there would cost the commit its entire
+      # Windows TEST verdict, for a finding about a bench driver. This
+      # job runs unconditionally every night, so a harness-only push IS
+      # covered - a night later, which is the right latency for a class
+      # that bites when somebody starts a round on a rig, not when they
+      # push.
+      #
+      # AND THE PER-PUSH HALF IS NOT LOST. `size-gate.yml` carries
+      # `**/*.ps1` in its `paths:` and parses all 340 files under pwsh 7
+      # on every push, which refuses every ordinary typo, unbalanced
+      # brace and merge-resolution join - the class the gate was written
+      # for and the overwhelming majority of what breaks a driver. What
+      # only 5.1 can see is the DIALECT delta, and that is what arrives
+      # here.
+      #
+      # LAST IN THE JOB AND `!cancelled()`, both deliberate. Last, so a
+      # red here cannot mask the one-process suite this job exists for;
+      # `!cancelled()`, so a red in that suite cannot mask this. The
+      # exposure that leaves is a cap kill, which takes both - and
+      # `tools/ci-verdict.py` reports a cap kill as a red naming the job
+      # rather than as a cancelled row with no verdict.
+      # =================================================================
+      - name: the PowerShell harness selftest, under Windows PowerShell 5.1
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          py=python3; command -v $py >/dev/null 2>&1 || py=python
+          $py tools/rig-selftest-gate.py --run-plib-51
+      # The whole roster, under the parser the rigs use. The gate is the
+      # same one `size-gate.yml` runs per push; `--shell` points it at
+      # the other dialect and `--require-major 5` refuses an image that
+      # repointed `powershell.exe` at PowerShell 7, which would hand
+      # this step a silent second copy of the ubuntu run. A shape list
+      # of known 7-only grammar was the alternative and was refused: the
+      # oracle costs about the same and is right by construction, where
+      # a list is wrong the first time somebody writes a shape nobody
+      # thought of. See THE 5.1 ARM in that script's header.
+      - name: every committed .ps1 parses under Windows PowerShell 5.1
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          py=python3; command -v $py >/dev/null 2>&1 || py=python
+          $py tools/ps1-parse-gate.py --shell powershell.exe --require-major 5
 
   # TODO 82: the long-run soak. One daemon, a mixed queue (store RAR5,
   # compressed RAR5, 7z, PAR2 repair, password) driven round and round
@@ -3363,6 +3474,114 @@ jobs:
   # deny.toml at the repo root. ci-private runs the same check on every
   # push; the nightly run is what catches a NEW advisory published
   # against an unchanged tree.
+  # THE PUBLIC DOWNLOAD PAGE AND THE UPDATE CHANNEL, ON A CLOCK.
+  #
+  # 18 Sep 2026: every download button on all sixteen locale pages 404'd
+  # for thirteen hours, and so did every installed daemon's update check,
+  # because `parfast-v1.6.0` was published into this same repo ten minutes
+  # after `v1.6.0`. parfast had just left beta, so it carried no
+  # `--prerelease`, and GitHub moved `/releases/latest` onto it.
+  # `/releases/latest` is per-REPO and knows nothing about products.
+  #
+  # `check-site-version.sh`'s live mode would have caught it in one
+  # second - its first assertion is "latest resolves to v$VERSION". It is
+  # the LAST STEP OF publish-release, it passed, and then the thing that
+  # broke it happened afterwards. Nothing re-ran it. So this is not a new
+  # assertion, it is the clock the existing one was missing, and the
+  # window it leaves is a day rather than however long it takes somebody
+  # to notice a dead download page.
+  #
+  # `--published` rather than the bare live mode: it takes the version
+  # from whatever `latest` currently resolves to, so it refuses a
+  # non-nzbfast tag BY NAME and does not red during the legitimate hours
+  # between a version bump landing on main and that release going out.
+  #
+  # Seconds and a few HTTP requests, no build, no toolchain - so it runs
+  # first and its verdict is never buried behind a two-hour matrix.
+  public-download-reachable:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The selftest first, every run: this job's whole value is that it
+      # REFUSES, and it is cheap enough that proving it still can costs
+      # nothing. Same division as everywhere else here - CI proves the
+      # gate works, then the gate proves the world is clean.
+      - name: selftest
+        run: tools/check-site-version.sh --selftest
+      - name: the published site and the update channel
+        run: tools/check-site-version.sh --published
+
+  # ---------------------------------------------------------------------
+  # THE SABnzbd ROSTER, RE-DERIVED AGAINST THE REAL UPSTREAM FILE.
+  #
+  # `tools/sab-parser-gate.py` holds a transcription of SABnzbd's
+  # `newsunpack.py::par2cmdline_verify` - the chain of `startswith` tests
+  # that is the whole of what SAB learns from a par2 repair - plus a
+  # roster of 24 branches, each carrying SAB's OWN spelling of its
+  # predicate. `--rederive` fetches the pinned upstream file, checks its
+  # sha256 against the pin in the script, and then asserts every one of
+  # those 24 spellings is still in the real function text.
+  #
+  # IT RAN NOWHERE UNTIL 18 Sep 2026, and the gate's header said so as a
+  # stated limit: it needs the upstream file, so a build-free offline job
+  # in size-gate.yml cannot host it. Nightly can - this is seconds and
+  # four HTTP requests' worth of one file - and nightly is the right
+  # cadence for it, because what it guards moves on somebody else's
+  # schedule, not on ours.
+  #
+  # WHAT IT ACTUALLY BUYS, stated plainly, because the pinned URL names a
+  # TAG and a tag's content does not change: this is not a watch on
+  # upstream. It is a watch on OUR ROSTER. The one edit the gate's whole
+  # design refuses is somebody quieting a red by rewriting a predicate,
+  # and a roster that has drifted from the source it claims to transcribe
+  # is exactly that edit's fingerprint. `--rederive` is the only thing in
+  # the repository that can see it, and until today nothing ran it, so
+  # the defence existed on paper. It is also what a lane BUMPING the pin
+  # runs, and the failure text says so at the site.
+  #
+  # A FETCH FAILURE IS A RED, deliberately, and not a skip. CLAUDE.md's
+  # suite-wide rule is that failing to find is failing: a gate that
+  # cannot reach its subject and says OK is the shape of every
+  # rubber-stamp incident in this repository's history. `--retry` covers
+  # a blip; a run that still cannot get the file has not checked
+  # anything and must not report that it did. It is a scheduled job, so
+  # the cost of that strictness is one re-run.
+  #
+  # NOT A STEP INSIDE `public-download-reachable` ABOVE, though it is the
+  # same shape of cheap network job: that job's name is a claim about the
+  # download page, and a red in it should mean that. A separate job
+  # names its own subject, and nightly's jobs are derived from this file
+  # by tools/ci-verdict.py rather than from a hand roster, so a new one
+  # here costs no edit there.
+  # ---------------------------------------------------------------------
+  sab-roster-rederive:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The selftest first, for the reason the job above gives: this
+      # job's whole value is that it can REFUSE, and proving it still
+      # can costs three seconds.
+      - name: selftest
+        run: tools/sab-parser-gate.py --selftest
+      - name: fetch the pinned SABnzbd newsunpack.py
+        run: |
+          set -euo pipefail
+          # The URL is read OUT of the gate rather than copied here:
+          # a second copy of the pin is a second thing to forget when
+          # the tag moves, and this one would fail in the direction
+          # that reports OK about the wrong file.
+          url=$(sed -n 's/^SAB_URL = "\(.*\)"$/\1/p' tools/sab-parser-gate.py)
+          [ -n "$url" ] || { echo "::error::SAB_URL is no longer a plain assignment in tools/sab-parser-gate.py"; exit 1; }
+          echo "$url"
+          curl -fsSL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/newsunpack.py" "$url"
+          wc -c "$RUNNER_TEMP/newsunpack.py"
+      - name: re-derive the roster against it
+        run: tools/sab-parser-gate.py --rederive "$RUNNER_TEMP/newsunpack.py"
+
   deny:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest

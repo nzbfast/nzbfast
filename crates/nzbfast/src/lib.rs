@@ -81,9 +81,13 @@ mod nettools;
 // Outbound HTTP for third-party URLs - the SSRF guard, the shared agents
 // and URL credential redaction. Hoisted out of serve/ by TODO 276 item 3.
 pub(crate) use nzbfast_core::netfetch;
-// TODO 297 (issue #57): the nzbindex.com JSON API, a second search
-// source dispatched to from indexers.rs on `newznab::SourceKind`.
-pub(crate) use nzbfast_core::notify;
+// `nzbfast_core::notify` used to be re-imported here for
+// `notify::transport_brief`, which `nettools` reached up for to keep a
+// webhook URL out of a printed error. That rule is
+// `netfetch::error_brief` now, and `Refusal`'s own Display, so the bin
+// names nothing in `notify` - see the ureq 3 port. The TODO 297
+// comment that stood here belonged to `mod nzbindex;`, which went to
+// nzbfast-meta and carries it at its own declaration.
 // Named by `serve/daemon_api_tests.rs` alone since lane 3 moved the api
 // layer out - a `use` can be unused where a `mod` never could.
 #[cfg(all(test, feature = "indexer"))]

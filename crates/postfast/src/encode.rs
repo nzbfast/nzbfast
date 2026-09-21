@@ -12,7 +12,7 @@
 //! shape, as the second NZB emitter in [`crate::nzb`].
 //!
 //! What keeps a second encoder from drifting into a second DIALECT is
-//! [`tests::the_neutral_frame_is_byte_identical_to_the_engines_own`]:
+//! `tests::the_neutral_frame_is_byte_identical_to_the_engines_own`:
 //! at the neutral selection this file's output is compared
 //! byte-for-byte against `nzbkit::yenc::encode` over a payload covering
 //! all 256 byte values, single-part and multi-part. So the knobs are

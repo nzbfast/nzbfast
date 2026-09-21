@@ -25,8 +25,10 @@ updates:
     # stalls were `dependency_file_not_resolvable` - a manifest FEATURE
     # the new version renamed or dropped, which Dependabot cannot bump
     # around and reports as a whole-run error rather than a skipped
-    # crate. Neither was ever in an ignore block; they are now, each
-    # with the exit condition that removes it again.
+    # crate. Neither was ever in an ignore block; each went in with the
+    # exit condition that removes it again. The ureq one is GONE as of
+    # TODO 326 (20 Sep 2026) - the tray is on ureq 3 - which leaves md-5
+    # below as the only entry, and its exit condition is upstream.
     ignore:
       # md-5 0.11.0 (27 Mar 2026) dropped the `asm` feature entirely,
       # and crates/nzbkit-base asks for it on x86. NOT a bump to take:
@@ -37,15 +39,6 @@ updates:
       # autodetects, not a version number. 0.10.x bumps still flow.
       - dependency-name: "md-5"
         versions: [">=0.11"]
-      # ureq 3.4.0 (8 Aug 2026) renamed the `tls` feature to `_tls`, and
-      # crates/nzbtray is on `version = "2", features = ["tls"]`. Unlike
-      # md-5 this one SHOULD be taken - it is just not the one-line
-      # manifest edit the rename makes it look like: 3.x is a different
-      # API, and the tray wires its own rustls loopback verifier through
-      # it (`loopback_tls`), on a Windows-only crate no host CI job
-      # runs. Exit condition: that port. 2.x bumps still flow.
-      - dependency-name: "ureq"
-        versions: [">=3"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

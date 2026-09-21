@@ -93,6 +93,13 @@ pub enum Shell {
     Dashboard,
     #[cfg(feature = "indexer")]
     Wall,
+    /// TODO 19 (public request #4): the sign-in page. A shell like the
+    /// other two rather than a `respond_page` string, so it gets the
+    /// same design tokens, the same `__NZBFAST_LOCALE__` stamp and the
+    /// same ETag-and-cache treatment - a login form that arrives
+    /// untranslated and unthemed would be the one page in the product
+    /// that looks like somebody else's.
+    Login,
 }
 
 /// EVERY input that can change a served shell page.
@@ -125,6 +132,18 @@ struct ShellKey {
     /// /wall is still worth a nav pill: it is the pull-search surface
     /// too, and hiding it would take the commercial indexers with it.
     indexers: usize,
+    /// TODO 19: is there a login form in front of this daemon?
+    ///
+    /// Read by the WALL alone, which is behind the same redirect as `/`
+    /// and had no sign-out control at all until 21 Sep 2026. It is
+    /// stamped rather than fetched because that page has no Settings
+    /// panel: the answer can only change somewhere else, which is a
+    /// reload away, so a per-load request would buy nothing and a pill
+    /// that appears after the first paint is worse than one that does
+    /// not move. The DASHBOARD keeps reading it from the `get_config`
+    /// it already makes, so switching the login on there reveals its
+    /// own pill without a reload.
+    web_login: bool,
 }
 
 impl ShellKey {
@@ -143,6 +162,7 @@ impl ShellKey {
             index_on: !d.indexer_off(),
             spots: d.spot_enabled.load(Ordering::Relaxed),
             indexers: d.enabled_indexers(),
+            web_login: nzbfast_daemon::websession::login_on(d),
         }
     }
 
@@ -152,6 +172,7 @@ impl ShellKey {
             Shell::Dashboard => ("dashboard.html", DASHBOARD_HTML),
             #[cfg(feature = "indexer")]
             Shell::Wall => ("wall.html", WALL_HTML),
+            Shell::Login => ("login.html", LOGIN_HTML),
         };
         // DEV-ONLY: with NZBFAST_DEV_WEB_DIR exported this re-reads the
         // page from disk on every request, so an edit is a reload. Unset
@@ -162,6 +183,7 @@ impl ShellKey {
             .replace("__NZBFAST_INDEX__", bit(self.index_on))
             .replace("__NZBFAST_SPOTS__", bit(self.spots))
             .replace("__NZBFAST_INDEXERS__", &self.indexers.to_string())
+            .replace("__NZBFAST_WEBLOGIN__", bit(self.web_login))
             .replace("__NZBFAST_LOCALE__", &self.locale)
     }
 }
@@ -179,16 +201,17 @@ struct ShellPage {
 
 /// Built shell pages, most recently served first.
 ///
-/// Bounded at four because a key only moves when a SETTING moves: two
-/// pages times the handful of (locale, indexer state) combinations one
-/// daemon ever serves, and a fifth entry would mean someone is flipping
-/// settings while the browser reloads. Only the COMPRESSED form is
+/// Bounded at six because a key only moves when a SETTING moves: THREE
+/// pages (TODO 19 added the login form) times the handful of (locale,
+/// indexer state) combinations one daemon ever serves, and a seventh
+/// entry would mean someone is flipping settings while the browser
+/// reloads. Only the COMPRESSED form is
 /// kept - 380 KB for the dashboard rather than the 1.2 MB of the page
 /// itself - because the identity client that has to pay a
 /// decompression for that is rare, and the resident bytes are paid by
 /// everyone.
 static SHELL_CACHE: Mutex<Vec<Arc<ShellPage>>> = Mutex::new(Vec::new());
-const SHELL_CACHE_MAX: usize = 4;
+const SHELL_CACHE_MAX: usize = 6;
 
 /// Serve the dashboard or the wall.
 pub fn respond_shell(req: tiny_http::Request, d: &Daemon, page: Shell) {
@@ -405,6 +428,7 @@ mod tests {
             index_on: true,
             spots: true,
             indexers: 2,
+            web_login: true,
         }
     }
 
@@ -418,17 +442,19 @@ mod tests {
     /// rather than by serving one visitor another visitor's daemon.
     #[test]
     fn every_shell_substitution_is_a_key_field() {
-        // The tokens and sound placeholders are substituted from
-        // compiled-in files, so they are constant for the life of the
-        // binary and need no key field; the other four are `ShellKey`'s
-        // state fields.
-        const KEYED: [&str; 6] = [
+        // The tokens, sound and sign-out placeholders are substituted
+        // from compiled-in files, so they are constant for the life of
+        // the binary and need no key field; the other five are
+        // `ShellKey`'s state fields.
+        const KEYED: [&str; 8] = [
             "__NZBFAST_UI_TOKENS__",
             "__NZBFAST_UI_SOUND__",
+            "__NZBFAST_UI_SIGNOUT__",
             "__NZBFAST_INDEX__",
             "__NZBFAST_SPOTS__",
             "__NZBFAST_INDEXERS__",
             "__NZBFAST_LOCALE__",
+            "__NZBFAST_WEBLOGIN__",
         ];
         #[cfg_attr(not(feature = "indexer"), expect(unused_mut))]
         let mut pages: Vec<(&str, &str)> = vec![("dashboard", DASHBOARD_HTML)];
@@ -498,6 +524,28 @@ mod tests {
                 fnv_etag(v.render().as_bytes()),
                 fnv_etag(rendered.as_bytes()),
                 "{name} does not change the validator"
+            );
+        }
+        // `web_login` is NOT in that list, and leaving it out silently
+        // would be exactly the hole this test exists to close: it is
+        // read by the WALL alone (TODO 19), so flipping it against a
+        // DASHBOARD render moves nothing and the assertion above would
+        // fail for the right reason on the wrong page. Checked here
+        // against its own page instead, so the field still has to
+        // matter.
+        #[cfg(feature = "indexer")]
+        {
+            let wall = key(Shell::Wall).render();
+            let off = ShellKey {
+                web_login: false,
+                ..key(Shell::Wall)
+            }
+            .render();
+            assert_ne!(off, wall, "web_login does not change the wall");
+            assert_ne!(
+                fnv_etag(off.as_bytes()),
+                fnv_etag(wall.as_bytes()),
+                "web_login does not change the validator"
             );
         }
     }

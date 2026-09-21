@@ -1,3 +1,4 @@
+use super::address_filters::{self, Direction, X86Format, X86Opcodes};
 use super::filters::{self, DeltaErrorMessages, FilterOp};
 use super::{huffman, Error, Result};
 use std::io::Read;
@@ -482,7 +483,7 @@ pub fn decode_literal_only(
     algorithm_version: u8,
     output_size: usize,
 ) -> Result<Vec<u8>> {
-    let mut decoder = Unpack50Decoder::new();
+    let mut decoder = Rar50Decoder::new();
     decoder.decode_member(
         input,
         algorithm_version,
@@ -493,7 +494,7 @@ pub fn decode_literal_only(
 }
 
 pub fn decode_lz(input: &[u8], algorithm_version: u8, output_size: usize) -> Result<Vec<u8>> {
-    let mut decoder = Unpack50Decoder::new();
+    let mut decoder = Rar50Decoder::new();
     decoder.decode_member(input, algorithm_version, output_size, false, DecodeMode::Lz)
 }
 
@@ -801,15 +802,27 @@ fn encode_filter_data(
             Ok((FilterType::Delta, channels))
         }
         Rar50FilterKind::E8 => {
-            e8e9_encode(data, file_offset as u32, false);
+            address_filters::x86(
+                data,
+                file_offset as u32,
+                Direction::Encode,
+                X86Opcodes::Call,
+                X86Format::Rar5,
+            );
             Ok((FilterType::E8, 0))
         }
         Rar50FilterKind::E8E9 => {
-            e8e9_encode(data, file_offset as u32, true);
+            address_filters::x86(
+                data,
+                file_offset as u32,
+                Direction::Encode,
+                X86Opcodes::CallAndJump,
+                X86Format::Rar5,
+            );
             Ok((FilterType::E8E9, 0))
         }
         Rar50FilterKind::Arm => {
-            arm_encode(data, file_offset as u32);
+            address_filters::arm(data, file_offset as u32, Direction::Encode);
             Ok((FilterType::Arm, 0))
         }
     }
@@ -818,8 +831,8 @@ fn encode_filter_data(
 /// Returns the packed blocks and the LZ window as it stands after the last
 /// block. That window holds the FILTERED chunks, which is what the decoder
 /// keeps, so the caller can assign it straight onto the encoder history.
-/// Its trim rule must stay identical to `Unpack50Encoder::remember`.
-// Reached only from `Unpack50Encoder::encode_member_with_filters_chunked`
+/// Its trim rule must stay identical to `Rar50Encoder::remember`.
+// Reached only from `Rar50Encoder::encode_member_with_filters_chunked`
 // below, whose callers all live in `codec::rar50::ratio`, behind the
 // `ratio-lab` feature. So in a plain `cfg(test)` build with that feature
 // off - which is what `--all-targets` compiles - the whole chain is
@@ -2576,7 +2589,7 @@ fn encode_token_block(
     let main_table = EncoderTable::from_lengths(&lengths.main)?;
     let distance_table = EncoderTable::from_lengths(&lengths.distance)?;
     let align_table = EncoderTable::from_lengths(&lengths.align)?;
-    let length_table = EncoderTable::from_lengths(&lengths.length)?;
+    let length_slot_codes = EncoderTable::from_lengths(&lengths.length)?;
     let (table_data, table_bits) =
         encode_table_lengths_with_bit_count(&lengths, algorithm_version)?;
     let mut writer = BitWriter::continuing(table_data, table_bits);
@@ -2622,7 +2635,7 @@ fn encode_token_block(
                 } => {
                     let (code, len) = main_table.code_for_symbol(258 + index)?;
                     writer.write_bits(usize::from(code), usize::from(len));
-                    let (code, len) = length_table.code_for_symbol(length_slot)?;
+                    let (code, len) = length_slot_codes.code_for_symbol(length_slot)?;
                     writer.write_bits(usize::from(code), usize::from(len));
                     let length_extra_bits = length_slot_extra_bits(length_slot)?;
                     if length_extra_bits != 0 {
@@ -2669,12 +2682,12 @@ fn encode_token_block(
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Unpack50Encoder {
+pub struct Rar50Encoder {
     history: Vec<u8>,
     options: EncodeOptions,
 }
 
-impl Unpack50Encoder {
+impl Rar50Encoder {
     pub fn new() -> Self {
         Self::default()
     }
@@ -2878,7 +2891,7 @@ pub(super) struct EncodeFilter {
 #[derive(Debug, Clone, Copy, Default)]
 struct EncoderMatchState {
     reps: [usize; 4],
-    last_length: usize,
+    previous_match_length: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2905,7 +2918,7 @@ impl EncoderMatchState {
         distance: usize,
         distance_size: usize,
     ) -> Result<EncodedMatch> {
-        if distance == self.reps[0] && length == self.last_length && self.last_length != 0 {
+        if distance == self.reps[0] && length == self.previous_match_length && self.previous_match_length != 0 {
             return Ok(EncodedMatch::LastLengthRepeat);
         }
         if let Some(index) = self
@@ -2937,7 +2950,7 @@ impl EncoderMatchState {
     }
 
     fn remember(&mut self, length: usize, distance: usize) {
-        if distance == self.reps[0] && length == self.last_length {
+        if distance == self.reps[0] && length == self.previous_match_length {
             return;
         }
         if let Some(index) = self
@@ -2950,7 +2963,7 @@ impl EncoderMatchState {
             self.reps.rotate_right(1);
         }
         self.reps[0] = distance;
-        self.last_length = length;
+        self.previous_match_length = length;
     }
 }
 
@@ -3888,7 +3901,7 @@ fn estimated_match_cost(
     distance: usize,
     distance_size: usize,
 ) -> Result<usize> {
-    if distance == state.reps[0] && length == state.last_length && state.last_length != 0 {
+    if distance == state.reps[0] && length == state.previous_match_length && state.previous_match_length != 0 {
         return Ok(2);
     }
     if state
@@ -4297,7 +4310,7 @@ impl DistanceArm {
         {
             return Some(Self::Repeat {
                 main: u32::from(prices.main[258 + index]),
-                repeat_at: if index == 0 { state.last_length } else { 0 },
+                repeat_at: if index == 0 { state.previous_match_length } else { 0 },
                 repeat_price: u32::from(prices.main[257]),
             });
         }
@@ -4586,7 +4599,7 @@ impl OptimalNode {
         distance: 0,
         state: EncoderMatchState {
             reps: [0; 4],
-            last_length: 0,
+            previous_match_length: 0,
         },
     };
 }
@@ -4738,7 +4751,7 @@ fn walk_tokens_optimal<P: MatchPosition>(
                             distance,
                         );
                     }
-                    let repeat = node.state.last_length;
+                    let repeat = node.state.previous_match_length;
                     if slot == 0 && repeat > short && repeat < length {
                         relax_priced(
                             &mut nodes,
@@ -5847,12 +5860,12 @@ fn literal_presence(data: &[u8]) -> [bool; 256] {
 }
 
 #[derive(Debug, Clone)]
-pub struct Unpack50Decoder {
+pub struct Rar50Decoder {
     // Arc so the parallel block decoder can hand the current table set to
     // worker threads without cloning the LUTs; serial paths just deref.
     tables: Option<std::sync::Arc<DecodeTables>>,
     reps: [usize; 4],
-    last_length: usize,
+    previous_match_length: usize,
     // Solid LZ history, offset-addressed: the live match window is
     // `history[history_start..]`. Trimming the window to the dictionary is
     // an O(1) advance of `history_start` instead of a front `drain` that
@@ -5891,32 +5904,32 @@ pub struct SolidStateSnapshot {
     zero_prefix: usize,
     tables: Option<std::sync::Arc<DecodeTables>>,
     reps: [usize; 4],
-    last_length: usize,
+    previous_match_length: usize,
 }
 
 /// O(1) snapshot of decoder state before a solid member decodes, so a
 /// failed integrity check can rewind and retry (filters off) without
 /// cloning the decoder - the clone copied the whole multi-MB solid window
 /// per member. Valid to restore only while no compaction has run since the
-/// checkpoint; `Unpack50Decoder::commit_member` (the only compaction site)
+/// checkpoint; `Rar50Decoder::commit_member` (the only compaction site)
 /// must not be called between `solid_checkpoint` and `restore_checkpoint`.
 pub struct SolidCheckpoint {
     tables: Option<std::sync::Arc<DecodeTables>>,
     reps: [usize; 4],
-    last_length: usize,
+    previous_match_length: usize,
     history_start: usize,
     history_len: usize,
     history_zero_prefix: usize,
     compactions: u64,
 }
 
-impl Unpack50Decoder {
+impl Rar50Decoder {
     pub fn new() -> Self {
         Self {
             retain_history: true,
             tables: None,
             reps: [0; 4],
-            last_length: 0,
+            previous_match_length: 0,
             history: Vec::new(),
             history_start: 0,
             history_zero_prefix: 0,
@@ -5970,7 +5983,7 @@ impl Unpack50Decoder {
         SolidCheckpoint {
             tables: self.tables.clone(),
             reps: self.reps,
-            last_length: self.last_length,
+            previous_match_length: self.previous_match_length,
             history_start: self.history_start,
             history_len: self.history.len(),
             history_zero_prefix: self.history_zero_prefix,
@@ -5991,7 +6004,7 @@ impl Unpack50Decoder {
         self.history_zero_prefix = cp.history_zero_prefix;
         self.tables = cp.tables.clone();
         self.reps = cp.reps;
-        self.last_length = cp.last_length;
+        self.previous_match_length = cp.previous_match_length;
     }
 
     /// A solid member's output is verified and final: reclaim the dead
@@ -6156,14 +6169,14 @@ impl Unpack50Decoder {
                 match symbol {
                     0..=255 => output.push(symbol as u8),
                     256 if mode.uses_lz() => {
-                        filters.push(read_filter(&mut bits, output.len())?);
+                        filters.push(parse_filter_record(&mut bits, output.len())?);
                     }
                     257 if mode.uses_lz() => {
-                        if self.last_length != 0 {
+                        if self.previous_match_length != 0 {
                             self.copy_match(
                                 &mut output,
                                 self.reps[0],
-                                self.last_length,
+                                self.previous_match_length,
                                 output_size,
                                 dictionary_size,
                             )?;
@@ -6179,10 +6192,10 @@ impl Unpack50Decoder {
                         }
                         let length_slot = tables.length.decode(&mut bits)?;
                         let length_extra = bits.read_bits(length_slot_extra_bits(length_slot)?)?;
-                        let length = slot_to_length(length_slot, length_extra)?;
+                        let length = match_length_for_slot(length_slot, length_extra)?;
                         self.reps[..=rep_index].rotate_right(1);
                         self.reps[0] = distance;
-                        self.last_length = length;
+                        self.previous_match_length = length;
                         self.copy_match(
                             &mut output,
                             distance,
@@ -6194,7 +6207,7 @@ impl Unpack50Decoder {
                     262.. if mode.uses_lz() => {
                         let length_slot = symbol - 262;
                         let length_extra = bits.read_bits(length_slot_extra_bits(length_slot)?)?;
-                        let mut length = slot_to_length(length_slot, length_extra)?;
+                        let mut length = match_length_for_slot(length_slot, length_extra)?;
                         #[cfg(feature = "parallel")]
                         let (distance_slot, distance_bit_count) =
                             tables.distance.decode_distance_hot(&mut bits)?;
@@ -6225,7 +6238,7 @@ impl Unpack50Decoder {
                         length += length_bonus(distance);
                         self.reps.rotate_right(1);
                         self.reps[0] = distance;
-                        self.last_length = length;
+                        self.previous_match_length = length;
                         self.copy_match(
                             &mut output,
                             distance,
@@ -6400,7 +6413,7 @@ impl Unpack50Decoder {
                 &mut bits,
                 block_header.payload_bits,
                 &mut self.reps,
-                &mut self.last_length,
+                &mut self.previous_match_length,
                 &mut output,
                 output_size,
                 &mut sink,
@@ -6589,7 +6602,7 @@ impl Unpack50Decoder {
             },
             tables: self.tables.clone(),
             reps: self.reps,
-            last_length: self.last_length,
+            previous_match_length: self.previous_match_length,
         }
     }
 
@@ -6603,13 +6616,13 @@ impl Unpack50Decoder {
         self.history_compactions += 1;
         self.tables = snapshot.tables;
         self.reps = snapshot.reps;
-        self.last_length = snapshot.last_length;
+        self.previous_match_length = snapshot.previous_match_length;
     }
 
     fn reset(&mut self) {
         self.tables = None;
         self.reps = [0; 4];
-        self.last_length = 0;
+        self.previous_match_length = 0;
         self.history.clear();
         self.history_start = 0;
         self.history_zero_prefix = 0;
@@ -6848,7 +6861,7 @@ impl StreamingOutput {
         self
     }
 
-    fn add_filter<E>(
+    fn queue_filter<E>(
         &mut self,
         filter: PendingFilter,
     ) -> std::result::Result<(), StreamDecodeError<E>> {
@@ -6868,7 +6881,7 @@ impl StreamingOutput {
         self.has_filters = true;
         self.reserve_ok_upto = 0; // headroom grew; recompute on next reserve
         self.reserve(self.head);
-        // filter.start >= written (read_filter adds a non-negative offset),
+        // filter.start >= written (parse_filter_record adds a non-negative offset),
         // so the materialized-space start is always at or ahead of head.
         let ring_start = filter.start - self.written + self.head;
         if let Some(back) = self.pending_filters.back() {
@@ -6974,7 +6987,22 @@ impl StreamingOutput {
     /// A member never needs window past its own output, so a small member
     /// declaring a huge dictionary still allocates only what it can use.
     fn growth_ceiling(output_limit: usize, headroom: usize) -> usize {
-        output_limit.saturating_add(headroom).next_power_of_two()
+        // `output_limit` is the member's DECLARED unpacked size, which an
+        // untrusted header can set anywhere up to `usize::MAX`.
+        // `saturating_add` alone is NOT enough and reading it as enough is
+        // the trap here: `next_power_of_two` has no next power to give above
+        // `1 << (BITS - 1)`, so it panics with "attempt to add with overflow"
+        // in a debug build and returns 0 in release - and 0 is worse than the
+        // panic, because it silently removes the anti-thrash ceiling this
+        // function exists to impose. `checked_` plus `unwrap_or(usize::MAX)`
+        // is the saturating spelling the whole expression needs: the value is
+        // only ever a `min` bound on a ring whose real cap is
+        // `history_limit`, so `usize::MAX` means "no bound from the declared
+        // output", which is the right answer for an absurd claim.
+        output_limit
+            .saturating_add(headroom)
+            .checked_next_power_of_two()
+            .unwrap_or(usize::MAX)
     }
 
     /// Bytes materialized but not yet flushed to the sink.
@@ -7397,7 +7425,7 @@ impl StreamingOutput {
                     .expect("pending filter chain underflow");
                 // `filter.start` is a group position in a chain; the filter
                 // wants the offset inside its own member, pinned at
-                // declaration by `add_filter`.
+                // declaration by `queue_filter`.
                 apply_filter_to_vec(
                     &mut self.filter_scratch,
                     &held.filter,
@@ -7476,7 +7504,7 @@ fn decode_block_serial<E>(
     bits: &mut BitReader<'_>,
     payload_bits: usize,
     reps: &mut [usize; 4],
-    last_length: &mut usize,
+    previous_match_length: &mut usize,
     output: &mut StreamingOutput,
     output_size: usize,
     sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
@@ -7495,12 +7523,12 @@ fn decode_block_serial<E>(
         match symbol {
             0..=255 => output.push(symbol as u8, sink)?,
             256 => {
-                let filter = read_filter(bits, output.written())?;
-                output.add_filter(filter)?;
+                let filter = parse_filter_record(bits, output.written())?;
+                output.queue_filter(filter)?;
             }
             257 => {
-                if *last_length != 0 {
-                    output.copy_match(reps[0], *last_length, sink)?;
+                if *previous_match_length != 0 {
+                    output.copy_match(reps[0], *previous_match_length, sink)?;
                 }
             }
             258..=261 => {
@@ -7513,16 +7541,16 @@ fn decode_block_serial<E>(
                 }
                 let length_slot = tables.length.decode(bits)?;
                 let length_extra = bits.read_bits(length_slot_extra_bits(length_slot)?)?;
-                let length = slot_to_length(length_slot, length_extra)?;
+                let length = match_length_for_slot(length_slot, length_extra)?;
                 reps[..=rep_index].rotate_right(1);
                 reps[0] = distance;
-                *last_length = length;
+                *previous_match_length = length;
                 output.copy_match(distance, length, sink)?;
             }
             262.. => {
                 let length_slot = symbol - 262;
                 let length_extra = bits.read_bits(length_slot_extra_bits(length_slot)?)?;
-                let mut length = slot_to_length(length_slot, length_extra)?;
+                let mut length = match_length_for_slot(length_slot, length_extra)?;
                 #[cfg(feature = "parallel")]
                 let (distance_slot, distance_bit_count) =
                     tables.distance.decode_distance_hot(bits)?;
@@ -7553,7 +7581,7 @@ fn decode_block_serial<E>(
                 length += length_bonus(distance);
                 reps.rotate_right(1);
                 reps[0] = distance;
-                *last_length = length;
+                *previous_match_length = length;
                 output.copy_match(distance, length, sink)?;
             }
         }
@@ -7673,7 +7701,7 @@ mod tape_kind {
 /// `kind_length` packs the kind into the top `TAPE_KIND_SHIFT` bits and the
 /// length below it. Both are bounded by the format, not by hope: a length
 /// slot is under `LENGTH_TABLE_SIZE` (44) in every RAR 5 and RAR 7 table, so
-/// `slot_to_length` yields at most 4,097 plus a bonus of 3, and a literal
+/// `match_length_for_slot` yields at most 4,097 plus a bonus of 3, and a literal
 /// run is capped at `TAPE_LITS_CAP`. `min` is belt and braces so a
 /// malformed stream can never carry a length into the kind bits.
 ///
@@ -8032,7 +8060,7 @@ fn decode_tape_op(
 ) -> Result<TapeOp> {
     match symbol {
         256 => {
-            filters.push(read_filter_raw(bits)?);
+            filters.push(parse_filter_record_fields(bits)?);
             Ok(TapeOp::filter())
         }
         257 => Ok(TapeOp::rep_last()),
@@ -8081,7 +8109,7 @@ const fn build_length_slot_extra_bits() -> [u8; LENGTH_TABLE_SIZE] {
 
 /// Read one length slot's extra bits and form the length, in one pass.
 ///
-/// `length_slot_extra_bits` + `slot_to_length` recomputed `(slot >> 2) - 1`
+/// `length_slot_extra_bits` + `match_length_for_slot` recomputed `(slot >> 2) - 1`
 /// and its range check twice per match and re-checked an `extra_bits` value
 /// that `read_bits` had just produced with exactly that width, so it could
 /// not be out of range (round 13). The table lookup is the range check.
@@ -8149,7 +8177,7 @@ enum TapeApplied {
 }
 
 #[cfg(feature = "parallel")]
-impl Unpack50Decoder {
+impl Rar50Decoder {
     /// Replay a decoded tape against the window in archive order, resolving
     /// the rep-distance state the workers left symbolic. Reproduces the
     /// serial decoder's stops and errors exactly (see module comment).
@@ -8175,7 +8203,7 @@ impl Unpack50Decoder {
                 let (distance, length) = (op.distance as usize, op.length());
                 self.reps.rotate_right(1);
                 self.reps[0] = distance;
-                self.last_length = length;
+                self.previous_match_length = length;
                 output.copy_match(distance, length, sink)?;
                 continue;
             }
@@ -8193,8 +8221,8 @@ impl Unpack50Decoder {
                     }
                 }
                 tape_kind::REP_LAST => {
-                    if self.last_length != 0 {
-                        output.copy_match(self.reps[0], self.last_length, sink)?;
+                    if self.previous_match_length != 0 {
+                        output.copy_match(self.reps[0], self.previous_match_length, sink)?;
                     }
                 }
                 tape_kind::REP => {
@@ -8208,14 +8236,14 @@ impl Unpack50Decoder {
                     }
                     self.reps[..=index].rotate_right(1);
                     self.reps[0] = distance;
-                    self.last_length = length;
+                    self.previous_match_length = length;
                     output.copy_match(distance, length, sink)?;
                 }
                 _ => {
                     // tape_kind::FILTER; the worker emits no other kind.
                     let raw = tape.filters[filter_pos];
                     filter_pos += 1;
-                    output.add_filter(raw.resolve(output.written())?)?;
+                    output.queue_filter(raw.resolve(output.written())?)?;
                 }
             }
         }
@@ -8234,7 +8262,7 @@ impl Unpack50Decoder {
                 &mut bits,
                 tape.payload_bits,
                 &mut self.reps,
-                &mut self.last_length,
+                &mut self.previous_match_length,
                 output,
                 output_size,
                 sink,
@@ -8541,7 +8569,7 @@ impl Unpack50Decoder {
             // block - which the differential suite compares against the
             // buffered decoder, error paths included - is unchanged.
             let mut reps = self.reps;
-            let mut last_length = self.last_length;
+            let mut previous_match_length = self.previous_match_length;
             // nzbfast-local change, 3 Sep 2026 - and so does the write
             // cursor, with the output buffer MOVED OUT of `output` for the
             // walk; see VENDORING.md. Behind `&mut FlatOutput` every op
@@ -8637,7 +8665,7 @@ impl Unpack50Decoder {
                     reps[2] = reps[1];
                     reps[1] = reps[0];
                     reps[0] = distance;
-                    last_length = length;
+                    previous_match_length = length;
                     let step = if fast_copy!(distance, length) {
                         maybe_emit!()
                     } else {
@@ -8705,12 +8733,12 @@ impl Unpack50Decoder {
                         }
                     }
                     tape_kind::REP_LAST => {
-                        if last_length != 0 {
-                            let step = if fast_copy!(reps[0], last_length) {
+                        if previous_match_length != 0 {
+                            let step = if fast_copy!(reps[0], previous_match_length) {
                                 maybe_emit!()
                             } else {
                                 sync_out!();
-                                let slow = output.copy_match_slow(reps[0], last_length, sink);
+                                let slow = output.copy_match_slow(reps[0], previous_match_length, sink);
                                 sync_in!();
                                 slow
                             };
@@ -8761,7 +8789,7 @@ impl Unpack50Decoder {
                             }
                         }
                         reps[0] = distance;
-                        last_length = length;
+                        previous_match_length = length;
                         let step = if fast_copy!(distance, length) {
                             maybe_emit!()
                         } else {
@@ -8784,7 +8812,7 @@ impl Unpack50Decoder {
                         let declared = raw
                             .resolve(output.written())
                             .map_err(StreamDecodeError::from)
-                            .and_then(|pending| output.add_filter(pending));
+                            .and_then(|pending| output.queue_filter(pending));
                         sync_in!();
                         if let Err(error) = declared {
                             outcome = Err(error);
@@ -8795,7 +8823,7 @@ impl Unpack50Decoder {
             }
             sync_out!();
             self.reps = reps;
-            self.last_length = last_length;
+            self.previous_match_length = previous_match_length;
             if let Some(done) = outcome? {
                 return Ok(done);
             }
@@ -9615,7 +9643,7 @@ impl FlatOutput {
     /// fall back to the buffered path exactly as the streaming path does
     /// (`FilteredMember`). Unlike streaming there is no hold-back limit —
     /// memory is already committed — so long filters are handled here.
-    fn add_filter<E>(
+    fn queue_filter<E>(
         &mut self,
         filter: PendingFilter,
     ) -> std::result::Result<(), StreamDecodeError<E>> {
@@ -9710,7 +9738,7 @@ impl FlatOutput {
                 // it wants the offset within its own member, which is what
                 // the encoder bakes in and what the buffered oracle passes,
                 // and both shifts moved E8/E8E9/ARM addresses off the
-                // serial walk. `add_filter` pinned that origin at
+                // serial walk. `queue_filter` pinned that origin at
                 // declaration; slice with the physical index, translate
                 // with the member-local one.
                 apply_filter_to_vec(
@@ -9810,7 +9838,7 @@ fn read_compressed_block_into(
     })
 }
 
-impl Default for Unpack50Decoder {
+impl Default for Rar50Decoder {
     fn default() -> Self {
         Self::new()
     }
@@ -9872,7 +9900,7 @@ impl RawFilter {
             // Correct as-is whenever `current_pos` is a member-output
             // position (the buffered path and every single-member decode).
             // A chain output resolves against the whole group, so it
-            // rewrites this in `add_filter`.
+            // rewrites this in `queue_filter`.
             file_start: start,
             length: self.length as usize,
             filter_type: self.filter_type,
@@ -9881,9 +9909,9 @@ impl RawFilter {
     }
 }
 
-fn read_filter_raw(bits: &mut BitReader<'_>) -> Result<RawFilter> {
-    let offset = read_filter_data(bits)?;
-    let length = read_filter_data(bits)?;
+fn parse_filter_record_fields(bits: &mut BitReader<'_>) -> Result<RawFilter> {
+    let offset = read_counted_le_u32(bits)?;
+    let length = read_counted_le_u32(bits)?;
     let filter_type = match bits.read_bits(3)? {
         0 => FilterType::Delta,
         1 => FilterType::E8,
@@ -9904,11 +9932,11 @@ fn read_filter_raw(bits: &mut BitReader<'_>) -> Result<RawFilter> {
     })
 }
 
-fn read_filter(bits: &mut BitReader<'_>, current_pos: usize) -> Result<PendingFilter> {
-    read_filter_raw(bits)?.resolve(current_pos)
+fn parse_filter_record(bits: &mut BitReader<'_>, current_pos: usize) -> Result<PendingFilter> {
+    parse_filter_record_fields(bits)?.resolve(current_pos)
 }
 
-fn read_filter_data(bits: &mut BitReader<'_>) -> Result<u32> {
+fn read_counted_le_u32(bits: &mut BitReader<'_>) -> Result<u32> {
     let byte_count = bits.read_bits(2)? as usize + 1;
     let mut data = 0;
     for index in 0..byte_count {
@@ -9924,8 +9952,8 @@ fn write_filter(writer: &mut BitWriter, filter: EncodeFilter) -> Result<()> {
     if filter.length > u32::MAX as usize {
         return Err(Error::InvalidData("RAR 5 filter length is too large"));
     }
-    write_filter_data(writer, filter.offset as u32);
-    write_filter_data(writer, filter.length as u32);
+    write_counted_le_u32(writer, filter.offset as u32);
+    write_counted_le_u32(writer, filter.length as u32);
     match filter.filter_type {
         FilterType::Delta => {
             if filter.channels == 0 || filter.channels > 32 {
@@ -9943,7 +9971,7 @@ fn write_filter(writer: &mut BitWriter, filter: EncodeFilter) -> Result<()> {
     Ok(())
 }
 
-fn write_filter_data(writer: &mut BitWriter, value: u32) {
+fn write_counted_le_u32(writer: &mut BitWriter, value: u32) {
     let byte_count = if value <= 0xff {
         1
     } else if value <= 0xffff {
@@ -9992,9 +10020,21 @@ fn apply_filter_to_range(
             filters::delta_decode_into(data, filter.channels, rar50_delta_messages(), scratch)?;
             data.copy_from_slice(scratch);
         }
-        FilterType::E8 => e8e9_decode(data, file_start as u32, false),
-        FilterType::E8E9 => e8e9_decode(data, file_start as u32, true),
-        FilterType::Arm => arm_decode(data, file_start as u32),
+        FilterType::E8 => address_filters::x86(
+            data,
+            file_start as u32,
+            Direction::Decode,
+            X86Opcodes::Call,
+            X86Format::Rar5,
+        ),
+        FilterType::E8E9 => address_filters::x86(
+            data,
+            file_start as u32,
+            Direction::Decode,
+            X86Opcodes::CallAndJump,
+            X86Format::Rar5,
+        ),
+        FilterType::Arm => address_filters::arm(data, file_start as u32, Direction::Decode),
     }
     Ok(())
 }
@@ -10015,9 +10055,21 @@ fn apply_filter_to_vec(
             filters::delta_decode_into(data, filter.channels, rar50_delta_messages(), scratch)?;
             std::mem::swap(data, scratch);
         }
-        FilterType::E8 => e8e9_decode(data, file_start as u32, false),
-        FilterType::E8E9 => e8e9_decode(data, file_start as u32, true),
-        FilterType::Arm => arm_decode(data, file_start as u32),
+        FilterType::E8 => address_filters::x86(
+            data,
+            file_start as u32,
+            Direction::Decode,
+            X86Opcodes::Call,
+            X86Format::Rar5,
+        ),
+        FilterType::E8E9 => address_filters::x86(
+            data,
+            file_start as u32,
+            Direction::Decode,
+            X86Opcodes::CallAndJump,
+            X86Format::Rar5,
+        ),
+        FilterType::Arm => address_filters::arm(data, file_start as u32, Direction::Decode),
     }
     Ok(())
 }
@@ -10027,101 +10079,6 @@ fn rar50_delta_messages() -> DeltaErrorMessages {
         invalid_channels: "RAR 5 DELTA filter channel count is invalid",
         zero_channels: "RAR 5 DELTA filter has zero channels",
         truncated_source: "RAR 5 DELTA filter source is truncated",
-    }
-}
-
-fn e8e9_decode(data: &mut [u8], file_offset: u32, include_e9: bool) {
-    if data.len() <= 4 {
-        return;
-    }
-    let cmp_mask = if include_e9 { 0xfe } else { 0xff };
-    let opcode_limit = data.len() - 4;
-    let mut opcode_pos = 0usize;
-    while let Some(pos) = super::fast::next_x86_opcode(data, opcode_pos, opcode_limit, cmp_mask) {
-        let cur_pos = pos + 1;
-        let offset = file_offset.wrapping_add(cur_pos as u32) % X86_FILTER_FILE_SIZE;
-        let addr = u32::from_le_bytes([
-            data[cur_pos],
-            data[cur_pos + 1],
-            data[cur_pos + 2],
-            data[cur_pos + 3],
-        ]);
-        let new_addr = if addr & 0x8000_0000 != 0 {
-            (addr.wrapping_add(offset) & 0x8000_0000 == 0)
-                .then(|| addr.wrapping_add(X86_FILTER_FILE_SIZE))
-        } else {
-            (addr.wrapping_sub(X86_FILTER_FILE_SIZE) & 0x8000_0000 != 0)
-                .then(|| addr.wrapping_sub(offset))
-        };
-        if let Some(value) = new_addr {
-            data[cur_pos..cur_pos + 4].copy_from_slice(&value.to_le_bytes());
-        }
-        opcode_pos = pos + 5;
-    }
-}
-
-fn e8e9_encode(data: &mut [u8], file_offset: u32, include_e9: bool) {
-    if data.len() <= 4 {
-        return;
-    }
-    let cmp_mask = if include_e9 { 0xfe } else { 0xff };
-    let opcode_limit = data.len() - 4;
-    let mut opcode_pos = 0usize;
-    while let Some(pos) = super::fast::next_x86_opcode(data, opcode_pos, opcode_limit, cmp_mask) {
-        let cur_pos = pos + 1;
-        let offset = file_offset.wrapping_add(cur_pos as u32) % X86_FILTER_FILE_SIZE;
-        let addr = u32::from_le_bytes([
-            data[cur_pos],
-            data[cur_pos + 1],
-            data[cur_pos + 2],
-            data[cur_pos + 3],
-        ]);
-        let candidate = addr.wrapping_add(offset);
-        let new_addr = if candidate < X86_FILTER_FILE_SIZE {
-            Some(candidate)
-        } else {
-            let candidate = addr.wrapping_sub(X86_FILTER_FILE_SIZE);
-            (candidate & 0x8000_0000 != 0 && candidate.wrapping_add(offset) & 0x8000_0000 == 0)
-                .then_some(candidate)
-        };
-        if let Some(value) = new_addr {
-            data[cur_pos..cur_pos + 4].copy_from_slice(&value.to_le_bytes());
-        }
-        opcode_pos = pos + 5;
-    }
-}
-
-const X86_FILTER_FILE_SIZE: u32 = 0x0100_0000;
-
-fn arm_decode(data: &mut [u8], file_offset: u32) {
-    let mut pos = 0usize;
-    while pos + 3 < data.len() {
-        if data[pos + 3] == 0xeb {
-            let mut offset = u32::from(data[pos])
-                | (u32::from(data[pos + 1]) << 8)
-                | (u32::from(data[pos + 2]) << 16);
-            offset = offset.wrapping_sub(file_offset.wrapping_add(pos as u32) / 4);
-            data[pos] = offset as u8;
-            data[pos + 1] = (offset >> 8) as u8;
-            data[pos + 2] = (offset >> 16) as u8;
-        }
-        pos += 4;
-    }
-}
-
-fn arm_encode(data: &mut [u8], file_offset: u32) {
-    let mut pos = 0usize;
-    while pos + 3 < data.len() {
-        if data[pos + 3] == 0xeb {
-            let mut offset = u32::from(data[pos])
-                | (u32::from(data[pos + 1]) << 8)
-                | (u32::from(data[pos + 2]) << 16);
-            offset = offset.wrapping_add(file_offset.wrapping_add(pos as u32) / 4);
-            data[pos] = offset as u8;
-            data[pos + 1] = (offset >> 8) as u8;
-            data[pos + 2] = (offset >> 16) as u8;
-        }
-        pos += 4;
     }
 }
 
@@ -10142,7 +10099,7 @@ fn length_bonus(distance: usize) -> usize {
     usize::from(distance > 0x100) + usize::from(distance > 0x2000) + usize::from(distance > 0x40000)
 }
 
-pub fn slot_to_length(slot: usize, extra_bits: u32) -> Result<usize> {
+pub fn match_length_for_slot(slot: usize, extra_bits: u32) -> Result<usize> {
     if slot < 8 {
         return Ok(slot + 2);
     }
@@ -11477,8 +11434,8 @@ mod tests {
                         };
                         let mut ring = StreamingOutput::new(seed.clone(), 0, limit, 128, 128);
                         let mut flat = FlatOutput::new_seeded(&seed, limit, 128, 128);
-                        let mut ring_decoder = Unpack50Decoder::new();
-                        let mut flat_decoder = Unpack50Decoder::new();
+                        let mut ring_decoder = Rar50Decoder::new();
+                        let mut flat_decoder = Rar50Decoder::new();
                         let mut sink = |_: DecodedChunk<'_>| Ok::<_, std::convert::Infallible>(());
                         let ring_result =
                             ring_decoder.apply_tape(&mut make_tape(), &mut ring, limit, &mut sink);
@@ -11503,7 +11460,7 @@ mod tests {
                         assert_eq!(flat.written(), ring.written());
                         assert_eq!(&flat.buf[..flat.pos], &ring.ring[..ring.head]);
                         assert_eq!(flat_decoder.reps, ring_decoder.reps);
-                        assert_eq!(flat_decoder.last_length, ring_decoder.last_length);
+                        assert_eq!(flat_decoder.previous_match_length, ring_decoder.previous_match_length);
                     }
                 }
             }
@@ -11577,7 +11534,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            Unpack50Decoder::new()
+            Rar50Decoder::new()
                 .decode_member(&without_history, 0, data.len(), false, DecodeMode::Lz)
                 .unwrap(),
             data
@@ -11783,7 +11740,7 @@ mod tests {
             .collect();
         let sixteen = encode_lz_member_with_options(&data, 0, EncodeOptions::new(16)).unwrap();
         let none = encode_lz_member_with_options(&data, 0, EncodeOptions::new(0)).unwrap();
-        let filtered = Unpack50Encoder::with_options(EncodeOptions::new(16))
+        let filtered = Rar50Encoder::with_options(EncodeOptions::new(16))
             .encode_member_with_filters(
                 &data,
                 0,
@@ -12029,7 +11986,7 @@ mod tests {
         }
         for slot in 0..LENGTH_TABLE_SIZE {
             let bit_count = usize::from(length_slot_extra_bits(slot)?);
-            let base = slot_to_length(slot, 0)?;
+            let base = match_length_for_slot(slot, 0)?;
             let max = base
                 + if bit_count == 0 {
                     0
@@ -12161,7 +12118,7 @@ mod tests {
         // The widest match the format can express: length slot 43 with all
         // nine extra bits set, plus the distance bonus, at a distance the
         // 1 GiB window limit still allows.
-        let widest_length = slot_to_length(LENGTH_TABLE_SIZE - 1, (1 << 9) - 1).unwrap() + 3;
+        let widest_length = match_length_for_slot(LENGTH_TABLE_SIZE - 1, (1 << 9) - 1).unwrap() + 3;
         let matched = TapeOp::match_at(u32::MAX, widest_length as u32);
         assert_eq!(matched.kind(), tape_kind::MATCH);
         assert_eq!(matched.length(), widest_length);
@@ -12303,7 +12260,7 @@ mod tests {
             );
             let extra = (1u32 << LENGTH_SLOT_EXTRA_BITS[slot]) - 1;
             assert_eq!(
-                slot_to_length(slot, extra).unwrap(),
+                match_length_for_slot(slot, extra).unwrap(),
                 if slot < 8 {
                     slot + 2
                 } else {
@@ -12346,7 +12303,7 @@ mod tests {
                     let mut bits = BitReader::new_at(&encoded, offset);
                     assert_eq!(
                         read_slot_length(slot, &mut bits).unwrap() as usize,
-                        slot_to_length(slot, extra).unwrap(),
+                        match_length_for_slot(slot, extra).unwrap(),
                         "slot {slot}, extra {extra}, offset {offset}"
                     );
                     assert_eq!(bits.position(), offset + usize::from(width));
@@ -13070,7 +13027,7 @@ mod tests {
         }
         let state = EncoderMatchState {
             reps: [30, 0, 0, 0],
-            last_length: 8,
+            previous_match_length: 8,
         };
 
         let best = best_match(
@@ -13108,7 +13065,7 @@ mod tests {
         }
         let state = EncoderMatchState {
             reps: [30, 0, 0, 0],
-            last_length: 8,
+            previous_match_length: 8,
         };
         let current = best_match(
             &input,
@@ -13252,7 +13209,7 @@ mod tests {
     }
 
     fn encode_lz_member_with_filter(data: &[u8], kind: Rar50FilterKind) -> Result<Vec<u8>> {
-        Unpack50Encoder::new().encode_member_with_filter(data, 0, Rar50FilterSpec::new(kind))
+        Rar50Encoder::new().encode_member_with_filter(data, 0, Rar50FilterSpec::new(kind))
     }
 
     #[test]
@@ -13306,10 +13263,22 @@ mod tests {
         encoded.extend_from_slice(&0x0010_0c08u32.to_le_bytes());
 
         let mut decoded = encoded.clone();
-        e8e9_decode(&mut decoded, file_offset, false);
+        address_filters::x86(
+            &mut decoded,
+            file_offset,
+            Direction::Decode,
+            X86Opcodes::Call,
+            X86Format::Rar5,
+        );
 
         assert_eq!(&decoded[1..5], &0x0000_0c07u32.to_le_bytes());
-        e8e9_encode(&mut decoded, file_offset, false);
+        address_filters::x86(
+            &mut decoded,
+            file_offset,
+            Direction::Encode,
+            X86Opcodes::Call,
+            X86Format::Rar5,
+        );
         assert_eq!(decoded, encoded);
     }
 
@@ -13318,7 +13287,7 @@ mod tests {
         let data = b"\xe8\0\0\0\0plain text after call".to_vec();
         let input = encode_lz_member_with_filter(&data, Rar50FilterKind::E8).unwrap();
         let mut reader = input.as_slice();
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         let mut streamed = Vec::new();
 
         decoder
@@ -13352,7 +13321,7 @@ mod tests {
         let input =
             encode_lz_member_with_filter(&data, Rar50FilterKind::Delta { channels: 5 }).unwrap();
         let mut reader = input.as_slice();
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         let mut streamed = Vec::new();
 
         decoder
@@ -13384,11 +13353,11 @@ mod tests {
             .map(|index| (index * 41 + index / 11) as u8)
             .collect();
         let delta = Rar50FilterSpec::new(Rar50FilterKind::Delta { channels: 5 });
-        let input = Unpack50Encoder::new()
+        let input = Rar50Encoder::new()
             .encode_member_with_filters(&data, 0, &[delta.clone(), delta])
             .unwrap();
         let mut reader = input.as_slice();
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         let mut streamed = Vec::new();
 
         decoder
@@ -13453,7 +13422,7 @@ mod tests {
         }
         stream.extend_from_slice(&member); // final block keeps is_last
 
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         let mut decoded = Vec::with_capacity(output_size);
         let mut reader = stream.as_slice();
         decoder
@@ -13510,7 +13479,7 @@ mod tests {
         let dict = 4 * 1024 * 1024; // comfortably above `far`
 
         // Limit below the match distance: rejected, and distinctly so.
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         decoder.set_window_limit(far / 2);
         let mut rejected = Vec::new();
         let err = decoder
@@ -13541,7 +13510,7 @@ mod tests {
         );
 
         // Limit above the match distance: decodes byte-for-byte.
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         decoder.set_window_limit(far + 1);
         let mut decoded = Vec::new();
         decoder
@@ -13577,7 +13546,7 @@ mod tests {
         };
         let mut output = StreamingOutput::new(Vec::new(), 0, 1 << 20, 1 << 20, 1 << 20);
         let error = output
-            .add_filter::<std::convert::Infallible>(filter)
+            .queue_filter::<std::convert::Infallible>(filter)
             .unwrap_err();
         assert!(matches!(error, StreamDecodeError::FilteredMember));
     }
@@ -13597,6 +13566,40 @@ mod tests {
         // A small member declaring the same dictionary keeps the lazy start.
         let small = StreamingOutput::new(Vec::new(), 0, 1 << 20, dict, dict);
         assert!(small.ring.len() < ceiling);
+    }
+
+    #[test]
+    fn a_huge_declared_unpacked_size_does_not_overflow_the_growth_ceiling() {
+        // `output_limit` is the header's declared unpacked size and reaches
+        // here unclamped. Rounding it up to a power of two used to panic in
+        // a debug build ("attempt to add with overflow") and wrap to 0 in
+        // release, losing the anti-thrash ceiling. Growth is reached by
+        // declaring a filter: that sets `has_filters`, clears the
+        // reserve short-circuit and pushes `needed` past the initial ring.
+        let dict = 128 << 10;
+        let mut output = StreamingOutput::new(Vec::new(), 0, 1 << (usize::BITS - 1), dict, dict);
+        let mut sink = |_: DecodedChunk<'_>| Ok::<_, std::convert::Infallible>(());
+        for index in 0..1000u32 {
+            output.push((index % 251) as u8, &mut sink).unwrap();
+        }
+        output
+            .queue_filter::<std::convert::Infallible>(PendingFilter {
+                start: output.written + output.pending_len(),
+                file_start: 0,
+                length: 16,
+                filter_type: FilterType::E8,
+                channels: 0,
+            })
+            .unwrap();
+        // The declared size bounds nothing here, so the ring settles at the
+        // dictionary-derived ceiling rather than at 0 or a panic.
+        let ceiling =
+            (dict + 2 * STREAM_FLUSH_THRESHOLD + STREAM_FILTER_HOLD_LIMIT).next_power_of_two();
+        assert_eq!(output.ring.len(), ceiling);
+        assert_eq!(
+            StreamingOutput::growth_ceiling(usize::MAX, 2 * STREAM_FLUSH_THRESHOLD),
+            usize::MAX
+        );
     }
 
     /// Byte-at-a-time LZ reference: `out[i] = out[len - distance + i]`,
@@ -13772,7 +13775,7 @@ mod tests {
         let m2 = encode_lz_member_with_history(&second, &first, 0).unwrap();
 
         let dict = 32 << 20;
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         let mut decoded_first = Vec::new();
         decoder
             .decode_member_from_reader_with_dictionary_to_sink(
@@ -13833,9 +13836,9 @@ mod tests {
     /// Streams one all-zero member through the real member path, leaving the
     /// decoder holding a few materialized bytes and a carried sparse run -
     /// the state every carried-zero-run test below starts from.
-    fn decoder_after_streamed_zero_member(size: usize, dict: usize) -> Unpack50Decoder {
+    fn decoder_after_streamed_zero_member(size: usize, dict: usize) -> Rar50Decoder {
         let member = encode_lz_member(&vec![0u8; size], 0).unwrap();
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         let mut decoded = 0usize;
         decoder
             .decode_member_from_reader_with_dictionary_to_sink(
@@ -14055,7 +14058,7 @@ mod tests {
         let range = range_start..data.len();
         data.extend_from_slice(b"\xe9\0\0\0\0plain suffix outside filter range");
 
-        let input = Unpack50Encoder::new()
+        let input = Rar50Encoder::new()
             .encode_member_with_filter(
                 &data,
                 0,
@@ -14082,7 +14085,7 @@ mod tests {
         data.extend_from_slice(b"\xe8\0\0\0\0second filtered cluster");
         let second_end = data.len();
 
-        let input = Unpack50Encoder::new()
+        let input = Rar50Encoder::new()
             .encode_member_with_filters(
                 &data,
                 0,
@@ -14110,7 +14113,7 @@ mod tests {
         .unwrap();
         assert_eq!(records.len(), 2);
         assert_ne!(transformed, data);
-        let unapplied = Unpack50Decoder::new()
+        let unapplied = Rar50Decoder::new()
             .decode_member(&input, 0, data.len(), false, DecodeMode::LzNoFilters)
             .unwrap();
         assert_eq!(unapplied, transformed);
@@ -14138,9 +14141,9 @@ mod tests {
         let original = [0x04, 0x00, 0x00, 0xeb, 0x08, 0x00, 0x00, 0xeb];
         let mut filtered = original;
 
-        arm_encode(&mut filtered, u32::MAX - 3);
+        address_filters::arm(&mut filtered, u32::MAX - 3, Direction::Encode);
         assert_ne!(filtered, original);
-        arm_decode(&mut filtered, u32::MAX - 3);
+        address_filters::arm(&mut filtered, u32::MAX - 3, Direction::Decode);
 
         assert_eq!(filtered, original);
     }
@@ -14151,7 +14154,7 @@ mod tests {
         let second = b"RAR5 solid shared phrase alpha beta gamma\nsecond\n".repeat(4);
         let solid = encode_lz_member_with_history(&second, &first, 0).unwrap();
         let standalone = encode_lz_member(&second, 0).unwrap();
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
 
         assert_eq!(
             decoder
@@ -14476,7 +14479,7 @@ mod tests {
                     off.len(),
                 );
                 assert_eq!(
-                    Unpack50Decoder::new()
+                    Rar50Decoder::new()
                         .decode_member(&on, 0, data.len(), false, DecodeMode::Lz)
                         .unwrap(),
                     data,
@@ -14507,7 +14510,7 @@ mod tests {
         // stream, as the decoder carries them.
         let mut tables: Option<DecodeTables> = None;
         let mut reps = [0usize; 4];
-        let mut last_length = 0usize;
+        let mut previous_match_length = 0usize;
         for file in archive.files() {
             if file.is_stored() {
                 continue;
@@ -14518,7 +14521,7 @@ mod tests {
             if !info.solid {
                 tables = None;
                 reps = [0; 4];
-                last_length = 0;
+                previous_match_length = 0;
             }
             let mut input = std::io::Cursor::new(packed.as_slice());
             let mut payload_buf = Vec::new();
@@ -14586,14 +14589,14 @@ mod tests {
                             lit[2] += 1;
                         }
                         256 => {
-                            let _ = read_filter(&mut bits, 0);
+                            let _ = parse_filter_record(&mut bits, 0);
                             filt[0] += 1;
                             filt[1] += (bits.position() - start) as u64;
                         }
                         257 => {
                             rep_last[0] += 1;
                             rep_last[1] += (bits.position() - start) as u64;
-                            rep_last[2] += last_length as u64;
+                            rep_last[2] += previous_match_length as u64;
                         }
                         258..=261 => {
                             let index = symbol - 258;
@@ -14601,11 +14604,11 @@ mod tests {
                             let extra = bits
                                 .read_bits(length_slot_extra_bits(slot).unwrap())
                                 .unwrap();
-                            let length = slot_to_length(slot, extra).unwrap();
+                            let length = match_length_for_slot(slot, extra).unwrap();
                             let distance = reps[index];
                             reps[..=index].rotate_right(1);
                             reps[0] = distance;
-                            last_length = length;
+                            previous_match_length = length;
                             rep[index][0] += 1;
                             rep[index][1] += (bits.position() - start) as u64;
                             rep[index][2] += length as u64;
@@ -14615,7 +14618,7 @@ mod tests {
                             let extra = bits
                                 .read_bits(length_slot_extra_bits(slot).unwrap())
                                 .unwrap();
-                            let mut length = slot_to_length(slot, extra).unwrap();
+                            let mut length = match_length_for_slot(slot, extra).unwrap();
                             let after_length = bits.position();
                             let distance_slot = tables.distance.decode(&mut bits).unwrap();
                             let count = distance_slot_bit_count(distance_slot).unwrap();
@@ -14630,7 +14633,7 @@ mod tests {
                             length += length_bonus(distance);
                             reps.rotate_right(1);
                             reps[0] = distance;
-                            last_length = length;
+                            previous_match_length = length;
                             let total = (bits.position() - start) as u64;
                             mat[0] += 1;
                             mat[1] += total;
@@ -14773,7 +14776,7 @@ mod tests {
         }
         assert!(blocks >= 2, "{blocks} blocks");
         assert_eq!(cursor.position() as usize, encoded.len());
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
 
         assert_eq!(
             decoder
@@ -14794,7 +14797,7 @@ mod tests {
         data[MAX_COMPRESSED_BLOCK_OUTPUT + 65..MAX_COMPRESSED_BLOCK_OUTPUT + 69]
             .copy_from_slice(&0x40u32.to_le_bytes());
 
-        let encoded = Unpack50Encoder::with_options(EncodeOptions::new(0))
+        let encoded = Rar50Encoder::with_options(EncodeOptions::new(0))
             .encode_member_with_filter(
                 &data,
                 0,
@@ -14812,7 +14815,7 @@ mod tests {
                 .is_last;
             blocks += 1;
         }
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
 
         assert!(!first.is_last);
         assert!(last_is_last);
@@ -14846,8 +14849,8 @@ mod tests {
     /// the same window the decoder has. The decoder's window holds the LZ
     /// output, i.e. the filter-encoded bytes, because a declared filter is
     /// applied to a scratch copy of its range as that range completes and
-    /// never in place (trap 5, and unrar's `UnpackWriteBuf` copying into
-    /// `FilterSrcMemory` before `ApplyFilter`). The encoder used to remember
+    /// never in place (trap 5: the reference extractor behaves the same way,
+    /// filtering a copy of the range). The encoder used to remember
     /// the PRE-filter input instead, so any cross-member match reaching into
     /// a filter-mutated range resolved against bytes the decoder never had.
     #[test]
@@ -14860,13 +14863,13 @@ mod tests {
             let a = e8_call_records(len);
             let b = a.clone();
 
-            let mut encoder = Unpack50Encoder::with_options(EncodeOptions::new(4));
+            let mut encoder = Rar50Encoder::with_options(EncodeOptions::new(4));
             let packed_a = encoder
                 .encode_member_with_filter(&a, 0, Rar50FilterSpec::new(Rar50FilterKind::E8))
                 .unwrap();
             let packed_b = encoder.encode_member(&b, 0).unwrap();
 
-            let mut decoder = Unpack50Decoder::new();
+            let mut decoder = Rar50Decoder::new();
             let decoded_a = decoder
                 .decode_member(&packed_a, 0, a.len(), false, DecodeMode::Lz)
                 .unwrap();
@@ -14881,7 +14884,7 @@ mod tests {
     #[test]
     fn filters_are_split_before_rar_reader_filter_limit() {
         let data = vec![0u8; MAX_FILTER_BLOCK_LENGTH + 1];
-        let encoded = Unpack50Encoder::with_options(
+        let encoded = Rar50Encoder::with_options(
             EncodeOptions::new(0).with_max_match_distance(128 * 1024),
         )
         .encode_member_with_filter(
@@ -14896,7 +14899,7 @@ mod tests {
         while cursor.position() < encoded.len() as u64 {
             last = read_compressed_block_into(&mut cursor, &mut payload).unwrap();
         }
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
 
         // Two records of 262,143 and 1 byte, whatever the compressed-block
         // layout (one block since the pooled path took filtered members).
@@ -14911,7 +14914,7 @@ mod tests {
 
     #[test]
     fn solid_encoder_history_limit_follows_encode_options_dictionary() {
-        let mut encoder = Unpack50Encoder::with_options(
+        let mut encoder = Rar50Encoder::with_options(
             EncodeOptions::new(0).with_max_match_distance(DEFAULT_DICTIONARY_SIZE + 1024),
         );
         encoder.remember(&vec![0x41; DEFAULT_DICTIONARY_SIZE + 512]);
@@ -14919,7 +14922,7 @@ mod tests {
         assert_eq!(encoder.history.len(), DEFAULT_DICTIONARY_SIZE + 512);
 
         let mut capped =
-            Unpack50Encoder::with_options(EncodeOptions::new(0).with_max_match_distance(1024));
+            Rar50Encoder::with_options(EncodeOptions::new(0).with_max_match_distance(1024));
         capped.remember(&vec![0x42; 4096]);
 
         assert_eq!(capped.history.len(), 1024);
@@ -14984,7 +14987,7 @@ mod tests {
             data: &input,
             pos: 0,
         };
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
 
         let output = decoder
             .decode_member_from_reader(&mut reader, 0, 4, false, DecodeMode::LiteralOnly)
@@ -15035,12 +15038,12 @@ mod tests {
 
     #[test]
     fn decodes_length_slots() {
-        assert_eq!(slot_to_length(0, 0).unwrap(), 2);
-        assert_eq!(slot_to_length(7, 0).unwrap(), 9);
-        assert_eq!(slot_to_length(8, 0).unwrap(), 10);
-        assert_eq!(slot_to_length(8, 1).unwrap(), 11);
-        assert_eq!(slot_to_length(11, 1).unwrap(), 17);
-        assert_eq!(slot_to_length(12, 3).unwrap(), 21);
+        assert_eq!(match_length_for_slot(0, 0).unwrap(), 2);
+        assert_eq!(match_length_for_slot(7, 0).unwrap(), 9);
+        assert_eq!(match_length_for_slot(8, 0).unwrap(), 10);
+        assert_eq!(match_length_for_slot(8, 1).unwrap(), 11);
+        assert_eq!(match_length_for_slot(11, 1).unwrap(), 17);
+        assert_eq!(match_length_for_slot(12, 3).unwrap(), 21);
     }
 
     #[test]
@@ -15154,7 +15157,7 @@ mod tests {
 
     #[test]
     fn copies_lz_matches_with_overlap() {
-        let decoder = Unpack50Decoder::new();
+        let decoder = Rar50Decoder::new();
         let mut output = b"AB".to_vec();
 
         decoder
@@ -15166,7 +15169,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_match_copy() {
-        let decoder = Unpack50Decoder::new();
+        let decoder = Rar50Decoder::new();
         let mut output = b"AB".to_vec();
 
         assert_eq!(
@@ -15181,7 +15184,7 @@ mod tests {
 
     #[test]
     fn rejects_match_distance_beyond_dictionary() {
-        let decoder = Unpack50Decoder::new();
+        let decoder = Rar50Decoder::new();
         let mut output = b"ABCD".to_vec();
 
         assert_eq!(
@@ -15194,7 +15197,7 @@ mod tests {
 
     #[test]
     fn solid_history_is_capped_to_dictionary_size() {
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         let first_payload = literal_only_payload(b"ABBA");
         let first =
             encode_compressed_block(&first_payload, first_payload.len() * 8, true, true).unwrap();
@@ -15226,7 +15229,7 @@ mod tests {
     /// commit_member compaction afterwards must leave the window intact.
     #[test]
     fn solid_checkpoint_rewinds_member_decode() {
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         let first_payload = literal_only_payload(b"ABBA");
         let first =
             encode_compressed_block(&first_payload, first_payload.len() * 8, true, true).unwrap();
@@ -15266,7 +15269,7 @@ mod tests {
 
     #[test]
     fn streaming_decoder_history_is_capped_without_reordering() {
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         let first_payload = literal_only_payload(b"ABBA");
         let first =
             encode_compressed_block(&first_payload, first_payload.len() * 8, true, true).unwrap();
@@ -15370,7 +15373,7 @@ mod tests {
     fn mt_sink_decode(
         encoded: &[u8],
         output_size: usize,
-        decoder: &mut Unpack50Decoder,
+        decoder: &mut Rar50Decoder,
     ) -> std::result::Result<Vec<u8>, StreamDecodeError<std::convert::Infallible>> {
         let mut cursor = std::io::Cursor::new(encoded);
         let mut out = Vec::new();
@@ -15451,14 +15454,14 @@ mod tests {
         for (name, data) in differential_shapes() {
             let encoded = encode_lz_member_with_options(&data, 0, EncodeOptions::new(4)).unwrap();
 
-            let mut mt_decoder = Unpack50Decoder::new();
+            let mut mt_decoder = Rar50Decoder::new();
             let mt_out = mt_sink_decode(&encoded, data.len(), &mut mt_decoder)
                 .unwrap_or_else(|_| panic!("{name}: parallel decode failed"));
             assert_eq!(mt_out, data, "{name}: parallel output mismatch");
 
             // Reference: the untouched buffered decoder. Output and final
             // LZ state (rep distances, last length) must agree exactly.
-            let mut reference = Unpack50Decoder::new();
+            let mut reference = Rar50Decoder::new();
             let ref_out = reference
                 .decode_member(&encoded, 0, data.len(), false, DecodeMode::Lz)
                 .unwrap();
@@ -15468,8 +15471,8 @@ mod tests {
                 "{name}: rep state diverged"
             );
             assert_eq!(
-                mt_decoder.last_length, reference.last_length,
-                "{name}: last_length diverged"
+                mt_decoder.previous_match_length, reference.previous_match_length,
+                "{name}: previous_match_length diverged"
             );
         }
     }
@@ -15505,7 +15508,7 @@ mod tests {
                 "algorithm {algorithm_version}: fixture must contain a distance code"
             );
 
-            let mut buffered = Unpack50Decoder::new();
+            let mut buffered = Rar50Decoder::new();
             let buffered_out = buffered
                 .decode_member(
                     &encoded,
@@ -15520,7 +15523,7 @@ mod tests {
                 "algorithm {algorithm_version}: buffered"
             );
 
-            let mut serial = Unpack50Decoder::new();
+            let mut serial = Rar50Decoder::new();
             serial.set_mt_workers_cap(1);
             let mut cursor = std::io::Cursor::new(&encoded);
             let mut serial_out = Vec::with_capacity(data.len());
@@ -15553,7 +15556,7 @@ mod tests {
                 "algorithm {algorithm_version}: rep state"
             );
             assert_eq!(
-                serial.last_length, buffered.last_length,
+                serial.previous_match_length, buffered.previous_match_length,
                 "algorithm {algorithm_version}: last-length state"
             );
         }
@@ -15568,10 +15571,10 @@ mod tests {
         for (name, data) in differential_shapes() {
             let encoded = encode_lz_member_with_options(&data, 0, EncodeOptions::new(4)).unwrap();
             for prefix in [data.len() - 1234, data.len() / 2, data.len() / 3 + 7] {
-                let mut reference = Unpack50Decoder::new();
+                let mut reference = Rar50Decoder::new();
                 let ref_result =
                     reference.decode_member(&encoded, 0, prefix, false, DecodeMode::Lz);
-                let mut mt_decoder = Unpack50Decoder::new();
+                let mut mt_decoder = Rar50Decoder::new();
                 let mt_result = mt_sink_decode(&encoded, prefix, &mut mt_decoder);
                 match ref_result {
                     Ok(ref_out) => {
@@ -15626,7 +15629,7 @@ mod tests {
             base[1000..5000].to_vec(),
             last,
         ];
-        let mut encoder = Unpack50Encoder::with_options(EncodeOptions::new(4));
+        let mut encoder = Rar50Encoder::with_options(EncodeOptions::new(4));
         let encoded: Vec<Vec<u8>> = members
             .iter()
             .enumerate()
@@ -15649,7 +15652,7 @@ mod tests {
             .collect();
 
         // Serial oracle: one decoder, members decoded in order, solid.
-        let mut serial = Unpack50Decoder::new();
+        let mut serial = Rar50Decoder::new();
         let mut serial_out = Vec::new();
         for (data, packed) in members.iter().zip(&encoded) {
             serial_out.extend(
@@ -15666,7 +15669,7 @@ mod tests {
 
         // Chain in two groups of two; the second call sees a carried window.
         for flat_limit in [u64::MAX, 0] {
-            let mut chained = Unpack50Decoder::new();
+            let mut chained = Rar50Decoder::new();
             let mut chain_out: Vec<u8> = Vec::new();
             for group in [[0usize, 1], [2, 3]] {
                 let sizes: Vec<usize> = group.iter().map(|&i| members[i].len()).collect();
@@ -15708,7 +15711,7 @@ mod tests {
                 "chained output diverged at flat_limit {flat_limit}"
             );
             assert_eq!(chained.reps, serial.reps, "rep state diverged");
-            assert_eq!(chained.last_length, serial.last_length);
+            assert_eq!(chained.previous_match_length, serial.previous_match_length);
         }
     }
 
@@ -15734,8 +15737,8 @@ mod tests {
     /// An address filter declared by a member that is NOT the first of its
     /// chain group. E8/E8E9/ARM mix the filtered range's origin into every
     /// translated address, and that origin is the offset within the MEMBER
-    /// (what the encoder bakes in, what unrar's per-file WrittenFileSize
-    /// gives, what the serial walk passes). The chain outputs count the
+    /// (what the encoder bakes in, what a reference extractor's per-file
+    /// output count gives, what the serial walk passes). The chain outputs count the
     /// whole group, so member 2's filter used to translate against
     /// `prior members + local offset` and silently emitted shifted
     /// addresses. Both legs - flat and, via flat_limit 0, the ring - must
@@ -15756,7 +15759,7 @@ mod tests {
             let members = [lead, filtered, tail];
             let filtered_index = 1usize;
 
-            let mut encoder = Unpack50Encoder::new();
+            let mut encoder = Rar50Encoder::new();
             let encoded: Vec<Vec<u8>> = members
                 .iter()
                 .enumerate()
@@ -15772,7 +15775,7 @@ mod tests {
                 .collect();
 
             // Serial oracle: one decoder, members in order, solid.
-            let mut serial = Unpack50Decoder::new();
+            let mut serial = Rar50Decoder::new();
             let mut serial_out = Vec::new();
             for (index, (data, packed)) in members.iter().zip(&encoded).enumerate() {
                 serial_out.extend(
@@ -15796,7 +15799,7 @@ mod tests {
                     next += 1;
                     Some(Box::new(std::io::Cursor::new(reader.to_vec())))
                 };
-                let mut chained = Unpack50Decoder::new();
+                let mut chained = Rar50Decoder::new();
                 let mut chain_out: Vec<u8> = Vec::new();
                 chained
                     .decode_solid_chain_to_sink(
@@ -15883,13 +15886,13 @@ mod tests {
         // Case B: output needs block 2 -> every path fails with the exact
         // error the serial decoder raises at that table build.
         for output_size in [4usize, 6] {
-            let mut reference = Unpack50Decoder::new();
+            let mut reference = Rar50Decoder::new();
             let ref_result =
                 reference.decode_member(&stream, 0, output_size, false, DecodeMode::Lz);
 
-            let mut mt_decoder = Unpack50Decoder::new();
+            let mut mt_decoder = Rar50Decoder::new();
             let mt_result = mt_sink_decode(&stream, output_size, &mut mt_decoder);
-            let mut flat_decoder = Unpack50Decoder::new();
+            let mut flat_decoder = Rar50Decoder::new();
             let flat_result = flat_sink_decode(&stream, output_size, &mut flat_decoder);
 
             match ref_result {
@@ -15928,7 +15931,7 @@ mod tests {
         let (_, data) = differential_shapes().swap_remove(1);
         let encoded = encode_lz_member_with_options(&data, 0, EncodeOptions::new(4)).unwrap();
         let truncated = &encoded[..encoded.len() / 2];
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         assert!(
             mt_sink_decode(truncated, data.len(), &mut decoder).is_err(),
             "truncated stream must fail like the serial decoder"
@@ -15939,7 +15942,7 @@ mod tests {
     #[cfg(feature = "parallel")]
     fn parallel_decode_resolves_rep_state_across_blocks() {
         // Block 1 (tables, not last): "AB" literals, a new match, then a
-        // symbol-257 repeat -> "ABABAB", leaving last_length=2, reps[0]=2.
+        // symbol-257 repeat -> "ABABAB", leaving previous_match_length=2, reps[0]=2.
         // Built inline (mirroring repeat_payload) so the exact bit count is
         // known - padding bits would otherwise decode as stray literals.
         // Block 2 (no tables, last): a bare symbol-257 repeat whose distance
@@ -15974,17 +15977,17 @@ mod tests {
         let mut stream = block1;
         stream.extend_from_slice(&block2);
 
-        let mut reference = Unpack50Decoder::new();
+        let mut reference = Rar50Decoder::new();
         let expected = reference
             .decode_member(&stream, 0, 8, false, DecodeMode::Lz)
             .unwrap();
         assert_eq!(expected, b"ABABABAB", "reference disagrees with test setup");
 
-        let mut mt_decoder = Unpack50Decoder::new();
+        let mut mt_decoder = Rar50Decoder::new();
         let mt_out = mt_sink_decode(&stream, 8, &mut mt_decoder).expect("parallel decode failed");
         assert_eq!(mt_out, expected);
         assert_eq!(mt_decoder.reps, reference.reps);
-        assert_eq!(mt_decoder.last_length, reference.last_length);
+        assert_eq!(mt_decoder.previous_match_length, reference.previous_match_length);
     }
 
     /// Decode a member through the flat-apply path (test-forced on regardless
@@ -15994,7 +15997,7 @@ mod tests {
     fn flat_sink_decode(
         encoded: &[u8],
         output_size: usize,
-        decoder: &mut Unpack50Decoder,
+        decoder: &mut Rar50Decoder,
     ) -> std::result::Result<Vec<u8>, StreamDecodeError<std::convert::Infallible>> {
         decoder.test_force_flat = true;
         let mut cursor = std::io::Cursor::new(encoded);
@@ -16079,14 +16082,14 @@ mod tests {
         for (name, data) in differential_shapes() {
             let encoded = encode_lz_member_with_options(&data, 0, EncodeOptions::new(4)).unwrap();
 
-            let mut flat_decoder = Unpack50Decoder::new();
+            let mut flat_decoder = Rar50Decoder::new();
             let flat_out = flat_sink_decode(&encoded, data.len(), &mut flat_decoder)
                 .unwrap_or_else(|_| panic!("{name}: flat decode failed"));
             assert_eq!(flat_out, data, "{name}: flat output mismatch");
 
             // Reference: the untouched buffered decoder. Output and final LZ
             // state (rep distances, last length) must agree exactly.
-            let mut reference = Unpack50Decoder::new();
+            let mut reference = Rar50Decoder::new();
             let ref_out = reference
                 .decode_member(&encoded, 0, data.len(), false, DecodeMode::Lz)
                 .unwrap();
@@ -16096,8 +16099,8 @@ mod tests {
                 "{name}: rep state diverged"
             );
             assert_eq!(
-                flat_decoder.last_length, reference.last_length,
-                "{name}: last_length diverged"
+                flat_decoder.previous_match_length, reference.previous_match_length,
+                "{name}: previous_match_length diverged"
             );
         }
     }
@@ -16111,10 +16114,10 @@ mod tests {
         for (name, data) in differential_shapes() {
             let encoded = encode_lz_member_with_options(&data, 0, EncodeOptions::new(4)).unwrap();
             for prefix in [data.len() - 1234, data.len() / 2, data.len() / 3 + 7] {
-                let mut reference = Unpack50Decoder::new();
+                let mut reference = Rar50Decoder::new();
                 let ref_result =
                     reference.decode_member(&encoded, 0, prefix, false, DecodeMode::Lz);
-                let mut flat_decoder = Unpack50Decoder::new();
+                let mut flat_decoder = Rar50Decoder::new();
                 let flat_result = flat_sink_decode(&encoded, prefix, &mut flat_decoder);
                 match ref_result {
                     Ok(ref_out) => {
@@ -16143,7 +16146,7 @@ mod tests {
         let (_, data) = differential_shapes().swap_remove(1);
         let encoded = encode_lz_member_with_options(&data, 0, EncodeOptions::new(4)).unwrap();
         let truncated = &encoded[..encoded.len() / 2];
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         assert!(
             flat_sink_decode(truncated, data.len(), &mut decoder).is_err(),
             "truncated stream must fail like the serial decoder"
@@ -16185,17 +16188,17 @@ mod tests {
         let mut stream = block1;
         stream.extend_from_slice(&block2);
 
-        let mut reference = Unpack50Decoder::new();
+        let mut reference = Rar50Decoder::new();
         let expected = reference
             .decode_member(&stream, 0, 8, false, DecodeMode::Lz)
             .unwrap();
         assert_eq!(expected, b"ABABABAB", "reference disagrees with test setup");
 
-        let mut flat_decoder = Unpack50Decoder::new();
+        let mut flat_decoder = Rar50Decoder::new();
         let flat_out = flat_sink_decode(&stream, 8, &mut flat_decoder).expect("flat decode failed");
         assert_eq!(flat_out, expected);
         assert_eq!(flat_decoder.reps, reference.reps);
-        assert_eq!(flat_decoder.last_length, reference.last_length);
+        assert_eq!(flat_decoder.previous_match_length, reference.previous_match_length);
     }
 
     /// Flat decode with an explicit dictionary, so a member many times the
@@ -16205,7 +16208,7 @@ mod tests {
         encoded: &[u8],
         output_size: usize,
         dictionary: usize,
-        decoder: &mut Unpack50Decoder,
+        decoder: &mut Rar50Decoder,
     ) -> std::result::Result<Vec<u8>, StreamDecodeError<std::convert::Infallible>> {
         decoder.test_force_flat = true;
         let mut cursor = std::io::Cursor::new(encoded);
@@ -16326,7 +16329,7 @@ mod tests {
         }
         assert_eq!(flat_plan_bytes(0, data.len(), dictionary), 2 * dictionary);
         let encoded = encode_lz_member_with_options(&data, 0, EncodeOptions::new(4)).unwrap();
-        let mut reference = Unpack50Decoder::new();
+        let mut reference = Rar50Decoder::new();
         reference.set_window_limit(dictionary);
         let expected = reference
             .decode_member_with_dictionary(
@@ -16339,7 +16342,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(expected, data, "reference disagrees with the encoder");
-        let mut flat_decoder = Unpack50Decoder::new();
+        let mut flat_decoder = Rar50Decoder::new();
         let flat_out =
             flat_sink_decode_with_dictionary(&encoded, data.len(), dictionary, &mut flat_decoder)
                 .expect("sliding flat decode");
@@ -16363,8 +16366,8 @@ mod tests {
             *byte = (i % 251) as u8;
         }
         let encoded = encode_lz_member_with_filter(&data, Rar50FilterKind::E8).unwrap();
-        let mut flat_decoder = Unpack50Decoder::new();
-        let mut reference = Unpack50Decoder::new();
+        let mut flat_decoder = Rar50Decoder::new();
+        let mut reference = Rar50Decoder::new();
         let expected = reference
             .decode_member_with_dictionary(
                 &encoded,
@@ -16391,11 +16394,11 @@ mod tests {
         // equal the buffered reference (which filters at member end).
         let data = b"\xe8\0\0\0\0plain text after the call opcode".to_vec();
         let encoded = encode_lz_member_with_filter(&data, Rar50FilterKind::E8).unwrap();
-        let mut reference = Unpack50Decoder::new();
+        let mut reference = Rar50Decoder::new();
         let ref_out = reference
             .decode_member(&encoded, 0, data.len(), false, DecodeMode::Lz)
             .unwrap();
-        let mut flat_decoder = Unpack50Decoder::new();
+        let mut flat_decoder = Rar50Decoder::new();
         let flat_out =
             flat_sink_decode(&encoded, data.len(), &mut flat_decoder).expect("flat filter decode");
         assert_eq!(flat_out, ref_out);
@@ -16421,7 +16424,7 @@ mod tests {
         let end = data.len();
         data.extend_from_slice(b"SUFFIX-not-filtered-111111111111111");
 
-        let encoded = Unpack50Encoder::new()
+        let encoded = Rar50Encoder::new()
             .encode_member_with_filters(
                 &data,
                 0,
@@ -16432,14 +16435,14 @@ mod tests {
             )
             .unwrap();
 
-        let mut reference = Unpack50Decoder::new();
+        let mut reference = Rar50Decoder::new();
         let ref_out = reference
             .decode_member(&encoded, 0, data.len(), false, DecodeMode::Lz)
             .unwrap();
         assert_eq!(ref_out, data, "reference round-trip mismatch");
 
         // Capture chunks in order to inspect the emit boundaries.
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         decoder.test_force_flat = true;
         let mut chunks: Vec<Vec<u8>> = Vec::new();
         decoder
@@ -16667,15 +16670,15 @@ mod tests {
                 EncoderMatchState::default(),
                 EncoderMatchState {
                     reps: [7, 300, 70_000, 1 << 20],
-                    last_length: 11,
+                    previous_match_length: 11,
                 },
                 EncoderMatchState {
                     reps: [1, 2, 3, 4],
-                    last_length: 2,
+                    previous_match_length: 2,
                 },
                 EncoderMatchState {
                     reps: [4096, 8192, 1, 0],
-                    last_length: 4096,
+                    previous_match_length: 4096,
                 },
             ];
             for state in states {
@@ -16729,7 +16732,7 @@ mod tests {
                 EncoderMatchState::default(),
                 EncoderMatchState {
                     reps: [9, 4096, 1 << 19, 1 << 24],
-                    last_length: 17,
+                    previous_match_length: 17,
                 },
             ];
             for state in states {
@@ -16918,7 +16921,7 @@ mod tests {
             &data, &with, 0, &[], 0, DISTANCE_TABLE_SIZE_50,
             &mut EncoderMatchState::default(), true,
         ).unwrap();
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         decoder.decode_member_with_dictionary(
             &encode_literal_only(&history, 0).unwrap(), 0, history.len(),
             131072, false, DecodeMode::Lz,
@@ -16949,7 +16952,10 @@ mod tests {
         // not flagged (the shift is under the width) and silently wraps to
         // an allowance of 0, which the armv7-cross RUN caught (left 1, right
         // 8). (nzbfast-local change, 15 Sep 2026; see VENDORING.md.)
-        assert_eq!(tree_wave_width(16, TREE_CANDIDATE_SLOTS, Some(usize::MAX)), 8);
+        assert_eq!(
+            tree_wave_width(16, TREE_CANDIDATE_SLOTS, Some(usize::MAX)),
+            8
+        );
         assert_eq!(tree_wave_width(16, TREE_CANDIDATE_SLOTS, Some(1 << 30)), 4);
         // `usize::MAX`, not `1 << 40`: the allowance is a `usize`, and on a
         // 32-bit target that shift is a deny-by-default overflow that stops
@@ -17192,7 +17198,7 @@ mod tests {
                 )
                 .unwrap();
                 let dictionary = 1 << 20;
-                let mut decoder = Unpack50Decoder::new();
+                let mut decoder = Rar50Decoder::new();
                 assert_eq!(
                     decoder
                         .decode_member_with_dictionary(

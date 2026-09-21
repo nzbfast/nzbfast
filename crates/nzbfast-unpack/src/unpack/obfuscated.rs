@@ -54,7 +54,7 @@ pub fn collect_obfuscated_rar_volumes(dir: &std::path::Path) -> Result<Vec<PathB
 /// This collector exists for the opposite case - hash names carrying no
 /// set and no order - so filename order is not available to fall back
 /// on, and RAR4 headers carry no substitute. Measured 22 Aug 2026 over a
-/// four-volume stored set written by `rars::rar15_40::write_stored_volumes`:
+/// four-volume stored set from `rarfixtures::rar4_stored_volume_set`:
 /// the two INTERIOR volumes are identical in every header field the
 /// parser exposes - same main flags, same member name, both
 /// `is_split_before` and `is_split_after`, same `pack_size`, `unp_size`,

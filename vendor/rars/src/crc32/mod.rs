@@ -1,5 +1,7 @@
 //! Shared RAR CRC-32 primitives.
 
+mod pmull;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Crc32 {
     value: u32,
@@ -109,8 +111,12 @@ pub fn table_entry(index: u8) -> u32 {
 
 // `crc` here is the raw (pre-inverted) CRC state; crc32fast's
 // `new_with_initial` takes and `finalize` returns *finished* checksums,
-// so bridge with a complement on each side.
+// so bridge with a complement on each side. A CPU with the folded kernel
+// (`pmull`) never reaches crc32fast here.
 fn update_raw(crc: u32, input: &[u8]) -> u32 {
+    if let Some(folded) = pmull::update(crc, input) {
+        return folded;
+    }
     let mut hasher = crc32fast::Hasher::new_with_initial(!crc);
     hasher.update(input);
     !hasher.finalize()

@@ -471,7 +471,7 @@ impl ControlCrypt {
 
     /// Encrypt one line's content (no terminators). None = a byte
     /// outside the alphabet, a line too short for FF1's domain, or a
-    /// line past [`MAX_CONTROL_LINE`] (the encoder half refuses the same
+    /// line past `MAX_CONTROL_LINE` (the encoder half refuses the same
     /// lengths as the decoder half, which is what keeps the round-trip
     /// pins honest).
     pub fn encrypt_line(&self, seg: u32, line_index: u32, content: &[u8]) -> Option<Vec<u8>> {
@@ -488,7 +488,7 @@ impl ControlCrypt {
 
     /// Decrypt one line's content - the inverse of [`Self::encrypt_line`].
     /// This is the ONLY entry to FF1 on the decode side, so the
-    /// [`MAX_CONTROL_LINE`] refusal here covers all three callers in
+    /// `MAX_CONTROL_LINE` refusal here covers all three callers in
     /// [`control_decrypt_block`]: the line-1 trial decrypt, the header
     /// run, and the footer. A None on any of them lands on the path an
     /// article that is simply not control-encrypted already takes.

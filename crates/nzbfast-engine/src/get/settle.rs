@@ -2306,6 +2306,7 @@ mod spare_contract_tests {
             par2_name_demoted: Default::default(),
             par2_sniffed: AtomicBool::new(false),
             total_segments: 1,
+            posted_bytes: 0,
             remaining: AtomicUsize::new(0),
             missing: AtomicUsize::new(0),
             errors: AtomicUsize::new(errors),

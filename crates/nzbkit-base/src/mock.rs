@@ -65,8 +65,8 @@ pub struct Chaos {
     /// Fixed delay before every successful BODY response (a "slow
     /// server" - per-connection throughput ≈ article_size / delay).
     pub delay_ms: u64,
-    /// Echo the requested message-id on the refusal line ("430 no such
-    /// article <id>") instead of the bare form. Real providers split
+    /// Echo the requested message-id on the refusal line (`"430 no such
+    /// article <id>"`) instead of the bare form. Real providers split
     /// both ways, and the difference is not cosmetic: the pool treats an
     /// UN-echoed 430 as positional-only evidence and requeues the
     /// article uncharged for one confirming repeat (see `Work::soft_430`
@@ -197,7 +197,7 @@ pub struct Chaos {
     ///
     /// The one fault shape none of the levers above can build, and the
     /// only one that can wedge a pool whose last backbone HAS answered.
-    /// A hold ([`crate::pool::PoolConfig::recheck_430`]) is taken only
+    /// A hold (`crate::pool::PoolConfig::recheck_430`) is taken only
     /// where a group's own 430 was the last evidence the article
     /// needed, so a server that never connects cannot produce one - it
     /// has to refuse first and go away after. `outage` alone begins
@@ -868,14 +868,14 @@ pub struct MockServer {
     /// traffic (or its absence, while a download runs) is visible.
     pub stats: Arc<AtomicU64>,
     /// The `served` count at the moment of each DATE command, across
-    /// all connections - see [`Counters::date_log`]. The §129 3g
+    /// all connections - see `Counters::date_log`. The §129 3g
     /// alignment fence rides behind a BODY as a DATE, so this is where
     /// a test reads whether this server is being fenced, and where it
     /// stopped being fenced.
     pub date_log: Arc<std::sync::Mutex<Vec<u64>>>,
     /// Body bytes this server put on the wire, across all connections -
     /// the independent witness for the §129 3c provider-accounting
-    /// clause (see [`ThrottleState::bytes_out`]).
+    /// clause (see `ThrottleState::bytes_out`).
     pub bytes_out: Arc<AtomicU64>,
     /// Every BODY request's message-id (with angle brackets) in arrival
     /// order, across all connections - the M11 tests assert queue-order

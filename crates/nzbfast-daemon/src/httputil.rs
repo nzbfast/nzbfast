@@ -7,20 +7,42 @@
 
 use super::*;
 
-/// Wrong keys tolerated from one address inside [`AUTH_FAIL_WINDOW`] before
-/// it is refused outright. Generous: a misconfigured *arr retries a handful
-/// of times, and locking that out helps nobody.
+/// Wrong credentials from one address inside `AUTH_FAIL_WINDOW` before
+/// the refusal changes shape. Generous: a misconfigured *arr retries a
+/// handful of times, and locking that out helps nobody.
+///
+/// "Refused outright" is what this comment used to say and it was never
+/// true of any call site - see `Daemon::note_auth_failure`.
 pub const AUTH_FAIL_THRESHOLD: u32 = 10;
-/// How long the failure count is remembered. Also the block duration - the
-/// count resets by simply going quiet, so there is no permanent lockout and
-/// no state to unstick.
+/// How long the failure count is remembered, measured from the FIRST
+/// failure and not from the last: the timestamp is written when the entry
+/// is created and refreshed only by a reset, so continued knocking does
+/// not extend the window. The count resets by simply going quiet, so
+/// there is no permanent lockout and no state to unstick.
 pub(super) const AUTH_FAIL_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 /// Ceiling on tracked addresses, so the map itself cannot be the attack.
 pub const AUTH_FAIL_MAX_TRACKED: usize = 4096;
 
 impl Daemon {
-    /// Record a rejected API key and decide whether this address has had
-    /// enough. `true` = refuse without doing any further work.
+    /// Record a rejected credential and report whether this address has
+    /// had enough.
+    ///
+    /// **IT LABELS A REFUSAL; IT DOES NOT PREVENT AN ATTEMPT.** Every
+    /// caller consults this AFTER the credential has already been
+    /// checked and found wrong, and every caller uses the answer to pick
+    /// a status code (429 rather than 401/403) and nothing else. So a
+    /// `true` here saves no work, declines no guess, and above all
+    /// changes no ANSWER: a caller that then sends the RIGHT credential
+    /// is served normally. That is measured rather than asserted, in
+    /// `daemon_weblogin::the_ladder_labels_a_guess_but_never_refuses_one`.
+    ///
+    /// Two consequences, and they pull opposite ways. Nothing here
+    /// bounds a guess rate - on `/login` the only thing that does is the
+    /// ~16 ms of Argon2id CPU a verification costs. And equally, nothing
+    /// here can lock an owner out of their own install, which is the
+    /// property any stricter scheme would have to keep. The measurement
+    /// and what it would take to change this:
+    /// `research/LOGIN-RATE-LIMIT-MEASURED-2026-09-20.md`.
     ///
     /// Deliberately refuses FAST rather than sleeping. The obvious throttle
     /// is a delay before answering, but responses are written on the small

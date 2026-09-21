@@ -1,6 +1,6 @@
 use crate::codec::rar13::{
-    unpack15_decode, unpack15_encode, unpack15_encode_with_options_and_progress,
-    EncodeOptions as Rar15EncodeOptions, Unpack15, Unpack15Encoder,
+    decode_rar15, encode_rar15, EncodeOptions as Rar15EncodeOptions, Rar15CheckedEncoder,
+    Rar15Decoder,
 };
 use crate::crypto::rar13::{Rar13Cipher, Rar13DecryptReader};
 use crate::detect::{find_archive_start, ArchiveSignature, RAR13_SIGNATURE, SFX_SCAN_LIMIT};
@@ -434,7 +434,7 @@ impl Archive {
     where
         F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
     {
-        let mut unpack15 = Unpack15::new();
+        let mut decoder = Rar15Decoder::new();
         let mut extracted_count = 0usize;
         for entry in &self.entries {
             if entry.is_split_before() || entry.is_split_after() {
@@ -458,7 +458,7 @@ impl Archive {
                     .write_compressed_to(
                         self,
                         password,
-                        &mut unpack15,
+                        &mut decoder,
                         self.main.is_solid() && extracted_count != 0,
                         &mut writer,
                     )
@@ -495,7 +495,7 @@ impl Archive {
 
             let mut packed = self.main.extra[packed_start..packed_end].to_vec();
             Rar13Cipher::new_comment().decrypt_in_place(&mut packed);
-            return Ok(Some(unpack15_decode(&packed, unpacked_len)?));
+            return Ok(Some(decode_rar15(&packed, unpacked_len)?));
         }
 
         let comment_start = 2usize;
@@ -721,7 +721,7 @@ impl Entry {
         &self,
         archive: &Archive,
         password: Option<&[u8]>,
-        unpack15: &mut Unpack15,
+        decoder: &mut Rar15Decoder,
         solid: bool,
         out: &mut impl Write,
     ) -> Result<()> {
@@ -737,7 +737,7 @@ impl Entry {
             let password = password.ok_or(Error::NeedPassword)?;
             let packed = archive.range_reader(self.packed_range.clone())?;
             let mut packed = Rar13DecryptReader::new(packed, Rar13Cipher::new(password));
-            unpack15.decode_member_from_reader(
+            decoder.decode_member_from_reader(
                 &mut packed,
                 self.header.unp_size as usize,
                 solid,
@@ -745,7 +745,7 @@ impl Entry {
             )?;
         } else {
             let mut packed = archive.range_reader(self.packed_range.clone())?;
-            unpack15.decode_member_from_reader(
+            decoder.decode_member_from_reader(
                 &mut packed,
                 self.header.unp_size as usize,
                 solid,
@@ -769,7 +769,7 @@ impl Entry {
         password: Option<&[u8]>,
         out: &mut impl Write,
     ) -> Result<()> {
-        self.write_compressed_to(archive, password, &mut Unpack15::new(), false, out)
+        self.write_compressed_to(archive, password, &mut Rar15Decoder::new(), false, out)
     }
 
     fn entry_error(&self, operation: &'static str, error: Error) -> Error {
@@ -833,7 +833,7 @@ where
     F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
 {
     let mut pending: Option<PendingSplitRefs> = None;
-    let mut unpack15 = Unpack15::new();
+    let mut decoder = Rar15Decoder::new();
     let mut extracted_count = 0usize;
     // Volumes already reported consumed - see the rar50 twin.
     let mut reported = 0usize;
@@ -857,7 +857,7 @@ where
                     .write_compressed_to(
                         archive,
                         password,
-                        &mut unpack15,
+                        &mut decoder,
                         archive.main.is_solid() && extracted_count != 0,
                         &mut writer,
                     )
@@ -882,7 +882,7 @@ where
                     let completed = pending.take().expect("pending split");
                     let solid = archive.main.is_solid() && extracted_count != 0;
                     completed
-                        .write_to(volumes, entry, password, &mut unpack15, solid, &mut *open)
+                        .write_to(volumes, entry, password, &mut decoder, solid, &mut *open)
                         .map_err(|error| entry.entry_error("extracting", error))?;
                     extracted_count += 1;
                 }
@@ -1009,7 +1009,7 @@ impl PendingSplitRefs {
         volumes: &[Archive],
         final_entry: &Entry,
         password: Option<&[u8]>,
-        unpack15: &mut Unpack15,
+        decoder: &mut Rar15Decoder,
         solid: bool,
         open: &mut F,
     ) -> Result<()>
@@ -1044,7 +1044,7 @@ impl PendingSplitRefs {
                 ));
             }
         } else {
-            unpack15.decode_member_from_reader(
+            decoder.decode_member_from_reader(
                 &mut reader,
                 final_entry.header.unp_size as usize,
                 solid,
@@ -1172,7 +1172,7 @@ pub fn write_compressed_archive_with_comment_and_progress(
     let mut solid_encoder = options
         .features
         .solid
-        .then(|| Unpack15Encoder::with_options(encode_options));
+        .then(|| Rar15CheckedEncoder::with_options(encode_options));
 
     let total_bytes: u64 = entries.iter().map(|entry| entry.data.len() as u64).sum();
     let attempts = if options.features.solid || options.compression_level == Some(0) {
@@ -1201,7 +1201,7 @@ pub fn write_compressed_archive_with_comment_and_progress(
             work.advance(delta as u64)
         };
         let mut packed = if let Some(encoder) = solid_encoder.as_mut() {
-            encoder.encode_member_with_progress(entry.data, &mut advance)?
+            encoder.encode_solid_member_with_progress(entry.data, &mut advance)?
         } else if options.compression_level == Some(0) {
             entry.data.to_vec()
         } else {
@@ -1509,30 +1509,33 @@ fn rar15_encode_options_for_level(level: Option<u8>) -> Result<Rar15EncodeOption
     }
 }
 
+/// Packs `data` with the first of the level's option sets whose stream
+/// decodes back, or `None` when none does, which the callers store. The
+/// check is [`Rar15CheckedEncoder`]'s, the same one the solid writers use:
+/// it compares while decoding, so no second copy of the member is built.
 fn encode_verified_rar15_payload_with_progress(
     data: &[u8],
     options: Rar15EncodeOptions,
     progress: &mut dyn FnMut(usize) -> bool,
 ) -> Result<Option<Vec<u8>>> {
-    let mut candidates = rar15_encode_fallback_options(options).into_iter();
-    let Some(first) = candidates.next() else {
-        return Ok(None);
-    };
-    let packed = match unpack15_encode_with_options_and_progress(data, first, progress) {
-        Err(crate::codec::Error::Cancelled) => return Err(Error::Cancelled),
-        result => result?,
-    };
-    if unpack15_payload_matches(&packed, data)? {
-        return Ok(Some(packed));
-    }
-    for candidate_options in candidates {
-        let packed =
-            match unpack15_encode_with_options_and_progress(data, candidate_options, progress) {
-                Err(crate::codec::Error::Cancelled) => return Err(Error::Cancelled),
-                result => result?,
-            };
-        if unpack15_payload_matches(&packed, data)? {
-            return Ok(Some(packed));
+    first_rar15_payload_that_decodes_back(rar15_encode_fallback_options(options), |options| {
+        Rar15CheckedEncoder::with_options(options).encode_member_with_progress(data, progress)
+    })
+}
+
+/// Tries `candidates` in order and keeps the first member `encode` returns.
+/// Apart from the encoder so a test can refuse an option set, which no
+/// input does since the planner fix.
+fn first_rar15_payload_that_decodes_back(
+    candidates: Vec<Rar15EncodeOptions>,
+    mut encode: impl FnMut(Rar15EncodeOptions) -> crate::codec::Result<Option<Vec<u8>>>,
+) -> Result<Option<Vec<u8>>> {
+    for options in candidates {
+        match encode(options) {
+            Ok(Some(packed)) => return Ok(Some(packed)),
+            Ok(None) => {}
+            Err(crate::codec::Error::Cancelled) => return Err(Error::Cancelled),
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(None)
@@ -1552,13 +1555,6 @@ fn rar15_encode_fallback_options(options: Rar15EncodeOptions) -> Vec<Rar15Encode
         candidates.push(conservative);
     }
     candidates
-}
-
-fn unpack15_payload_matches(packed: &[u8], data: &[u8]) -> Result<bool> {
-    match unpack15_decode(packed, data.len()) {
-        Ok(decoded) => Ok(decoded == data),
-        Err(_) => Ok(false),
-    }
 }
 
 fn reject_writer_feature(
@@ -1763,7 +1759,7 @@ fn encode_archive_comment(comment: Option<&[u8]>) -> Result<Vec<u8>> {
             "RAR 1.3 archive comment is longer than 65535 bytes",
         ));
     }
-    let mut packed = unpack15_encode(comment)?;
+    let mut packed = encode_rar15(comment)?;
     Rar13Cipher::new_comment().encrypt_in_place(&mut packed);
     let packed_field_len = packed.len().checked_add(2).ok_or(Error::InvalidHeader(
         "RAR 1.3 archive comment size overflows",
@@ -1822,12 +1818,74 @@ pub fn file_checksum(input: &[u8]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::rar13::{find_long_lz, LongLz};
+    use crate::codec::rar13::{find_long_match, LongMatch, Rar15Encoder};
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     struct CollectWriter(Rc<RefCell<Vec<u8>>>);
+
+    fn fallback_test_member() -> Vec<u8> {
+        let mut data = b"the quick brown fox jumps over the lazy dog. ".repeat(300);
+        data.extend((0..4096u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8));
+        data
+    }
+
+    /// A member whose first option set does not decode back is packed with
+    /// the next one, and the sets are tried in their order.
+    #[test]
+    fn verified_payload_lands_through_a_later_option_set() {
+        let data = fallback_test_member();
+        let candidates =
+            rar15_encode_fallback_options(rar15_encode_options_for_level(Some(5)).unwrap());
+        assert!(candidates.len() >= 2, "{candidates:?}");
+        let mut tried = Vec::new();
+        let packed = first_rar15_payload_that_decodes_back(candidates.clone(), |options| {
+            tried.push(options);
+            if tried.len() == 1 {
+                return Ok(None);
+            }
+            Rar15CheckedEncoder::with_options(options)
+                .encode_member_with_progress(&data, &mut |_| true)
+        })
+        .unwrap()
+        .expect("the second option set lands");
+        assert_eq!(tried, candidates[..2]);
+        let expected = Rar15Encoder::with_options(candidates[1])
+            .encode_member(&data)
+            .unwrap();
+        assert!(packed == expected);
+        assert!(decode_rar15(&packed, data.len()).unwrap() == data);
+    }
+
+    /// When no option set decodes back every one is tried, in order, and the
+    /// answer is `None`, which both writers turn into a stored member.
+    #[test]
+    fn verified_payload_is_none_when_no_option_set_lands() {
+        let candidates =
+            rar15_encode_fallback_options(rar15_encode_options_for_level(Some(3)).unwrap());
+        let mut tried = Vec::new();
+        let packed = first_rar15_payload_that_decodes_back(candidates.clone(), |options| {
+            tried.push(options);
+            Ok(None)
+        })
+        .unwrap();
+        assert!(packed.is_none());
+        assert_eq!(tried, candidates);
+    }
+
+    #[test]
+    fn verified_payload_stops_at_a_cancel() {
+        let candidates =
+            rar15_encode_fallback_options(rar15_encode_options_for_level(Some(5)).unwrap());
+        let mut calls = 0;
+        let result = first_rar15_payload_that_decodes_back(candidates, |_| {
+            calls += 1;
+            Err(crate::codec::Error::Cancelled)
+        });
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert_eq!(calls, 1);
+    }
 
     #[test]
     fn compressed_writer_reports_balanced_progress_events() {
@@ -2353,9 +2411,9 @@ mod tests {
     }
 
     #[test]
-    fn writes_and_reads_literal_only_compressed_archive_with_repeated_stmode() {
+    fn writes_and_reads_literal_only_compressed_archive_with_repeated_run_mode() {
         let data =
-            b"this literal-only payload is long enough to enter and exit stmode more than once";
+            b"this literal-only payload is long enough to enter and leave run mode more than once";
         let input = [FileEntry {
             name: b"long.txt",
             data,
@@ -2453,7 +2511,7 @@ mod tests {
         assert_eq!(archive.entries[0].header.method, METHOD_BEST);
         assert!(
             archive.entries[0].header.pack_size < data.len() as u32,
-            "ShortLZ should make the repeated payload smaller than stored data"
+            "near matches should make the repeated payload smaller than stored data"
         );
 
         let extracted = collect_extract(&archive, None).unwrap();
@@ -2461,12 +2519,12 @@ mod tests {
     }
 
     #[test]
-    fn compressed_writer_emits_long_lz_matches() {
+    fn compressed_writer_emits_long_matches() {
         let mut data = short_lz_resistant_prefix(300);
         data.extend_from_within(..32);
         assert_eq!(
-            find_long_lz(&data, 300, 0x8000),
-            Some(LongLz {
+            find_long_match(&data, 300, 0x8000),
+            Some(LongMatch {
                 distance: 300,
                 length: 32
             })
@@ -2480,7 +2538,7 @@ mod tests {
             file_comment: None,
         }];
 
-        let literal_only = Unpack15Encoder::new()
+        let literal_only = Rar15Encoder::new()
             .encode_literals_only(&data)
             .unwrap()
             .len();
@@ -2489,7 +2547,7 @@ mod tests {
         assert_eq!(archive.entries[0].header.method, METHOD_BEST);
         assert!(
             (archive.entries[0].header.pack_size as usize) < literal_only,
-            "LongLZ should make a >256-byte-distance repeat smaller than literal-only output"
+            "a long match should make a >256-byte-distance repeat smaller than literal-only output"
         );
 
         let extracted = collect_extract(&archive, None).unwrap();
@@ -2549,7 +2607,7 @@ mod tests {
         let input = [
             FileEntry {
                 name: b"first.txt",
-                data: b"first member primes the adaptive unpack15 state",
+                data: b"first member primes the adaptive decoder state",
                 file_time: 0,
                 file_attr: 0x20,
                 password: None,
@@ -3109,6 +3167,64 @@ mod tests {
 
         let extracted = collect_extract(&archive, None).unwrap();
         assert_eq!(extracted[0].data, data);
+    }
+
+    /// The first member here once packed, at level 3, into a stream that did
+    /// not decode back (a flag group ended with bit 7 unused). The solid
+    /// path has no fallback option sets, so every level must write both
+    /// members so that they extract.
+    #[test]
+    fn solid_writer_packs_member_that_once_did_not_decode_back() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/rar15_40/rar154/doc_154_best.rar"
+        ))
+        .unwrap();
+        let source = crate::rar15_40::Archive::parse(&bytes).unwrap();
+        let mut decoder = Rar15Decoder::new();
+        let mut members = Vec::new();
+        for file in source.files() {
+            if file.is_directory() || file.is_stored() || file.unp_ver != 15 {
+                continue;
+            }
+            let packed = file.packed_data(&source).unwrap();
+            let data = decoder
+                .decode_member(&packed, file.unp_size as usize, file.is_solid())
+                .unwrap();
+            members.push((file.name.clone(), data));
+        }
+        let hard = members
+            .iter()
+            .position(|(name, _)| name == b"RAR1~FHU.MD")
+            .expect("fixture member");
+        let data = [
+            members[hard].1.clone(),
+            members[(hard + 1) % members.len()].1.clone(),
+        ];
+        for level in 1..=5u8 {
+            let mut features = FeatureSet::store_only();
+            features.solid = true;
+            let options = WriterOptions {
+                target: ArchiveVersion::Rar14,
+                features,
+                compression_level: Some(level),
+                ..WriterOptions::default()
+            };
+            let input = [(b"a.md", &data[0]), (b"b.md", &data[1])].map(|(name, data)| FileEntry {
+                name,
+                data,
+                file_time: 0,
+                file_attr: 0x20,
+                password: None,
+                file_comment: None,
+            });
+            let bytes = write_compressed_archive_with_comment(&input, options, None)
+                .unwrap_or_else(|error| panic!("level {level}: {error:?}"));
+            let extracted = collect_extract(&Archive::parse(&bytes).unwrap(), None).unwrap();
+            assert_eq!(extracted.len(), 2, "level {level}");
+            assert!(extracted[0].data == data[0], "level {level}");
+            assert!(extracted[1].data == data[1], "level {level}");
+        }
     }
 
     #[test]

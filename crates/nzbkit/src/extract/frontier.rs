@@ -16,6 +16,12 @@ use crate::sync::MutexExt;
 /// like any other span and simply unblocks the reader.
 pub(super) struct FrontierBuffer {
     pub(super) state: Mutex<FrontierState>,
+    /// Every park on this condvar re-acquires `state`, so it must be
+    /// spelled `.unwrap_or_else(|e| e.into_inner())` and never
+    /// `.unwrap()`: `state` is taken through `lock_ok()` everywhere
+    /// else precisely so one panicking worker does not take the readers
+    /// with it, and a bare unwrap here would turn that poison into a
+    /// second panic on the decode thread, which has no catch_unwind.
     pub(super) arrived: Condvar,
     /// §94 B: when Some, reads only serve bytes below the slot's
     /// verified-block watermark - the chase decode consumes nothing the
@@ -58,6 +64,27 @@ pub(super) struct FrontierBuffer {
     pager: Option<Weak<Extractor>>,
 }
 
+/// The `total` of a frontier whose declared size is not trusted yet
+/// (TODO 118.2 (b)). A poster that writes a fresh random `=ybegin size=`
+/// on every article gives a chase no total it can believe at attach, and
+/// the RAR decode does not need one: it reads forward and stops at the
+/// volume's own END header. So the buffer opens unbounded and
+/// [`FrontierBuffer::close_total`] closes it when the slot's
+/// `SizeTrust` ladder does - a second agreeing article, the engine's
+/// exact witness, or the finish-time settle of a lone claim. What never
+/// closes it is a high-water mark of bytes received (TODO 118.2's
+/// standing rule).
+///
+/// `u64::MAX` rather than an `Option` because every consumer of `total`
+/// already reads it as a ceiling: an append clamps its reservation at
+/// `total - base` (unbounded here, exactly a bare `Vec`), a write clips
+/// at `total` (nothing clipped), a read answers `Ok(0)` at `total`
+/// (never, so it parks at the frontier as at any hole) and completeness
+/// is `frontier() >= total` (never, until closed). The one consumer that
+/// must not see the sentinel is the rars driver's `expected_len`, which
+/// `chase_wait_volume` narrows for it.
+pub(super) const OPEN_TOTAL: u64 = u64::MAX;
+
 #[derive(Default)]
 pub(super) struct FrontierState {
     /// Volume offset of `data[0]`. Zero until a drop-behind trim moves
@@ -80,7 +107,12 @@ pub(super) struct FrontierState {
     /// Sum of paged span lengths - the scratch live-count this buffer
     /// still owes (released per span on read-back, remainder on Drop).
     pub(super) paged_bytes: usize,
-    /// Declared volume size (the level-1 entry's unpacked size).
+    /// Declared volume size (the level-1 entry's unpacked size), or
+    /// [`OPEN_TOTAL`] while the declaration is not yet trusted (TODO
+    /// 118.2 (b)): an open buffer takes every span, never answers EOF,
+    /// never reads complete, and closes through
+    /// [`FrontierBuffer::close_total`] once the slot's size is
+    /// corroborated.
     pub(super) total: u64,
     /// What this buffer's `data` allocation currently has charged to
     /// `memgauge::HoldsReserve` - the reserved-but-unused slack
@@ -430,6 +462,33 @@ impl FrontierBuffer {
             scratch,
             pager,
         }
+    }
+
+    /// Close an open buffer's total (see [`OPEN_TOTAL`]), or correct a
+    /// closed one - the engine's exact witness overrides a claim two
+    /// articles agreed on, exactly as it does for the RAR mapper's
+    /// bound. Wakes every parked reader: one waiting at the frontier for
+    /// bytes past the true end now reads `Ok(0)` there. Bytes already
+    /// retained past a lowered total stay where they are - reads stop at
+    /// the total, so they are dead weight rather than a wrong byte, and
+    /// the case is a post whose exact length is shorter than what it
+    /// carried, which is not a post. A zero is not a total.
+    pub(super) fn close_total(&self, total: u64) {
+        if total == 0 {
+            return;
+        }
+        let mut st = self.state.lock_ok();
+        if st.total == total {
+            return;
+        }
+        st.total = total;
+        drop(st);
+        self.arrived.notify_all();
+    }
+
+    /// Is the declared size still untrusted ([`OPEN_TOTAL`])?
+    pub(super) fn is_open(&self) -> bool {
+        self.state.lock_ok().total == OPEN_TOTAL
     }
 
     /// Stop withholding bytes from the decode: see `gate_released`.
@@ -1432,7 +1491,9 @@ impl FrontierBuffer {
         // and disjoint). `frontier_ram() == end` is the tail's identity:
         // an append in the window moves it and the commit walks away
         // (the next round re-clones the new tail); a front trim moves
-        // `base` and `data` together and leaves it standing.
+        // `base` and `data` together and leaves it standing - which is
+        // why the commit guard checks `data` still HOLDS the chunk as
+        // well (see `tail_stood_still`).
         if include_data {
             const TAIL_CHUNK: usize = 8 << 20;
             let mut retries = 0usize;
@@ -1469,15 +1530,7 @@ impl FrontierBuffer {
                     break;
                 };
                 let mut st = self.state.lock_ok();
-                let tail_stood_still = !st.conflict
-                    && st.abort.is_none()
-                    && st.frontier_ram() == end
-                    && !st
-                        .paged
-                        .range(..end)
-                        .next_back()
-                        .is_some_and(|(&ps, &(_, plen))| ps + plen as u64 > at);
-                if !tail_stood_still {
+                if !Self::tail_stood_still(&st, at, end, bytes.len()) {
                     drop(st);
                     sc.release(bytes.len());
                     retries += 1;
@@ -1493,6 +1546,37 @@ impl FrontierBuffer {
             }
         }
         moved
+    }
+
+    /// Whether the tail chunk `[at, end)` that `page_cold` cloned under
+    /// the lock and wrote with the lock RELEASED is still exactly the
+    /// last `len` bytes of `data`.
+    ///
+    /// `frontier_ram()` alone does NOT answer that. A drop-behind trim
+    /// drains `n` from the front of `data` and advances `base` by the
+    /// same `n` (`trim_to`, `trim_commit`), so the RAM frontier is
+    /// INVARIANT under a trim and the `== end` arm sees nothing. That is
+    /// harmless while the cut stays below `at`, and it is not harmless
+    /// for a volume the engine is wholly past: the chase publishes
+    /// `u64::MAX` as that volume's watermark, which is both what selects
+    /// it for `include_data` paging and what makes the trim cut the
+    /// WHOLE of `data`. The commit then subtracted a chunk length from a
+    /// shorter (often empty) `data`: a panic under this very mutex in a
+    /// debug or test build, and in release a wrapped `cut` that turned
+    /// the truncate into a no-op while still charging `paged_bytes` and
+    /// inserting a `paged` region below the new `base`. The `len` arm is
+    /// the sibling of the `data.len() >= n` check `trim_consistent`
+    /// already carries for the three-phase spill.
+    fn tail_stood_still(st: &FrontierState, at: u64, end: u64, len: usize) -> bool {
+        !st.conflict
+            && st.abort.is_none()
+            && st.frontier_ram() == end
+            && st.data.len() >= len
+            && !st
+                .paged
+                .range(..end)
+                .next_back()
+                .is_some_and(|(&ps, &(_, plen))| ps + plen as u64 > at)
     }
 
     /// Blocking RANDOM-ACCESS read for the 7z chase. The trait method
@@ -1521,7 +1605,7 @@ impl FrontierBuffer {
             // the reader (TODO 255) - fall through to serve or error.
             if st.paused && !st.sealed {
                 let t = super::chasestat::mark();
-                st = self.arrived.wait(st).unwrap();
+                st = self.arrived.wait(st).unwrap_or_else(|e| e.into_inner());
                 super::chasestat::pause_park(t);
                 continue;
             }
@@ -1654,7 +1738,7 @@ impl FrontierBuffer {
                 )));
             }
             let t = super::chasestat::mark();
-            st = self.arrived.wait(st).unwrap();
+            st = self.arrived.wait(st).unwrap_or_else(|e| e.into_inner());
             super::chasestat::hole_park(t);
         }
     }
@@ -1710,7 +1794,7 @@ impl rars::BlockingRangeSource for FrontierBuffer {
             // again, for the life of the process.
             if st.paused && !st.sealed {
                 let t = super::chasestat::mark();
-                st = self.arrived.wait(st).unwrap();
+                st = self.arrived.wait(st).unwrap_or_else(|e| e.into_inner());
                 super::chasestat::pause_park(t);
                 continue;
             }
@@ -1828,7 +1912,7 @@ impl rars::BlockingRangeSource for FrontierBuffer {
                 ex.wake_pager();
             }
             let t = super::chasestat::mark();
-            st = self.arrived.wait(st).unwrap();
+            st = self.arrived.wait(st).unwrap_or_else(|e| e.into_inner());
             super::chasestat::hole_park(t);
         }
     }
@@ -1839,7 +1923,8 @@ impl rars::BlockingRangeSource for FrontierBuffer {
     }
 
     fn total_len(&self) -> Option<u64> {
-        Some(self.state.lock_ok().total)
+        let t = self.state.lock_ok().total;
+        (t != OPEN_TOTAL).then_some(t)
     }
 }
 
@@ -2355,6 +2440,50 @@ mod tests {
     /// runs the volume out through preads once the gap fills, and a
     /// demotion pops every span back byte-exact with the scratch
     /// live-count fully drained.
+    /// The tail commit in `page_cold` runs with the state lock
+    /// RELEASED across the scratch write, so a drop-behind trim can
+    /// land in that window. A trim drains from the front of `data` and
+    /// advances `base` by the same count, so `frontier_ram()` is
+    /// UNCHANGED and the rest of the guard is blind to it - which is
+    /// what let the commit subtract the chunk length from a `data` that
+    /// no longer held it (a panic under this mutex in a debug build, a
+    /// wrapped `cut` and a permanently over-counted `paged_bytes` in
+    /// release). The wholly-consumed volume is the reachable case: the
+    /// chase publishes `u64::MAX` for it, which both selects it for
+    /// `include_data` paging and makes the trim cut the whole run.
+    #[test]
+    fn page_cold_tail_commit_refuses_a_trim_that_drained_the_chunk() {
+        let buf = FrontierBuffer::new(100_000);
+        buf.write_span(0, &pat(0, 20_000));
+        // What the off-lock half planned: the last 8,000 bytes.
+        let (at, end, len) = {
+            let st = buf.state.lock_ok();
+            let end = st.frontier_ram();
+            (end - 8_000, end, 8_000usize)
+        };
+        {
+            let st = buf.state.lock_ok();
+            assert!(
+                FrontierBuffer::tail_stood_still(&st, at, end, len),
+                "an untouched tail must commit"
+            );
+        }
+        // The trim a fully-consumed volume gets: the whole of `data`.
+        assert!(buf.trim_to(u64::MAX, 1).is_some(), "the trim must take");
+        let st = buf.state.lock_ok();
+        assert_eq!(
+            st.frontier_ram(),
+            end,
+            "a front trim leaves the RAM frontier standing - the rest of \
+             the guard cannot see it, which is why this test exists"
+        );
+        assert!(st.data.len() < len);
+        assert!(
+            !FrontierBuffer::tail_stood_still(&st, at, end, len),
+            "committing here subtracts the chunk from a drained `data`"
+        );
+    }
+
     #[test]
     fn stall_paging_serves_paged_spans_and_pops_them_back() {
         use rars::BlockingRangeSource as _;

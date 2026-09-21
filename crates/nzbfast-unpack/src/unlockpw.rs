@@ -55,7 +55,7 @@ pub fn encrypted_rar(dir: &Path) -> Option<PathBuf> {
 /// NUMBER, so the loop examined none of them - and an obfuscated
 /// container carries no meaningful extension at all. Both are grouped
 /// perfectly well by [`crate::rarfix::collect_sevenz_archives`], which is
-/// what [`unlock_non_rar`] below already spends a password on, so the
+/// what `unlock_non_rar` below already spends a password on, so the
 /// probe and the spend disagreed about what was even in the folder: the
 /// job reported a generic "could not be unpacked", `settle_locked_failure`
 /// returned at the `None` here before setting the password state, and the
@@ -156,7 +156,7 @@ pub(crate) fn unlock_non_rar(dir: &Path, password: &str) -> Option<bool> {
 /// returned until 22 Aug 2026 meant: this password did not open anything
 /// here. `Err(Some(why))` is a refusal that is about the DISK - today
 /// only a bomb verdict, raised by the two rungs inside
-/// [`crate::rarfix::try_unrar_spent_why`] - and dropping it here was
+/// `crate::rarfix::try_unrar_spent_why` - and dropping it here was
 /// worse than wrong wording, because the callers are SWEEPS. Every
 /// candidate in the operator's passwords file is another extraction
 /// attempt against the same full disk, so one bomb refused every
@@ -166,13 +166,13 @@ pub(crate) fn unlock_non_rar(dir: &Path, password: &str) -> Option<bool> {
 /// as being quoted: there is nothing for a second password to do
 /// differently.
 ///
-/// It also stops the fall-through to [`unlock_non_rar`] below, for the
+/// It also stops the fall-through to `unlock_non_rar` below, for the
 /// same reason the nested pass stops at its first refusal: that arm
 /// extracts a 7z or a zip, on the disk that has just refused to hold an
 /// extraction.
 ///
 /// A `Result` rather than a bool with a `_why` twin beside it, which is
-/// the shape [`crate::rarfix::try_unrar_spent_why`] and
+/// the shape `crate::rarfix::try_unrar_spent_why` and
 /// [`crate::repair::reextract_dir_why`] took: those two kept their plain
 /// wrappers for callers that genuinely only ask "did it unpack", and
 /// this function has none left. Every caller composes something the user

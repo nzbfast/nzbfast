@@ -1768,3 +1768,90 @@ pub(super) fn set_categories(
         (true, json!(d.cat_list()))
     })
 }
+
+/// TODO 19 (public request #4): the dashboard login name.
+///
+/// Empty clears it, which is how a login form is REMOVED - and clearing
+/// it signs every browser out, because the page a session was minted for
+/// no longer exists. The value is echoed back by `get_config` (it is not
+/// a secret), so it is charset-gated the way `cors_origin` is: it ends up
+/// in a JSON body and in a `[config]` log line, and a control character
+/// in either is somebody else's parsing problem.
+///
+/// No case folding and no trimming of the INTERIOR: a name is compared
+/// byte-for-byte at login, and quietly rewriting it here would mean the
+/// thing the user typed into the settings box is not the thing that gets
+/// them in. Surrounding whitespace IS trimmed, because a trailing space
+/// pasted from a password manager is never intended and is invisible in
+/// both boxes.
+pub(super) fn set_web_username(
+    d: &Arc<Daemon>,
+    _name: &str,
+    v: &str,
+) -> std::result::Result<(bool, Value), String> {
+    let t = v.trim();
+    if t.is_empty() {
+        *d.web_username.lock_ok() = None;
+        d.sessions.drop_all();
+        return Ok((true, Value::Null));
+    }
+    if t.chars().count() > 128 {
+        return Err("web_username: 128 characters at most".into());
+    }
+    if t.chars().any(|c| c.is_control()) {
+        return Err("web_username: no control characters".into());
+    }
+    *d.web_username.lock_ok() = Some(t.to_string());
+    d.sessions.drop_all();
+    Ok((true, json!(t)))
+}
+
+/// TODO 19: the dashboard password. What is STORED is the Argon2id PHC
+/// string, never the plaintext - so what `apply_and_save` writes into
+/// settings.json under `web_password` is a `$argon2id$v=19$…` value, and
+/// the restore path reads it back as a hash rather than re-hashing it.
+///
+/// Empty clears it. A floor of eight characters, and no ceiling worth
+/// naming: this is the credential in front of an install somebody is
+/// publishing to the internet, and a four-character one is worse than
+/// none because it reads as protection. Argon2id's own input limit is
+/// far past anything a human types.
+///
+/// The plaintext is dropped at the end of this function and appears in no
+/// log: the table marks this row `Log::Masked`, which is what keeps the
+/// `[config]` line from printing it.
+pub(super) fn set_web_password(
+    d: &Arc<Daemon>,
+    _name: &str,
+    v: &str,
+) -> std::result::Result<(bool, Value), String> {
+    // NOT trimmed, unlike the username: a space is a legitimate password
+    // character and silently dropping a leading one would mean the
+    // password that was set is not the password that was typed.
+    if v.is_empty() {
+        *d.web_password.lock_ok() = None;
+        d.sessions.drop_all();
+        return Ok((true, Value::Null));
+    }
+    // The floor AND the weak-credential refusals, in one place so the
+    // rules cannot drift apart. The length check lives inside
+    // `password_refusal` and still answers in exactly the words the
+    // settings page and the daemon test have always matched on.
+    //
+    // The refusals beyond length were chosen for a PASSWORD on purpose
+    // (research/LOGIN-RATE-LIMIT-MEASURED-2026-09-20.md): the ladder in
+    // front of /login labels a bad guess rather than declining to
+    // evaluate it, so it bounds an attacker's rate at nothing, and it
+    // cannot be made to without deciding how to identify a client behind
+    // a reverse proxy. Until that is decided the credential itself is
+    // the only defence there is, so the worst ones are refused here.
+    let user = d.web_username.lock_ok().clone().unwrap_or_default();
+    if let Some(why) = crate::websession::password_refusal(v, &user) {
+        return Err(format!("web_password: {why}"));
+    }
+    let hash = crate::websession::hash_password(v)
+        .map_err(|e| format!("web_password: could not hash it ({e})"))?;
+    *d.web_password.lock_ok() = Some(hash.clone());
+    d.sessions.drop_all();
+    Ok((true, json!(hash)))
+}

@@ -76,6 +76,7 @@ fn probe7z_pick_sql_with(pin: &str) -> String {
 /// One release the prober should look at next.
 #[derive(Debug, Clone)]
 pub struct ProbeCandidate {
+    /// The release row to probe.
     pub id: i64,
     pub(crate) stem: String,
     pub(crate) total_bytes: i64,
@@ -86,7 +87,10 @@ pub struct ProbeCandidate {
 /// them again earns a 430 from every provider).
 #[derive(Debug, Clone)]
 pub struct ProbeFile {
+    /// The file's name as the index holds it - the posted name, which
+    /// on an obfuscated post says nothing.
     pub filename: String,
+    /// Summed over-wire bytes of this file's segments.
     pub bytes: i64,
     /// (part number, bracketed message-id, over-wire bytes), part order.
     pub segments: Vec<(u32, String, u64)>,

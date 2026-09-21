@@ -498,7 +498,8 @@ jobs:
       # all its `cfg(windows)` code:
       #   - rapidyenc's C++ kernels are compiled here by cl.exe for ARM64
       #     rather than cl.exe for x64, taking the `_M_ARM64` arms of
-      #     vendor/rapidyenc/src/common.h that no other job compiles;
+      #     crates/nzbkit-base/vendor/rapidyenc/src/common.h that no
+      #     other job compiles;
       #   - nzbkit's own aarch64 paths (gf16's NEON kernels, the
       #     `is_aarch64_feature_detected!` probes in nntp.rs and
       #     sysbench.rs) meet Windows runtime feature detection for the

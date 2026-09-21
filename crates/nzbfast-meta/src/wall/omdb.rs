@@ -266,22 +266,28 @@ pub fn omdb_signup(email: &str) -> Result<(), String> {
     // rode the shared pool in the first place.
     let agent = crate::netfetch::ssrf_safe_agent(4, 30);
     let post = |fields: &[(String, String)]| -> Result<String, String> {
-        agent
-            .post(URL)
-            .set("Content-Type", "application/x-www-form-urlencoded")
-            .timeout(std::time::Duration::from_secs(15))
-            .send_string(&form_encode(fields))
-            .map_err(|e| format!("signup submit failed: {e}"))?
-            .into_string()
-            .map_err(|e| e.to_string())
+        crate::netfetch::send_keeping_refusal(
+            agent
+                .post(URL)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .config()
+                .timeout_global(Some(std::time::Duration::from_secs(15)))
+                .build(),
+            &form_encode(fields)[..],
+        )
+        .map_err(|e| format!("signup submit failed: {e}"))?
+        .into_body()
+        .read_to_string()
+        .map_err(|e| e.to_string())
     };
-    let mut page = agent
-        .get(URL)
-        .timeout(std::time::Duration::from_secs(15))
-        .call()
-        .map_err(|e| format!("couldn't load the signup form: {e}"))?
-        .into_string()
-        .map_err(|e| e.to_string())?;
+    let mut page = crate::netfetch::call_body(
+        agent
+            .get(URL)
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(15)))
+            .build(),
+    )
+    .map_err(|e| format!("couldn't load the signup form: {e}"))?;
     if let Some((_, target, _, checked)) = omdb_free_radio(&page)
         && !checked
     {

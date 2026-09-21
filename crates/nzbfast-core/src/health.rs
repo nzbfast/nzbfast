@@ -180,7 +180,7 @@ impl ServerAnswer {
 /// Every field the UI shows is here in NUMBERS, and `reason` is English
 /// wire text: the dashboard composes its own sentence in the user's
 /// language from the counts (the same division of labour as
-/// [`crate::serve::Job::unpack_blocked_by`]), and `reason` is what the
+/// `crate::serve::Job::unpack_blocked_by`), and `reason` is what the
 /// API, the log line and the failure summary use.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PostHealth {
@@ -256,7 +256,7 @@ pub struct PostHealth {
 ///
 /// Same honesty rules as the payload verdict, and for the same reasons.
 /// The counts are `absent` of `sampled`, never a percentage. A host
-/// that never answered is dropped rather than counted - see [`tally`],
+/// that never answered is dropped rather than counted - see `tally`,
 /// which both verdicts are built from precisely so that rule cannot
 /// drift between them. A clean answer here is not a promise: STAT
 /// reports that an article ANSWERED, not that its bytes are intact, and

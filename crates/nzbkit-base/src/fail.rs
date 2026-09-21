@@ -1,7 +1,12 @@
 //! Why the pool gave up on an article, as a value rather than a
 //! sentence.
 //!
-//! [`FetchOutcome::Failed`](crate::pool::FetchOutcome::Failed) has
+//! Also role-aware fault selection for the chaos mock (TODO 283):
+//! resolve a FILE ROLE - payload, recovery index, volume N - to the
+//! ids the `Chaos` knobs apply to. Same status as `mock`: public for
+//! the rigs and the test suites, not a real API.
+//!
+//! `FetchOutcome::Failed` has
 //! carried a `String` since it was written, and the application then
 //! rebuilds policy from that text: `nzbfast`'s `failkind` module decides
 //! retry, dead-post reporting and the button a failed job is offered by

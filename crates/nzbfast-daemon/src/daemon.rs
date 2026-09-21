@@ -60,6 +60,10 @@ mod daemon_speed;
 pub use daemon_speed::AUTO_SPEED_TARGET_MS;
 pub use daemon_speed::auto_speed_step;
 pub(crate) use daemon_speed::window_rate;
+// The per-job rates a queue row divides its own bytes-left by. The api
+// crate names `JobRates` through this glob; `JobRateWins` is the type of
+// `Daemon::job_win`.
+pub use daemon_speed::{JobRateWins, JobRates};
 // Split from the line above rather than folded into it: production
 // reads only the target and the step, and the three BOUNDS are read
 // only by the arithmetic pin in tests_index.rs. A single re-export is
@@ -307,6 +311,47 @@ pub struct Daemon {
     /// LANDS leaves this alone, because it heals the store and the next
     /// caller simply appends.
     pub hist_rewrite_fail_ms: AtomicU64,
+    /// Terminal records the history store has REFUSED, keyed by nzo_id,
+    /// carried as rows of the QUEUE store until history takes them.
+    ///
+    /// A record leaving the queue for history is two writes to two files
+    /// with two different failure modes, and since §7a the queue's write
+    /// is an append that needs the FILE while history's rescue needs the
+    /// DIRECTORY - so "the directory that refuses one refuses the other"
+    /// stopped being true, and a park whose history write was refused
+    /// went on to tombstone its queue row: the finished job was then in
+    /// neither store at the next start (21 Sep 2026 codex sweep, P2-3;
+    /// the load-time twin is P2-1, the H4 of the 8 Aug sweep, where the
+    /// one-time migration's history half failed and the queue half
+    /// retired `queue.json` anyway). `queue_rows` appends these to every
+    /// publish, so the queue store keeps a terminal row for each - the
+    /// very shape `restore_records` has routed into history since before
+    /// the split - and the next start files them again. An entry leaves
+    /// when a history write for it lands (`history_upsert_if_present`,
+    /// any successful rewrite), when the record leaves history, or when
+    /// it is back in the live queue (a retry). Taken with no other
+    /// daemon lock held except inside `queue_rows`, which takes
+    /// `history` UNDER it; never take it while holding `history`.
+    pub hist_owed: Mutex<std::collections::HashMap<String, Arc<Mutex<Job>>>>,
+    /// The queue store EXISTS and this process could not read it at
+    /// start (a permission or I/O error, never a missing file). Set by
+    /// `load_queue`, never cleared: the remedy is to fix the file and
+    /// restart. While set, `queue_rewrite_locked` refuses - a rewrite
+    /// publishes memory as the whole truth, and memory started empty
+    /// over rows nothing here has seen - and `recover_orphaned_spool`
+    /// adopts nothing, because a spool copy the unread store names is
+    /// not an orphan. Appends are not gated here, and in practice do not
+    /// land either: both append paths open the store read+append to mend
+    /// a torn tail, so a file that refuses a read refuses them at the
+    /// open, and `save_failed_at` reports the run's saves as failed. The
+    /// store is frozen for the run. `sab_warnings` says so on every
+    /// client (21 Sep 2026 codex sweep, P2-2).
+    pub queue_store_unreadable: AtomicBool,
+    /// The history store's twin of `queue_store_unreadable`: while set,
+    /// `history_rewrite_locked` refuses (compaction, and the rescue a
+    /// refused append falls back to), so the unread rows are not
+    /// replaced by the ones this run has seen.
+    pub history_store_unreadable: AtomicBool,
     /// §129 1b: discrete lifecycle events (job.completed, job.failed...)
     /// with a monotonic `seq`, so clients stop inferring toasts from
     /// snapshot diffs. Ring bounded at `histstore::LIFE_RING`; a client
@@ -446,7 +491,7 @@ pub struct Daemon {
     pub mover_wake: tokio::sync::Notify,
     /// The mover's pacing token bucket - ONE for the whole daemon, so
     /// concurrent lanes divide one budget instead of each granting
-    /// itself the whole of it. See [`mover::mover_pacer`].
+    /// itself the whole of it. See `mover::mover_pacer`.
     pub mover_bucket: Mutex<mover::PaceState>,
     /// How file moves share the machine with downloads ("File moves").
     /// "yield" (default): pace the copy to the measured headroom and go
@@ -490,7 +535,7 @@ pub struct Daemon {
     /// a visible way to stop it.
     ///
     /// Turning it on also arms issue #18's deferral - see
-    /// [`crate::job::par2_sweep_deferred`] - so the `.par2`
+    /// `crate::job::par2_sweep_deferred` - so the `.par2`
     /// sweep now moves out of `finalize_completed_gen` and into the
     /// tail for the default configuration too.
     pub write_manifest: std::sync::atomic::AtomicBool,
@@ -695,7 +740,7 @@ pub struct Daemon {
     /// every other query handler queued behind it and parked an HTTP
     /// worker apiece. Eight such waits and the daemon answered nothing
     /// at all - the same silence as 28 Jul, one mutex further along.
-    /// See [`INDEX_READ_CONNS`] for why a ceiling matters more than the
+    /// See `INDEX_READ_CONNS` for why a ceiling matters more than the
     /// concurrency.
     #[cfg(feature = "indexer")]
     pub index_read: IndexReadPool,
@@ -804,7 +849,7 @@ pub struct Daemon {
     /// not be the first one clients met, and the field evidence that
     /// bought is in - `serial` present and strictly increasing across all
     /// 26 published manifests from v1.0.11 to v1.3.1. The rules live on
-    /// [`super::update::check_manifest_serial`].
+    /// `super::update::check_manifest_serial`.
     ///
     /// THE RESET IS A LOCAL FILE EDIT, and that is the whole safety
     /// argument for enforcing at all. This is a one-way ratchet with no
@@ -1252,7 +1297,7 @@ pub struct Daemon {
     /// who wants to say no has to be able to find the switch.
     pub identity_lookup: std::sync::atomic::AtomicBool,
     /// Auto-rename: on completion, rename the folder + main media file to a
-    /// friendly "Title (Year)[ quality]" form (TV keeps Show - S01E02).
+    /// friendly "Title (Year)\[ quality\]" form (TV keeps Show - S01E02).
     /// Master switch (default on); the five below tune what the quality
     /// suffix carries. Live settings.
     pub auto_rename: std::sync::atomic::AtomicBool,
@@ -1335,6 +1380,23 @@ pub struct Daemon {
     /// Sampled once per job at download start, like the other live
     /// settings beside it.
     pub skip_samples: std::sync::atomic::AtomicBool,
+    /// TODO 332: when a download turns out to need a LONG par2 repair,
+    /// put it back at the end of the queue ONCE before repairing, so the
+    /// person has a chance to see the notice and stop it.
+    ///
+    /// OFF by default, and the default is the ruling rather than
+    /// caution: the daemon's job is to finish downloads, and a person
+    /// who is not watching is better served by a slow repair than by a
+    /// job that sat in the queue waiting for an answer. Whoever wants
+    /// the chance to back out asks for it.
+    ///
+    /// DEFER ONCE, THEN REPAIR. This flag is only half of the decision -
+    /// the other half is `Job::repair_deferred`, the per-job mark that
+    /// stops the second pass deferring again. Sampled once per job at
+    /// download start, like the live settings beside it, and handed to
+    /// the engine as `JobSpec::defer_long_repair` already ANDed with
+    /// that mark, so the engine holds no policy at all.
+    pub repair_defer_long: std::sync::atomic::AtomicBool,
     /// M12 volume control, live: only index posts newer than this
     /// (seconds; 0 = off). Read by the scan loop each pass.
     pub index_max_age_secs: AtomicU64,
@@ -1587,6 +1649,16 @@ pub struct Daemon {
     /// a whole-job average hides stalls (a wedged job kept "reporting"
     /// 400 KB/s); a ~5 s window shows what's happening NOW.
     pub speed_win: Mutex<VecDeque<(Instant, u64)>>,
+    /// The same rolling window, kept PER JOB: the active download's own
+    /// bytes and the draining predecessor's own bytes, each on its own
+    /// window, so a queue row can divide its own bytes-left by its own
+    /// rate. `speed_win` is deliberately the whole line (active plus
+    /// drain), which is right for the header and wrong for a row - a
+    /// finishing job crawling at 2 MB/s behind a successor at 110 MB/s
+    /// read "3 seconds left" for minutes. Touched only by
+    /// [`Daemon::job_rates`]; lock order there is `job_win` ->
+    /// `active_dl` -> `drain_dl`.
+    pub job_win: Mutex<daemon_speed::JobRateWins>,
     /// M18b per-provider data-usage history: "YYYY-MM-DD" → host → bytes,
     /// persisted to .spool/usage.json (metered/block accounts need to see
     /// where the gigabytes went).
@@ -1762,7 +1834,7 @@ pub struct Daemon {
     /// the quarantine below. Live - read per pass.
     pub watch_recursive: AtomicBool,
     /// Move a complete-but-unusable .nzb (parse/enqueue rejection) into
-    /// <watch>/rejected/ with a .txt beside it saying why. Off, the
+    /// `<watch>`/rejected/ with a .txt beside it saying why. Off, the
     /// file stays put and only the dashboard strip explains it.
     /// Truncated files are NEVER moved regardless: a stalled copy can
     /// resume, and yanking the destination mid-copy is exactly the
@@ -1863,7 +1935,7 @@ pub struct Daemon {
     /// runs an ordered list, not one script, and the `script` setting
     /// holds that list comma-separated; this is it, parsed. Order is
     /// the list's, and a failing link does not stop the ones after it -
-    /// see [`Daemon::run_script_chain`] for both contracts.
+    /// see `Daemon::run_script_chain` for both contracts.
     pub scripts: Mutex<Vec<PathBuf>>,
     /// Seconds before a post-processing script is killed. 0 = wait
     /// forever, which is what a multi-hour transcode wants; the default
@@ -1888,7 +1960,7 @@ pub struct Daemon {
     pub notify_health: Mutex<std::collections::HashMap<String, crate::notify::Outcome>>,
     /// What to do with an indexer's `X-DNZB-Failure` link when a job
     /// fails: "off" (default), "report", or "regrab". See
-    /// [`Daemon::report_failure`].
+    /// `Daemon::report_failure`.
     pub failure_link: Mutex<String>,
     /// Which encode the user would rather have when a title has several.
     /// Biases the order releases are listed in; never hides any of them.
@@ -1896,6 +1968,20 @@ pub struct Daemon {
     /// API keys, rotatable live. None = open (no auth).
     pub apikey: Mutex<Option<String>>,
     pub nzbkey: Mutex<Option<String>>,
+    /// TODO 19 (public request #4): the OPTIONAL dashboard login name.
+    /// `None` (and an empty string, which the setter normalises to
+    /// `None`) means no login form exists and the browser authenticates
+    /// with the API key exactly as it always has. Never a credential on
+    /// its own - it is echoed back by `get_config` like any other
+    /// non-secret setting.
+    pub web_username: Mutex<Option<String>>,
+    /// The Argon2id PHC string for [`Self::web_username`]'s password.
+    /// The plaintext is hashed at the setter and is never stored, never
+    /// logged and never echoed; `has_web_password` is all the UI learns.
+    /// A login form exists only when BOTH this and the username are set.
+    pub web_password: Mutex<Option<String>>,
+    /// Signed-in browsers. Empty unless a login form is configured.
+    pub sessions: crate::websession::Sessions,
     /// Per-install secret behind stream_token(). Generated once, persisted
     /// in settings.json - deliberately NOT the apikey, so rotating the key
     /// doesn't orphan every .strm pointer in a Jellyfin/Emby library.
@@ -2016,7 +2102,7 @@ pub struct Daemon {
     #[cfg(feature = "indexer")]
     pub owned_keys_cache: Mutex<Option<(u64, u64, Arc<std::collections::HashSet<String>>)>>,
     /// N12: the enabled-backbone list `oracle_ctx` needs, tagged with the
-    /// [`CfgStamp`] of the config file it was read from. See
+    /// `CfgStamp` of the config file it was read from. See
     /// `enabled_backbones`.
     #[cfg(feature = "indexer")]
     pub oracle_bb_cache: Mutex<Option<(CfgStamp, Vec<String>)>>,
@@ -2305,6 +2391,24 @@ impl Daemon {
     pub fn read_unpack_passwords_for(&self, site: &str, poster: &str) -> Vec<String> {
         let path = self.password_file.lock_ok().clone();
         crate::smart::order_passwords(crate::smart::read_password_file(&path), &path, site, poster)
+    }
+
+    /// The same list again, each candidate carrying its 1-based entry
+    /// number in the FILE - for the ladders that say in the log which
+    /// entry did the unlocking. The number never moves with the
+    /// promotion; see [`crate::smart::order_passwords_indexed`].
+    pub fn read_unpack_passwords_for_indexed(
+        &self,
+        site: &str,
+        poster: &str,
+    ) -> Vec<(usize, String)> {
+        let path = self.password_file.lock_ok().clone();
+        crate::smart::order_passwords_indexed(
+            crate::smart::read_password_file(&path),
+            &path,
+            site,
+            poster,
+        )
     }
 
     /// §99: remember that `pw` unlocked a download from `site` /
@@ -2619,6 +2723,25 @@ impl Daemon {
         best.map(|(_, j)| j)
     }
 
+    /// [`Self::pick_job`] plus the twin door: what the runner actually
+    /// starts.
+    ///
+    /// A same-post twin of a row that is still delivering the post is
+    /// removed (see [`Self::refuse_twin_start`]) and the pick is asked
+    /// again. The released hold - a Force, or a resume - was the user's
+    /// instruction to download a DIFFERENT copy, and a byte-different NZB
+    /// of identical articles is not one. Bounded by the queue: every
+    /// refusal removes a row, and a refusal that could not remove it
+    /// answers `false` and lets the ordinary start checks decide.
+    pub fn pick_job_for_start(&self, queue_paused: bool) -> Option<Arc<Mutex<Job>>> {
+        loop {
+            let j = self.pick_job(queue_paused)?;
+            if !self.refuse_twin_start(&j) {
+                return Some(j);
+            }
+        }
+    }
+
     /// Benchmark history: one JSON array in .spool, appended by every
     /// sysbench run (manual or scheduled), capped at 400 entries.
     pub fn bench_history_path(&self) -> PathBuf {
@@ -2820,7 +2943,7 @@ pub struct RenameSettings {
     /// off.
     pub identify: std::sync::atomic::AtomicBool,
     /// TODO 78: put the episode's own title in a TV filename
-    /// ("Show - S01E02 - Children [1080p].mkv"), from the TVmaze episode
+    /// ("Show - S01E02 - Children \[1080p\].mkv"), from the TVmaze episode
     /// list already cached for the show.
     ///
     /// Default OFF, and the only rename sub-setting that is. Two
@@ -2842,8 +2965,8 @@ pub struct RenameSettings {
     /// Default OFF - not a worse answer than the metadata renamer, a
     /// DIFFERENT one, and turning it on for everyone would rename
     /// finished downloads on installs that never asked. A category may
-    /// override it either way: [`CatMeta::nzb_name`],
-    /// [`Daemon::name_from_nzb`].
+    /// override it either way: `CatMeta::nzb_name`,
+    /// `Daemon::name_from_nzb`.
     pub from_nzb: std::sync::atomic::AtomicBool,
 }
 

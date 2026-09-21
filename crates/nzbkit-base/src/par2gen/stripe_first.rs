@@ -71,7 +71,7 @@
 
 use super::{
     CreateControl, CreatePhase, CreateTrail, CriticalIndex, CriticalPatch, MappedPlan,
-    Par2GenError, io, ntt_range,
+    Par2GenError, SetMember, io, ntt_range,
 };
 use crate::md5fast::{Digest, Md5};
 use crate::par2::TYPE_RECVSLIC;
@@ -110,7 +110,7 @@ fn flush_chunk(
     chunk_words: usize,
     at: u64,
     lanes: usize,
-    files: &[std::fs::File],
+    files: &[SetMember],
     names: &[String],
     place: &[(usize, u64)],
     seals: &mut [Md5],
@@ -131,7 +131,8 @@ fn flush_chunk(
                         let span = &rows_bytes[k * stride..k * stride + chunk_words];
                         let bytes = crate::gf16::words_as_bytes(span);
                         let (vi, hdr) = place[r];
-                        crate::disk::write_all_at(&files[vi], bytes, hdr + 68 + at)
+                        files[vi]
+                            .write_all_at(bytes, hdr + 68 + at)
                             .map_err(io(&dir.join(&names[vi])))?;
                         m.update(bytes);
                     }
@@ -583,7 +584,10 @@ fn band_chunk(
 /// The volume files `run` folds into, laid out and header-written before
 /// the first payload byte exists.
 struct Volumes {
-    files: Vec<std::fs::File>,
+    /// Every volume of this run, each the [`SetMember`] the trail's one
+    /// door returned - a bare `std::fs::File` does not fit here, which
+    /// is what keeps `lay_out_volumes` the only way this vector fills.
+    files: Vec<SetMember>,
     names: Vec<String>,
     patches: Vec<CriticalPatch>,
     /// Per row: (volume, offset of the packet header in that file).
@@ -602,7 +606,7 @@ struct Volumes {
 /// known offset.
 fn lay_out_volumes(a: &Args) -> Result<Volumes, Par2GenError> {
     let packet = 68 + a.bs as u64;
-    let mut files: Vec<std::fs::File> = Vec::with_capacity(a.layout.len());
+    let mut files: Vec<SetMember> = Vec::with_capacity(a.layout.len());
     let mut names: Vec<String> = Vec::with_capacity(a.layout.len());
     let mut patches: Vec<CriticalPatch> = Vec::with_capacity(a.layout.len());
     // Per row: (volume, offset of the packet header in that file).
@@ -621,7 +625,7 @@ fn lay_out_volumes(a: &Args) -> Result<Volumes, Par2GenError> {
             header[32..48].copy_from_slice(a.set_id);
             header[48..64].copy_from_slice(TYPE_RECVSLIC);
             header[64..68].copy_from_slice(&(e as u32).to_le_bytes());
-            crate::disk::write_all_at(&f, &header, at)
+            f.write_all_at(&header, at)
         };
         // Sized through the disk layer BEFORE the first positional write:
         // on NTFS a write past the valid data length zero-fills up to it,
@@ -631,13 +635,9 @@ fn lay_out_volumes(a: &Args) -> Result<Volumes, Par2GenError> {
         // `NZBFAST_WIN_SPARSE=0` the old behaviour) and sets the length.
         let patch = match a.cidx {
             None => {
-                crate::disk::preallocate_output(
-                    &f,
-                    a.head.len() as u64 + count as u64 * packet,
-                    u64::MAX,
-                )
-                .map_err(io(&path))?;
-                crate::disk::write_all_at(&f, a.head, 0).map_err(io(&path))?;
+                f.preallocate(a.head.len() as u64 + count as u64 * packet, u64::MAX)
+                    .map_err(io(&path))?;
+                f.write_all_at(a.head, 0).map_err(io(&path))?;
                 for i in 0..count {
                     let at = a.head.len() as u64 + i as u64 * packet;
                     header_at(vfirst + i, at).map_err(io(&path))?;
@@ -657,7 +657,7 @@ fn lay_out_volumes(a: &Args) -> Result<Volumes, Par2GenError> {
                         .map(|t| cidx.cycle[t % cidx.cycle.len()].1 as u64)
                         .sum::<u64>()
                     + cidx.creator.1 as u64;
-                crate::disk::preallocate_output(&f, total, u64::MAX).map_err(io(&path))?;
+                f.preallocate(total, u64::MAX).map_err(io(&path))?;
                 let mut offsets = Vec::with_capacity(owed);
                 let mut pos = 0u64;
                 let mut turn = 0usize;
@@ -667,14 +667,14 @@ fn lay_out_volumes(a: &Args) -> Result<Volumes, Par2GenError> {
                     pos += packet;
                     for _ in 0..*owed {
                         let (o, l) = cidx.cycle[turn % cidx.cycle.len()];
-                        crate::disk::write_all_at(&f, &a.head[o..o + l], pos).map_err(io(&path))?;
+                        f.write_all_at(&a.head[o..o + l], pos).map_err(io(&path))?;
                         offsets.push(pos);
                         pos += l as u64;
                         turn += 1;
                     }
                 }
                 let (o, l) = cidx.creator;
-                crate::disk::write_all_at(&f, &a.head[o..o + l], pos).map_err(io(&path))?;
+                f.write_all_at(&a.head[o..o + l], pos).map_err(io(&path))?;
                 pos += l as u64;
                 debug_assert_eq!(pos, total, "the interleaved walk matches its own size");
                 if a.complete {
@@ -903,6 +903,17 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
                             };
                             dst.copy_from_slice(&out[e * len..(e + 1) * len]);
                         }
+                        // One stripe of the output walked. Stepped HERE,
+                        // by the worker that walked it, and not once per
+                        // chunk by the driver after the end gate: a
+                        // create that fits one chunk otherwise reports
+                        // 0 and then 100 with nothing between, which is
+                        // what a 4 GiB `parfast c` measured on 20 Sep
+                        // 2026 (GH #88). `step` is a relaxed fetch_add
+                        // and reaches the sink at most 256 times a phase,
+                        // so per stripe costs nothing the transform can
+                        // see.
+                        a.control.step(CreatePhase::Fold, 1);
                     }
                     end_gate.wait();
                 }
@@ -1048,7 +1059,8 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
                     .step(CreatePhase::Write, a.rows as u64 * fw as u64 * 2);
             }
             chunks += 1;
-            a.control.step(CreatePhase::Fold, (c1 - c0) as u64);
+            // The fold's stripes were stepped by the workers as they
+            // walked them (see the worker loop); nothing to add here.
             c0 = c1;
         }
         if let Some((f0, fw, fb)) = owed.take() {
@@ -1092,7 +1104,8 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
     for (r, m) in seals.into_iter().enumerate() {
         let digest: [u8; 16] = m.finalize().into();
         let (vi, hdr) = place[r];
-        crate::disk::write_all_at(&files[vi], &digest, hdr + 16)
+        files[vi]
+            .write_all_at(&digest, hdr + 16)
             .map_err(io(&a.dir.join(&names[vi])))?;
     }
     for (f, name) in files.iter().zip(&names) {
@@ -1155,9 +1168,38 @@ mod band_run_floor_tests {
         for &bs in &[64 << 10, 256 << 10, 1 << 20, 4 << 20] {
             for &n_slices in &[1024usize, 4096, 16384, MAX_INPUT_SLICES] {
                 let mut admitted = 0;
+                let mut unrepresentable = 0;
+                // The smallest budget that can admit a window at all: the
+                // arena is `window * bs` and the window floor is
+                // `NTT_WINDOW_MIN` slices. In u64 because on a 32-bit
+                // target this is the quantity that can fail to exist.
+                let window_floor_budget = NTT_WINDOW_MIN as u64 * bs as u64;
                 // Walk the budget from under the floor to the whole corpus.
                 for step in 1..=64usize {
-                    let budget = step * NTT_WINDOW_MIN * bs / 8;
+                    // COMPUTED IN u64, AND THAT IS NOT TIDINESS. As `usize`
+                    // this was `step * NTT_WINDOW_MIN * bs / 8`, and the
+                    // multiply is evaluated in full before the divide, so at
+                    // `bs = 4 MiB` the very first `step` is `1024 * 4 MiB` =
+                    // 2^32 on the nose, which does not exist in a 32-bit
+                    // `usize`; the widest cell here is 2^38. Under the
+                    // armv7 job's `overflow-checks` that PANICKED before
+                    // `create_ntt_window_with_budget` was ever called, so
+                    // the test proved nothing about the band run on that
+                    // target (nightly run 35256109460, 17 Sep 2026). The
+                    // 64-bit boxes never saw it, because there it fits.
+                    let budget_wanted = step as u64 * NTT_WINDOW_MIN as u64 * bs as u64 / 8;
+                    // AND A BUDGET THE TARGET CANNOT ADDRESS IS SKIPPED,
+                    // NOT CLAMPED, because here the two are not the same
+                    // test and the clamp is the one that lies. Clamping to
+                    // `usize::MAX` at `bs = 4 MiB` buys 1,023 slices - one
+                    // short of the 1,024-slice floor - so it is refused
+                    // anyway, and the cell would LOOK exercised while
+                    // admitting nothing. The skip says so instead, and the
+                    // count is asserted on below.
+                    let Ok(budget) = usize::try_from(budget_wanted) else {
+                        unrepresentable += 1;
+                        continue;
+                    };
                     let Some(window) =
                         create_ntt_window_with_budget(bs, n_slices, ROWS, ROWS, budget)
                     else {
@@ -1175,11 +1217,42 @@ mod band_run_floor_tests {
                         bs / 32
                     );
                 }
-                assert!(
-                    admitted > 0,
-                    "bs={bs} n={n_slices}: no budget in the walk admitted a window - \
-                     the walk has stopped exercising the rule it pins"
-                );
+                if window_floor_budget > usize::MAX as u64 {
+                    // A 32-bit target only. The arm is not reachable at this
+                    // block size on this width AT ALL - not by this walk and
+                    // not by a real create - because the smallest admitting
+                    // budget is larger than the address space. Assert that
+                    // rather than a window, and SAY the cell was skipped, so
+                    // it is a visible hole and not a silently absent one.
+                    // On a 64-bit target this branch is dead and the cell
+                    // list below it is exercised in full, unchanged.
+                    assert_eq!(
+                        admitted,
+                        0,
+                        "bs={bs} n={n_slices}: the window floor needs \
+                         {window_floor_budget} B, past usize::MAX on this \
+                         {}-bit target, so nothing can be admitted",
+                        usize::BITS
+                    );
+                    assert!(
+                        unrepresentable > 0,
+                        "bs={bs} n={n_slices}: the walk must reach a budget this \
+                         target cannot hold, or the skip below is mislabelled"
+                    );
+                    eprintln!(
+                        "SKIPPED bs={bs} n={n_slices}: the {NTT_WINDOW_MIN}-slice window \
+                         floor needs {window_floor_budget} B of budget, which a \
+                         {}-bit usize cannot address; {unrepresentable} of 64 budget \
+                         steps are unrepresentable here",
+                        usize::BITS
+                    );
+                } else {
+                    assert!(
+                        admitted > 0,
+                        "bs={bs} n={n_slices}: no budget in the walk admitted a window - \
+                         the walk has stopped exercising the rule it pins"
+                    );
+                }
             }
         }
     }

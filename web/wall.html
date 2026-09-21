@@ -45,6 +45,12 @@ __NZBFAST_UI_TOKENS__
      hand-made fork of it: one blip for all 105 controls, deaf to the
      volume slider and to two of the three preferences. -->
 __NZBFAST_UI_SOUND__
+<!-- The shared sign-out control, substituted by assets.rs from
+     web/ui-signout.html. This page is behind the same login gate as the
+     dashboard (`/wall` redirects to `/login` too) and until 21 Sep 2026
+     had no way out of it: signing out meant walking to the dashboard
+     first. -->
+__NZBFAST_UI_SIGNOUT__
 <style>
 *{box-sizing:border-box}
 html{scrollbar-color:color-mix(in srgb,var(--fg) 26%,transparent) var(--bg)}
@@ -301,17 +307,24 @@ select{background:var(--surface);color:var(--fg);border:1px solid var(--line);
 #chips.fadeR{--fadeR:#000 calc(100% - 46px),transparent 100%}
 #chips .chip.on{background:var(--acc);border-color:var(--acc);color:#fff}
 #chips .gsep{flex:none;width:1px;background:var(--line);margin:2px 4px}
-/* GH #76: the newsgroup filter pill. Its own row rather than a chip in
-   #chips, because #chips is hidden on the Releases table and this filter
-   applies to BOTH surfaces - parked in there it would be an active
-   filter with nothing on screen saying so, on exactly the surface the
-   group browser hands off into. */
+/* GH #76: the newsgroup menu and, when one is picked, its clear button.
+   Its own row rather than a chip in #chips, because #chips is hidden on
+   the Releases table and this filter applies to BOTH surfaces - parked
+   in there it would be an active filter with nothing on screen saying
+   so, on exactly the surface the group browser hands off into. */
 #grpbar{max-width:1660px;margin:0 auto;padding:10px 22px 0;display:none;
   gap:7px;align-items:center;flex-wrap:wrap}
 #grpbar.on{display:flex}
+#grpbar label{font-size:12px;color:var(--dim);font-weight:600;
+  text-transform:uppercase;letter-spacing:.06em}
+/* The menu itself. `dir=ltr` on the options rather than the select, so an
+   RTL locale keeps the label on the right and still renders every group
+   name left-to-right - a newsgroup name is an ASCII path and reversing
+   its dot-separated parts makes it unreadable. */
+#grpbar select{max-width:min(60vw,420px)}
+#grpbar select.on{border-color:var(--acc);color:var(--acc);font-weight:600}
 #grpbar .chip{background:var(--acc);border-color:var(--acc);color:#fff;
   display:inline-flex;align-items:center;gap:7px}
-#grpbar .chip b{font-weight:600;font-variant-numeric:tabular-nums}
 .wallhead{grid-column:1/-1;font-size:12px;text-transform:uppercase;
   letter-spacing:.08em;color:var(--dim);font-weight:650;padding:10px 2px 0;
   border-bottom:1px solid var(--line);margin-bottom:2px}
@@ -807,6 +820,15 @@ body.nosearch #sortwrap,body.nosearch #more{display:none!important}
   <a class="pill on" href="/wall" data-i18n-title="hdr.wall.title" title="Poster wall"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wall"/></svg> <span data-i18n="hdr.wall">wall</span></a>
   <a class="pill" href="/#settings" data-i18n-title="hdr.settings.title" title="Settings"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg> <span data-i18n="hdr.settings">settings</span></a>
   <a class="pill" href="/manual#wall" target="_blank" rel="noopener" data-i18n-title="hdr.manual.title" title="User manual"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-manual"/></svg> <span data-i18n="hdr.manual">manual</span></a>
+  <!-- TODO 19: hidden by default and revealed by revealSignoutPill() at
+       boot, only when a login form is configured - same rule and the
+       same shared function as the dashboard's copy. It carries the
+       ICON that pill did not, because the media query below 700px hides
+       nav labels on this page: a text-only pill would collapse to an
+       empty capsule on a phone. LAST in the nav, after manual, so the
+       four destinations keep the one order
+       tools/nav-destinations-gate.py holds all three copies to. -->
+  <a href="#" class="pill" id="navSignout" style="display:none" data-i18n-title="hdr.signout.title" title="Sign this browser out of the dashboard" onclick="return signOut()"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-signout"/></svg> <span data-i18n="hdr.signout">sign out</span></a>
   </nav>
   <!-- 24C: two surfaces, not three zoom levels. Wall = the title-grouped
        poster grid (discover); Releases = the per-release table (search).
@@ -915,7 +937,7 @@ body.nosearch #sortwrap,body.nosearch #more{display:none!important}
 
 <!-- M30: genre + quality filter chips (grid views only). -->
 <div id="chips"></div>
-<!-- GH #76: the active newsgroup filter, on both surfaces. -->
+<!-- GH #76: the newsgroup menu, and the active filter, on both surfaces. -->
 <div id="grpbar"></div>
 <div id="suggest"></div>
 <!-- M31b: "Because you watch …" caption, shown under the bar while the
@@ -1065,6 +1087,13 @@ const IDX_COUNT=+'__NZBFAST_INDEXERS__'||0;
 // from the built-in indexer. An unreplaced token means off - spots are
 // new, so there is no install anywhere that should assume otherwise.
 const SPOT_ON=(/** @type {string} */('__NZBFAST_SPOTS__'))==='1';
+// TODO 19: is there a login form in front of this daemon at all? Stamped
+// rather than fetched, for the reason loadGrpNames gives about the group
+// list: this page has no Settings panel, so the answer can only be
+// changed somewhere else, which is a reload away. An unreplaced token
+// means OFF - the state that shows nothing, which is right for a control
+// that would otherwise sign you out of nothing.
+const WEB_LOGIN=(/** @type {string} */('__NZBFAST_WEBLOGIN__'))==='1';
 // Spots are promoted into the release index as first-class named
 // cards, so while they are on there IS a wall to show even with the
 // header indexer off - which is the default install now.
@@ -1143,7 +1172,33 @@ let key = localStorage.nzbfastKey || '';
 // but it is the page most likely to be holding a key the dashboard tab
 // next door has just rotated.
 let keyEpoch = 0;
-function adoptKey(v){ key = v; localStorage.nzbfastKey = v; keyEpoch++; }
+// TODO 19 (public request #4): the dashboard session's CSRF token, out
+// of the readable companion cookie the daemon sets beside the HttpOnly
+// session. Its presence is also how this page knows a session exists.
+// Same function, same reasoning and same port-prefix match as
+// dashboard.html - see the copy there for why it is read per call.
+function csrfToken(){
+  try{
+    const m = document.cookie.match(/(?:^|;\s*)nzbfast_csrf_\d+=([^;]*)/);
+    return m ? decodeURIComponent(m[1]) : '';
+  }catch(_){ return ''; }
+}
+// The daemon requires `X-CSRF-Token` on every cookie-authenticated call
+// and the key is not sent at all when a session is in force - see the
+// session block in `handle_api`.
+function authHeaders(sent, oneShot){
+  const tok = oneShot ? '' : csrfToken();
+  if(tok) return {'X-CSRF-Token': tok};
+  return sent ? {'X-Api-Key': sent} : {};
+}
+// With a session in force the key is not written to localStorage: that
+// stored credential is the leak TODO 19 is about. A key stored before
+// the login existed is left alone.
+function adoptKey(v){
+  key = v;
+  if(!csrfToken()) localStorage.nzbfastKey = v;
+  keyEpoch++;
+}
 // §61d, same contract as the dashboard's launch handshake: a wall link
 // may arrive with ?apikey= (a bookmark, a second browser). Adopt it if
 // this browser holds no key, keep it aside if it disagrees with the
@@ -1213,12 +1268,88 @@ let hiddenCount = 0;
 let catGroup = localStorage.nzbfastWallGroup === 'on';
 let genreSel = localStorage.nzbfastWallGenre || '';
 let resSel = '', decSel = ''; // decade: 'min-max' ('0-1979' = older)
-// GH #76: the newsgroup filter. Deliberately NOT persisted, unlike
-// genreSel above: a genre is a taste and survives a reload usefully,
-// whereas this arrives from an act - the dashboard's group browser
-// handing off, or a click on a row's own group badge - and a narrowing
-// the user cannot remember making is one they read as an empty index.
+// GH #76: the newsgroup filter. Carried in the URL HASH rather than in
+// localStorage, unlike genreSel above, and the difference is not
+// arbitrary: a genre is a taste and survives a reload usefully, whereas
+// a narrowing the user cannot remember making is one they read as an
+// empty index. The hash is the middle answer - it survives a reload and
+// makes the link shareable, and it is the one form of persistence the
+// user can SEE, which is what stops it becoming an invisible filter.
+// setGrpFilter writes it; the boot arm near `#group=` reads it back.
 let grpSel = '';
+// The groups the menu offers: the SUBSCRIBED list, from index_stats, and
+// deliberately not `SELECT DISTINCT grp` over the release table - a facet
+// scan of the releases is the expensive way to a worse answer, because it
+// names what happened to land rather than what this install is indexing.
+// Empty until the one fetch below lands (and if it never does, the menu
+// stays hidden and the badge and the dashboard hand-off still work).
+let grpNames = [];
+// ---- The filter roster: one declared list, three consumers ------------
+//
+// The wall asks "is a filter active?" in three places, and until this
+// roster each one answered it by NAMING EVERY FILTER BY HAND. The GH #76
+// newsgroup filter shipped missing from all three (`8eb64dbe1`), and the
+// failure is silent in every direction - no gate, no test, no runtime
+// error, just a page that states something nothing established: an empty
+// filtered list blamed on "Matched only" and offering to turn off the
+// wrong switch, a narrowed grid sitting under three rails that quietly
+// were not narrowed, and the empty state announcing that the wall is
+// still filling when the user had simply picked a group with nothing in
+// it. Two of those were fixed one token each; the third was still live
+// when this roster was written.
+//
+// Two DIFFERENT questions are being asked, which is why the hand lists
+// legitimately differed - and why a reader could not tell a deliberate
+// omission from the next `grpSel`:
+//
+//   set  - does this remove ROWS from the answer? The empty state and
+//          the U4 probe ask this one: an empty grid is only ambiguous
+//          when nothing the user chose can account for it.
+//   view - has the user taken the page over, so that the whole-index
+//          discovery rails no longer belong on it? A re-sort and a
+//          surface switch remove no rows and still answer yes.
+//
+// A filter is added by adding a line here, which cannot be done without
+// answering both questions. That is the whole point of the roster; the
+// de-duplication of the three lists is a side effect.
+//
+// TWO STATES ARE DELIBERATELY NOT IN IT, both load-bearing:
+//   * `matchedOnly` is the filter the U4 probe is ABOUT. A roster entry
+//     would make the probe decline to run whenever it is on, which is
+//     the default and nearly always. The rails are unaffected by it in
+//     either direction: all three rail fetches carry `matched=1`
+//     whatever the checkbox says.
+//   * `dirFlip` reverses whichever sort is chosen and removes no rows,
+//     and `latest` reversed is still the default browse, so the rails
+//     stay. It has never been in any of the three lists.
+const WALL_FILTERS=[
+  {n:'q',        set:true,  view:true,  on:()=>!!document.getElementById('q').value.trim()},
+  // The one asymmetry that was already here and unexplained. A category
+  // does narrow the answer, so the empty state has to say "No matches"
+  // rather than reaching for a story about the index - but the rails are
+  // SCOPED to the chosen category rather than hidden by it (renderStrips
+  // passes `&cat=`), because they used to be an All-only feature and
+  // choosing Movies wiped every bit of curation off the page.
+  {n:'tab',      set:true,  view:false, on:()=>!!tab},
+  {n:'genreSel', set:true,  view:true,  on:()=>!!genreSel},
+  {n:'resSel',   set:true,  view:true,  on:()=>!!resSel},
+  {n:'decSel',   set:true,  view:true,  on:()=>!!decSel},
+  {n:'grpSel',   set:true,  view:true,  on:()=>!!grpSel},
+  // The three below remove no rows at all, so `set` is false for each
+  // and the empty state must keep looking for the real story.
+  {n:'sortBy',   set:false, view:true,  on:()=>sortBy!=='latest'},
+  {n:'view',     set:false, view:true,  on:()=>view==='releases'},
+  // Shapes the grid into sections by kind rather than narrowing it. It
+  // has hidden the rails since the toggle shipped: a sectioned grid
+  // under ungrouped whole-index rails is a different page.
+  {n:'catGroup', set:false, view:true,  on:()=>catGroup},
+];
+// Did anything the user chose remove rows from the answer? (The U4
+// empty-state story, and whether the one-row probe is worth issuing.)
+const narrowsResults=()=>WALL_FILTERS.some(f=>f.set&&f.on());
+// Has the user taken the page over, so the discovery rails do not
+// belong on it?
+const narrowsView=()=>WALL_FILTERS.some(f=>f.view&&f.on());
 // 24D: user-defined categories ({slug,name}), served on wall2/browse
 // responses - each gets its own tab chip and section label.
 let customCats = [], _catsSig = '';
@@ -1362,7 +1493,8 @@ async function api(mode, extra, authKey){
   // over as a blob download (m3uHandoff / dlRelNzb, §61d).
   let r;
   try {
-    r = await fetch(`/api?mode=${mode}${extra||''}`, {headers: sent?{'X-Api-Key': sent}:{}});
+    r = await fetch(`/api?mode=${mode}${extra||''}`,
+      {headers: authHeaders(sent, authKey != null)});
   } catch(e){ return fetchFail(); }
   // A non-JSON body (a reverse proxy's 502 page, a truncated answer)
   // used to reject here and vanish the same way.
@@ -1588,14 +1720,17 @@ function render(){
   document.getElementById('matchedOnly').checked = matchedOnly;
   _lastKind=null;
   if(!list.length){
-    const q=document.getElementById('q').value.trim();
     // U4: four stories, told apart. A user filter that matched nothing
     // says so; "Matched only" hiding a real pile says so and offers the
     // one click that reveals it; groups chosen but nothing indexed yet
     // says the wall is filling; only a wall with no groups chosen sends
     // the user to the indexing settings.
+    // The first branch is the filter roster's `set` question, and this
+    // was the site that still had `grpSel` missing from its hand list:
+    // a newsgroup with nothing matched in it read as "Scanning your
+    // newsgroups", which is a claim about the index made about a filter.
     let msg;
-    if(q||tab||genreSel||resSel||decSel){
+    if(narrowsResults()){
       msg=t('wall.nomatch','No matches.');
     } else if(matchedOnly && unmBusy){
       // The probe was refused, so whether the filter is hiding a pile
@@ -1723,13 +1858,49 @@ function renderChips(){ setTimeout(chipFades,0);
 // the poster grid) and a filter that reached three of them would be the
 // "Group by title" toggle silently widening the answer.
 function grpQS(){ return grpSel?`&group=${encodeURIComponent(grpSel)}`:''; }
+// The menu is the way IN that neither of the other two is: the row badge
+// needs a release from the group already on screen, and the dashboard
+// hand-off needs a trip to the other page - so on an index whose recent
+// window is one busy group, the other groups had no route at all. That is
+// the "menu of the groups that are being indexed" the request asked for.
 function renderGrpBar(){
   const box=document.getElementById('grpbar');
-  box.classList.toggle('on',!!grpSel);
-  if(!grpSel){ box.innerHTML=''; return; }
-  box.innerHTML=`<button class="chip" id="grpclear"
-    title="${esc(t('wall.grp.clear','Show every newsgroup again'))}">${
-    t('wall.grp.only','Newsgroup: {g}',{g:`<b dir="ltr">${esc(grpSel)}</b>`})} ✕</button>`;
+  // A group can be active without being subscribed: a badge click names
+  // whatever the row was posted to, and a #group= link names whatever
+  // the dashboard was showing, either of which may have been unsubscribed
+  // since. Carry it as an extra option rather than dropping it, or the
+  // menu would show "Every newsgroup" while the list is narrowed.
+  const names=grpNames.includes(grpSel)||!grpSel?grpNames:[grpSel].concat(grpNames);
+  box.classList.toggle('on',!!(names.length||grpSel));
+  if(!names.length&&!grpSel){ box.innerHTML=''; return; }
+  box.innerHTML=
+    `<label for="grpsel">${esc(t('wall.grp.pick','Newsgroup'))}</label>`
+    +`<select id="grpsel" class="${grpSel?'on':''}" title="${esc(grpSel
+        ?t('wall.grp.only','Newsgroup: {g}',{g:grpSel})
+        :t('wall.grp.pick.title','Show only the releases posted to one newsgroup'))}">`
+    +`<option value=""${grpSel?'':' selected'}>${
+        esc(t('wall.grp.every','Every newsgroup'))}</option>`
+    +names.map(n=>`<option dir="ltr" value="${esc(n)}"${
+        n===grpSel?' selected':''}>${esc(n)}</option>`).join('')
+    +`</select>`
+    // Redundant with the menu's first option on purpose: one click back
+    // to everything, next to the narrowing it undoes, is what the pill
+    // this replaced was for.
+    +(grpSel?`<button class="chip" id="grpclear"
+      title="${esc(t('wall.grp.clear','Show every newsgroup again'))}">✕</button>`:'');
+}
+// One fetch, at boot. A subscription list changes when the user edits it
+// in the dashboard, which is a different page and a reload away, so there
+// is nothing here worth polling for on the 45 s tick.
+async function loadGrpNames(){
+  // index_stats is the cheap answer and cannot refuse: it is served from
+  // a try_lock'd snapshot, and `groups` is the configured list rather
+  // than anything read out of the index, so a cold or busy index still
+  // answers it correctly (`stats_cold` is about the COUNTS below it).
+  const j=await api('index_stats');
+  if(j.error) return;                      // leave the menu hidden
+  grpNames=(j.groups||[]).filter(Boolean);
+  renderGrpBar();
 }
 // The one way the filter changes, so the pill, the page number and the
 // refetch can never come apart. `name` empty clears it.
@@ -1738,6 +1909,18 @@ function setGrpFilter(name){
   if(next===grpSel) return;
   grpSel=next;
   lpage=0;
+  // The narrowing goes in the URL, which is what makes it survive a
+  // reload - and the reason it is the hash and not localStorage is the
+  // one the `grpSel` declaration gives: a filter the user cannot
+  // remember setting reads as an empty index, and the address bar is
+  // where they can see it. Same spelling the boot arm reads, so a
+  // reloaded page lands back on the same list and the link is shareable.
+  // It clobbers a `#q=` left over from a search link, which costs
+  // nothing after boot - the search box holds its own text.
+  try{
+    history.replaceState(null,'',location.pathname+location.search
+      +(grpSel?'#group='+encodeURIComponent(grpSel):''));
+  }catch(e){}
   renderGrpBar();
   // Whichever surface is showing asks again; the other one picks the
   // filter up from `grpSel` the next time it fetches.
@@ -1745,6 +1928,12 @@ function setGrpFilter(name){
 }
 document.getElementById('grpbar').addEventListener('click',e=>{
   if(e.target.closest('#grpclear')) setGrpFilter('');
+});
+// Delegated, because renderGrpBar rebuilds the select's markup every time
+// the filter or the catalogue moves - a listener bound to the element
+// would be dropped by the next render.
+document.getElementById('grpbar').addEventListener('change',e=>{
+  const sel=e.target.closest('#grpsel'); if(sel) setGrpFilter(sel.value);
 });
 document.getElementById('chips').addEventListener('click',e=>{
   const b=e.target.closest('button'); if(!b) return;
@@ -1781,14 +1970,20 @@ async function renderAffNote(){
 let stripSeq=0;
 async function renderStrips(){
   const box=document.getElementById('strips');
-  const q=document.getElementById('q').value.trim();
-  // Deliberately NOT bailing on `tab` any more. The strips used to be
-  // an All-only feature, so the moment you narrowed to Movies every bit
-  // of curation vanished and you were left with a bare grid ordered by
-  // upload date - which is the one view a film watcher actually wants
-  // and the one that got the least help. They are scoped to the chosen
-  // category instead.
-  if(q||sortBy!=='latest'||view==='releases'||genreSel||resSel||decSel||catGroup){ box.innerHTML=''; return; }
+  // The rails are curation over the WHOLE index - Recommended for you,
+  // Hot right now - so anything the user has done to the page takes them
+  // away. Which states those are is the filter roster's `view` column,
+  // up with the filter declarations, and it is declared there rather
+  // than spelled out here because the U4 empty state asks a different
+  // question of the same filters and the two hand lists used to drift
+  // (GH #76: the newsgroup filter shipped missing from both).
+  // HIDING rather than passing the narrowing down to the three strip
+  // fetches, which is the choice this line makes and the roster does
+  // not: a rail scoped to one genre or one group is a different
+  // feature, and it would cost three more filtered queries to answer a
+  // question nobody asked. `tab` is the exception, and the roster's
+  // entry for it says why.
+  if(narrowsView()){ box.innerHTML=''; return; }
   const cat=`&cat=${encodeURIComponent(tab||'all')}`;
   const seq=++stripSeq;
   const toCard=c=>({
@@ -2132,7 +2327,7 @@ async function grab(id, play){
 // player, and the /stream link inside it carries its own ?t= token.
 async function m3uHandoff(id){
   try{
-    const r=await fetch('/m3u/'+encodeURIComponent(id), {headers:key?{'X-Api-Key':key}:{}});
+    const r=await fetch('/m3u/'+encodeURIComponent(id), {headers: authHeaders(key, false)});
     if(!r.ok){ toast(tErr('failed'), true); return; }
     const a=document.createElement('a');
     a.href=URL.createObjectURL(await r.blob());
@@ -2143,7 +2338,8 @@ async function m3uHandoff(id){
 }
 async function dlRelNzb(id){
   try{
-    const r=await fetch('/getnzb/'+encodeURIComponent(id)+'.nzb', {headers:key?{'X-Api-Key':key}:{}});
+    const r=await fetch('/getnzb/'+encodeURIComponent(id)+'.nzb',
+      {headers: authHeaders(key, false)});
     if(!r.ok){ toast(tErr('failed'), true); return; }
     const m=(r.headers.get('Content-Disposition')||'').match(/filename="([^"]+)"/);
     const a=document.createElement('a');
@@ -3912,7 +4108,7 @@ async function apiPost(mode, body){
   let r;
   try {
     r=await fetch(`/api?mode=${mode}`,
-      {method:'POST', body:JSON.stringify(body), headers: sent?{'X-Api-Key': sent}:{}});
+      {method:'POST', body:JSON.stringify(body), headers: authHeaders(sent, false)});
   } catch(e){ return fetchFail(); }
   let j;
   try { j=await r.json(); }
@@ -4075,7 +4271,7 @@ async function artFromFile(inp){
   const fd=new FormData(); fd.append('file', f, f.name||'poster');
   try{
     const r=await fetch(`/api?mode=wall_art&key=${encodeURIComponent(openKey)}`,
-      {method:'POST', body:fd, headers: key?{'X-Api-Key': key}:{}});
+      {method:'POST', body:fd, headers: authHeaders(key, false)});
     await artDone(await r.json());
   }catch(e){ toast(t('wall.failed','Failed: {err}',{err:e.message}), true); }
 }
@@ -4129,7 +4325,15 @@ async function wallFetch(reset){
     // ambiguous - hidden by the filter, or truly nothing indexed? One
     // 1-row probe with the filter off tells the empty state which story
     // to tell (and how big the hidden pile is).
-    if(reset && !wtotal && matchedOnly && !(q||tab||genreSel||resSel||decSel)){
+    // "No other filter" is the filter roster's `set` question, asked the
+    // same way render()'s empty state asks it. An empty answer under a
+    // filter the user set is not ambiguous at all - that filter is the
+    // reason - so probing there would attribute the emptiness to
+    // "Matched only" and offer to turn off the wrong switch, which is
+    // the one thing this probe exists to avoid. GH #76 is what it cost
+    // when the list was a hand list: the newsgroup filter was missing
+    // from it, and from both of the other two sites.
+    if(reset && !wtotal && matchedOnly && !narrowsResults()){
       try{
         const p=await api('wall2','&cat=all&q=&limit=1&offset=0&matched=0&all=1');
         if(seq!==wseq) return;
@@ -4649,6 +4853,9 @@ function idxOffPage(){
 }
 navPillName();
 idxOffPage();
+// No catalogue retry beside the two above it: this one moves `display`,
+// not a string, so applyI18n has nothing to undo and nothing to wait for.
+revealSignoutPill(WEB_LOGIN);
 document.getElementById('lprev').addEventListener('click', ()=>{ if(lpage>0){ lpage--; browseFetch(); } });
 document.getElementById('lnext').addEventListener('click', ()=>{ lpage++; browseFetch(); });
 document.getElementById('matchedOnly').addEventListener('change', e=>{ viewBadge();
@@ -5062,6 +5269,9 @@ addEventListener('visibilitychange', ()=>{
 });
 // M30: hidden-count chip + any pending rule suggestion.
 loadHidCount(); fetchSuggest();
+// GH #76: fill the newsgroup menu. After the hash arm above, which is what
+// decides which option starts selected.
+loadGrpNames();
 // Manual link: English at /manual, translations at /manual/<lang> (#wall anchor).
 // Selector follows the nav unification: the manual pill is now keyed
 // hdr.manual, shared with the dashboard.

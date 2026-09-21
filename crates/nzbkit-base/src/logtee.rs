@@ -195,7 +195,7 @@ fn span_len(mark: u64, seen: u64, held: usize, max: usize) -> usize {
 ///
 /// `to` behind `from`, or either one from a previous process's ring,
 /// yields nothing rather than a guess - the same clamping discipline
-/// [`span_len`] documents, applied at both ends.
+/// `span_len` documents, applied at both ends.
 pub fn between(from: u64, to: u64, max: usize) -> Vec<String> {
     let Some(r) = RING.get() else {
         return Vec::new();

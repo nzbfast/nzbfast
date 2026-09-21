@@ -2018,19 +2018,8 @@ fn the_head_field_length_is_solved_when_volume_zero_is_absent() {
 /// term the fix had to drop.
 #[test]
 fn a_real_writer_stored_set_reaches_arithmetic_placement() {
-    use rars::rar50::{Rar50VolumeWriter, StoredEntry, WriterOptions};
     let data = payload(300_000, 31);
-    let volumes = Rar50VolumeWriter::new(WriterOptions::default())
-        .stored_entry(StoredEntry {
-            name: b"payload.bin",
-            data: &data,
-            mtime: None,
-            attributes: 0o100644,
-            host_os: 1,
-        })
-        .max_payload_per_volume(120_000)
-        .finish()
-        .unwrap();
+    let volumes = super::rarfixtures::stored_volume_set(b"payload.bin", &data, 120_000);
     assert_eq!(volumes.len(), 3, "geometry the measurement above assumes");
     let ms: Vec<VolumeMapper> = volumes
         .iter()

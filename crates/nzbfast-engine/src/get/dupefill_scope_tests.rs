@@ -139,6 +139,7 @@ fn slot(hint: &str, total: usize) -> Arc<crate::unpack::FileSlot> {
         par2_name_demoted: Default::default(),
         par2_sniffed: AtomicBool::new(false),
         total_segments: total,
+        posted_bytes: 0,
         remaining: AtomicUsize::new(0),
         missing: AtomicUsize::new(0),
         errors: AtomicUsize::new(0),

@@ -14,6 +14,13 @@ mod scratch;
 // and `payload` below says when a fixture needs it.
 mod payloads;
 
+// The ONE place this binary (and `daemon` and `leak_soak`) builds RAR
+// fixtures through the engine's writer, named by SHAPE so the engine
+// swap is one file rather than every test site. Sibling dir, the
+// `payloads`/`harness` pattern.
+mod rarfixtures;
+use rarfixtures::Member;
+
 // The forward guard on the trap `payloads` exists to escape: a repair
 // that completed having rebuilt nothing from parity. e2e-only, unlike
 // its three bare-named siblings, because `run_get_win` and `Fixture`
@@ -1704,38 +1711,11 @@ async fn compressed_outer_wrapping_rar_denests_beside_leftovers() {
             }
         })
         .collect();
-    let store_opts = || {
-        rars::rar50::WriterOptions::new(rars::ArchiveVersion::Rar50, rars::FeatureSet::store_only())
-    };
-    let inner = rars::rar50::Rar50Writer::new(store_opts())
-        .stored_entries(&[rars::rar50::StoredEntry {
-            name: b"movie.bin",
-            data: &doc,
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-        }])
-        .finish()
-        .unwrap();
-    let outer = rars::rar50::Rar50Writer::new(store_opts())
-        .compressed_entries(&[
-            rars::rar50::CompressedEntry {
-                name: b"inner.rar",
-                data: &inner,
-                mtime: None,
-                attributes: 0,
-                host_os: 0,
-            },
-            rars::rar50::CompressedEntry {
-                name: b"readme.txt",
-                data: b"the payload rides one level down",
-                mtime: None,
-                attributes: 0,
-                host_os: 0,
-            },
-        ])
-        .finish()
-        .unwrap();
+    let inner = rarfixtures::stored_archive(&[Member::bare(b"movie.bin", &doc)]);
+    let outer = rarfixtures::compressed_archive(&[
+        Member::bare(b"inner.rar", &inner),
+        Member::bare(b"readme.txt", b"the payload rides one level down"),
+    ]);
 
     let mut fx = Fixture::new("comprnest");
     fx.add_file("c.rar", &outer, 1500);
@@ -1800,29 +1780,8 @@ async fn compressed_outer_with_subfolder_rar_payload_denests() {
             }
         })
         .collect();
-    let store_opts = || {
-        rars::rar50::WriterOptions::new(rars::ArchiveVersion::Rar50, rars::FeatureSet::store_only())
-    };
-    let inner = rars::rar50::Rar50Writer::new(store_opts())
-        .stored_entries(&[rars::rar50::StoredEntry {
-            name: b"movie.bin",
-            data: &doc,
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-        }])
-        .finish()
-        .unwrap();
-    let outer = rars::rar50::Rar50Writer::new(store_opts())
-        .compressed_entries(&[rars::rar50::CompressedEntry {
-            name: b"Sub/inner.rar",
-            data: &inner,
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-        }])
-        .finish()
-        .unwrap();
+    let inner = rarfixtures::stored_archive(&[Member::bare(b"movie.bin", &doc)]);
+    let outer = rarfixtures::compressed_archive(&[Member::bare(b"Sub/inner.rar", &inner)]);
 
     let mut fx = Fixture::new("comprsubnest");
     fx.add_file("c.rar", &outer, 1500);
@@ -1882,17 +1841,7 @@ async fn top_level_compressed_rar_extracts_one_pass() {
             }
         })
         .collect();
-    let vols = rars::rar50::Rar50VolumeWriter::new(rars::rar50::WriterOptions::default())
-        .compressed_entries(&[rars::rar50::CompressedEntry {
-            name: b"movie.bin",
-            data: &doc,
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-        }])
-        .max_payload_per_volume(80_000)
-        .finish()
-        .unwrap();
+    let vols = rarfixtures::compressed_volume_set(&[Member::bare(b"movie.bin", &doc)], 80_000);
     assert!(
         vols.len() >= 3,
         "want a real multi-volume set, got {}",
@@ -1970,21 +1919,11 @@ async fn encrypted_compressed_rar_extracts_one_pass() {
         return;
     }
     let doc = half_entropy(600_000, 0x9e3779b97f4a7c15);
-    let mut features = rars::FeatureSet::store_only();
-    features.file_encryption = true;
-    let opts = rars::rar50::WriterOptions::new(rars::ArchiveVersion::Rar50, features);
-    let vols = rars::rar50::Rar50VolumeWriter::new(opts)
-        .encrypted_compressed_entries(&[rars::rar50::EncryptedCompressedEntry {
-            name: b"movie.bin",
-            data: &doc,
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-            password: b"s3cretpw",
-        }])
-        .max_payload_per_volume(80_000)
-        .finish()
-        .unwrap();
+    let vols = rarfixtures::encrypted_compressed_volume_set(
+        &[Member::bare(b"movie.bin", &doc)],
+        80_000,
+        b"s3cretpw",
+    );
     assert!(
         vols.len() >= 3,
         "want a real multi-volume set, got {}",
@@ -2059,17 +1998,7 @@ async fn top_level_compressed_rar_damaged_repairs_and_reextracts() {
         return;
     }
     let doc = half_entropy(600_000, 0xa076_1d64_78bd_642f);
-    let vols = rars::rar50::Rar50VolumeWriter::new(rars::rar50::WriterOptions::default())
-        .compressed_entries(&[rars::rar50::CompressedEntry {
-            name: b"movie.bin",
-            data: &doc,
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-        }])
-        .max_payload_per_volume(80_000)
-        .finish()
-        .unwrap();
+    let vols = rarfixtures::compressed_volume_set(&[Member::bare(b"movie.bin", &doc)], 80_000);
     assert!(
         vols.len() >= 3,
         "want a real multi-volume set, got {}",
@@ -2136,19 +2065,7 @@ async fn top_level_compressed_rar_damaged_repairs_and_reextracts() {
 /// the header) around one payload file - the inner layer for the CRC
 /// audit tests.
 fn store_rar(name: &'static [u8], data: &[u8]) -> Vec<u8> {
-    rars::rar50::Rar50Writer::new(rars::rar50::WriterOptions::new(
-        rars::ArchiveVersion::Rar50,
-        rars::FeatureSet::store_only(),
-    ))
-    .stored_entries(&[rars::rar50::StoredEntry {
-        name,
-        data,
-        mtime: None,
-        attributes: 0,
-        host_os: 0,
-    }])
-    .finish()
-    .unwrap()
+    rarfixtures::stored_archive(&[Member::bare(name, data)])
 }
 
 /// Same damage with NO cure packed beside it: the job must fail loudly
@@ -4772,22 +4689,8 @@ async fn nested_recovery_record_heals_poster_damaged_inner() {
             }
         })
         .collect();
-    let mut features = rars::FeatureSet::store_only();
-    features.recovery_record = true;
-    let intact = rars::rar50::Rar50Writer::new(rars::rar50::WriterOptions::new(
-        rars::ArchiveVersion::Rar50,
-        features,
-    ))
-    .compressed_entries(&[rars::rar50::CompressedEntry {
-        name: b"doc.bin",
-        data: &doc,
-        mtime: None,
-        attributes: 0,
-        host_os: 0,
-    }])
-    .recovery_percent(Some(20))
-    .finish()
-    .unwrap();
+    let intact =
+        rarfixtures::compressed_archive_with_recovery(&[Member::bare(b"doc.bin", &doc)], Some(20));
     // Damage the packed stream (headers end well before offset 300; the
     // packed member of a 300 KB half-entropy input runs >100 KB).
     let mut damaged = intact.clone();
@@ -4853,19 +4756,11 @@ async fn recovery_record_only_post_heals_a_wire_missing_article() {
             }
         })
         .collect();
-    let entries = [rars::rar50::CompressedEntry {
-        name: b"doc.bin",
-        data: &doc,
-        mtime: None,
-        attributes: 0o100644,
-        host_os: 1,
-    }];
-    let volumes = rars::rar50::Rar50VolumeWriter::new(rars::rar50::WriterOptions::default())
-        .compressed_entries(&entries)
-        .max_payload_per_volume(64 * 1024)
-        .recovery_percent(Some(20))
-        .finish()
-        .unwrap();
+    let volumes = rarfixtures::compressed_volume_set_with_recovery(
+        &[Member::unix(b"doc.bin", &doc)],
+        64 * 1024,
+        Some(20),
+    );
     assert!(
         volumes.len() >= 3,
         "expected a multivolume set, got {}",
@@ -5529,17 +5424,7 @@ async fn compressed_set_wholly_missing_volume_joins_chase_one_pass() {
         return;
     }
     let doc = half_entropy(600_000, 0x9e3779b97f4a7c15);
-    let vols = rars::rar50::Rar50VolumeWriter::new(rars::rar50::WriterOptions::default())
-        .compressed_entries(&[rars::rar50::CompressedEntry {
-            name: b"movie.bin",
-            data: &doc,
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-        }])
-        .max_payload_per_volume(80_000)
-        .finish()
-        .unwrap();
+    let vols = rarfixtures::compressed_volume_set(&[Member::bare(b"movie.bin", &doc)], 80_000);
     assert!(
         vols.len() >= 3,
         "want a real multi-volume set, got {}",

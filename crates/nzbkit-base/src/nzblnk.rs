@@ -172,6 +172,22 @@ fn clip(s: &str, n: usize) -> String {
 /// software emits, with or without the `?`. Unknown parameters are
 /// ignored (the format is meant to grow), a repeated single-valued
 /// parameter keeps its FIRST value, and `g` accumulates.
+///
+/// ```
+/// use nzbkit_base::nzblnk;
+///
+/// let link = "nzblnk:?t=Some.Release.2024.1080p&h=abc123%40example.com&p=secret";
+/// assert!(nzblnk::looks_like(link));
+///
+/// let l = nzblnk::parse(link).expect("a usable link");
+/// assert_eq!(l.header, "abc123@example.com"); // what to search for
+/// assert_eq!(l.title, "Some.Release.2024.1080p"); // the job name
+/// assert_eq!(l.password, "secret"); // unlocks the archive with no typing
+/// assert!(l.groups.is_empty());
+///
+/// // A link with no `h` names nothing to look for.
+/// assert_eq!(nzblnk::parse("nzblnk:?t=x"), Err(nzblnk::NzbLnkError::NoHeader));
+/// ```
 pub fn parse(s: &str) -> Result<NzbLnk, NzbLnkError> {
     let t = trim_wrapping(s);
     if !looks_like(t) {

@@ -468,6 +468,7 @@ impl Daemon {
             defer_reason: String::new(),
             defer_at: 0,
             defer_count: 0,
+            repair_deferred: false,
             demote: false,
             bad_blocks: None,
             verify_blocks: 0,
@@ -740,7 +741,10 @@ impl Daemon {
                     duplicate = false;
                     {
                         let mut g = job.lock_ok();
-                        g.priority = enqueue_priority(priority, false);
+                        g.set_priority(
+                            enqueue_priority(priority, false),
+                            "the original it was held for is gone",
+                        );
                         g.paused = priority == -2;
                         g.held_for.clear();
                         // No longer held: the add-time insurance stamp applies.
@@ -857,7 +861,7 @@ impl Daemon {
             let mut g = job.lock_ok();
             g.state = JobState::Failed;
             g.paused = false;
-            g.priority = 0;
+            g.set_priority(0, "it was never queued");
             g.fail_message = why;
             g.finished_at = Some(Instant::now());
             g.finished_unix = Some(unix_now());

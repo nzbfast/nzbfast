@@ -101,6 +101,20 @@ pub struct UnpackProgress {
     base_total: AtomicU64,
     /// The set being extracted right now, and the attempt at it.
     cur: std::sync::Mutex<CurSet>,
+    /// TODO 101: this ladder is eating its volumes - each one is
+    /// hard-deleted the moment the extractor is finished with it.
+    ///
+    /// Set by the tail when `eatvol::decide` returns `Eat`, which is
+    /// BEFORE the first volume goes, so the row says what is about to
+    /// happen rather than reporting it after the first file is already
+    /// gone. The two counters below then fill in behind it.
+    eating: std::sync::atomic::AtomicBool,
+    /// Volumes actually removed so far, and the bytes they gave back.
+    /// Only successful `remove_file`s count - a volume the delete could
+    /// not remove costs space, so crediting it here would have the row
+    /// claim space the disk never returned.
+    eaten: AtomicU64,
+    eaten_bytes: AtomicU64,
 }
 
 /// The set in flight. Separate from the two `base` counters above, and
@@ -143,6 +157,46 @@ impl UnpackProgress {
     /// countable, which the page reads as "say nothing about volumes".
     pub fn volumes(&self) -> u64 {
         self.volumes
+    }
+
+    /// TODO 101: is this ladder deleting its volumes as it consumes
+    /// them? False on every ordinary unpack, which is what the page
+    /// reads as "say nothing about it".
+    pub fn eating(&self) -> bool {
+        self.eating.load(Ordering::Relaxed)
+    }
+
+    /// TODO 101: one more spent volume has been removed, giving `bytes`
+    /// back.
+    ///
+    /// An inherent method on the CELL, and deliberately not a free
+    /// function over the thread-local the way [`mark_eating`] and every
+    /// other reporting call here is: the delete callback runs on the
+    /// extractor's walk, which is NOT the thread the ladder armed on,
+    /// so a thread-local publish silently loses almost all of it (a
+    /// 13-volume set published one). This is the same reason
+    /// [`watch`] is handed an `Arc<AtomicU64>` rather than reading
+    /// `written` off `LIVE`. Callers take the cell once on the driving
+    /// thread with [`live_cell`] and call this from wherever the
+    /// deletion happens.
+    ///
+    /// Called per delete rather than totalled at the end, so a pass
+    /// that fails half way has still published what it really freed -
+    /// which is exactly the run whose report has to explain why a retry
+    /// must fetch the download again.
+    pub fn note_eaten(&self, bytes: u64) {
+        self.eaten.fetch_add(1, Ordering::Relaxed);
+        self.eaten_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Volumes eaten so far, and the bytes they gave back. Both 0 until
+    /// the first one goes, so an armed ladder that has not reached a
+    /// volume boundary yet says it is eating and claims no figure.
+    pub fn eaten(&self) -> (u64, u64) {
+        (
+            self.eaten.load(Ordering::Relaxed),
+            self.eaten_bytes.load(Ordering::Relaxed),
+        )
     }
 
     /// Unpacked bytes expected, or 0 while no set has been parsed yet.
@@ -212,7 +266,7 @@ pub struct UnpackArm {
 /// payload never reads), and the arm is inert - `watch` below then does
 /// nothing at all, which is what keeps this free for the CLI.
 ///
-/// The MAP and not the hub it hangs off: see [`UnpackMap`].
+/// The MAP and not the hub it hangs off: see `UnpackMap`.
 pub fn arm(map: Option<&Arc<UnpackMap>>, owner: &str, volumes: u64) -> UnpackArm {
     let Some(m) = map else {
         return UnpackArm {
@@ -243,17 +297,21 @@ impl Drop for UnpackArm {
 }
 
 /// Report the set that is about to be extracted: `written` is the
-/// accumulator its output writers feed, and `archives` the parsed
-/// volumes it will be built from.
+/// accumulator its output writers feed, and `total` the bytes its parsed
+/// volumes say it will produce ([`unpacked_total`] over their members).
+///
+/// A byte total and not the parsed volumes themselves: this layer names
+/// no archive engine, so the caller that owns the handles does the walk
+/// (`rarfix::preflight::archives_unpacked_total` in nzbfast-unpack).
 ///
 /// Called once per set, immediately before extraction - the RAR arms'
 /// entry point, and [`begin_set`] plus [`attempt`] in one call because
 /// those arms parse the whole set before the first byte moves. An arm
 /// that walks a password shortlist, or that learns its total as it
 /// feeds, wants the two halves separately.
-pub fn watch(written: &Arc<AtomicU64>, archives: &[rars::Archive], resumed: u64) {
+pub fn watch(written: &Arc<AtomicU64>, total: u64, resumed: u64) {
     begin_set();
-    attempt(written, unpacked_total(archives), resumed);
+    attempt(written, total, resumed);
 }
 
 /// The ladder moves on to a NEW set: fold what the last one produced
@@ -381,6 +439,27 @@ pub fn raise_total(total: u64) {
     });
 }
 
+/// TODO 101: this ladder is armed to eat its volumes.
+///
+/// Called by the tail once `eatvol::decide` has said `Eat`, on the same
+/// thread the ladder runs on. Inert without a live arm, like every other
+/// reporting call here - a CLI run eats its volumes just the same, it
+/// simply has no row to tell.
+pub fn mark_eating() {
+    with_live(|p| p.eating.store(true, Ordering::Relaxed));
+}
+
+/// The ladder armed on THIS thread, as a handle that can be carried to
+/// another one.
+///
+/// For [`UnpackProgress::note_eaten`], whose caller runs on the
+/// extractor's walk rather than on the thread that armed the ladder.
+/// Everything else here reports from the driving thread and goes
+/// through `with_live` instead.
+pub fn live_cell() -> Option<Arc<UnpackProgress>> {
+    LIVE.with(|l| l.borrow().clone())
+}
+
 /// Run `f` against the ladder armed on this thread, if there is one.
 /// No ladder means nobody is listening (a CLI run, or a hubless
 /// prefetch sidecar), and every reporting call above is inert.
@@ -407,12 +486,16 @@ fn with_live(f: impl FnOnce(&UnpackProgress)) {
 /// disk before handing a set to the external `unrar`, so a per-fragment
 /// fold would call the commonest multi-volume shape there is twice its
 /// real size and refuse an archive that fits.
-pub fn unpacked_total(archives: &[rars::Archive]) -> u64 {
-    archives
-        .iter()
-        .flat_map(|a| a.members())
-        .filter(|m| !m.meta.is_directory && !m.meta.is_split_before)
-        .fold(0u64, |acc, m| acc.saturating_add(m.meta.unpacked_size))
+///
+/// `members` is every member header of every volume, in any order, as
+/// `(unpacked_size, is_directory, is_split_before)`. Plain figures
+/// rather than engine handles, so the counting rule lives here with its
+/// measurements while this crate depends on no archive engine.
+pub fn unpacked_total(members: impl IntoIterator<Item = (u64, bool, bool)>) -> u64 {
+    members
+        .into_iter()
+        .filter(|&(_, is_directory, is_split_before)| !is_directory && !is_split_before)
+        .fold(0u64, |acc, (size, _, _)| acc.saturating_add(size))
 }
 
 #[cfg(test)]
@@ -426,10 +509,31 @@ mod tests {
     }
 
     #[test]
+    fn a_split_member_is_counted_once_and_a_directory_never() {
+        // One 3,000,000-byte member across three volumes repeats its
+        // whole-file header in each; only the fragment that starts it
+        // (`is_split_before == false`) counts.
+        let members = [
+            (3_000_000, false, false),
+            (3_000_000, false, true),
+            (3_000_000, false, true),
+            (4_096, true, false),
+            (500, false, false),
+        ];
+        assert_eq!(unpacked_total(members), 3_000_500);
+        assert_eq!(unpacked_total([]), 0);
+        // Declared sizes are untrusted input: the fold saturates.
+        assert_eq!(
+            unpacked_total([(u64::MAX, false, false), (1, false, false)]),
+            u64::MAX
+        );
+    }
+
+    #[test]
     fn a_ladder_with_no_hub_registers_nothing_and_watch_is_inert() {
         let a = arm(None, "nzo-1", 130);
         let w = Arc::new(AtomicU64::new(7));
-        watch(&w, &[], 0);
+        watch(&w, 0, 0);
         assert!(LIVE.with(|l| l.borrow().is_none()));
         drop(a);
     }
@@ -454,14 +558,14 @@ mod tests {
         // Set one. `watch` cannot raise a total from an empty archive
         // list, so drive the counters the way the ladder does.
         let first = Arc::new(AtomicU64::new(0));
-        watch(&first, &[], 0);
+        watch(&first, 0, 0);
         raise_total(100);
         first.store(60, Ordering::Relaxed);
         assert_eq!(p.done(), 60);
         // Set two: set one's bytes fold into the base rather than
         // restarting at zero.
         let second = Arc::new(AtomicU64::new(0));
-        watch(&second, &[], 0);
+        watch(&second, 0, 0);
         raise_total(50);
         second.store(20, Ordering::Relaxed);
         assert_eq!((p.total(), p.done()), (150, 80));
@@ -479,7 +583,7 @@ mod tests {
         let (hub, _a) = armed(4);
         let p = hub.unpack.lock_ok().get("nzo-1").cloned().unwrap();
         let w = Arc::new(AtomicU64::new(0));
-        watch(&w, &[], 70);
+        watch(&w, 0, 70);
         raise_total(100);
         assert_eq!(p.done(), 70, "the prefix already on disk counts as done");
         w.store(30, Ordering::Relaxed);
@@ -519,7 +623,7 @@ mod tests {
         let p = hub.unpack.lock_ok().get("nzo-1").cloned().expect("armed");
         // A set the ladder finished with before the retrying arm ran.
         let done_before = Arc::new(AtomicU64::new(0));
-        watch(&done_before, &[], 0);
+        watch(&done_before, 0, 0);
         raise_total(10);
         done_before.store(10, Ordering::Relaxed);
 
@@ -531,7 +635,7 @@ mod tests {
             // One pass of a group loop: two sets, banked as it goes.
             for (n, produced) in [(100u64, 100u64), (50, 20)] {
                 let w = Arc::new(AtomicU64::new(0));
-                watch(&w, &[], 0);
+                watch(&w, 0, 0);
                 raise_total(n);
                 w.store(produced, Ordering::Relaxed);
             }
@@ -552,7 +656,7 @@ mod tests {
         let (hub, _a) = armed(1);
         let p = hub.unpack.lock_ok().get("nzo-1").cloned().expect("armed");
         let w = Arc::new(AtomicU64::new(0));
-        watch(&w, &[], 0);
+        watch(&w, 0, 0);
         raise_total(70);
         w.store(70, Ordering::Relaxed);
         mark.rewind();
@@ -568,7 +672,7 @@ mod tests {
         let (hub, _a) = armed(2);
         let p = hub.unpack.lock_ok().get("nzo-1").cloned().expect("armed");
         let w = Arc::new(AtomicU64::new(0));
-        watch(&w, &[], 0);
+        watch(&w, 0, 0);
         raise_total(40);
         raise_total(40);
         raise_total(10);

@@ -29,7 +29,11 @@ use std::path::Path;
 /// Checksums for one `block_size` slice of a file (last slice zero-padded).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockCheck {
+    /// MD5 of this slice's `block_size` bytes, the last slice of a file
+    /// being zero-padded up to that size first.
     pub md5: [u8; 16],
+    /// CRC32 of the same padded slice. Cheap enough to run first, so a
+    /// damaged block is usually rejected without an MD5 pass.
     pub crc32: u32,
 }
 
@@ -522,20 +526,30 @@ pub fn verify_file_path_tiered(
         return verify_file_streaming_sized(file, block_size, src, VERIFY_CHUNK);
     }
     if !regular_file_size_mismatch(true, disk_len, file.length) {
-        // The experimental IFSC-only tier, default off. It reads through
-        // positioned lanes rather than the sequential handle, so it does
-        // NOT carry the read-side cache policy below.
+        // The IFSC-only tier, which DEFAULTS ON at both shipping
+        // surfaces (`parfast` 13 Sep 2026 unless `--slow`, the daemon's
+        // `fast_final_check` 15 Sep 2026). It reads through positioned
+        // lanes rather than the sequential handle, so it does NOT carry
+        // the read-side cache policy below.
         //
-        // ITS ORIGINAL JUSTIFICATION HAS EXPIRED, and the note is left
-        // here rather than deleted because the next reader will
-        // otherwise re-derive it: this said the trade was fair "because
-        // the arm it would want (drop-behind) is off by default". That
-        // arm is ON by default as of the gated round (`readpolicy`'s
-        // `DROP_BEHIND_DEFAULT`), so the reason is now simply that THIS
-        // TIER is the experimental one and default off. A lane that
-        // ships the tier on owes the policy a positioned equivalent, or
-        // owes a measurement showing a member large enough to reach the
-        // size floor does not care.
+        // ITS ORIGINAL JUSTIFICATION HAS EXPIRED TWICE, and the note is
+        // left here rather than deleted because the next reader will
+        // otherwise re-derive it. It first said the trade was fair
+        // "because the arm it would want (drop-behind) is off by
+        // default"; that arm is ON by default as of the gated round
+        // (`readpolicy`'s `DROP_BEHIND_DEFAULT`). It then said the
+        // reason was simply that this tier was the experimental one and
+        // default off; the tier was shipped on twice and that premise
+        // is gone too.
+        //
+        // SO THE DEBT IS OPEN AND IT IS ON THE DEFAULT PATH: this tier
+        // owes the read-side policy a positioned equivalent, or owes a
+        // measurement showing a member large enough to reach the
+        // policy's size floor does not care. Neither has been paid.
+        // Nothing here is a correctness question - the tier declines to
+        // `None` on anything that is not a clean exact-size member, so
+        // the verdict is unaffected - it is a cache-policy debt on the
+        // path a stock `parfast v` or daemon actually takes.
         if ifsc_only
             && let Some(verified) =
                 ifsc_only_attempt(path, &mut src, file, block_size, disk_len, threads)?
@@ -612,11 +626,15 @@ const FAST_CHECK_ON: u8 = 2;
 /// alone, which is why there is a single global here rather than a
 /// parameter on each surface.
 ///
-/// EXPERIMENTAL, DEFAULT OFF, and it changes what "verified" MEANS -
-/// see [`ifsc_only_attempt`] for exactly what the verdict then rests on
-/// and for the one spec-legal set on which the two tiers disagree. The
-/// policy section of `research/PAR2-PERF-AUDIT-2026-09-02.md` carries
-/// the decision.
+/// IT CHANGES WHAT "verified" MEANS - see `ifsc_only_attempt` for
+/// exactly what the verdict then rests on and for the one spec-legal
+/// set on which the two tiers disagree. The policy section of
+/// `research/PAR2-PERF-AUDIT-2026-09-02.md` carries the original
+/// decision, which was to ship the tier OFF; THAT IS NO LONGER THE
+/// DEFAULT. Both shipping surfaces arm it: `parfast` (13 Sep 2026, on
+/// unless `--slow`) and the daemon's `fast_final_check` (15 Sep 2026,
+/// on for a fresh install). Do not read the tier as an opt-in
+/// curiosity.
 pub fn set_fast_check(on: bool) {
     FAST_CHECK.store(
         if on { FAST_CHECK_ON } else { FAST_CHECK_OFF },
@@ -701,8 +719,12 @@ pub(crate) fn ifsc_covers_every_block(file: &Par2File, block_size: u64) -> bool 
 /// deliberately built one with a shared prefix walks past it, and
 /// `the_ifsc_only_tier_diverges_only_on_the_h7_shape` pins that
 /// honestly rather than claiming a fallback that does not exist. This
-/// is the whole of the policy question, and it is why the default is
-/// OFF and why moving it is a product decision rather than a code one.
+/// is the whole of the policy question, and it is why moving the
+/// default was a product decision rather than a code one. THAT
+/// DECISION HAS BEEN TAKEN: the tier is ON by default at both shipping
+/// surfaces (`parfast` 13 Sep 2026 unless `--slow`, the daemon's
+/// `fast_final_check` 15 Sep 2026), so a stock run accepts the H7
+/// divergence above.
 ///
 /// The head check is free in the sense that matters: 16 KiB against a
 /// member measured in gigabytes.
@@ -1781,7 +1803,7 @@ fn read_retry<R: Read>(src: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
 /// [`verify_file`] needs the whole candidate in memory and then walks it
 /// twice - once for the whole-file MD5, once again per block - so a 30 GB
 /// set member cost 30 GB of RSS and two full MD5 passes over cold pages.
-/// This reads `src` in [`VERIFY_CHUNK`] pieces and feeds the whole-file
+/// This reads `src` in `VERIFY_CHUNK` pieces and feeds the whole-file
 /// MD5, the 16k head MD5 and the per-block MD5+CRC32 from the one copy.
 /// UNPROVEN cells still contribute to both FileDesc hashes, but do not pay
 /// for block hash state whose verdict is necessarily false on a mismatch.
@@ -1914,6 +1936,53 @@ fn verify_file_streaming_sized<R: Read>(
         md5_ok,
         md5_16k_ok: md5_16k == file.md5_16k,
     })
+}
+
+#[cfg(test)]
+mod default_claim_tests {
+    /// The three comment sites that used to assert the IFSC-only tier
+    /// was default off must keep saying it is default ON.
+    ///
+    /// Both shipping surfaces arm it (`crates/parfast/src/lib.rs`'s
+    /// `set_fast_check(!parsed.opts.slow)` and
+    /// `crates/nzbfast-daemon/src/bootstrap.rs`'s `fast_final_check`
+    /// `unwrap_or(true)`), and this file reasoned FROM the default-off
+    /// claim about the read-side cache policy, so a reader who trusts a
+    /// stale claim here draws the wrong conclusion about what the
+    /// product runs. This pins the correction rather than the prose:
+    /// re-tense freely, but do not let the file go back to claiming the
+    /// tier is off by default.
+    #[test]
+    fn the_tier_is_documented_as_on_by_default() {
+        // ONLY the production half of the file, cut at the first test
+        // module. Searching the whole of it would match the assertion
+        // literals below and pass with every comment site broken,
+        // which is exactly what a negative control caught here.
+        let src = include_str!("verify.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields a first part");
+        // `verify_file_path_tiered`'s inline note.
+        assert!(
+            src.contains("The IFSC-only tier, which DEFAULTS ON at both shipping"),
+            "the tiered-dispatch comment no longer records the ON default"
+        );
+        // ...and the cache-policy debt it used to excuse by being off.
+        assert!(
+            src.contains("SO THE DEBT IS OPEN AND IT IS ON THE DEFAULT PATH"),
+            "the read-side cache-policy debt is no longer recorded as open"
+        );
+        // `set_fast_check`'s doc comment.
+        assert!(
+            src.contains("decision, which was to ship the tier OFF; THAT IS NO LONGER THE"),
+            "set_fast_check's doc no longer corrects the default-off decision"
+        );
+        // `ifsc_only_attempt`'s H7 policy note.
+        assert!(
+            src.contains("DECISION HAS BEEN TAKEN: the tier is ON by default at both shipping"),
+            "the H7 policy note no longer records that the default moved"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -11,18 +11,28 @@
 //!
 //! # The process-global knobs
 //!
-//! `nzbkit::mem::set_cpu_workers`, `set_process_budget` and
-//! `par2repair::set_joint_arm` are PROCESS-wide (`set_file_workers` is
-//! the CLI's `-T`, which has no GUI counterpart, so this crate never
-//! calls it). A CLI sets them once in `run_with` and exits; a
-//! long-lived app has to set them per job - and to UNSET them per job,
-//! because a knob nobody writes is the last job's and not the engine's
-//! (see [`apply_knobs`]) - and with two jobs running at once the last
-//! writer wins. That is not a bug this crate can fix - it
+//! `nzbkit::mem::set_cpu_workers`, `set_process_budget`,
+//! `par2repair::set_joint_arm` and `digest_cache::publish` are
+//! PROCESS-wide (`set_file_workers` is the CLI's `-T`, which has no
+//! GUI counterpart, so this crate never calls it). A CLI sets them
+//! once in `run_with` and exits; a long-lived app has to set them per
+//! job - and to UNSET them per job, because a knob nobody writes is
+//! the last job's and not the engine's (see [`apply_knobs`]) - and
+//! with two jobs running at once the last writer wins. That is not a
+//! bug this crate can fix - it
 //! is what the engine's interface is - so the queue takes a lock around
 //! the setting and the START of the job, the Settings pane says
 //! plainly that the performance knobs are shared above concurrency 1,
-//! and [`KnobLock`] is the one place any of them is written.
+//! and [`KnobLock`] is the one place any of those FOUR is written.
+//!
+//! A FIFTH process-global engine knob is written in this crate and is
+//! deliberately not one of them: `nzbkit::par2::set_fast_check`, the
+//! verify tier, which `Session::new` chooses once for the whole
+//! session and never revisits (the reasoning is at that call). It sits
+//! outside [`KnobLock`] because it is not per-job - no job carries a
+//! value for it, so there is no last writer to lose to. If the CLI's
+//! `--slow` ever gets a Settings field it becomes per-job, and then it
+//! moves into [`apply_knobs`] with the other four.
 //!
 //! # What cancel and pause can actually reach today
 //!

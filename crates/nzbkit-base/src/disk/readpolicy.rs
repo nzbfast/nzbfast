@@ -242,7 +242,7 @@ pub(crate) fn hints_for(
 const DROP_BEHIND_DEFAULT: bool = true;
 
 /// The policy as the engine sees it: probe the device, read the
-/// overrides, apply [`hints_for`].
+/// overrides, apply `hints_for`.
 pub fn hints_for_path(path: &Path, len: u64) -> ReadHints {
     // `0` is the pre-policy behaviour: no hints at all, which is the
     // baseline arm of every round over this file.
@@ -268,7 +268,7 @@ pub fn hints_for_path(path: &Path, len: u64) -> ReadHints {
 ///
 /// The mechanism is NOT duplicated here: [`super::detect_storage`] owns
 /// the rotational probe and the `NZBFAST_STORAGE` operator override, and
-/// this file contributes only the network half ([`is_network_fs`]),
+/// this file contributes only the network half (`is_network_fs`),
 /// which `detect_storage` now calls. What is added here is the memo -
 /// `detect_storage` canonicalises a sysfs path and reads a file, which
 /// is fine once per job and wasteful once per member of a 400-file set.

@@ -260,11 +260,35 @@ pub fn reposition_for_priority(
     Some(to)
 }
 
+/// What a priority write owes the transfer, once its locks are released.
+///
+/// `apply_priority` only writes the record. Withdrawing Force from a job
+/// that is on the wire while the queue is paused (or sending a released
+/// duplicate back to its hold) is a request to STOP it, and the record
+/// alone stops nothing - see [`Daemon::wind_down_unforced`] for the
+/// incident and the rule. Shared by the SAB arm and the NZBGet
+/// `GroupSetPriority` arm, so the two facades (and the dashboard's bulk
+/// action, which is the SAB arm) cannot drift on it.
+///
+/// `ids` are the rows the write LANDED on. A held row that just became
+/// paused may leave the queue idle with no park, so this says so the way
+/// the pause arm does.
+pub(crate) fn wind_down_after_priority(d: &Arc<Daemon>, ids: &[String]) {
+    if ids.is_empty() {
+        return;
+    }
+    d.wind_down_unforced(ids);
+    d.note_queue_idle();
+}
+
 pub fn apply_priority(d: &Arc<Daemon>, g: &mut Job, prio: i32) -> bool {
     if g.state == JobState::Completed || finishing_tail(d, g) {
         return false;
     }
     if g.priority == -3 && g.paused {
+        // Said out loud: this is the release of a duplicate hold, and the
+        // priority line below reads as an ordinary rank change without it.
+        info!(target: "queue", "{}: duplicate hold released by a priority write", g.nzo_id);
         g.paused = false;
         // The re-arm this release owes, for the same reason the resume
         // owes one (see `apply_pause`): the row is runnable again, and
@@ -277,7 +301,29 @@ pub fn apply_priority(d: &Arc<Daemon>, g: &mut Job, prio: i32) -> bool {
             d.queue_idle_latch.store(false, Ordering::Relaxed);
         }
     }
-    g.priority = prio;
+    // The way BACK to a duplicate hold. A copy the user released with
+    // download-anyway (Force, resumed) still carries `held_for` - the row
+    // it was held behind - and Duplicate priority on such a row is that
+    // hold again, the exact (paused, -3) pair the hold has always been,
+    // which `is_held_alternative`, the promotion when the original fails
+    // and the queue's `labels` all read. On a row with no `held_for` the
+    // write stays a plain priority number, as it was.
+    //
+    // The wind-down a paused ACTIVE row owes is not done here (this runs
+    // under the queue and job locks); the caller runs
+    // [`wind_down_after_priority`] once they are released.
+    let rehold = prio == crate::job::DUPE_PRIORITY && !g.held_for.is_empty();
+    if rehold {
+        g.paused = true;
+    }
+    g.set_priority(
+        prio,
+        if rehold {
+            "priority write put the copy back on hold"
+        } else {
+            "priority write"
+        },
+    );
     // Explicit priority overrides a watchdog deferral - and §77's
     // health sink, which is an advisory guess and does not get to argue
     // with an order the user has just given.

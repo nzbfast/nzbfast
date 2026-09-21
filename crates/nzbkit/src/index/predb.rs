@@ -1401,7 +1401,7 @@ impl Index {
     ///
     /// The bound is therefore `max(hold, setup + one row)` and not
     /// `hold`, which is the same rule and the same reason as
-    /// [`crate::index::foldpace::FoldPace`]: the first row of a call
+    /// `crate::index::foldpace::FoldPace`: the first row of a call
     /// always runs, because a call whose own SETUP outlasted the bound
     /// would otherwise examine nothing, write no cursor, and be asked
     /// the identical question on the next tick for ever. Setup here is

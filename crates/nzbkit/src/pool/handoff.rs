@@ -50,11 +50,11 @@
 //! sockets that are parked with nothing to do. It is counted here
 //! because a proactive dialler is the one thing on the tree that can put
 //! a socket on the wire no fleet was sized for - but it is counted as
-//! `LeaseState::spares`, OUTSIDE [`limit_for`], because the sizing rule
+//! `LeaseState::spares`, OUTSIDE `limit_for`, because the sizing rule
 //! is that active work outranks a parked spare for the same permit. So no
 //! acquire of any class is ever refused because of a spare: the spare is
 //! trimmed inside the same lock hold that admits the worker taking its
-//! slot ([`trim_spares`]), and `held + spares <= cap` is arithmetic
+//! slot (`trim_spares`), and `held + spares <= cap` is arithmetic
 //! rather than a race.
 
 use crate::sync::MutexExt;
@@ -170,6 +170,19 @@ pub const POST_PROCESS_RESERVE: usize = 1;
 /// than papered over.
 pub const MIN_DOWNLOAD_FLEET: usize = 2;
 
+/// How long [`super::Shared::untried_candidate_mask`]'s answer may be
+/// reused before it is recomputed, in ms since the run started.
+///
+/// A fifth of [`SCAN_RETRY_MS`], which is the throttle on the whole-queue
+/// walk the same idle loop already does per server - so the drain floor
+/// costs strictly less than the scan it rides beside, and the answer is
+/// one per RUN where that one is per server. Not zero, because every
+/// idle worker on the fleet asks this question inside the same 25 ms
+/// tick and they would all scan; not larger, because a window is how
+/// long a server that has just stopped being a candidate keeps a socket
+/// it no longer owes anybody.
+const UNTRIED_MASK_TTL_MS: u64 = 20;
+
 /// Which class of work a pool's workers take their permits as.
 ///
 /// The two differ ONLY in what they are allowed to take from the
@@ -258,6 +271,8 @@ pub struct SpillGate {
 }
 
 impl SpillGate {
+    /// A shut gate. Shared: the head, every lane and the daemon's
+    /// governor all hold the same one.
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
@@ -277,6 +292,8 @@ impl SpillGate {
         self.live.swap(false, Ordering::AcqRel)
     }
 
+    /// Is a spill episode live right now? Asked per turn by every
+    /// gated behaviour, which is why nothing is unwound on close.
     pub fn is_open(&self) -> bool {
         self.live.load(Ordering::Acquire)
     }
@@ -294,7 +311,7 @@ pub enum SpillRole {
     /// successor instead of stopping at this run's own accounting.
     ///
     /// A head NEVER hands a socket over through
-    /// [`Shared::claim_handoff`](super::Shared) on this account: that
+    /// `Shared::claim_handoff` on this account: that
     /// exit RETIRES the worker, `alive` does not come back within a
     /// run, and a head that retired its fleet could never reclaim it.
     /// Parking is reversible and retiring is not, which is the whole
@@ -312,7 +329,10 @@ pub enum SpillRole {
 /// this pool is on.
 #[derive(Clone, Debug)]
 pub struct SpillSeat {
+    /// The episode gate, shared with every other pool in the spill.
     pub gate: Arc<SpillGate>,
+    /// Which side this pool is on. Fixed when the fleet is built and
+    /// never reconsidered - only the gate moves.
     pub role: SpillRole,
     /// For a [`SpillRole::Lane`], the most sockets it may build PER
     /// SERVER ROW - the absorption figure the daemon's governor sized
@@ -630,7 +650,7 @@ impl HostLease {
     ///
     /// A LEVEL and not an increment: it sets the holding to the granted
     /// figure, so the caller re-asserts its ask on every turn, a
-    /// [`trim_spares`] that happened in between is simply reconciled,
+    /// `trim_spares` that happened in between is simply reconciled,
     /// and there is nothing to leak and nothing to double-count.
     ///
     /// Two things bound the grant, and both are the item's stated
@@ -721,6 +741,9 @@ pub struct ConnBudget {
 }
 
 impl ConnBudget {
+    /// An empty budget, holding no leases yet. One per daemon: two
+    /// budgets over the same account would each think they held the
+    /// whole of it.
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
@@ -790,6 +813,8 @@ pub struct HandoffSignal {
 }
 
 impl HandoffSignal {
+    /// An unlatched signal. Shared between the pool that latches it
+    /// and everyone waiting on it.
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
@@ -804,6 +829,8 @@ impl HandoffSignal {
         first
     }
 
+    /// Has it latched? Sticky, so a `false` here is only an answer
+    /// about the instant it was asked, while a `true` stays true.
     pub fn is_latched(&self) -> bool {
         self.latched.load(Ordering::Acquire)
     }
@@ -828,9 +855,10 @@ impl super::Shared {
     /// successor run right now? Three conditions, all cheap:
     /// a successor is actually blocked on this host's lease, this run
     /// is past queue-dry (so the idleness is the tail, not a gap), and
-    /// the worker is not its server's last - one stays to pick up a
-    /// requeue, exactly as the fleet always had at least one worker per
-    /// server for that.
+    /// the worker is not the last its server may not go below - one
+    /// stays to pick up a requeue, exactly as the fleet always had at
+    /// least one worker per server for that, and a SECOND stays while
+    /// the drain floor holds ([`Self::handoff_floor`]).
     ///
     /// A PEEK, and the only caller that may act on it is one that has
     /// then taken [`Self::claim_handoff`]: this answer is the same for
@@ -955,10 +983,144 @@ impl super::Shared {
     /// blocked on the lease can no more do that than one blocked on an
     /// admission.
     fn handoff_room(&self, idx: usize) -> bool {
+        let keep = self.handoff_floor(idx);
         self.workers_dialling_on(idx).is_some_and(|d| {
             d.saturating_sub(self.lease_parked_on(idx))
-                > self.handoff_out[idx].load(Ordering::Acquire) + 1
+                > self.handoff_out[idx].load(Ordering::Acquire) + keep
         })
+    }
+
+    /// How many socket-capable bodies this server must be left with -
+    /// the ONE it has always kept for a requeue, plus a SECOND while the
+    /// drain floor holds.
+    ///
+    /// **The floor** (21 Sep 2026,
+    /// `research/DRAIN-TAIL-ONE-SOCKET-REPRO-2026-09-20.md`). A run's
+    /// per-server width only ever FALLS after queue-dry - `IdleTurn::Retire`
+    /// ends a `WorkerLife`, no replacement is spawned mid-run, and the
+    /// permit goes to the successor - while the set of articles that may
+    /// still land on that server does not. A requeue, a steer, a retry
+    /// or a 430 elsewhere can make a server the only remaining candidate
+    /// for an article LONG after that server's fleet went idle and shed
+    /// down to one, and the article then walks the tail on a single
+    /// socket. That is the 549 s tail the findings doc above was
+    /// written against: a job whose last ~80 articles crept behind one
+    /// connection at ~0.71 MB/s while the rest of the fleet was already
+    /// serving the next job.
+    ///
+    /// **The predicate is forward-looking, and the obvious wording is
+    /// the wrong one.** "While it still owes bytes only that server can
+    /// carry" reads ZERO at the instant of the shed - the tail is still
+    /// outstanding somewhere else at that moment, which is precisely why
+    /// this server is idle. Measured: section 6 of the findings doc says
+    /// that wording would have fired on none of the rig's four shapes,
+    /// including the one that reproduces the defect. What fires is
+    /// "server S is an UNTRIED candidate for something still outstanding"
+    /// - see [`Self::untried_candidate_mask`].
+    ///
+    /// **Bounded on all three axes.** At most ONE extra socket per
+    /// server; only while this run is DRAINING (`tail_started`), so no
+    /// mid-run idle turn is touched and a spilled lane's early
+    /// hand-over - the one case `handoff_wanted` lifts the queue-dry
+    /// gate for, where the socket is owed back to the head at once -
+    /// keeps its shipped behaviour verbatim; and only on servers still
+    /// carrying a bit in the mask, so a server that has refused
+    /// everything left sheds exactly as it did.
+    ///
+    /// The `tail_started` guard is bound out rather than read inline so
+    /// its guard drops before the mask's scan takes the queue and
+    /// in-flight locks.
+    fn handoff_floor(&self, idx: usize) -> usize {
+        let draining = self.tail_started.lock_ok().is_some();
+        if draining && self.untried_candidate_mask() & super::server_bit(idx) != 0 {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Servers that are an UNTRIED candidate for at least one article
+    /// this run still owes: the OR, over every outstanding article, of
+    /// the live servers that have not 430'd it.
+    ///
+    /// Deliberately OVER-approximating, in the direction that keeps a
+    /// socket. It does not subtract the fill gate (a level-N server the
+    /// gate has not opened yet is still the server that answers once the
+    /// primaries refuse), nor `tried_fail` (`next_work` hands an article
+    /// back to a server that failed it when nobody else can take it),
+    /// nor a `recheck_430` hold's owning group. Each of those would be a
+    /// reason to shed the last spare worker on a server the run may ask
+    /// again inside the same tail, and the whole cost of being wrong the
+    /// other way is one socket per server for the length of a drain.
+    ///
+    /// Cached for [`UNTRIED_MASK_TTL_MS`]; see [`super::Shared::untried_mask`]
+    /// for why that is safe in the direction it goes wrong.
+    pub(super) fn untried_candidate_mask(&self) -> u32 {
+        let now_ms = self.run_ms();
+        let at = self.untried_mask_at.load(Ordering::Acquire);
+        let fresh = at != u64::MAX && now_ms.saturating_sub(at) < UNTRIED_MASK_TTL_MS;
+        if fresh {
+            return self.untried_mask.load(Ordering::Acquire);
+        }
+        let Some(m) = self.untried_candidate_scan() else {
+            // The queue lock was contended. Never BLOCK for it - this is
+            // a sync call on a runtime thread and the census's 20 x 1 ms
+            // sleep is not available here - and never answer 0, which is
+            // the answer that sheds. The last computed mask is the right
+            // fallback for the same staleness reason the cache is, and
+            // before there is one the live fleet is: at the first ask of
+            // a drain every server is a candidate until a scan says
+            // otherwise.
+            return if at == u64::MAX {
+                self.live_mask()
+            } else {
+                self.untried_mask.load(Ordering::Acquire)
+            };
+        };
+        self.untried_mask.store(m, Ordering::Release);
+        self.untried_mask_at.store(now_ms, Ordering::Release);
+        m
+    }
+
+    /// [`Self::untried_candidate_mask`] uncached. `None` means the queue
+    /// lock was contended and the caller must reuse its last answer.
+    ///
+    /// Lock order is `done`, then `inflight`, then `queue` - `pick_dup`'s
+    /// and `QueueControl::pending_census`'s, and for the same reason
+    /// that census gives: an article the dup-union already drove
+    /// terminal keeps its in-flight entry (and can ride back through the
+    /// queue) until its original's answer lands, so `done` is what keeps
+    /// it from holding a floor for the rest of the tail.
+    fn untried_candidate_scan(&self) -> Option<u32> {
+        let live = self.live_mask();
+        if live == 0 || self.pending.load(Ordering::Acquire) == 0 {
+            return Some(0);
+        }
+        let mut m = 0u32;
+        let done = self.done.lock_ok();
+        {
+            let inf = self.inflight.lock_ok();
+            for e in inf.values() {
+                if done.contains(e.ord) {
+                    continue;
+                }
+                m |= !e.tried_430 & live;
+                if m == live {
+                    return Some(m); // every server is a candidate already
+                }
+            }
+        }
+        let q = self.queue.try_lock().ok()?;
+        for w in q.iter() {
+            if done.contains(w.ord) {
+                continue;
+            }
+            m |= !w.tried_430 & live;
+            if m == live {
+                break;
+            }
+        }
+        Some(m)
     }
 
     /// [`Self::want_handoff`], CLAIMED: true only for a worker that may
@@ -1001,25 +1163,28 @@ impl super::Shared {
         if !self.handoff_wanted(idx) {
             return false;
         }
+        // ONE floor reading for both steps below, taken before either:
+        // the two must agree, and a scan between them could disagree.
+        let keep = self.handoff_floor(idx);
         if self.handoff_out[idx]
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |h| {
                 self.workers_dialling_on(idx)
-                    .is_some_and(|d| d.saturating_sub(self.lease_parked_on(idx)) > h + 1)
+                    .is_some_and(|d| d.saturating_sub(self.lease_parked_on(idx)) > h + keep)
                     .then_some(h + 1)
             })
             .is_err()
         {
             return false;
         }
-        // The reservation: leave at least one socket-capable body
-        // behind, judged at the same instant the departure lands.
+        // The reservation: leave [`Self::handoff_floor`] socket-capable
+        // bodies behind, judged at the same instant the departure lands.
         // BOTH park classes are discounted here for
         // [`Self::handoff_room`]'s reason - a body parked on the
         // account lease holds no permit either.
         let reserved = self.alive[idx]
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |a| {
                 let parked = self.parked[idx].load(Ordering::SeqCst) + self.lease_parked_on(idx);
-                (a > parked + 1).then(|| a - 1)
+                (a > parked + keep).then(|| a - 1)
             })
             .is_ok();
         if !reserved {
@@ -1053,6 +1218,26 @@ mod tests {
     use super::*;
     use crate::pool::{ArticleReq, Shared, inline_tests::one_server};
     use std::time::Instant;
+
+    /// Every claim-arithmetic fixture below queues one article and then
+    /// asserts on the hand-over with a worker IDLE on server 0 - a pair
+    /// of facts that only coexist in production once this server can no
+    /// longer be asked for that article, because a worker with a
+    /// takeable queued article does not idle. Since the drain floor
+    /// (21 Sep 2026) the fixture has to SAY so: an untried candidate
+    /// keeps a second socket, which is a different subject from the
+    /// claim arithmetic these tests pin, and pinned separately by
+    /// `a_worker_does_not_retire_while_its_server_is_the_only_untried_candidate`.
+    ///
+    /// Marks every queued article refused everywhere, which is what an
+    /// idle fleet at queue-dry means. Not a loosening of the floor: the
+    /// floor's own gate test drives it from the other side.
+    async fn refused_everywhere(shared: &Shared) {
+        let mut q = shared.queue.lock().await;
+        for w in q.iter_mut() {
+            w.tried_430 = u32::MAX;
+        }
+    }
 
     #[tokio::test]
     async fn a_lease_never_exceeds_its_cap_and_waiters_are_counted() {
@@ -1444,6 +1629,7 @@ mod tests {
         });
         let reqs: Vec<ArticleReq> = vec![ArticleReq::fresh("<a0>")];
         let (shared, _) = Shared::new(reqs, &servers);
+        refused_everywhere(&shared).await;
 
         let held = lease.acquire().await;
         let l2 = lease.clone();
@@ -1478,6 +1664,7 @@ mod tests {
         servers[0].1.lease = Some(lease.clone());
         let reqs: Vec<ArticleReq> = vec![ArticleReq::fresh("<a0>")];
         let (shared, _) = Shared::new(reqs, &servers);
+        refused_everywhere(&shared).await;
 
         // A successor parked on this host's lease.
         let held = lease.acquire().await;
@@ -1529,6 +1716,7 @@ mod tests {
         servers[0].1.lease = Some(lease.clone());
         let reqs: Vec<ArticleReq> = vec![ArticleReq::fresh("<a0>")];
         let (shared, _) = Shared::new(reqs, &servers);
+        refused_everywhere(&shared).await;
 
         let held = lease.acquire().await;
         let l2 = lease.clone();
@@ -1566,6 +1754,131 @@ mod tests {
             !shared.claim_handoff(0),
             "the pinned leftover is the last socket-capable body"
         );
+
+        drop(held);
+        drop(waiter.await.unwrap());
+    }
+
+    /// THE DRAIN FLOOR (21 Sep 2026,
+    /// `research/DRAIN-TAIL-ONE-SOCKET-REPRO-2026-09-20.md`): a server
+    /// that is still an UNTRIED candidate for an outstanding article
+    /// keeps a second socket-capable body, because nothing spawns one
+    /// back mid-run and the article may be steered, requeued or 430'd
+    /// onto it at any point in the tail.
+    ///
+    /// Two rows, one outstanding article already refused by row 0, so
+    /// row 1 is its only untried candidate. Row 1 has two live workers
+    /// and a successor parked on its lease - every condition the
+    /// shipped hand-over asks for - and the claim is refused anyway.
+    /// It is granted the moment the article goes terminal, which is
+    /// what makes this the FLOOR and not a door that shut for good.
+    ///
+    /// NO CLOCK IN IT, deliberately: the witness for the timing half is
+    /// `DRAIN_TAIL_SHAPE=late` on `nzbfast`'s `#[ignore]`d
+    /// `integration::drain_tail` rig, which is a wall-clock ratio and
+    /// must not decide a push
+    /// (`research/TEST-TIMING-MARGIN-CENSUS-2026-09-17.md`). The mask's
+    /// own cache is time-keyed, and the reason this test does not have
+    /// to sleep past it is that `complete_one` invalidates it - which
+    /// is the production path the last article of a run takes.
+    #[tokio::test]
+    async fn a_worker_does_not_retire_while_its_server_is_the_only_untried_candidate() {
+        let budget = ConnBudget::new();
+        let lease = budget.lease("s1", 1);
+        let base = one_server()[0].clone();
+        let mut row1 = base.clone();
+        row1.0.host = "s1".into();
+        row1.1.lease = Some(lease.clone());
+        let servers = vec![base, row1];
+
+        let reqs: Vec<ArticleReq> = vec![ArticleReq::fresh("<a0>")];
+        let (shared, _) = Shared::new(reqs, &servers);
+
+        // Both rows live and serving, so `live_mask` is both bits and
+        // the mask below is a statement about the article rather than
+        // about a dark fleet.
+        shared.alive[0].store(1, Ordering::Relaxed);
+        shared.alive[1].store(2, Ordering::Relaxed);
+        shared.sessions[0].store(1, Ordering::Relaxed);
+        shared.sessions[1].store(1, Ordering::Relaxed);
+
+        // The one outstanding article: row 0 has refused it, row 1 has
+        // never been asked. This is the state a 430 elsewhere leaves
+        // behind, and it can arrive AFTER row 1's fleet went idle.
+        let ord = {
+            let mut q = shared.queue.lock().await;
+            let w = q.front_mut().expect("the run's only article");
+            w.tried_430 = super::super::server_bit(0);
+            w.ord
+        };
+
+        // A successor really is parked on row 1's lease.
+        let held = lease.acquire().await;
+        let l2 = lease.clone();
+        let waiter = tokio::spawn(async move { l2.acquire().await });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(lease.waiters(), 1);
+        *shared.tail_started.lock_ok() = Some(Instant::now());
+
+        assert_eq!(
+            shared.untried_candidate_mask(),
+            super::super::server_bit(1),
+            "row 1 is the only server the run may still ask"
+        );
+        assert!(
+            shared.handoff_wanted(1),
+            "every condition the shipped hand-over asks for is met"
+        );
+        assert!(
+            !shared.want_handoff(1),
+            "and the floor is what refuses it: two live workers is one \
+             more than the row's leftover, not two"
+        );
+        assert!(!shared.claim_handoff(1));
+        assert_eq!(
+            shared.handoff_out[1].load(Ordering::Relaxed),
+            0,
+            "a refused claim leaves nothing charged"
+        );
+        assert_eq!(
+            shared.alive[1].load(Ordering::Relaxed),
+            2,
+            "and takes nobody out of `alive`"
+        );
+
+        // A THIRD body on the row clears the floor rather than the
+        // gate: the floor costs one socket, it does not shut the door.
+        shared.alive[1].store(3, Ordering::Relaxed);
+        assert!(shared.claim_handoff(1), "one spare above the floor may go");
+        assert!(!shared.claim_handoff(1), "the floor holds the next one");
+        shared.alive[1].store(2, Ordering::Relaxed);
+        shared.handoff_out[1].store(0, Ordering::Relaxed);
+
+        // Terminal: the run owes nothing, so row 1 is nobody's
+        // candidate and the shipped one-worker floor is all that is
+        // left. `complete_one` is the production path, and it is what
+        // invalidates the mask's cache.
+        assert!(shared.claim_done("<a0>", ord));
+        shared.complete_one();
+        assert_eq!(
+            shared.untried_candidate_mask(),
+            0,
+            "a terminal article is not outstanding"
+        );
+        assert!(
+            shared.claim_handoff(1),
+            "and the second socket is free to go"
+        );
+        assert!(
+            !shared.claim_handoff(1),
+            "down to the floor the fleet always had"
+        );
+
+        // The floor is the DRAIN's: with no tail latch it is not
+        // consulted at all, which is what keeps a spilled lane's early
+        // hand-over on its shipped path.
+        *shared.tail_started.lock_ok() = None;
+        assert_eq!(shared.handoff_floor(1), 1);
 
         drop(held);
         drop(waiter.await.unwrap());
@@ -1610,6 +1923,7 @@ mod tests {
         servers[0].1.lease = Some(lease.clone());
         let reqs: Vec<ArticleReq> = vec![ArticleReq::fresh("<a0>")];
         let (shared, _) = Shared::new(reqs, &servers);
+        refused_everywhere(&shared).await;
         shared.alive[0].store(2, Ordering::Relaxed);
         *shared.tail_started.lock_ok() = Some(Instant::now());
 

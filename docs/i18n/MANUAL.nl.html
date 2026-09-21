@@ -112,12 +112,13 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
     <li><a href="#automation">10 · Automatisering</a></li>
     <li><a href="#arr">11 · Sonarr, Radarr &amp; co</a></li>
     <li><a href="#remotes">12 · Telefoon &amp; remote-apps</a></li>
-    <li><a href="#performance">13 · Prestatietools</a></li>
-    <li><a href="#updates">14 · Updates</a></li>
-    <li><a href="#cli">15 · Commandoregel</a></li>
-    <li><a href="#api">16 · API-overzicht</a></li>
-    <li><a href="#files">17 · Bestanden &amp; locaties</a></li>
-    <li><a href="#troubleshooting">18 · Problemen oplossen</a></li>
+    <li><a href="#security">13 · Beveiliging &amp; toegang</a></li>
+    <li><a href="#performance">14 · Prestatietools</a></li>
+    <li><a href="#updates">15 · Updates</a></li>
+    <li><a href="#cli">16 · Commandoregel</a></li>
+    <li><a href="#api">17 · API-overzicht</a></li>
+    <li><a href="#files">18 · Bestanden &amp; locaties</a></li>
+    <li><a href="#troubleshooting">19 · Problemen oplossen</a></li>
   </ol>
 </nav>
 <main>
@@ -658,7 +659,7 @@ releases eronder. Open hem met <b>&#9656;</b> of door op de rij te klikken; het 
 bij de titel selecteert de getoonde releases. Groeperen geldt alleen voor <b>Deze
 index</b>; kies <b>Indexers</b> of <b>Beide</b> en de tabel wordt weer vlak, en zegt
 dat.</li>
-<li><b>Eén nieuwsgroep tegelijk.</b> Klik op de groepsnaam onder een release en de pagina beperkt zich tot de releases die daar geplaatst zijn; een pil boven de tabel noemt de groep tot je hem wist. Hij beperkt de muur en de tabel allebei, dus wisselen tussen die twee houdt hem vast. De andere ingang is Instellingen &rarr; Ordenen &rarr; <b>Indexeren</b> &rarr; <b>Te scannen groepen</b> &rarr; <b>Zoeken…</b>: open een groep die je al scant en druk op <b>Geïndexeerde releases</b>.</li>
+<li><b>Eén nieuwsgroep tegelijk.</b> Het menu <b>Groep</b> boven de tabel somt de groepen op die je indexeert; kies er een en de pagina beperkt zich tot de releases die daar geplaatst zijn, en de adresbalk draagt hem mee, dus een herlading of een gedeelde link houdt hem vast. Klikken op de groepsnaam onder een release kiest diezelfde groep. Hij beperkt de muur en de tabel allebei, dus wisselen tussen die twee houdt hem vast. De andere ingang is Instellingen &rarr; Ordenen &rarr; <b>Indexeren</b> &rarr; <b>Te scannen groepen</b> &rarr; <b>Zoeken…</b>: open een groep die je al scant en druk op <b>Geïndexeerde releases</b>.</li>
 <li><b>Elke release van een titel</b> staat in de kaart als je die opent, met de
 resolutie, de codec, het audioformaat en het dynamisch bereik (Dolby Vision, HDR10)
 uit de releasenaam gelezen, plus grootte, leeftijd en of elk deel nog bij je provider
@@ -703,7 +704,7 @@ klik aanvaardt («Alle Reality-titels vanaf nu verbergen?»). Alles wat je hebt 
 en elk geleerd filter staat onder <b>Verborgen &amp; filters</b> en is daar ongedaan te
 maken.</li>
 <li>Een kleine <b>beschikbaarheidsstip</b> op een tegel is het oordeel van het orakel
-(<a href="#performance">§13</a>): een amberkleurig «?» betekent onzeker bij jouw
+(<a href="#performance">§14</a>): een amberkleurig «?» betekent onzeker bij jouw
 providers, rood dat de onderdelen steeds ontbreken. Groepen die worden leeggeruimd
 krijgen een <b>opgeruimd</b>-badge.</li>
 </ul>
@@ -793,12 +794,12 @@ server in of uit de pool halen. Elke server heeft:</p>
 <tr><th>Veld</th><th>Toelichting</th></tr>
 <tr><td>Host / poort</td><td>Gebruik SSL-poort <b>563</b>. TLS kost niets meetbaars - nzbfast versleutelt altijd.</td></tr>
 <tr><td>Gebruikersnaam / wachtwoord</td><td>Lokaal opgeslagen in <code>config.local.json</code>, nooit terug naar de browser gestuurd. Laat je het wachtwoord bij bewerken leeg, dan blijft het opgeslagen wachtwoord staan. Wachtwoorden zijn <a href="#passwords">op schijf versluierd, niet versleuteld</a>.</td></tr>
-<tr><td>Verbindingen</td><td>Gelijktijdige verbindingen per server. Gebruik <b>Verbindingstuning</b> (<a href="#performance">§13</a>) om de sweet spot van elke provider te vinden in plaats van hoog te gokken.</td></tr>
+<tr><td>Verbindingen</td><td>Gelijktijdige verbindingen per server. Gebruik <b>Verbindingstuning</b> (<a href="#performance">§14</a>) om de sweet spot van elke provider te vinden in plaats van hoog te gokken.</td></tr>
 <tr><td>Niveau (tier)</td><td>0 = primair; hogere niveaus zijn fill-servers, die alleen artikelen gevraagd worden die elk lager niveau miste. Zet onbeperkte accounts op 0, blokaccounts op 1+.</td></tr>
 <tr><td>Blokgrootte (GB)</td><td>Voor blokaccounts (betalen per GB): nzbfast houdt hiertegen het totale verbruik bij en stopt met de server zodra het blok op is (waarschuwing bij 85%).</td></tr>
-<tr><td>Elke byte wordt betaald</td><td>Zet dit aan voor een account met betaling per volume. Je downloads gebruiken de server precies zoals eerst; wat stopt is verkeer dat nzbfast uit zichzelf zou sturen - de automatische verbindingstuner, de netwerkstap van de systeembenchmark en de header-scans voor de ingebouwde index slaan hem allemaal over. Onafhankelijk van het niveau en van de blokgrootte, want een account met betaling per volume kan je enige provider zijn en een onbeperkt account kan op niveau 2 staan. Standaard uit. De handmatige <b>Test</b> in <b>Verbindingstuning</b> (<a href="#performance">§13</a>) werkt nog steeds op een zo gemarkeerde server en vraagt eerst, want daar kies jij ervoor om te besteden.</td></tr>
+<tr><td>Elke byte wordt betaald</td><td>Zet dit aan voor een account met betaling per volume. Je downloads gebruiken de server precies zoals eerst; wat stopt is verkeer dat nzbfast uit zichzelf zou sturen - de automatische verbindingstuner, de netwerkstap van de systeembenchmark en de header-scans voor de ingebouwde index slaan hem allemaal over. Onafhankelijk van het niveau en van de blokgrootte, want een account met betaling per volume kan je enige provider zijn en een onbeperkt account kan op niveau 2 staan. Standaard uit. De handmatige <b>Test</b> in <b>Verbindingstuning</b> (<a href="#performance">§14</a>) werkt nog steeds op een zo gemarkeerde server en vraagt eerst, want daar kies jij ervoor om te besteden.</td></tr>
 </table></div>
-<p><b>Laat wat ruimte onder de verbindingslimiet van je account.</b> De verbindingen net onder de limiet zetten kost niets: de doorvoer vlakt al ruim voor de laatste een of twee verbindingen af, en <b>Verbindingstuning</b> (<a href="#performance">§13</a>) komt er toch al onder uit. Die vrije plekken zijn wat een tweede apparaat, een ander programma of een nieuwe poging na een verbroken socket er nog door laat, in plaats van geweigerd te worden terwijl deze elke plek bezet houdt.</p>
+<p><b>Laat wat ruimte onder de verbindingslimiet van je account.</b> De verbindingen net onder de limiet zetten kost niets: de doorvoer vlakt al ruim voor de laatste een of twee verbindingen af, en <b>Verbindingstuning</b> (<a href="#performance">§14</a>) komt er toch al onder uit. Die vrije plekken zijn wat een tweede apparaat, een ander programma of een nieuwe poging na een verbroken socket er nog door laat, in plaats van geweigerd te worden terwijl deze elke plek bezet houdt.</p>
 <p><b>Je hoeft de limiet op open bestanden van je machine niet te beheren.</b> Het systeem
 telt elke verbinding als een open bestand, en macOS start een programma met een limiet van
 256 daarvan, wat een volledige set verbindingen over meerdere servers kan overschrijden. Op
@@ -858,7 +859,7 @@ laat zien wat er gevonden is en neemt de servers over (duplicaten worden overges
 <li>Serverwijzigingen gelden vanaf de <em>volgende</em> download - geen herstart nodig.</li>
 </ul>
 <div class="tip"><b>Aanbeveling</b>Twee providers op <em>verschillende</em> backbones
-verslaan drie op dezelfde. Draai <b>Serverdiversiteit</b> (<a href="#performance">§13</a>)
+verslaan drie op dezelfde. Draai <b>Serverdiversiteit</b> (<a href="#performance">§14</a>)
 om te zien welke van je providers je dekking echt diversifiëren en welke redundante
 kopieën van elkaar zijn.</div>
 
@@ -875,9 +876,9 @@ interface winnen van opties op de opdrachtregel).</p>
 <tr><th>Instelling</th><th>Wat het doet</th></tr>
 <tr><td>Snelheidslimiet</td><td>Limiet in bytes/sec (<code>50M</code>, <code>1G</code>, 0 = onbeperkt). Remote-apps kunnen percentages sturen - stel <i>Lijnsnelheid</i> in zodat die goed vertaald worden. Het item <b>aangepast…</b> in de kopbalk zet ditzelfde plafond zonder de Instellingen te openen.</td></tr>
 <tr><td>Autosnelheid</td><td>RTT-gestuurde limiet die wijkt voor ander thuisverkeer en weer oprekt zodra de lijn stil is.</td></tr>
-<tr><td>Trage downloads automatisch uitstellen</td><td>Een taak die vastzit op één trage server terwijl andere wachten gaat naar achteren in de wachtrij (voortgang blijft bewaard). Zie <a href="#performance">§13</a>.</td></tr>
-<tr><td>Prefetch op inactieve servers</td><td>Servers die de actieve taak niets opleveren beginnen alvast aan de volgende in de wachtrij. Zie <a href="#performance">§13</a>.</td></tr>
-<tr><td>Auto-update / Update-check-URL</td><td>Zie <a href="#updates">§14</a>.</td></tr>
+<tr><td>Trage downloads automatisch uitstellen</td><td>Een taak die vastzit op één trage server terwijl andere wachten gaat naar achteren in de wachtrij (voortgang blijft bewaard). Zie <a href="#performance">§14</a>.</td></tr>
+<tr><td>Prefetch op inactieve servers</td><td>Servers die de actieve taak niets opleveren beginnen alvast aan de volgende in de wachtrij. Zie <a href="#performance">§14</a>.</td></tr>
+<tr><td>Auto-update / Update-check-URL</td><td>Zie <a href="#updates">§15</a>.</td></tr>
 <tr><td>Lijnsnelheid</td><td>De nominale snelheid van je verbinding - maakt procentuele limieten vanuit SABnzbd-compatibele apps mogelijk.</td></tr>
 <tr><td>Weekschema</td><td>Rijeneditor voor regels per moment van de week: pauzeren, hervatten of een snelheidslimiet instellen op bepaalde dagen/tijden (lokale tijd). Bijv. door de week van 9–17 uur begrensd op 20&nbsp;MB/s, daarbuiten onbeperkt.</td></tr>
 </table></div>
@@ -1097,7 +1098,7 @@ browser, dus het geldt voor elk apparaat dat naar deze installatie kijkt.</p>
 <h3>Geavanceerd: de knoppen achter de voor de hand liggende</h3>
 <p>Zes instellingen zonder optie op de opdrachtregel. Elk heeft nu een geavanceerde regel
 op de instellingenkaart waar hij bij hoort, en blijft via de API te zetten
-(<a href="#api">§16</a>), bijv.
+(<a href="#api">§17</a>), bijv.
 <code>/api?mode=config&amp;name=verify_mode&amp;value=lean&amp;apikey=…</code>. Net als
 alle andere worden ze bewaard in <code>settings.json</code>.</p>
 <div class="tblwrap"><table>
@@ -1105,7 +1106,7 @@ alle andere worden ze bewaard in <code>settings.json</code>.</p>
 <tr><td><code>verify_mode</code></td><td><code>full</code> | <code>fast</code> | <code>lean</code> (standaard <code>fast</code>). <code>lean</code> is de duw voor trage CPU's: als fast, maar slaat daarnaast de yEnc-CRC per artikel over zodra PAR2 een bestand dekt, wat één CRC32-laag oplevert in plaats van twee. Downloads zonder PAR2 houden hun artikel-CRC's, en de verificatie en reparatie aan het eind van de taak veranderen in geen geval. De keuze <b>Controle tijdens het downloaden</b> hierboven is deze instelling.</td></tr>
 <tr><td><code>auto_retry_mins</code></td><td>Wachttijd vóór de <em>ene</em> automatische nieuwe poging die een eerste mislukking met ontbrekende artikelen krijgt (standaard 20). Propagatievertraging is een echte oorzaak van ontbrekende artikelen en lost zichzelf op; dankzij het journaal haalt de herhaling alleen op wat nog ontbreekt. Mislukkingen door wachtwoord of takedown komen nooit in aanmerking.</td></tr>
 <tr><td><code>index_scan_par</code></td><td>Hoeveel groepen de indexeerder parallel scant (standaard 3, begrensd op 1-8).</td></tr>
-<tr><td><code>oracle_sample</code></td><td>STAT-budget in rust van het beschikbaarheidsorakel (<a href="#oracle">§13</a>), peilingen per uur per server. Standaard 300, maximaal 3600, <code>0</code> schakelt het bemonsteren helemaal uit.</td></tr>
+<tr><td><code>oracle_sample</code></td><td>STAT-budget in rust van het beschikbaarheidsorakel (<a href="#oracle">§14</a>), peilingen per uur per server. Standaard 300, maximaal 3600, <code>0</code> schakelt het bemonsteren helemaal uit.</td></tr>
 <tr><td><code>predb_max_rows</code></td><td>Hoeveel pre-aankondigingen de feedtabel bewaart (standaard 250000, begrensd op 10000-5000000). De uurlijkse opschoning snoeit tot dat aantal en de historische import weigert te starten zodra hij eroverheen zou gaan, zodat een import nooit rijen toevoegt die de volgende opschoning wist.</td></tr>
 <tr><td><code>predb_seed_days</code></td><td>Hoe ver terug een historische import reikt als hij zonder eigen venster wordt gestart (standaard 180 dagen, maximaal 366). Een groter venster betekent meer verzoeken aan de pre-bron, die op één per twee seconden loopt.</td></tr>
 </table></div>
@@ -1303,7 +1304,7 @@ hele dashboard en de wall hebben een touch-lay-out. Het paneel Instellingen → 
 toegang toont de exacte URL's en een QR-code om te scannen.</p>
 
 <h3 id="remote-proxy">nzbfast van buitenaf bereiken</h3>
-<p>Er is geen inlogpagina, en dat is een bewuste keuze. Inloggen met een sessiecookie is een beveiligingsoppervlak dat je voor altijd moet onderhouden, en het zou nog steeds het zwakste slot zijn op alles wat aan het open internet hangt. nzbfast authenticeert in plaats daarvan met je API-sleutel, en accepteert die sleutel zowel in een request-header als in de URL (<code>X-Api-Key</code>, of <code>Authorization: Bearer</code>) - en juist dat laat iets ervoor de aanmelding netjes afhandelen.</p>
+<p>nzbfast authenticeert met je API-sleutel, en het accepteert die sleutel zowel in een request-header als in de URL (<code>X-Api-Key</code>, of <code>Authorization: Bearer</code>), en dat is wat iets ervóór in staat stelt de aanmelding netjes af te handelen. Er is ook, optioneel, een gebruikersnaam met wachtwoord vóór het dashboard in een browser, die niets verandert voor Sonarr, Radarr of de telefoon-apps; <a href="#security">§13</a> vergelijkt de twee en zegt wanneer elk het juiste antwoord is.</p>
 <p><b>Het eenvoudigst is om helemaal niets te publiceren.</b> Installeer <b>Tailscale</b> op deze machine en op je telefoon: beide zitten dan in één privénetwerk, er staat niets open, je hoeft niets aan router of certificaat te doen, en Instellingen → Toegang op afstand toont een adres dat overal werkt zodra het Tailscale ziet draaien. Kies dit, tenzij je echt een publiek domein nodig hebt.</p>
 <p><b>nzbfast kan ook zelf HTTPS serveren.</b> Wijs Instellingen → Beveiliging →
 HTTPS-certificaat / HTTPS-privésleutel naar een PEM-certificaat en zijn sleutel (of
@@ -1346,7 +1347,143 @@ API-sleutel en alles wat je ermee doet zouden leesbaar voor iedereen onderweg ov
 het internet gaan, en een installatie zonder sleutel staat open voor wie hem vindt.
 Zet je toch een poort open, stel dan eerst een API-sleutel in en zet HTTPS aan.</div>
 
-<h2 id="performance">13 · Prestatietools</h2>
+<h2 id="security">13 · Beveiliging &amp; toegang</h2>
+<p>nzbfast heeft vier manieren om te bepalen wie erbij kan, en ze doen niet
+hetzelfde werk. Twee zijn inloggegevens die het zelf controleert: de
+<b>API-sleutel</b>, die elk programma toont dat ermee praat, en de optionele
+<b>dashboard-aanmelding</b>, een gebruikersnaam en wachtwoord vóór de pagina's in
+een browser. De andere twee gaan over het netwerk in plaats van over de persoon:
+op welk adres de daemon antwoordt, en of iets ervóór bepaalt wie binnenkomt. Geen
+van vieren vervangt een ander. Een installatie thuis op een vertrouwd netwerk
+heeft alleen de eerste nodig; een installatie die je op het internet hebt gezet
+wil er drie van de vier.</p>
+<div class="tblwrap"><table>
+<tr><th>Laag</th><th>Wat die tegenhoudt</th><th>Waar</th></tr>
+<tr><td>API-sleutel</td><td>alles wat de API aanroept zonder hem: een andere machine, een ander programma, een webpagina die je toevallig bezoekt</td><td>Instellingen → Beveiliging. Bij de eerste start aangemaakt</td></tr>
+<tr><td>NZB-sleutel</td><td>op zichzelf niets. Het is een zwakkere sleutel om uit te delen, die downloads mag toevoegen en verder niets</td><td>Instellingen → Beveiliging. Optioneel</td></tr>
+<tr><td>Dashboard-aanmelding</td><td>een persoon achter een browser die het wachtwoord niet kent</td><td>Instellingen → Beveiliging. Standaard uit</td></tr>
+<tr><td>Het netwerk ervoor</td><td>hele netwerken tegelijk: het luisteradres, je firewall, een reverse proxy, een VPN</td><td>Instellingen → Beveiliging, en buiten nzbfast</td></tr>
+</table></div>
+
+<h3 id="sec-apikey">De API-sleutel</h3>
+<p>De API-sleutel is het belangrijkste inloggegeven. Hij bewaakt de hele
+SAB-compatibele API (<a href="#api">§17</a>), en dat is het volledige
+bedieningsvlak: de wachtrij, de geschiedenis, elke instelling, de wachtwoorden van
+je servers, de afsluit-aanroep. Alles wat met nzbfast praat, gebruikt hem. Sonarr,
+Radarr en de rest van de *arr-familie (<a href="#arr">§11</a>), nzb360 en LunaSea
+op een telefoon (<a href="#remotes">§12</a>) en browserextensies als NZB Unity en
+NZB Donkey tonen allemaal dezelfde sleutel.</p>
+<p>Je hoeft er zelf geen te maken. Bij de eerste start maakt nzbfast een
+willekeurige sleutel aan, bewaart die naast je instellingen in een bestand met de
+naam <code>apikey</code> (<a href="#files">§18</a>), drukt hem één keer af in de
+terminal en houdt hem vast over herstarts heen, en dat is precies wat de *arrs
+nodig hebben. Instellingen → Beveiliging toont hem opnieuw: het veld is met opzet
+leeg, dus klik op <b>Tonen</b> om hem te lezen en op <b>Nieuwe aanmaken</b> om hem
+te vervangen. Vervangen gaat meteen in, en elke app die je hebt ingesteld stopt
+met werken tot je de nieuwe erin plakt.</p>
+<p>Clients mogen de sleutel in de URL meesturen als <code>apikey=…</code>, of in
+een header, als <code>X-Api-Key</code> of <code>Authorization: Bearer</code>. De
+header heeft de voorkeur zodra iets je URL's logt, en hij is het die een reverse
+proxy in staat stelt de sleutel toe te voegen voor clients erachter.</p>
+
+<h3 id="sec-nzbkey">De NZB-sleutel, alleen toevoegen</h3>
+<p>De NZB-sleutel is een tweede, bewust zwakkere sleutel voor alles waarvan de
+enige taak is nzbfast een download aan te reiken. Wie hem toont mag een NZB
+toevoegen, de versie opvragen, het overzicht van pauze, schijf en waarschuwingen
+lezen en de categorienamen ophalen, precies wat een push-extensie nodig heeft om
+een release toe te voegen en je een categorielijst te laten zien. Hij mag de
+wachtrij en de geschiedenis niet lezen, geen enkele instelling zien of wijzigen,
+en niets pauzeren, verwijderen, opnieuw proberen of afsluiten. Het is geen
+uitgeklede API-sleutel die je in plaats van een echte instelt: het is iets om in
+een browserextensie te plakken, zodat een machine die je niet volledig vertrouwt
+je configuratie niet kan teruglezen.</p>
+
+<h3 id="sec-login">De dashboard-aanmelding</h3>
+<p>Zet een gebruikersnaam en een wachtwoord onder Instellingen → Beveiliging en
+nzbfast plaatst een aanmeldpagina vóór het dashboard en de posterwand. Hij staat
+standaard uit, en zolang een van beide velden leeg is, verandert er nergens iets.
+Hij bestaat voor één situatie: een installatie die je buiten je eigen netwerk hebt
+gepubliceerd, waar een sleutel in een URL niet is wat je een mens wilt laten
+typen.</p>
+<p>Het wachtwoord moet minstens acht tekens hebben, en vier andere vormen
+worden geweigerd omdat een rader ze het eerst probeert: de gebruikersnaam zelf,
+een van de meest geraden wachtwoorden zoals <code>password123</code>, één
+herhaald teken zoals <code>aaaaaaaa</code> en een doorlopende reeks zoals
+<code>abcdefgh</code>. De weigering zegt welke regel het was. Het wordt gehasht
+opgeslagen met Argon2id, wat betekent dat nzbfast het je niet kan terugtonen,
+alleen vervangen: laat het veld leeg om het opgeslagen wachtwoord te houden, en
+typ één enkele spatie om het te verwijderen. Een wijziging in een van beide
+velden meldt elke browser af, deze inbegrepen, en <b>Alle browsers afmelden</b>
+doet hetzelfde wanneer jij dat wilt. Een aangemelde browser blijft veertien
+dagen gebruik lang aangemeld.</p>
+<p><b>Voor Sonarr, Radarr, nzb360, LunaSea of je extensies verandert er
+niets.</b> Dat is de vraag die iedereen heeft, en het antwoord is dat deze
+aanmelding uitsluitend een browsergegeven is. Die programma's blijven de
+API-sleutel precies zo gebruiken als eerst, en geen enkel programma hoeft een
+aanmeldpagina in te vullen. Wat de aanmelding afdekt is een persoon met een
+browser: het dashboard, de wand, en de API-aanroepen die die pagina's doen zodra
+je bent aangemeld.</p>
+<p>Het enige wat hij niet doet, is een installatie zonder API-sleutel beschermen.
+De aanmelding bewaakt de pagina's, niet de API: een daemon zonder sleutel
+antwoordt nog steeds alles wat het rechtstreeks vraagt, aanmeldpagina of niet.
+Stel ook een sleutel in. Op een gepubliceerde installatie allebei.</p>
+
+<h3 id="sec-outside">Erbij komen van buiten je netwerk</h3>
+<p>Drie antwoorden werken, en ze zijn niet gelijkwaardig.
+<a href="#remote-proxy">§12</a> heeft de configuratie van elk; dit gaat over
+kiezen.</p>
+<div class="tblwrap"><table>
+<tr><th>Aanpak</th><th>Wat het oplevert</th><th>Wat het kost</th></tr>
+<tr><td><b>Een privénetwerk</b> (Tailscale, WireGuard)</td><td>Er wordt helemaal niets gepubliceerd. Er is geen publiek adres om te vinden, te scannen of te raden, dus de vraag wie zich mag aanmelden komt nooit op</td><td>De VPN moet draaien op elk apparaat dat je wilt gebruiken. Geen publiek domein, dus niets waarop je geen software kunt installeren bereikt het</td></tr>
+<tr><td><b>Een reverse proxy die authenticeert</b> (Caddy, nginx of Apache, met basic auth, Authelia, Authentik of oauth2-proxy)</td><td>Een echte voordeur op een echt domein, met een certificaat dat je toch al vernieuwt, één aanmelding gedeeld met je andere diensten, en snelheidsbegrenzing en logboeken waar je ze kunt zien</td><td>Een tweede ding om in te stellen en werkend te houden. Je *arrs en telefoon-apps kunnen geen aanmeldpagina invullen, dus de proxy moet een verzoek met een geldige API-sleutel doorlaten</td></tr>
+<tr><td><b>nzbfast in zijn eentje</b> (<code>tls_cert</code> en <code>tls_key</code>, plus de dashboard-aanmelding)</td><td>Eén programma, geen proxy. HTTPS van begin tot eind, en een aanmeldpagina voor mensen</td><td>Certificaatvernieuwing regel je zelf. Je krijgt de aanmelding van nzbfast in plaats van die van je huishouden, en de limiet op foute wachtwoorden telt per adres</td></tr>
+</table></div>
+<p>Wat je ook kiest, <b>stel ook een API-sleutel in</b>. Een proxy is een laag
+ervoor, geen slot op de deur erachter: alles wat de daemon rechtstreeks bereikt,
+via het lokale netwerk of door een fout in de proxyconfiguratie, komt uit bij wat
+nzbfast zelf eist. Een sleutelloze oorsprong achter een authenticerende proxy is
+één verkeerd gerouteerd verzoek verwijderd van open staan.</p>
+<p>Laat je het certificaat op een proxy eindigen, start nzbfast dan met
+<code>--bind 127.0.0.1</code>, zodat de proxy echt de enige weg naar binnen is.
+Serveert nzbfast liever zelf HTTPS, wijs Instellingen → Beveiliging dan naar een
+PEM-certificaat en zijn privésleutel en herstart. Het enige wat je moet vermijden
+is de poort op je router doorsturen zonder allebei: dat publiceert gewoon HTTP, en
+je sleutel en alles wat je ermee doet gaan leesbaar over het internet voor
+iedereen op het pad.</p>
+
+<h3 id="sec-cors">Browserextensies, en waar <code>cors_origin</code> voor is</h3>
+<p><code>cors_origin</code> is niet de authenticatielaag, en dat is het waard om
+duidelijk te zeggen, want de instelling staat in dezelfde kaart. Hij bepaalt welke
+<i>webpagina's</i> een browser deze API laat lezen, en niets meer. Elk van die
+verzoeken heeft nog steeds de API-sleutel nodig; wat deze instelling verandert is
+of de browser het antwoord teruggeeft aan de pagina die het vroeg.</p>
+<p>De standaard is <code>*</code>, net als bij SABnzbd. Daarom werken extensies
+als NZB Unity en NZB Donkey zodra je er een sleutel in plakt, zonder hier iets in
+te stellen. Wil je het krapper, vervang hem dan door de oorsprongen die je
+toestaat (<code>https://example.com</code>), gescheiden door komma's. Leeg stuurt
+helemaal geen header, wat elke extensie blokkeert.</p>
+
+<h3 id="sec-open">Wat dit allemaal niet beschermt</h3>
+<p><b>Een installatie zonder API-sleutel staat open.</b> Zonder sleutel is er
+niets te controleren, dus elke host die de poort bereikt heeft volledige controle,
+en elke webpagina die je bezoekt ook, want de daemon kan haar verzoeken aan je
+eigen lokale adres niet van de jouwe onderscheiden. nzbfast zegt dit bij het
+starten, in het logboek en in het dashboard, telkens als het waar is. Het scheelt
+één veld.</p>
+<p><b>Een sleutel beschermt de API, niet de machine.</b> Instellingen →
+Beveiliging → <b>Luisteren op</b> bepaalt welke adressen überhaupt antwoorden.
+<code>0.0.0.0</code>, de standaard, antwoordt op elk netwerk waarop deze machine
+zit, en dat is wat een NAS of een container nodig heeft. <code>127.0.0.1</code>
+antwoordt alleen op deze machine, zodat niets anders op je netwerk erbij komt,
+zelfs niet met de sleutel. Pas op: een adres dat deze machine niet heeft, zorgt
+dat de volgende start helemaal niet meer opkomt, en de enige weg terug is
+<code>settings.json</code> met de hand herstellen.</p>
+<p><b>Je back-up van de instellingen bevat alles.</b> Het back-upbestand uit
+dezelfde kaart draagt elke instelling, beide sleutels en je
+Usenet-serverwachtwoorden in leesbare vorm. Bewaar het op een privéplek, en zie
+het naar iemand sturen als het sturen van je accounts.</p>
+
+<h2 id="performance">14 · Prestatietools</h2>
 <h3 id="perf-benchmark">Systeembenchmark</h3>
 <p>Eén klik meet je drie plafonds - netwerkdoorvoer (een echte meting van 8 seconden
 over meerdere verbindingen), CPU-verificatiesnelheid en schrijfsnelheid van de schijf -
@@ -1400,7 +1537,7 @@ download.</li>
 </ul>
 <p class="dim">Het oordeel is een voorspelling op basis van aanwijzingen, geen garantie.
 Voor een hard antwoord over één NZB telt <code>nzbfast check</code>
-(<a href="#cli">§15</a>) de werkelijke artikelen. Beide tellen antwoorden, geen inhoud. Een schone controle betekent dat de artikelen
+(<a href="#cli">§16</a>) de werkelijke artikelen. Beide tellen antwoorden, geen inhoud. Een schone controle betekent dat de artikelen
 er waren toen ernaar gevraagd werd, niet dat wat erin zit onbeschadigd is: een klein
 aantal providers antwoordt voor verwijderde artikelen met dummygegevens in plaats van ze
 te weigeren, en dat blijkt pas tijdens de download zelf, waar het artikel op zijn eigen
@@ -1461,7 +1598,7 @@ en correct; hij trekt alleen de lijn niet vol.</p>
 <p class="dim">Benchmarks worden voor elke release opnieuw gedraaid; de methode en de
 cijfers per machine worden naast de resultaten gepubliceerd.</p>
 
-<h2 id="updates">14 · Updates</h2>
+<h2 id="updates">15 · Updates</h2>
 <ul>
 <li>Updates zijn <b>alleen een melding</b>: nzbfast downloadt of vervangt zijn
 eigen binary nooit, en er zit geen code in die dat kan. Is er een nieuwe versie,
@@ -1477,12 +1614,12 @@ niet meer; een lege update-check-URL doet hetzelfde.</li>
 <h3 id="updating">Bijwerken zonder je instellingen te verliezen</h3>
 <p>Eén regel geldt voor elke installatie: <b>een update vervangt het programma, nooit
 je instellingen.</b> Alles wat je hebt ingesteld - servers, paden, de API-sleutel, de
-wachtrij - staat in een handvol bestanden in één map (<a href="#files">§17</a>), en
+wachtrij - staat in een handvol bestanden in één map (<a href="#files">§18</a>), en
 geen installatieprogramma, image-pull of pakketupgrade komt aan die map. Lijken
 instellingen na een update toch verdwenen, dan komt dat vrijwel altijd doordat de
 nieuwe installatie een <em>andere, lege</em> map leest, niet doordat er iets is
 verwijderd; de oude bestanden staan nog precies waar ze altijd stonden.
-<a href="#settings-gone">§18</a> heeft de herstelstappen.</p>
+<a href="#settings-gone">§19</a> heeft de herstelstappen.</p>
 <div class="tblwrap"><table>
 <tr><th>Installatie</th><th>Zo werk je bij</th></tr>
 <tr><td>macOS-app</td><td>Open de nieuwe DMG en sleep <b>NzbFast</b> naar
@@ -1520,7 +1657,7 @@ mee.</td></tr>
 <tr><td>Debian / Ubuntu (.deb)<br>Fedora / RHEL (.rpm)</td><td>Installeer het nieuwe pakket over het oude heen: <code>sudo dpkg -i nzbfast_*.deb</code> of <code>sudo rpm -U nzbfast-*.rpm</code>. Je instellingenmap maakt geen deel uit van het pakket, dus een upgrade kan er niets in vervangen, en je eigen wijzigingen in <code>/etc/nzbfast/nzbfast.env</code> blijven staan. De service wordt alleen herstart als die al draaide.</td></tr>
 <tr><td>Homebrew</td><td><code>brew upgrade nzbfast</code></td></tr>
 <tr><td>Kale binary</td><td>Vervang de binary. Je config blijft staan waar je hem
-hebt gemaakt (<a href="#files">§17</a>).</td></tr>
+hebt gemaakt (<a href="#files">§18</a>).</td></tr>
 </table></div>
 <div class="tip"><b>Tip</b>Docker-gebruikers die Sonarr of Radarr aansluiten: zet de
 API-sleutel in de containerdefinitie zelf
@@ -1529,7 +1666,7 @@ Unraid-template). Een sleutel die daar staat overleeft elk containerongeluk, wan
 staat op de host, in de definitie, en wordt bij elke start opnieuw toegepast. Een
 sleutel die je later in Instellingen instelt wint er nog steeds van.</div>
 
-<h2 id="cli">15 · Commandoregel</h2>
+<h2 id="cli">16 · Commandoregel</h2>
 <p>Alles wat de daemon doet is ook scriptbaar. De alledaagse commando's:</p>
 <div class="tblwrap"><table>
 <tr><th>Commando</th><th>Doel</th></tr>
@@ -1551,7 +1688,7 @@ accepteert <code>--config</code> en <code>--help</code>. Daar komt <code>post</c
 yEnc-artikelen en schrijft de bijbehorende NZB. Een operationeel gereedschap; het
 vereist een expliciete <code>--post-server</code> en kiest nooit zelf een server.</p>
 
-<h2 id="api">16 · API-overzicht</h2>
+<h2 id="api">17 · API-overzicht</h2>
 <p>Basis-endpoint: <code>http://host:6789/api?mode=…&amp;apikey=…&amp;output=json</code> -
 SABnzbd-compatibel, dus bestaande SAB-integraties werken ongewijzigd. Twee sleutels:
 de <b>API-sleutel</b> (volledige controle) en de <b>NZB-sleutel</b> (alleen toevoegen:
@@ -1570,7 +1707,7 @@ de <b>API-sleutel</b> (volledige controle) en de <b>NZB-sleutel</b> (alleen toev
 <tr><td>Monitoring</td><td><code>/metrics</code> antwoordt in het Prometheus-tekstformaat 0.0.4: downloadsnelheid, wachtrijdiepte en bytes, verbindingen per provider, storingen en artikeltellingen, geheugen per subsysteem en bedrijfstijd. Overal basiseenheden (bytes, seconden), zodat het dashboard omrekent en niets vooraf afgerond binnenkomt. Alleen GET, en standaard is de volledige API-sleutel nodig. Zet <code>metrics_open</code> om het zonder sleutel te serveren, wat de gebruikelijke Prometheus-opzet is: het bevat geen taaknamen en geen paden, maar publiceert wel de hostnaam van elke ingestelde provider aan iedereen die de poort kan bereiken.</td></tr>
 </table></div>
 
-<h2 id="files">17 · Bestanden &amp; locaties</h2>
+<h2 id="files">18 · Bestanden &amp; locaties</h2>
 <p>Waar de instellingenmap staat, hangt af van hoe nzbfast is geïnstalleerd. Deze ene
 map bevat alles wat een back-up waard is:</p>
 <div class="tblwrap"><table>
@@ -1602,20 +1739,20 @@ wijst.</td></tr>
 <tr><td>Externe tools</td><td>Geen nodig - RAR-uitpakken en PAR2-herstel zijn native. Mocht een exotische set ooit een externe <code>unrar</code> of <code>par2</code> als fallback nodig hebben, dan kijkt nzbfast eerst naast zijn executable en daarna op <code>$PATH</code>.</td></tr>
 </table></div>
 
-<h2 id="troubleshooting">18 · Problemen oplossen</h2>
+<h2 id="troubleshooting">19 · Problemen oplossen</h2>
 <div class="tblwrap"><table>
 <tr><th>Symptoom</th><th>Controleer</th></tr>
 <tr><td>Trage downloads</td><td>Vraag het eerst aan de download zelf: terwijl die loopt, noemt de regel onder de voortgangsbalk de laag die <i>deze</i> taak ophoudt, en een klik op dat oordeel opent de rij op het bewijs (zie <a href="#dash-queue">Wachtrij</a>). Draai de <b>Systeembenchmark</b> - die benoemt de bottleneck ronduit. Is het het netwerk: draai <b>Verbindingstuning</b>, check de aantallen verbindingen per server en controleer of je providers niet allemaal op één backbone zitten (<b>Serverdiversiteit</b>).</td></tr>
 <tr><td>Alleen traag bij heel grote taken<br>(NAS of machine met weinig RAM)</td><td>Verwacht, en meetbaar: een uitgehongerd geheugenbudget spilt caches naar schijf en kost 20–40% voorbij ~87 GB. Zie <a href="#memory">Geheugenbudget</a> voor de cijfers en hoeveel RAM je moet geven. Kleinere taken merken er niets van.</td></tr>
 <tr><td>Download mislukt met "articles missing"</td><td>De post is verlopen of bij je providers weggehaald. Een tweede provider op een andere backbone redt de meeste van deze gevallen. <code>nzbfast check</code> voorspelt dit vóór het downloaden. En de muur markeert de waarschijnlijk verdwenen releases vooraf met zijn
-beschikbaarheidsstip (<a href="#oracle">§13</a>). Een eerste mislukking van deze vorm
+beschikbaarheidsstip (<a href="#oracle">§14</a>). Een eerste mislukking van deze vorm
 probeert het na een wachttijd één keer vanzelf opnieuw, want propagatievertraging ziet
 er precies zo uit en lost zichzelf op.</td></tr>
 <tr><td>Voltooid archief vraagt om een wachtwoord</td><td>De geschiedenisregel toont 🔑 - voer daar het wachtwoord in; de taak maakt zichzelf ter plekke af. </td></tr>
 <tr><td>Een archief pakt niet uit</td><td>Wachtwoord- en reparatiefouten melden zichzelf in de geschiedenisregel. Voor al het andere is er een noodluik: Instellingen → Watchmap &amp; nabewerking → <b>Uitpakken met externe unrar</b> (een geavanceerde instelling) geeft het uitpakken aan het op je machine geïnstalleerde programma <code>unrar</code> in plaats van de ingebouwde uitpakker. Laat het anders uit: het ingebouwde pad is sneller op elke vorm die we hebben gemeten, en versluierde posts met hash-namen gebruiken het toch altijd, omdat unrar hun hernoeming niet kan volgen. Dezelfde schakelaar voor <code>nzbfast get</code>-runs is de omgevingsvariabele <code>NZBFAST_NO_NATIVE_UNRAR=1</code>. Als unrar een archief uitpakt dat de ingebouwde uitpakker weigerde, meld het dan zodat we het ingebouwde pad kunnen repareren.</td></tr>
 <tr><td>Sonarr/Radarr krijgt geen verbinding</td><td>Poort 6789 bereikbaar? API-sleutel correct (volledige sleutel, niet de NZB-sleutel)? Clienttype op SABnzbd gezet?</td></tr>
 <tr><td>Het dashboard vraagt om een API-sleutel die ik nooit heb ingesteld</td><td>Een nieuwe installatie maakt er zelf een aan en toont hem één keer bij het starten (<a href="#firstrun-key">§2</a>). Hij staat in het bestand <code>apikey</code> naast je config, en in de startuitvoer. Of typ een eigen sleutel bij Instellingen → Beveiliging vanuit een browser die al ingelogd is.</td></tr>
-<tr id="settings-gone"><td>Al mijn instellingen lijken weg na een update<br>(servers, paden, API-sleutel)</td><td>Niets in een update verwijdert instellingen; dit betekent dat nzbfast een andere, lege map leest. Eerst dit: het API-sleutelveld in Instellingen toont zich met opzet leeg - klik op <b>Show</b> voordat je concludeert dat de sleutel weg is. Vergelijk op Docker de <code>/config</code>-koppeling van de nieuwe container met die van de oude: een gewijzigd hostpad, een relatief pad dat vanuit een andere map is gedraaid of een verse appdata-map laten nzbfast allemaal van nul beginnen, terwijl je echte instellingen onaangeroerd op het vorige pad staan. Zoek de oude map op (kijk naar <code>settings.json</code>, je configbestand en <code>apikey</code> - locaties in <a href="#files">§17</a>) en richt de koppeling er weer op, of kopieer die bestanden naar de nieuwe map en herstart. Het startlog noemt het exacte instellingenbestand dat in gebruik is: <code>[settings] applying saved settings from …</code></td></tr>
+<tr id="settings-gone"><td>Al mijn instellingen lijken weg na een update<br>(servers, paden, API-sleutel)</td><td>Niets in een update verwijdert instellingen; dit betekent dat nzbfast een andere, lege map leest. Eerst dit: het API-sleutelveld in Instellingen toont zich met opzet leeg - klik op <b>Show</b> voordat je concludeert dat de sleutel weg is. Vergelijk op Docker de <code>/config</code>-koppeling van de nieuwe container met die van de oude: een gewijzigd hostpad, een relatief pad dat vanuit een andere map is gedraaid of een verse appdata-map laten nzbfast allemaal van nul beginnen, terwijl je echte instellingen onaangeroerd op het vorige pad staan. Zoek de oude map op (kijk naar <code>settings.json</code>, je configbestand en <code>apikey</code> - locaties in <a href="#files">§18</a>) en richt de koppeling er weer op, of kopieer die bestanden naar de nieuwe map en herstart. Het startlog noemt het exacte instellingenbestand dat in gebruik is: <code>[settings] applying saved settings from …</code></td></tr>
 <tr><td>Niets op het netwerk kan de daemon bereiken</td><td>Check <code>--bind</code>: <code>127.0.0.1</code> bedient alleen de machine waarop nzbfast draait. De standaard, <code>0.0.0.0</code>, bedient elke interface. Controleer daarna de firewall van de machine zelf op poort 6789.</td></tr>
 <tr><td>De kaart Index doorzoeken blijft klein</td><td>De indexer groeit op de achtergrond - check of er groepen zijn ingesteld bij Instellingen → Indexeren, en geef Verdiepen per scan de tijd om geschiedenis op te bouwen. "Nu scannen" forceert een ronde; de statusregel toont live de voortgang.</td></tr>
 <tr><td>De wall toont verkeerde/geen artwork</td><td>Detailblad → ✎ Match corrigeren of ↻ Metadata verversen. Filmlookups worden beter met een gratis OMDb-sleutel.</td></tr>

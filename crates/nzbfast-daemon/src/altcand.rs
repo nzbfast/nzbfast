@@ -9,7 +9,7 @@
 //! ## What this file does NOT do
 //!
 //! It never decides that a job is doomed. That verdict is §282 section A,
-//! and this file only reads it: [`terminal_reason`] is the whole of the
+//! and this file only reads it: `terminal_reason` is the whole of the
 //! coupling, one function with one arm today. Section A adds its own arm
 //! there and every surface below - the queue row, the button, the history
 //! clause, the report - renders it with no further edit.
@@ -548,7 +548,7 @@ impl Daemon {
     /// pick therefore failed at the add, with a sentence about a delete
     /// that had not happened.
     ///
-    /// [`parked_replaceable`] and not a bare "is it in history": it is
+    /// `parked_replaceable` and not a bare "is it in history": it is
     /// the same predicate the drawer's offer and both clicked doors are
     /// drawn from, so this refusal has not loosened by a single record.
     /// A job that was deleted, completed, retried or already replaced is
@@ -599,7 +599,7 @@ impl Daemon {
     /// parked row has ALREADY FAILED: the verdict comes from its own
     /// `fail_message` rather than from `terminal_reason`, nothing about
     /// the row is restamped beyond item 14's `alt_to_name`, and
-    /// `job.failed` is not re-emitted. See [`parked_replaceable`] for
+    /// `job.failed` is not re-emitted. See `parked_replaceable` for
     /// which parked rows qualify and why the bound is drawn where it is.
     ///
     /// **IT ANNOUNCES THE SWITCH, and until 24 Aug 2026 it did not.**
@@ -753,7 +753,7 @@ impl Daemon {
                 // derived later because the original leaves the queue on
                 // the next line and its name is the part the user needs.
                 sg.paused = false;
-                sg.priority = 0;
+                sg.set_priority(0, "a held copy switched in for a failed download");
                 sg.held_for.clear();
                 sg.alt_from = failed_id.to_string();
                 sg.alt_from_name = name.clone();
@@ -779,7 +779,7 @@ impl Daemon {
                 if let Some(lead) = lead {
                     g.state = JobState::Failed;
                     g.paused = false;
-                    g.priority = 0;
+                    g.set_priority(0, "the download was replaced by a held copy");
                     // The LEAD, not the bare sentence: `fail_kind` reads
                     // this by prefix, and it is what tells an *arr to
                     // blocklist the release and search for another one

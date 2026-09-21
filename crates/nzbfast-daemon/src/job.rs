@@ -338,7 +338,7 @@ pub struct Job {
     /// changes three things: park() files a tombstoned job into history
     /// instead of dropping it, the spooled .nzb is kept (the history row
     /// is retryable, like NZBGet's HistoryReturn), and the JSON-RPC
-    /// history reports the row as DELETED/<value> rather than a
+    /// history reports the row as DELETED/`<value>` rather than a
     /// download verdict. Persisted: the row keeps saying "you deleted
     /// this" across a restart.
     pub delete_status: String,
@@ -368,11 +368,39 @@ pub struct Job {
     /// ago with nothing to say so. Measured on the live daemon 26 Aug
     /// 2026: a job sat Downloading with `deferred` still true from a
     /// bench 3h earlier. The stamp is what makes the sticky flag
-    /// honest, and it is why the queue row prints "tried <t> ago"
+    /// honest, and it is why the queue row prints "tried `<t>` ago"
     /// rather than a bare badge.
     pub defer_at: u64,
     /// Times deferred - bounded so a job can't churn forever.
     pub defer_count: u32,
+    /// TODO 332: this job has ALREADY been put back in the queue once
+    /// because a long PAR2 repair was forecast, so the next pass repairs
+    /// instead of deferring again.
+    ///
+    /// THE WHOLE ONCE-ONLY POLICY IS THIS FIELD. The ruling of 8 Sep
+    /// 2026 is "defer once, then repair": the setting means "give me a
+    /// chance to see it", never "block until I answer", because a job
+    /// that never repairs with nobody watching is worse than a slow one.
+    /// Without a mark the job would forecast the same long repair on
+    /// every pass, defer on every pass, and never finish - which is the
+    /// failure the once-only rule exists to prevent, and the one thing
+    /// about this feature that has to be got right.
+    ///
+    /// PERSISTED, and that is not incidental: a restart between the
+    /// defer and the second pass would otherwise re-arm the veto and the
+    /// job would cycle across restarts instead of within one process.
+    /// Never cleared by anything - a retry, a priority change and a
+    /// manual re-run all inherit it, because they are all the same
+    /// download and the user has already been shown the notice. A row
+    /// added fresh gets `false` from `daemon_enqueue`.
+    ///
+    /// Deliberately NOT `deferred`/`defer_reason`/`defer_at`, which are
+    /// the SLOW-JOB watchdog's scheduling state and are written here too:
+    /// those say "this row is behind the others right now" and are what
+    /// the queue drawer prints, and a priority change clears `deferred`.
+    /// This one is a fact about what has already been shown to the user
+    /// and must survive that.
+    pub repair_deferred: bool,
     /// Set by the watchdog just before aborting the pipeline: park()
     /// must requeue this job (deferred, back of the queue) instead of
     /// filing it in history as Failed.
@@ -399,7 +427,7 @@ pub struct Job {
     /// clean" alone is not. 0 whenever `bad_blocks` is None.
     pub verify_blocks: u64,
     /// M23: the Smart Folder rule that matched at enqueue asked for TV
-    /// filing ([Show]/Season NN/ + rename) at completion.
+    /// filing (\[Show\]/Season NN/ + rename) at completion.
     pub tv_sort: bool,
     /// The name of the Smart Folder rule that chose this job's category
     /// and/or TV filing, empty when nothing matched. Provenance only, and
@@ -419,7 +447,7 @@ pub struct Job {
     /// Persisted for the same reason - a restart must not forget it.
     pub filed: bool,
     /// The quality suffix TV filing actually appended to this job's
-    /// episode files, as [`Daemon::finalize_names`] computed it under the
+    /// episode files, as `Daemon::finalize_names` computed it under the
     /// naming settings that stood at the time. `Some("")` is a real
     /// answer - with auto-rename off, filing writes a bare
     /// `{base}.{ext}` - and `None` means "not filed, or filed before this
@@ -632,7 +660,7 @@ pub struct Job {
     pub early_refused: std::collections::HashSet<String>,
     /// How many times this record has crossed between the queue store
     /// and the history store, counting from 0 for a job that has never
-    /// crossed. Bumped by [`stamp_move`](super::moveseq::stamp_move) on
+    /// crossed. Bumped by `stamp_move` on
     /// the way OUT, before the destination store's durable write, so the
     /// destination's copy always carries the higher number.
     ///
@@ -835,6 +863,36 @@ pub struct Job {
 }
 
 impl Job {
+    /// The one way a LIVE row's priority is written, so that every change
+    /// leaves a line in daemon.log naming the row, both words and what
+    /// asked for it.
+    ///
+    /// Until 21 Sep 2026 a priority write said nothing at all - the
+    /// duplicate release, the reorder that adopts the front's priority,
+    /// the failed-original promotion, a `/stream` start: each was a bare
+    /// field write. That is why a Force job that kept a paused queue
+    /// running could not be explained from the log: nothing in it said
+    /// the row had been made Force, by what, or when. Only a CHANGE is
+    /// logged (a write that lands on the value the row already has says
+    /// nothing, so a client that re-sends its priority does not flood the
+    /// log), and only by id: the id is what every other queue line names,
+    /// and the release name stays out of a line that is about a number.
+    ///
+    /// `why` is a short clause, not a sentence, and names the actor
+    /// ("priority write", "moved to the front", ...).
+    pub fn set_priority(&mut self, to: i32, why: &str) {
+        let from = std::mem::replace(&mut self.priority, to);
+        if from != to {
+            info!(
+                target: "queue",
+                "{}: priority {} -> {} ({why})",
+                self.nzo_id,
+                priority_name(from),
+                priority_name(to)
+            );
+        }
+    }
+
     /// Fields that describe ONE network attempt and must not outlive it.
     /// Every path that sends a job back through the queue (retry, demote,
     /// pause requeue, disk-full requeue) calls this, because `whyslow`
@@ -880,7 +938,7 @@ impl Job {
     }
 }
 
-/// What [`Daemon::finalize_names`] needs to know about the job it is
+/// What `Daemon::finalize_names` needs to know about the job it is
 /// filing. A struct rather than more positional parameters because the
 /// list had reached four same-typed strings and bools, and a caller
 /// swapping `name` and `cat` would have compiled.
@@ -1026,10 +1084,17 @@ async fn settle_locked_failure(
         .to_string_lossy()
         .to_string();
     let poster = crate::smart::nzb_poster(nzb);
-    let cands: Vec<String> = job_pw
-        .map(str::to_string)
+    // The job's own password goes first and UNRANKED - it came with
+    // the NZB, the API call or the indexer, so it is not a guess to be
+    // ordered against the file's lines. Entry 0 is how it says so in
+    // the log below: the file has no entry 0, and every promoted line
+    // keeps the number the operator sees in their own editor.
+    let file_cands = d.read_unpack_passwords_for_indexed(site, &poster);
+    let total = file_cands.len();
+    let cands: Vec<(usize, String)> = job_pw
+        .map(|p| (0usize, p.to_string()))
         .into_iter()
-        .chain(d.read_unpack_passwords_for(site, &poster))
+        .chain(file_cands)
         .collect();
     let unlock_dir = out.to_path_buf();
     // The same stand-down the completed path takes (`job_finalize`): a
@@ -1038,11 +1103,11 @@ async fn settle_locked_failure(
     // tested against the archive. See [`crate::unlockpw::unlock`].
     let (winner, refused) = tokio::task::spawn_blocking(move || {
         let mut refused: Option<String> = None;
-        let mut winner: Option<String> = None;
-        for pw in cands {
+        let mut winner: Option<(usize, usize, String)> = None;
+        for (attempt, (entry, pw)) in cands.into_iter().enumerate() {
             match crate::unlockpw::unlock(&unlock_dir, &pw) {
                 Ok(()) => {
-                    winner = Some(pw);
+                    winner = Some((entry, attempt + 1, pw));
                     break;
                 }
                 Err(None) => {}
@@ -1068,10 +1133,18 @@ async fn settle_locked_failure(
         return false;
     }
     match winner {
-        Some(pw) => {
+        Some((entry, attempt, pw)) => {
+            // §99, same shape as the completed path's ladder: WHICH
+            // entry and on which attempt, never the value. Entry 0 is
+            // the job's own password, which is not one of the file's.
+            let which = if entry == 0 {
+                "the password the job came with".to_string()
+            } else {
+                format!("passwords-file entry {entry} of {total}, on attempt {attempt}")
+            };
             info!(
                 target: "unlock",
-                "{name:?}: {locked_name} unlocked with a password we already held - \
+                "{name:?}: {locked_name} unlocked with {which} - \
                  the job is a completion after all"
             );
             d.record_unlock_password(site, &poster, &pw);
@@ -2212,6 +2285,29 @@ pub fn demote_requeues(demote: bool, tombstone: bool, failed: bool) -> bool {
     demote && !tombstone && failed
 }
 
+/// TODO 332: may THIS run stand back from a long par2 repair and hand
+/// the job back to the queue?
+///
+/// The whole of the policy, in one expression, and a free function for
+/// [`demote_requeues`]'s reason: the property that matters is one a test
+/// must be able to state without a daemon, and it is the property whose
+/// failure mode is a job that never finishes.
+///
+/// * `setting` - `repair_defer_long`, sampled per job like every other
+///   live setting;
+/// * `already_deferred` - [`Job::repair_deferred`], the per-job mark the
+///   post-processing tail sets when it requeues. **This is what makes
+///   the policy DEFER ONCE, THEN REPAIR.** Without it the second pass
+///   forecasts the same long repair, defers again, and the job cycles
+///   until something else stops it.
+/// * `insurance` - a retention-insurance fetch, which banks volumes and
+///   extracts nothing. There is no repair for it to stand back from, and
+///   deferring one would send a row the user has not promoted yet round
+///   the queue for no reason.
+pub fn defers_long_repair(setting: bool, already_deferred: bool, insurance: bool) -> bool {
+    setting && !already_deferred && !insurance
+}
+
 /// A finished job as NZBGet's own `(Status, ParStatus, UnpackStatus)`.
 ///
 /// Everything that was not Completed used to report `FAILURE/PAR` with
@@ -2490,7 +2586,7 @@ pub enum FilesGone {
 /// "match the episode base plus any rename tail at all" - every quality of
 /// the episode, including the upgrade filed beside it a second ago.
 ///
-/// `legacy` is [`Daemon::job_suffix`], and runs only for records written
+/// `legacy` is `Daemon::job_suffix`, and runs only for records written
 /// before the suffix was persisted: recomputing is what we did for all of
 /// them anyway, and a suffix that no longer matches is a leftover rather
 /// than a destroyed episode. What it must never be is a bare `""` default,
@@ -2547,7 +2643,7 @@ pub struct DeleteRecord {
     /// sweep must leave it where it is.
     pub locked: bool,
     /// The row PUBLISHES as Failed, whatever `state` says - see
-    /// [`crate::history::publishes_as_failed`]. Carried rather
+    /// `crate::history::publishes_as_failed`. Carried rather
     /// than derived here because the §96 storage-deleted test reads
     /// `move_pending`, `origin` and the filesystem, and this struct is a
     /// snapshot taken under the history lock.

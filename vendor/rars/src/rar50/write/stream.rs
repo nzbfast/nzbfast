@@ -246,7 +246,11 @@ pub fn write_stored_archive_streamed_with_recovery<R: Read, W: Write>(
                 body_len,
             )?;
             let head = head_for(Some(offset))?;
-            let folder = InlineRecoveryFolder::new(head.len() as u64 + body_len, percent)?;
+            let folder = InlineRecoveryFolder::with_thread_cap(
+                head.len() as u64 + body_len,
+                percent,
+                options.recovery_fold_threads,
+            )?;
             (head, Some(folder))
         }
     };
@@ -452,7 +456,11 @@ where
         )?;
         let mut head = Vec::new();
         write_volume_head(&mut head, volume_number, false, None, Some(offset))?;
-        let mut folder = InlineRecoveryFolder::new(head.len() as u64 + body_len, percent)?;
+        let mut folder = InlineRecoveryFolder::with_thread_cap(
+            head.len() as u64 + body_len,
+            percent,
+            options.recovery_fold_threads,
+        )?;
         let mut sink = open_volume(volume_number)?;
         let mut written = 0u64;
         {

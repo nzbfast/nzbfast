@@ -55,7 +55,7 @@ use super::chase_tests::chase_volume_set;
 #[test]
 fn chase_multi_volume_compressed_inner() {
     let f = noisy(300_000, 98);
-    let vols = rars_compressed_volumes("F.bin", &f, 50_000);
+    let vols = compressed_volume_set("F.bin", &f, 50_000);
     assert!(
         vols.len() >= 3,
         "want a real multi-volume set, got {}",
@@ -108,7 +108,7 @@ fn chase_multi_volume_compressed_inner() {
 fn chase_compressed_rar4_inner_one_pass() {
     let dir = tmpdir("chase-v4");
     let f = payload(300_000, 191);
-    let inner_arch = rars_v4_compressed_volume(&[("F.bin", &f)]);
+    let inner_arch = rar4_compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&inner_arch);
     let outer = fixtures::rar5_volume(&[(
         "inner.rar",
@@ -134,7 +134,7 @@ fn chase_compressed_rar4_inner_one_pass() {
 #[test]
 fn chase_multi_volume_compressed_rar4_inner() {
     let f = noisy(300_000, 198);
-    let vols = rars_v4_compressed_volumes("F.bin", &f, 50_000);
+    let vols = rar4_compressed_volume_set("F.bin", &f, 50_000);
     assert!(
         vols.len() >= 3,
         "want a real multi-volume set, got {}",
@@ -209,7 +209,7 @@ fn chase_multi_volume_compressed_rar4_inner() {
 #[test]
 fn chase_encrypted_compressed_rar4_inner_one_pass() {
     let f = noisy(300_000, 199);
-    let vols = rars_v4_encrypted_volumes("F.bin", &f, 60_000, "chasepw", false);
+    let vols = rar4_encrypted_volume_set("F.bin", &f, 60_000, "chasepw", false);
     assert!(vols.len() >= 2, "want a split set, got {}", vols.len());
     for v in &vols {
         assert_not_store(v);
@@ -241,7 +241,7 @@ fn chase_encrypted_compressed_rar4_inner_one_pass() {
 #[test]
 fn chase_header_encrypted_compressed_rar4_inner() {
     let f = noisy(200_000, 201);
-    let vols = rars_v4_encrypted_volumes("F.bin", &f, 80_000, "hppw", true);
+    let vols = rar4_encrypted_volume_set("F.bin", &f, 80_000, "hppw", true);
     // A password-less mapper must see nothing but EncryptedHeaders -
     // that both proves the -hp shape and stands in for
     // assert_not_store, which cannot read a method byte it cannot
@@ -278,7 +278,7 @@ fn chase_header_encrypted_compressed_rar4_inner() {
 #[test]
 fn chase_encrypted_rar4_without_password_demotes() {
     let f = noisy(120_000, 203);
-    let vol = rars_v4_encrypted_volume("F.bin", &f, "nopw");
+    let vol = rar4_encrypted_archive("F.bin", &f, "nopw");
     let outer =
         fixtures::rar5_volume(&[("inner.rar", vol.len() as u64, vol.as_slice(), false, false)]);
     let dir = tmpdir("chase-v4enc-nopw");
@@ -304,7 +304,7 @@ fn chase_encrypted_rar4_without_password_demotes() {
 #[test]
 fn top_level_compressed_rar_chases_one_pass() {
     let f = payload(300_000, 131);
-    let arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&arch);
     let art = 7000usize;
     let n_arts = arch.len().div_ceil(art);
@@ -342,7 +342,7 @@ fn top_level_compressed_rar_chases_one_pass() {
 #[test]
 fn top_level_compressed_rar_multivolume_chases_one_pass() {
     let f = noisy(300_000, 132);
-    let vols = rars_compressed_volumes("F.bin", &f, 50_000);
+    let vols = compressed_volume_set("F.bin", &f, 50_000);
     assert!(
         vols.len() >= 3,
         "want a real multi-volume set, got {}",
@@ -388,7 +388,7 @@ fn top_level_chase_gate_off_materializes() {
     assert!(!top_chase_env_off_value(Some("0")));
     assert!(!top_chase_env_off_value(None));
     let f = noisy(300_000, 133);
-    let arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&arch);
     let dir = tmpdir("rar-top-gateoff");
     let ex = Arc::new(Extractor::new(&dir, 1, true));
@@ -415,7 +415,7 @@ fn top_level_chase_gate_off_materializes() {
 #[test]
 fn top_level_chase_budget_breach_demotes_to_volume() {
     let f = noisy(2_400_000, 134);
-    let arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&arch);
     assert!(arch.len() > 900_000, "packed too small: {}", arch.len());
     let dir = tmpdir("rar-top-budget");
@@ -467,23 +467,8 @@ fn top_level_chase_budget_breach_demotes_to_volume() {
 /// garbage. First test of the chase's decrypt path at ANY depth.
 #[test]
 fn top_level_encrypted_compressed_rar_chases_one_pass() {
-    use rars::rar50::{EncryptedCompressedEntry, Rar50VolumeWriter, WriterOptions};
     let f = noisy(300_000, 137);
-    let mut features = rars::FeatureSet::store_only();
-    features.file_encryption = true;
-    let opts = WriterOptions::new(rars::ArchiveVersion::Rar50, features);
-    let vols = Rar50VolumeWriter::new(opts)
-        .encrypted_compressed_entries(&[EncryptedCompressedEntry {
-            name: b"F.bin",
-            data: &f,
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-            password: b"hunter2",
-        }])
-        .max_payload_per_volume(50_000)
-        .finish()
-        .unwrap();
+    let vols = encrypted_compressed_volume_set("F.bin", &f, 50_000, "hunter2");
     assert!(
         vols.len() >= 3,
         "want a real multi-volume set, got {}",
@@ -545,7 +530,7 @@ fn top_level_encrypted_compressed_rar_chases_one_pass() {
 #[test]
 fn top_level_chase_never_runs_on_a_resumed_run() {
     let f = noisy(200_000, 136);
-    let arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&arch);
     let dir = tmpdir("rar-top-resume");
     let ex = Arc::new(Extractor::with_resume(&dir, 1, false, true));
@@ -571,7 +556,7 @@ fn top_level_chase_never_runs_on_a_resumed_run() {
 fn chase_multi_volume_patched_spans_complete() {
     let dir = tmpdir("chase-mv-patch");
     let f = noisy(300_000, 101);
-    let vols = rars_compressed_volumes("F.bin", &f, 50_000);
+    let vols = compressed_volume_set("F.bin", &f, 50_000);
     assert!(
         vols.len() >= 3,
         "want a real multi-volume set, got {}",
@@ -669,7 +654,7 @@ fn chase_output_store_archive_streams_below() {
     let dir = tmpdir("chase-deep");
     let g = payload(120_000, 99);
     let deep = fixtures::rar5_volume(&[("G.bin", 120_000, &g, false, false)]);
-    let inner_arch = rars_compressed_volume(&[("deep.rar", &deep)]);
+    let inner_arch = compressed_archive(&[("deep.rar", &deep)]);
     assert_not_store(&inner_arch);
     let outer = fixtures::rar5_volume(&[(
         "inner.rar",
@@ -702,7 +687,7 @@ fn chase_disabled_by_env() {
 
     let dir = tmpdir("chase-env");
     let f = payload(200_000, 90);
-    let inner_arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let inner_arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&inner_arch);
     let outer = fixtures::rar5_volume(&[(
         "inner.rar",
@@ -736,7 +721,7 @@ fn chase_disabled_by_env() {
 fn chase_worker_exits_on_extractor_drop() {
     let dir = tmpdir("chase-drop");
     let f = noisy(300_000, 89);
-    let inner_arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let inner_arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&inner_arch);
     let outer = fixtures::rar5_volume(&[(
         "inner.rar",
@@ -923,7 +908,7 @@ fn a_chase_whose_volumes_exceed_the_cap_trims_from_inside_the_volume() {
     // same reason: this one asserts on `vols[0]`, which is a FULL volume
     // at `per_vol` whatever the packed total comes to, so it carries none
     // of that test's remainder fragility. 7.35 s -> 2.03 s in a sweep.
-    let vols = rars_compressed_volumes_at_level("F.bin", &f, 9 << 20, Some(1));
+    let vols = compressed_volume_set_at_effort("F.bin", &f, 9 << 20, Some(1));
     volumes_over_the_cap_trim_and_carry_one_pass("chase-volume-over-cap", &f, vols);
 }
 
@@ -939,7 +924,7 @@ fn a_chase_whose_volumes_exceed_the_cap_trims_from_inside_the_volume() {
 fn a_v4_chase_decodes_a_volume_before_its_tail_arrives() {
     let dir = tmpdir("chase-v4-tailwait");
     let f = noisy(600_000, 221);
-    let vols = rars_v4_compressed_volumes("F.bin", &f, 120_000);
+    let vols = rar4_compressed_volume_set("F.bin", &f, 120_000);
     assert!(vols.len() >= 3, "want several volumes, got {}", vols.len());
     // WinRAR's tail: every real RAR3 volume ends in an ENDARC block, and
     // that block is what the eager walk waited for. The rars writer
@@ -1022,7 +1007,7 @@ fn a_v4_chase_decodes_a_volume_before_its_tail_arrives() {
 #[test]
 fn a_v4_deferred_header_walk_never_rereads_the_trimmed_prefix() {
     let f = noisy(120_000, 142);
-    let mut vols = rars_v4_compressed_volumes("F.bin", &f, 40_000);
+    let mut vols = rar4_compressed_volume_set("F.bin", &f, 40_000);
     assert!(vols.len() >= 2, "want a split member, got {}", vols.len());
     let vol = fixtures::with_rar4_end_block(std::mem::take(&mut vols[0]), true);
     let stop = vol.len() as u64 - 7; // the END record the walk stops on
@@ -1135,13 +1120,13 @@ fn volumes_over_the_cap_trim_and_carry_one_pass(tag: &str, f: &[u8], vols: Vec<V
 /// THE FIXTURE IS THE WHOLE COST OF THIS TEST and its shape is tuned
 /// (28 Aug 2026). It was 18.2 s in a full `--profile ci` sweep, the
 /// most expensive test in the workspace bar the soak, and 17.2 s of
-/// that was the one `rars_compressed_volumes` call - the chase it
+/// that was the one `compressed_volume_set` call - the chase it
 /// actually tests is half a second. Two things came out of measuring
 /// it, and both are in the numbers below rather than in a comment
 /// somewhere else.
 ///
 /// The SEARCH EFFORT is now named: see
-/// [`rars_compressed_volumes_at_level`] for why level 1 builds the same
+/// [`compressed_volume_set_at_effort`] for why level 1 builds the same
 /// archive 4.9x quicker, and for the level that is not available.
 ///
 /// The SPLIT MARGIN was the reason a cheaper encoder could not simply
@@ -1178,7 +1163,7 @@ fn a_chase_survives_trimming_the_volume_its_deferred_walk_resumes_in() {
     const PER_VOL: usize = 12 << 20;
     let dir = tmpdir("chase-volume-over-cap-finish");
     let f = noisy(57 << 20, 250);
-    let vols = rars_compressed_volumes_at_level("F.bin", &f, PER_VOL, Some(1));
+    let vols = compressed_volume_set_at_effort("F.bin", &f, PER_VOL, Some(1));
     assert_eq!(
         vols.len(),
         3,

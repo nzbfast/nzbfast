@@ -60,6 +60,28 @@ use crate::*;
 /// the daemon, so no queue control promises a pause the fold cannot
 /// honour inside the solve - see `par2repair::control::PauseGate` for
 /// why that exception exists.
+///
+/// # And the LONG-REPAIR VETO, which rides here for the third time
+///
+/// TODO 332. [`repair_defer`](Self::repair_defer) is a
+/// `par2repair::DeferGate` the run may ARM, and it is on this handle
+/// for the reason the other two are: it is the one per-owner value the
+/// repair sites and the post-processing tail can both reach, which is
+/// what lets the tail read back whether anything deferred. `None` on a
+/// run that never armed one, which is every CLI run and every job with
+/// the setting off.
+///
+/// UNLIKE THE OTHER TWO, `repair_control` DOES NOT CARRY IT. The cancel
+/// and the progress belong to every repair this job runs; the veto
+/// belongs to ONE - the download's own disk repair, which is the only
+/// site where "nothing has been written and the job can cleanly go
+/// round again" is unambiguously true. `repair::nativepass` is the one
+/// caller that puts the two together, and its call says why the four
+/// other sites are left exactly as they were.
+///
+/// It is NOT a third cancel bit. It is answered once, at the survey
+/// point, before anything is written, and it can only ever say "not
+/// now"; the user's Cancel is still one press on one flag.
 pub struct SideCancel {
     flag: Arc<std::sync::atomic::AtomicBool>,
     /// `pub` for ONE caller: `repair::sidefetch` attaches this control
@@ -78,6 +100,10 @@ pub struct SideCancel {
     /// Where the engine's per-phase progress is published for the
     /// queue payload to read.
     progress: Arc<crate::repairprog::RepairProgress>,
+    /// The long-repair veto - see the type doc. Built unarmed; only
+    /// [`arm_repair_defer`](Self::arm_repair_defer) replaces it with an
+    /// armed one, and only the daemon calls that.
+    defer: std::sync::Mutex<Option<Arc<nzbkit::par2repair::DeferGate>>>,
 }
 
 /// `new()` is the real constructor and this defers to it, rather than
@@ -103,6 +129,7 @@ impl SideCancel {
             ctl: Arc::new(nzbkit::pool::QueueControl::default()),
             repair: nzbkit::par2repair::PauseGate::new(),
             progress: Arc::new(crate::repairprog::RepairProgress::default()),
+            defer: std::sync::Mutex::new(None),
         }
     }
 
@@ -141,6 +168,30 @@ impl SideCancel {
             Some(self.progress.clone()),
             Some(self.repair.clone()),
         )
+    }
+
+    /// Arm the long-repair veto for this job - TODO 332.
+    ///
+    /// The caller is asserting BOTH halves of the policy, because the
+    /// engine can work out neither: the setting is on, and this job has
+    /// not already been deferred once. Idempotent in the sense that
+    /// matters - a second call simply replaces an unfired gate with
+    /// another unfired one - but there is one caller and it runs before
+    /// any repair does.
+    pub fn arm_repair_defer(&self) {
+        *self.defer.lock_ok() = Some(nzbkit::par2repair::DeferGate::armed());
+    }
+
+    /// This job's veto, or `None` on a run that never armed one.
+    pub fn repair_defer(&self) -> Option<Arc<nzbkit::par2repair::DeferGate>> {
+        self.defer.lock_ok().clone()
+    }
+
+    /// What this job's veto stopped, or `None` if it never fired -
+    /// what the post-processing tail reads to decide between filing the
+    /// job and sending it round again.
+    pub fn repair_deferred(&self) -> Option<nzbkit::par2repair::DeferredRepair> {
+        self.repair_defer().and_then(|g| g.fired())
     }
 
     /// What the engine has published about the repair running right

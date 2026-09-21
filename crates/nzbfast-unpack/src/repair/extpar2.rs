@@ -299,6 +299,20 @@ pub(super) enum NativeVerdict {
     /// re-download or a re-run repairs the same set from the same
     /// recovery data.
     Cancelled,
+    /// THE DAEMON STOOD BACK - `RepairError::Deferred`, raised through
+    /// this job's own `SideCancel` because the long-repair veto was
+    /// armed and the forecast said half an hour of folding. TODO 332.
+    ///
+    /// Its own arm beside [`Self::Cancelled`] for the same reason and
+    /// one step stronger: nothing was written at all, nothing about the
+    /// set is wrong, and the job is going straight back to the queue -
+    /// so par2cmdline must not be handed the very repair the daemon
+    /// just decided to postpone, no warn may say the set is broken, and
+    /// every caller returns instead of escalating.
+    ///
+    /// UNREACHABLE unless a caller armed the gate, which today is the
+    /// daemon and only on a job's FIRST pass.
+    Deferred,
 }
 
 /// Report the native pass's shortfall and turn it into a verdict.
@@ -586,6 +600,16 @@ pub(super) fn adoption_narrowed_need(
         // recovery volumes, which is the very thing its `SideCancel`
         // was raised to stop.
         NativeVerdict::Cancelled => NarrowedNeed::Cancelled,
+        // UNREACHABLE BY CONSTRUCTION, and kept as a belt: the probe
+        // drops the long-repair veto off its control before it calls
+        // (see `native_repair_pass`), because a forecast taken before
+        // the recovery purchase is not a forecast for the repair that
+        // will run. Folded onto `Cancelled` rather than given an arm of
+        // its own, because the answer either verdict needs from here is
+        // the same one - stop, and buy nothing - and a fourth
+        // `NarrowedNeed` would have to be carried by every caller to
+        // describe a state nothing can produce. TODO 332.
+        NativeVerdict::Deferred => NarrowedNeed::Cancelled,
     }
 }
 

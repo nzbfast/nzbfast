@@ -39,11 +39,11 @@ pub struct Fetched {
     pub bytes: Vec<u8>,
     /// `X-DNZB-Failure`: where to report this download failing, and where
     /// the indexer hands back a replacement NZB for the same title. See
-    /// [`Daemon::report_failure`].
+    /// `Daemon::report_failure`.
     pub failure_link: String,
     /// Host of the URL that was REQUESTED (not the last redirect hop):
     /// the only host `failure_link` may point back at. See
-    /// [`Daemon::report_failure`].
+    /// `Daemon::report_failure`.
     pub host: String,
     /// Was the REQUESTED url https? A failure link may not downgrade the
     /// scheme it was handed over. See [`failure_link_allowed`].
@@ -182,8 +182,13 @@ pub fn name_from_fetch(f: &Fetched, url: &str) -> Option<String> {
 }
 
 /// One `X-DNZB-*` header, trimmed, or empty.
-pub(super) fn dnzb(resp: &ureq::Response, name: &str) -> String {
-    resp.header(name).unwrap_or_default().trim().to_string()
+pub(super) fn dnzb(resp: &ureq::http::Response<ureq::Body>, name: &str) -> String {
+    resp.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 /// The failure-report link out of the two spellings in the wild.
@@ -311,7 +316,7 @@ pub(super) const FETCH_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) fn fetch_head(
     url: &str,
     origin: Option<&SourceOrigin>,
-) -> Result<(ureq::Response, String, String)> {
+) -> Result<(ureq::http::Response<ureq::Body>, String, String)> {
     // Deliberately case-SENSITIVE, unlike every other scheme test in this
     // file. `HTTPS://host/...` passes `failure_link_allowed` and
     // `supplied_link_scheme_ok` (both `eq_ignore_ascii_case`) and dies
@@ -409,22 +414,19 @@ fn fetch_url_inner(url: &str, origin: Option<&SourceOrigin>) -> Result<Fetched> 
     // even though the fetch itself may be plain `fetch_url`.
     let (head, addrs) = witness_resolution(&url_netloc(url), || fetch_head(url, origin));
     let (resp, failure_link, category) = head?;
-    let filename = resp
-        .header("Content-Disposition")
-        .and_then(content_disposition_filename)
-        .unwrap_or_default();
+    let filename =
+        content_disposition_filename(&dnzb(&resp, "Content-Disposition")).unwrap_or_default();
     // Refuse an oversized body BEFORE reading it, when the server was
     // honest enough to declare one; the take() below is the backstop for
     // when it wasn't.
-    if let Some(len) = resp
-        .header("Content-Length")
-        .and_then(|l| l.trim().parse::<u64>().ok())
+    if let Ok(len) = dnzb(&resp, "Content-Length").parse::<u64>()
         && len > FETCH_MAX_BYTES
     {
         anyhow::bail!("{url}: {len} bytes is too large for an NZB");
     }
     let mut bytes = Vec::new();
-    resp.into_reader()
+    resp.into_body()
+        .into_reader()
         .take(FETCH_MAX_BYTES + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > FETCH_MAX_BYTES {

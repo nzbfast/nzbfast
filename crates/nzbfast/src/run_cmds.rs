@@ -99,6 +99,11 @@ pub(crate) async fn get_cmd(
         // only ever fires on a repair that verified.
         par_cleanup: true,
         skip_samples,
+        // TODO 332: a `get` is a person at a terminal who can already
+        // read the "large repair ahead" warn and press ^C. There is no
+        // queue to put it at the back of, so there is nothing for the
+        // veto to do here.
+        defer_long_repair: false,
         password,
         // No CLI consent prompt: `unpack_eat_volumes=low_disk`
         // asks per job through the dashboard drawer, and there is

@@ -153,7 +153,7 @@ pub(super) const NZBLNK_INFLIGHT_MAX: usize = 4;
 /// half into no gate at all. The cost of that choice is that behind a
 /// reverse proxy every request shares the proxy's address and therefore
 /// one bucket, which is exactly the single global window this replaced -
-/// no worse than before, and [`NZBLNK_GLOBAL_MAX`] still bounds it.
+/// no worse than before, and `NZBLNK_GLOBAL_MAX` still bounds it.
 ///
 /// **Which half does the work depends on how the link arrived, and the
 /// clicked one is not the flattering case.** A protocol-handler click
@@ -168,7 +168,7 @@ pub(super) const NZBLNK_INFLIGHT_MAX: usize = 4;
 /// apart from a single loop.
 #[derive(Default)]
 pub struct NzblnkGate {
-    /// Arrival instants inside [`NZBLNK_WINDOW`], newest last, one
+    /// Arrival instants inside `NZBLNK_WINDOW`, newest last, one
     /// window per peer. `None` is the bucket for a transport that
     /// reports no address at all, which is one bucket for all of them
     /// rather than a hole in the gate.
@@ -345,12 +345,25 @@ pub(super) fn shared_indexer_agent() -> ureq::Agent {
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     AGENT
         .get_or_init(|| {
-            ureq::AgentBuilder::new()
-                .resolver(SsrfGuardResolver)
-                .redirects(4)
-                .timeout(std::time::Duration::from_secs(15))
-                .max_idle_connections_per_host(0)
-                .build()
+            ureq::Agent::with_parts(
+                ureq::Agent::config_builder()
+                    .max_redirects(4)
+                    // ureq 2 handed back the last response once the cap
+                    // was reached; ureq 3 raises `TooManyRedirects`
+                    // instead. Held to the ureq 2 answer, as every
+                    // agent in `netfetch` is.
+                    .max_redirects_will_error(false)
+                    // ureq 3 reads the proxy environment by default and
+                    // ureq 2 did not. A proxy would have the resolver
+                    // guarding the PROXY's address instead of the
+                    // indexer's - see `netfetch::agent_config`.
+                    .proxy(None)
+                    .timeout_global(Some(std::time::Duration::from_secs(15)))
+                    .max_idle_connections_per_host(0)
+                    .build(),
+                ureq::unversioned::transport::DefaultConnector::new(),
+                SsrfGuardResolver,
+            )
         })
         .clone()
 }
@@ -429,18 +442,19 @@ pub(super) fn indexer_fetch(
 ) -> std::result::Result<String, crate::newznab::NewznabError> {
     use crate::newznab::NewznabError;
     use std::io::Read as _;
-    let resp = match shared_indexer_agent().get(url).call() {
+    let resp = match crate::netfetch::call_keeping_refusal(shared_indexer_agent().get(url)) {
         Ok(r) => r,
-        Err(ureq::Error::Status(code @ (429 | 503), _)) => {
-            return Err(NewznabError::Limit(code, format!("HTTP {code}")));
-        }
-        Err(ureq::Error::Status(code, _)) => {
-            return Err(NewznabError::Api(code, format!("HTTP {code}")));
-        }
-        Err(e) => return Err(NewznabError::Api(0, redact_apikey(&e.to_string()))),
+        Err(e) => match e.code() {
+            Some(code @ (429 | 503)) => {
+                return Err(NewznabError::Limit(code, format!("HTTP {code}")));
+            }
+            Some(code) => return Err(NewznabError::Api(code, format!("HTTP {code}"))),
+            None => return Err(NewznabError::Api(0, redact_apikey(&e.to_string()))),
+        },
     };
     let mut bytes = Vec::new();
-    resp.into_reader()
+    resp.into_body()
+        .into_reader()
         .take(INDEXER_BODY_MAX + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| NewznabError::Api(0, redact_apikey(&e.to_string())))?;
@@ -1330,7 +1344,7 @@ pub(crate) const CONFIRM_UNLIMITED_PER_DAY: u32 = 400;
 
 /// Daily indexer-confirm budget for one reference account: 80% of the
 /// account's own configured allowance, whichever of hits/grabs binds
-/// first (an attempt costs one of each), floored at [`CONFIRM_PER_DAY`].
+/// first (an attempt costs one of each), floored at `CONFIRM_PER_DAY`.
 ///
 /// The floor CANNOT overspend a deliberately tiny configured quota:
 /// the runtime `hit_allowed`/`grab_allowed` guard is checked before

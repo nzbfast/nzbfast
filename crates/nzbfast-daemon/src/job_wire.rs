@@ -208,6 +208,9 @@ pub fn job_json(j: &Job) -> Value {
         "defer_reason": j.defer_reason,
         "defer_at": j.defer_at,
         "defer_count": j.defer_count,
+        // TODO 332: persisted so a restart between the defer and the
+        // second pass cannot re-arm the veto - see the field's own note.
+        "repair_deferred": j.repair_deferred,
         "password": j.password,
         "bad_blocks": j.bad_blocks,
         "verify_blocks": j.verify_blocks,
@@ -467,6 +470,10 @@ pub fn job_from_json(v: &Value) -> Option<Job> {
         defer_reason: s("defer_reason").unwrap_or_default(),
         defer_at: v.get("defer_at").and_then(Value::as_u64).unwrap_or(0),
         defer_count: nar_u32(v, "defer_count"),
+        repair_deferred: v
+            .get("repair_deferred")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         demote: false,
         password: s("password"),
         // Records written before verification became nullable stored 0

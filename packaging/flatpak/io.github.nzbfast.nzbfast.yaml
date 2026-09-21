@@ -147,13 +147,35 @@ modules:
         # release-monitoring.org, and this needs no registration - it
         # reads the GitHub releases API directly. The tags carry a `v`
         # prefix that the version must not, hence the sub().
+        #
+        # The LIST endpoint, filtered, NOT `/releases/latest`. That
+        # endpoint is per-REPO and this repo also publishes parfast, so
+        # on 18 Sep 2026 it answered `parfast-v1.6.0` and this checker
+        # would have proposed a parfast tag as nzbfast's next version.
+        # The filter keeps it to our own tag shape: newest release that
+        # is published, not a pre-release, and named `v<digit>...`.
+        # parfast tags (`parfast-v*`, `parfast-gui-v*`) fail the regex
+        # whatever flags they carry, so this holds even if the
+        # `--latest=false` half of the fix is ever forgotten.
+        #
+        # `sort_by(.published_at) | last` rather than `first`: the list
+        # endpoint's own order is not documented to be publish order,
+        # and on 18 Sep the two nzbfast/parfast releases shared a
+        # created_at to the second while their published_at differed by
+        # ten minutes. Sorting on the field that actually decides costs
+        # nothing and removes the dependence on an ordering GitHub never
+        # promised.
         x-checker-data:
           type: json
           is-main-source: true
-          url: https://api.github.com/repos/nzbfast/nzbfast/releases/latest
-          version-query: .tag_name | sub("^v"; "")
-          url-query: '"https://github.com/nzbfast/nzbfast/archive/refs/tags/"
-            + .tag_name + ".tar.gz"'
+          url: https://api.github.com/repos/nzbfast/nzbfast/releases?per_page=20
+          version-query: 'map(select(.prerelease == false and .draft == false
+            and (.tag_name | test("^v[0-9]")))) | sort_by(.published_at)
+            | last | .tag_name | sub("^v"; "")'
+          url-query: '"https://github.com/nzbfast/nzbfast/archive/refs/tags/v"
+            + (map(select(.prerelease == false and .draft == false
+            and (.tag_name | test("^v[0-9]")))) | sort_by(.published_at)
+            | last | .tag_name | sub("^v"; "")) + ".tar.gz"'
       # Regenerate with ./generate-cargo-sources.sh after any Cargo.lock
       # change, or the build fails offline on the first missing crate.
       - cargo-sources.json

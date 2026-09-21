@@ -144,7 +144,7 @@ pub struct JobFacts {
     pub hosts: Vec<HostFacts>,
     /// Unix seconds of the YOUNGEST article in the job's NZB, 0 for
     /// "we do not know" - which is not the same as "posted just now"
-    /// and is bucketed separately (see [`UNKNOWN_AGE`]).
+    /// and is bucketed separately (see `UNKNOWN_AGE`).
     pub post_unix: i64,
     pub outcome: Outcome,
 }
@@ -168,7 +168,7 @@ pub struct Cell {
 /// One provider's day.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HostDay {
-    /// Age bucket index as a decimal string, or [`UNKNOWN_AGE`].
+    /// Age bucket index as a decimal string, or `UNKNOWN_AGE`.
     #[serde(default)]
     pub age: BTreeMap<String, Cell>,
     /// Jobs in which this provider refused us another connection.
@@ -390,7 +390,7 @@ impl Stored {
         self.trim();
     }
 
-    /// Keep the newest [`WINDOW_DAYS`] date buckets.
+    /// Keep the newest `WINDOW_DAYS` date buckets.
     ///
     /// By KEY and not by "days before now": a clock that jumps backwards
     /// - a container starting before NTP, a laptop waking in another

@@ -163,7 +163,11 @@ fn unpack_pass(
     // TODO 205: the queue row's unpack line reads this very counter.
     // Resumed bytes count as work already done, or the row would stall
     // short of its total by exactly the prefix this pass never writes.
-    crate::unpackprog::watch(&written, archives, resumed_bytes);
+    crate::unpackprog::watch(
+        &written,
+        preflight::archives_unpacked_total(archives),
+        resumed_bytes,
+    );
 
     let staging = ExtractStaging::new(dir)?;
     let stage_dir = staging.path().to_path_buf();
@@ -236,6 +240,21 @@ fn unpack_pass(
         }) as Box<dyn std::io::Write>)
     };
     if eating {
+        // TODO 101: and the row says so too. Set HERE as well as in the
+        // tail that armed the mode, and the two are not redundant: the
+        // tail's call is earlier, so a row says what is about to happen
+        // before the first set is even parsed, while THIS one is the
+        // truthful predicate - `eating` above also requires a source
+        // path for every archive, and it is the only one the paths that
+        // reach this pass without the tail (the obfuscated ladder, a
+        // CLI run) ever make. Idempotent, so both firing is a no-op.
+        crate::unpackprog::mark_eating();
+        // Taken HERE, on the driving thread, because the delete
+        // callback below runs on the extractor's walk and the ladder
+        // registration is a thread-local - see
+        // `UnpackProgress::note_eaten`, which carries what a
+        // thread-local publish lost.
+        let row = crate::unpackprog::live_cell();
         info!(
             target: "extract",
             "unpacking {} volume(s), deleting each as it is used up…",
@@ -267,6 +286,13 @@ fn unpack_pass(
                     eaten += 1;
                     eaten_any.store(true, std::sync::atomic::Ordering::Relaxed);
                     bytes = bytes.saturating_add(size);
+                    // TODO 101: the queue row's unpack line reads this,
+                    // the same way it reads `written` above. Published
+                    // per delete and not totalled at the end, so a pass
+                    // that fails half way has still said what it freed.
+                    if let Some(row) = &row {
+                        row.note_eaten(size);
+                    }
                     // The space is back NOW, so the guard may spend it
                     // now - and not one byte before. A volume we could
                     // not remove credits nothing, which is exactly what

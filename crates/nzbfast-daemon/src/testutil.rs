@@ -154,6 +154,9 @@ pub fn test_daemon(dir: &Path) -> Arc<Daemon> {
         post_ids: Mutex::new(std::collections::HashMap::new()),
         hist_inflight: Mutex::new(std::collections::HashSet::new()),
         hist_rewrite_fail_ms: AtomicU64::new(0),
+        hist_owed: Mutex::new(std::collections::HashMap::new()),
+        queue_store_unreadable: AtomicBool::new(false),
+        history_store_unreadable: AtomicBool::new(false),
         life_seq: AtomicU64::new(0),
         life_events: Mutex::new(VecDeque::new()),
         queue_idle_latch: AtomicBool::new(true),
@@ -313,6 +316,8 @@ pub fn test_daemon(dir: &Path) -> Arc<Daemon> {
         media_chip_color: std::sync::atomic::AtomicBool::new(true),
         shape_chip_color: std::sync::atomic::AtomicBool::new(true),
         skip_samples: std::sync::atomic::AtomicBool::new(false),
+        // TODO 332: off by default - see the field's own note.
+        repair_defer_long: std::sync::atomic::AtomicBool::new(false),
         index_max_age_secs: AtomicU64::new(0),
         index_retention: seed_index_retention(&settings_path),
         index_pause_on_download: seed_index_pause_on_download(&settings_path),
@@ -361,6 +366,7 @@ pub fn test_daemon(dir: &Path) -> Arc<Daemon> {
         local_link: Mutex::new(None),
         cpu_sample: Mutex::new(None),
         speed_win: Mutex::new(VecDeque::new()),
+        job_win: Mutex::new(Default::default()),
         usage: Mutex::new(Default::default()),
         provquality: super::provquality::ProvQuality::load(spool.join("provquality.json")),
         run_usage_flushed: Mutex::new(Default::default()),
@@ -421,6 +427,9 @@ pub fn test_daemon(dir: &Path) -> Arc<Daemon> {
         quality_prefs: seed_quality_prefs(&settings_path),
         apikey: Mutex::new(None),
         nzbkey: Mutex::new(None),
+        web_username: Mutex::new(None),
+        web_password: Mutex::new(None),
+        sessions: Default::default(),
         stream_secret: seed_stream_secret(&settings_path),
         omdb_key: seed_omdb_key(&settings_path),
         tmdb_key: seed_tmdb_key(&settings_path, &config),
@@ -691,3 +700,53 @@ pub fn scratch_dir(prefix: &str, tag: &str) -> std::path::PathBuf {
 /// of `daemon_park.rs`'s test module with the test that reads it.
 pub const MINIMAL_NZB: &[u8] = br#"<?xml version="1.0"?>
 <nzb xmlns="http://www.newzbin.com/DTD/2003/nzb"><file poster="x" date="0" subject="&quot;a.bin&quot; yEnc (1/1)"><groups><group>g</group></groups><segments><segment bytes="1000" number="1">one@x</segment></segments></file></nzb>"#;
+
+/// Run `f` with THIS thread's tracing captured, and hand back what it
+/// said: one string per event, `[target] message`, in order.
+///
+/// For the tests whose subject is a line in daemon.log - the log is the
+/// only witness to some decisions (which row was made Force, by what),
+/// and "the line exists" is a claim worth pinning where the line is
+/// written. A minimal `Subscriber` over the `tracing` this crate already
+/// depends on, so the tests need no new dependency. Thread-local, so it
+/// sees only what `f` runs on its own thread; a wind-down that spawns a
+/// helper thread logs from there and is not captured.
+pub fn capture_log<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+    use std::sync::Mutex as StdMutex;
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Metadata, Subscriber, span};
+
+    struct Cap(Arc<StdMutex<Vec<String>>>);
+    struct Msg(String);
+    impl Visit for Msg {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+    impl Subscriber for Cap {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+        fn event(&self, e: &Event<'_>) {
+            let mut m = Msg(String::new());
+            e.record(&mut m);
+            if let Ok(mut v) = self.0.lock() {
+                v.push(format!("[{}] {}", e.metadata().target(), m.0));
+            }
+        }
+        fn enter(&self, _: &span::Id) {}
+        fn exit(&self, _: &span::Id) {}
+    }
+
+    let lines = Arc::new(StdMutex::new(Vec::new()));
+    let r = tracing::subscriber::with_default(Cap(lines.clone()), f);
+    let out = lines.lock().map(|v| v.clone()).unwrap_or_default();
+    (r, out)
+}

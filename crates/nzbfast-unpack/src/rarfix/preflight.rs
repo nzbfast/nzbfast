@@ -78,7 +78,25 @@ pub(crate) fn declared_unpacked_size(volumes: &[PathBuf], password: Option<&str>
         .map(|path| parse.read_path(path))
         .collect::<std::result::Result<Vec<_>, _>>()
         .ok()?;
-    Some(crate::unpackprog::unpacked_total(&archives))
+    Some(archives_unpacked_total(&archives))
+}
+
+/// Bytes a parsed volume set will produce: the walk over the engine's
+/// handles, feeding [`crate::unpackprog::unpacked_total`], which owns the
+/// counting rule (each file once, at the fragment that starts it).
+///
+/// Here and not in nzbfast-core because this crate owns the archives:
+/// core names no archive engine, so it takes the three figures the rule
+/// reads and nothing else. The one walk serves both readers of the
+/// total - this preflight and the progress line `native` publishes.
+pub(crate) fn archives_unpacked_total(archives: &[rars::Archive]) -> u64 {
+    crate::unpackprog::unpacked_total(archives.iter().flat_map(|a| a.members()).map(|m| {
+        (
+            m.meta.unpacked_size,
+            m.meta.is_directory,
+            m.meta.is_split_before,
+        )
+    }))
 }
 
 /// Does a set declaring `declared` unpacked bytes exceed what the target

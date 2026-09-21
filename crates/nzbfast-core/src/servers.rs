@@ -38,7 +38,7 @@ use std::path::Path;
 /// provider, opened by the hourly group-profile sampler
 /// (`serve::groupscan::sample_one_group`), while a benchmark round on
 /// another machine was using that same shared account. Nothing in the log named the
-/// host, because only the download planner prints "<host> disabled - not
+/// host, because only the download planner prints "`<host>` disabled - not
 /// in the pool" and no download had run - so the switch looked like it was
 /// holding for four days while it was not.
 ///

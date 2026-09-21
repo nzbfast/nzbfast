@@ -633,26 +633,48 @@ fn m_config(
             // follow. The gate is a no-op for legitimate callers (curl,
             // *arr, the dashboard's own POST); only a browser navigation
             // trips it.
-            (Some(name @ ("apikey" | "nzbkey")), Some(v)) => match same_site_only(req) {
-                Ok(()) => match apply_and_save(d, name, v) {
-                    Ok((live, saved)) => {
-                        info!(
-                            target: "config",
-                            "{name} → {}{}",
-                            log_value(name, v),
-                            if saved {
-                                ""
-                            } else {
-                                " (NOT SAVED - reverts on restart)"
-                            }
-                        );
-                        let _ = live;
-                        json!({"status": true, "saved": saved})
-                    }
-                    Err(e) => json!({"status": false, "error": e}),
-                },
+            // TODO 19: sign every browser out. No stored value, so it
+            // does not go through `apply_and_save` - but it IS a
+            // credential mutation in the sense that matters here (it can
+            // lock the owner's own tab out), so it takes the same
+            // same-site gate as the pair below.
+            (Some("web_logout_all"), _) => match same_site_only(req) {
+                Ok(()) => {
+                    d.sessions.drop_all();
+                    info!(target: "config", "every dashboard session signed out");
+                    json!({"status": true})
+                }
                 Err(e) => json!({"status": false, "error": e}),
             },
+            // TODO 19 joins this arm: the dashboard login pair is a
+            // credential exactly as the two keys are, and an
+            // `<img src=".../api?mode=config&name=web_password&value=…">`
+            // on a page the owner visits would set a password only the
+            // attacker knows - the same lock-out this gate exists for,
+            // and worse here because the login form is the thing the
+            // owner would then be facing.
+            (Some(name @ ("apikey" | "nzbkey" | "web_username" | "web_password")), Some(v)) => {
+                match same_site_only(req) {
+                    Ok(()) => match apply_and_save(d, name, v) {
+                        Ok((live, saved)) => {
+                            info!(
+                                target: "config",
+                                "{name} → {}{}",
+                                log_value(name, v),
+                                if saved {
+                                    ""
+                                } else {
+                                    " (NOT SAVED - reverts on restart)"
+                                }
+                            );
+                            let _ = live;
+                            json!({"status": true, "saved": saved})
+                        }
+                        Err(e) => json!({"status": false, "error": e}),
+                    },
+                    Err(e) => json!({"status": false, "error": e}),
+                }
+            }
             (Some(name), Some(v)) => match apply_and_save(d, name, v) {
                 Ok((live, saved)) => {
                     info!(
@@ -1190,7 +1212,7 @@ fn credential_mutation_allowed(req: &tiny_http::Request) -> Result<(), String> {
     same_site_only(req)
 }
 
-/// The same-site half of [`credential_mutation_allowed`], on its own.
+/// The same-site half of `credential_mutation_allowed`, on its own.
 ///
 /// `mode=config&name=apikey|nzbkey` writes the same two credentials as
 /// the mint routes, through the same `set_apikey`/`nzbkey` code, and had
@@ -1209,7 +1231,7 @@ fn credential_mutation_allowed(req: &tiny_http::Request) -> Result<(), String> {
 /// a cross-site form, GET or POST. A caller that sends no
 /// `Sec-Fetch-*`/`Origin` at all is not a browser and keeps working,
 /// exactly as the mint gate already allows.
-fn same_site_only(req: &tiny_http::Request) -> Result<(), String> {
+pub fn same_site_only(req: &tiny_http::Request) -> Result<(), String> {
     let hv = |name: &'static str| {
         req.headers()
             .iter()

@@ -20,6 +20,7 @@ use caps::{cap_payload, planned_servers};
 pub use controls::{apply_pause, apply_priority, reposition_for_priority};
 pub(crate) use controls::{
     delete_targets, note_queue_idle_unless_active, search_param, stop_deleted_transfer,
+    wind_down_after_priority,
 };
 use payload::{m_history, m_queue};
 
@@ -104,7 +105,10 @@ fn m_pause(
             .unwrap_or(0);
         let graceful = params.get("value2").map(|v| v != "now").unwrap_or(true);
         timed_pause(d, mins, graceful);
-        json!({"status": true})
+        // Additive and ours: what the pause did not stop (Force runs
+        // through a queue pause), so the caller can say so instead of
+        // reporting a pause over a transfer that is still moving.
+        json!({"status": true, "pause_exempt": d.pause_exempt()})
     })
 }
 
@@ -999,23 +1003,47 @@ fn m_stats(
         // answer. Monotone snapshots come last, beside the build.
         let cpu_pct = d.cpu_pct();
         let (disk_free, disk_total) = disk_stat_walk(&crate::naming::out_dir(d)).unwrap_or((0, 0));
-        // Phase 0(b) nested-archive prevalence (process lifetime):
-        // how often nested layers appear, of what inner type, and
-        // whether they streamed or demoted - real-world data for
-        // future nested-format priorities.
+        // Phase 0(b) nested-archive prevalence: how often nested layers
+        // appear, of what inner type, and whether they streamed or
+        // demoted - real-world data for future nested-format priorities.
+        //
+        // The nine top-level keys are the RUNNING TOTAL across daemon
+        // runs since TODO 13 stage 0a (20 Sep 2026). They were this
+        // PROCESS's figures until then, which is why the instrument
+        // banked nothing in two months of soaking: every spawn started
+        // from zero and the log that carried the per-level line keeps two
+        // rotations. `nzbfast_core::nestedstat` owns the file.
+        //
+        // The two sub-objects break the total back apart, because a
+        // reader wants "since this daemon started" as well as "ever" -
+        // and because the prevalence tests assert deltas within one
+        // process and must keep having something to assert.
         let nested_prevalence = {
-            let np = nzbkit::extract::nested_prevalence();
-            json!({
-                "levels": np.levels,
-                "in_stream": np.in_stream,
-                "demoted": np.demoted,
-                "disk": np.disk,
-                "rar_store": np.rar_store,
-                "rar_compressed": np.rar_compressed,
-                "rar_encrypted": np.rar_encrypted,
-                "sevenz": np.sevenz,
-                "other": np.other,
-            })
+            let fields = |np: nzbkit::extract::NestedPrevalence| {
+                json!({
+                    "levels": np.levels,
+                    "in_stream": np.in_stream,
+                    "demoted": np.demoted,
+                    "disk": np.disk,
+                    "rar_store": np.rar_store,
+                    "rar_compressed": np.rar_compressed,
+                    "rar_encrypted": np.rar_encrypted,
+                    "sevenz": np.sevenz,
+                    "other": np.other,
+                })
+            };
+            let mut total = fields(nzbkit::extract::nested_prevalence_total());
+            if let Some(o) = total.as_object_mut() {
+                o.insert(
+                    "process".into(),
+                    fields(nzbkit::extract::nested_prevalence()),
+                );
+                o.insert(
+                    "previous_runs".into(),
+                    fields(nzbkit::extract::nested_prevalence_baseline()),
+                );
+            }
+            total
         };
         let live_servers: Vec<Value> = d
             .hub

@@ -342,7 +342,7 @@ impl Index {
         Ok(xml)
     }
 
-    /// Delete releases outside [min,max] total bytes (0 = unbounded).
+    /// Delete releases outside min,max total bytes (0 = unbounded).
     /// Oversize releases can only grow, so they go immediately; undersize
     /// ones are pruned once FULLY PRESENT (every seen file has all its
     /// parts - the upload finished and it's still tiny, which is exactly
@@ -427,6 +427,10 @@ impl Index {
         Ok(n)
     }
 
+    /// `(releases, complete releases)` counted now, refreshing the
+    /// cached snapshot. A full `COUNT(*)`, so it is the slow and exact
+    /// answer - a caller polling for display wants the cached reader
+    /// rather than this.
     pub fn stats(&self) -> rusqlite::Result<(u64, u64)> {
         let snap = self.db.query_row(
             "SELECT COUNT(*), COALESCE(SUM(complete),0) FROM releases",
@@ -1256,7 +1260,7 @@ impl Index {
     /// the top id and follows it. Bounded per call in time and id
     /// space; the caller holds the index write mutex throughout, so
     /// the time bound is a bound on that HOLD and is enforced by
-    /// [`super::foldpace`] rather than by a deadline checked after the
+    /// `super::foldpace` rather than by a deadline checked after the
     /// fact.
     /// Returns (postings folded, rows folded away, caught up).
     pub fn shatter_fold(

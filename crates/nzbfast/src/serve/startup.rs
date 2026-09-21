@@ -16,9 +16,19 @@ pub(super) fn restore_runtime_state(
     daemon: &Arc<Daemon>,
     settings_path: &Path,
     _spool: &Path,
-    _config: &Path,
+    config: &Path,
     speedlimit: &Option<String>,
 ) -> Result<()> {
+    // TODO 13 stage 0a: load what previous daemon runs banked of the
+    // nested-archive prevalence tally, and arm the write-back, so
+    // `mode=stats` reports a running total rather than this process's.
+    // The counters are process-global atomics with nothing behind them,
+    // so until this line every spawn started the measurement from zero -
+    // and the only durable copy, the per-level log line, lives in a file
+    // the Mac app rotates on spawn keeping one `.1`. First, because it is
+    // a pure state load and everything below it can download.
+    nzbfast_core::nestedstat::install(config);
+
     // Bring back the job records a previous run persisted (Downloading
     // reverts to Queued inside load_queue - the download restarts and its
     // journal skips what already landed).
@@ -693,11 +703,30 @@ pub(super) fn announce_ready(
         // No API key → every request is treated as fully authorized (bug
         // sweep). Make the exposure impossible to miss; logtee mirrors
         // this into the dashboard log as well.
+        //
+        // TODO 19 re-worded the CSRF clause, and the correction is worth
+        // stating rather than quietly editing. The old line said a web
+        // page you visit "can add or delete jobs and change settings"
+        // via CSRF, full stop. That is still exactly true of a KEYLESS
+        // install - which is the only install this line is printed on -
+        // because with no credential at all there is nothing for a
+        // cross-site request to fail to present. What has changed is
+        // that the daemon now HAS a browser credential that a browser
+        // sends by itself (the dashboard session, TODO 19), and that one
+        // is defended: same-site plus a per-session token on every call
+        // it authenticates. Saying so here is the difference between
+        // "CSRF is a thing that can happen to you" and "CSRF is what an
+        // OPEN api is, and closing it is one setting away".
         eprintln!(
             "⚠ SECURITY: no apikey is set - the API on {bind}:{port} is OPEN to every host that \
-             can reach this machine. Any device on your network, or a web page you visit (CSRF), \
-             can add or delete jobs and change settings. Set an API key in Settings, or firewall \
-             the port, unless this box is on a fully trusted network."
+             can reach this machine. With no key there is no credential to check, so any device \
+             on your network - or any web page you visit, whose cross-site requests (CSRF) this \
+             daemon cannot tell from your own - can add or delete jobs and change settings. \
+             Set an API key in Settings, or firewall the port, unless this box is on a fully \
+             trusted network. (The dashboard's own optional login, in Settings > Security, is \
+             CSRF-defended in its own right: its session cookie is same-site and every call it \
+             authenticates carries a per-session token. It does not replace the key, which is \
+             what Sonarr, Radarr and the phone apps use.)"
         );
     }
     if open {
@@ -1017,6 +1046,9 @@ fn build_daemon(
         post_ids: Mutex::new(std::collections::HashMap::new()),
         hist_inflight: Mutex::new(std::collections::HashSet::new()),
         hist_rewrite_fail_ms: AtomicU64::new(0),
+        hist_owed: Mutex::new(std::collections::HashMap::new()),
+        queue_store_unreadable: AtomicBool::new(false),
+        history_store_unreadable: AtomicBool::new(false),
         life_seq: AtomicU64::new(0),
         life_events: Mutex::new(VecDeque::new()),
         queue_idle_latch: AtomicBool::new(true),
@@ -1231,6 +1263,8 @@ fn build_daemon(
         // costs a teaser's worth of bandwidth and nothing else; turning
         // it on trades that for the risk a name always carries.
         skip_samples: std::sync::atomic::AtomicBool::new(false),
+        // TODO 332: off by default - see the field's own note.
+        repair_defer_long: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "indexer")]
         index_max_age_secs: AtomicU64::new(index_max_age_secs),
         #[cfg(not(feature = "indexer"))]
@@ -1306,6 +1340,7 @@ fn build_daemon(
         local_link: Mutex::new(None),
         cpu_sample: Mutex::new(None),
         speed_win: Mutex::new(VecDeque::new()),
+        job_win: Mutex::new(Default::default()),
         usage: Mutex::new(
             crate::persist::load_json_with_backup(&spool.join("usage.json"))
                 .and_then(|v| v.as_object().cloned())
@@ -1380,6 +1415,11 @@ fn build_daemon(
         quality_prefs: seed_quality_prefs(&settings_path),
         apikey: Mutex::new(apikey),
         nzbkey: Mutex::new(nzbkey),
+        // TODO 19: seeded from settings.json by `apply_saved_settings`,
+        // like every other restored credential - never from a flag.
+        web_username: Mutex::new(None),
+        web_password: Mutex::new(None),
+        sessions: Default::default(),
         stream_secret: seed_stream_secret(&settings_path),
         omdb_key: seed_omdb_key(&settings_path),
         tmdb_key: seed_tmdb_key(&settings_path, &config),

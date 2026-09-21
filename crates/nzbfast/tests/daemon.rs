@@ -5,6 +5,10 @@
 // What each credential may do - full key, add-only nzbkey, bootstrap
 // hatch (sibling dir, size gate).
 mod daemon_authkey;
+// TODO 19: the optional dashboard login - the form, the session, the
+// CSRF token, and the two control arms that say a keyless daemon and a
+// key-holding API client are untouched (sibling dir, size gate).
+mod daemon_weblogin;
 // §123 chip-6 fault x lifecycle cross product (sibling dir, size gate).
 mod daemon_chip6;
 // TODO 222: the bomb verdict must reach the job message on every route
@@ -124,7 +128,10 @@ mod harness;
 mod playback_contract;
 // §73 phase 3 remux endpoint (sibling dir, size gate).
 mod payloads;
+// The shared RAR fixture builders (sibling dir, the `payloads` pattern)
+// - see `rarfixtures/mod.rs` for why they are named by shape.
 mod preview_media;
+mod rarfixtures;
 mod scratch;
 // M11 playback rigs (sibling dir, size gate).
 mod stream_chaos;
@@ -1054,9 +1061,23 @@ async fn raising_a_held_duplicates_priority_releases_it() {
     let mut articles = HashMap::new();
     // Both copies are REAL: the point of the test is that the held one
     // actually downloads once its priority is raised.
-    let a = make_file_articles("a.bin", &payload(120_000, 17), 40_000, "dq", &mut articles);
-    let b = make_file_articles("b.bin", &payload(120_000, 19), 40_000, "dq", &mut articles);
-    let c = make_file_articles("c.bin", &payload(120_000, 23), 40_000, "dq", &mut articles);
+    //
+    // ONE idtag PER FILE, and it is load-bearing. `make_file_articles`
+    // mints `{idtag}-{part}@mock`, which depends on the tag and the part
+    // number and NOT on the filename or the payload - so a shared "dq"
+    // gave all three NZBs the same three article ids, and the later calls
+    // overwrote the earlier ones in `articles`. Three rows that read as
+    // different posts here were one post posted three times on the wire.
+    // Nothing noticed while a duplicate hold was decided by TITLE alone;
+    // `7df90e1f7` made post identity load-bearing (a released twin whose
+    // articles its live original already covers is removed at the start
+    // door) and the fixture's three "copies" covered each other at 1.0,
+    // so both released rows were dropped and the test waited out its full
+    // 60 s. This test's subject is a DIFFERENT post of the same title,
+    // which that commit leaves alone by name - so the tags must differ.
+    let a = make_file_articles("a.bin", &payload(120_000, 17), 40_000, "dqa", &mut articles);
+    let b = make_file_articles("b.bin", &payload(120_000, 19), 40_000, "dqb", &mut articles);
+    let c = make_file_articles("c.bin", &payload(120_000, 23), 40_000, "dqc", &mut articles);
     let srv = MockServer::start(articles, Chaos::default()).await;
 
     let nzb = |file: &str, segs: &[(String, u64, u32)]| {
@@ -5141,25 +5162,37 @@ async fn cancelling_a_download_leaves_its_duplicate_held() {
     let mut articles = HashMap::new();
     // The cancelled original is deliberately long (250 ms an article, 2
     // connections → ~6 s) so the delete lands mid-transfer.
+    //
+    // ONE idtag PER FILE. `make_file_articles` mints `{idtag}-{part}@mock`
+    // off the tag and the part number only, so a shared tag here gave
+    // held.bin and alt.bin the same ten ids as orig.bin's first ten - and
+    // each call overwrote those articles in the map, leaving the
+    // "original" delivering another file's bytes for its first ten parts.
+    // These three are meant to be different posts that share a TITLE, which
+    // is what puts the twins behind a hold; identical ids make them the
+    // same post, and post identity is load-bearing since `7df90e1f7`. This
+    // test was not red - a still-held twin is left alone by name - so this
+    // is the latent half of the defect that reddened
+    // `raising_a_held_duplicates_priority_releases_it`.
     let orig = make_file_articles(
         "orig.bin",
         &payload(2_000_000, 51),
         40_000,
-        "cd",
+        "cdo",
         &mut articles,
     );
     let held = make_file_articles(
         "held.bin",
         &payload(400_000, 53),
         40_000,
-        "cd",
+        "cdh",
         &mut articles,
     );
     let alt = make_file_articles(
         "alt.bin",
         &payload(400_000, 55),
         40_000,
-        "cd",
+        "cda",
         &mut articles,
     );
     let srv = MockServer::start(

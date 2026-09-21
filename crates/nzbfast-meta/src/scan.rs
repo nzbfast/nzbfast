@@ -849,6 +849,12 @@ pub async fn index_scan_into(
     }
 
     let t_tail = Instant::now();
+    // Say what this group's ingest did with reposted postings, once,
+    // before the breakdown below. The figures were a per-BATCH `warn!`
+    // until 18 Sep 2026 and were 80% of everything the daemon logged
+    // (`nzbkit::index::GenFold`); folding them here is what makes the
+    // scan's output one line per leg rather than thousands.
+    ix.flush_gen_fold();
     if let Some(g) = gates {
         let (min, max) = g.size_bounds();
         if min > 0 || max > 0 {

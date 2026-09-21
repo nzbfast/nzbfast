@@ -63,14 +63,6 @@ fn match_length_scalar(
     length
 }
 
-// The x86 E8/E8E9 opcode scan has ONE definition, in `crate::fast`, and
-// every caller in this module tree reaches it through here. It lived as a
-// byte-identical second copy in this file until the two were collapsed;
-// `match_length` below is what actually belongs to `codec::fast`.
-// (nzbfast-local change, 23 Aug 2026 - re-apply on the next rars re-sync,
-// see vendor/rars/VENDORING.md.)
-pub(crate) use crate::fast::next_x86_opcode;
-
 #[cfg(test)]
 mod tests {
     use super::*;

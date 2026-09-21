@@ -37,19 +37,11 @@ async fn a_demote_after_a_drop_refetches_the_holed_volumes_and_repairs() {
     // trim. Level 1 because the writer's default costs 3 s/MB in a
     // debug build and the fixture is the whole price of this leg.
     let doc = half_entropy(60_000_000, 0x2545f4914f6cdd1d);
-    let vols = rars::rar50::Rar50VolumeWriter::new(
-        rars::rar50::WriterOptions::default().with_compression_level(1),
-    )
-    .compressed_entries(&[rars::rar50::CompressedEntry {
-        name: b"movie.bin",
-        data: &doc,
-        mtime: None,
-        attributes: 0,
-        host_os: 0,
-    }])
-    .max_payload_per_volume(1_500_000)
-    .finish()
-    .unwrap();
+    let vols = crate::rarfixtures::compressed_volume_set_at_effort(
+        &[crate::rarfixtures::Member::bare(b"movie.bin", &doc)],
+        1_500_000,
+        Some(1),
+    );
     assert!(vols.len() >= 8, "want many volumes, got {}", vols.len());
     let mut fx = Fixture::new("drop-refetch");
     let names: Vec<String> = (1..=vols.len()).map(|i| format!("d.part{i}.rar")).collect();

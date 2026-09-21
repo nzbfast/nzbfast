@@ -222,7 +222,33 @@ pub(crate) enum ArchiveSource {
     },
 }
 
+/// A stream source's length as CURRENTLY known: the `len` the parse was
+/// built with, narrowed to the source's own [`BlockingRangeSource::total_len`]
+/// once it reports one. A chased volume whose declared size is not yet
+/// trusted parses with an unbounded `len` and learns its length later
+/// (nzbfast TODO 118.2 (b)); every bound in this file that used to read
+/// the captured `len` reads this instead, so a header-prefix read sized
+/// off `len` - 14 bytes where the END block leaves 8 - is clamped at the
+/// true end rather than running into `Ok(0)` there. A source that reports
+/// no length, or one past `len`, leaves `len` alone.
+/// (nzbfast-local change, 21 Sep 2026; see vendor/rars/VENDORING.md.)
+fn stream_len_now(source: &dyn BlockingRangeSource, len: usize) -> usize {
+    source
+        .total_len()
+        .and_then(|total| usize::try_from(total).ok())
+        .map_or(len, |total| total.min(len))
+}
+
 impl ArchiveSource {
+    /// [`stream_len_now`] for a stream source; `None` for the others.
+    /// (nzbfast-local change, 21 Sep 2026; see vendor/rars/VENDORING.md.)
+    pub(crate) fn stream_len(&self) -> Option<usize> {
+        match self {
+            Self::Stream { source, len } => Some(stream_len_now(source.as_ref(), *len)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn read_range(&self, range: Range<usize>) -> Result<Vec<u8>> {
         match self {
             Self::Memory(data) => data
@@ -234,7 +260,7 @@ impl ArchiveSource {
                 read_exact_at(&mut file, range.start, range.len())
             }
             Self::Stream { source, len } => {
-                if range.start > range.end || range.end > *len {
+                if range.start > range.end || range.end > stream_len_now(source.as_ref(), *len) {
                     return Err(Error::TooShort);
                 }
                 let mut data = vec![0; range.len()];
@@ -283,7 +309,7 @@ impl ArchiveSource {
                 }))
             }
             Self::Stream { source, len } => {
-                if range.start > range.end || range.end > *len {
+                if range.start > range.end || range.end > stream_len_now(source.as_ref(), *len) {
                     return Err(Error::TooShort);
                 }
                 Ok(Box::new(BlockingRangeReader {
@@ -382,7 +408,7 @@ impl ArchiveSource {
                 Ok(())
             }
             Self::Stream { source, len } => {
-                if end > *len {
+                if end > stream_len_now(source.as_ref(), *len) {
                     return Err(Error::TooShort);
                 }
                 stream_read_exact(source.as_ref(), offset, buf)
@@ -421,7 +447,7 @@ impl ArchiveSource {
                 })
             }
             Self::Stream { source, len } => {
-                if range.end > *len {
+                if range.end > stream_len_now(source.as_ref(), *len) {
                     return Err(Error::TooShort);
                 }
                 Ok(OwnedRangeReader::Stream {
@@ -438,7 +464,7 @@ impl ArchiveSource {
             Self::Memory(data) => Ok(data.len()),
             Self::File(path) => usize::try_from(std::fs::metadata(path.as_ref())?.len())
                 .map_err(|_| Error::InvalidHeader("archive size overflows host address size")),
-            Self::Stream { len, .. } => Ok(*len),
+            Self::Stream { source, len } => Ok(stream_len_now(source.as_ref(), *len)),
         }
     }
 
@@ -446,7 +472,9 @@ impl ArchiveSource {
         match self {
             Self::Memory(data) => Ok(data.to_vec()),
             Self::File(path) => Ok(std::fs::read(path.as_ref())?),
-            Self::Stream { len, .. } => self.read_range(0..*len),
+            Self::Stream { source, len } => {
+                self.read_range(0..stream_len_now(source.as_ref(), *len))
+            }
         }
     }
 }
@@ -960,12 +988,29 @@ mod tests {
     /// re-sync, see vendor/rars/VENDORING.md.)
     #[test]
     fn a_range_that_ends_early_fails_rather_than_reading_as_eof() {
-        // A blocking source that has DECLARED its total and stopped
-        // short: `read_at` past the end answers 0 forever.
-        let buffer = Arc::new(GrowableBuffer::with_total_len(4));
-        buffer.append(b"0123");
+        // A blocking source that stopped short WITHOUT declaring a total:
+        // `read_at` past the end answers 0 forever. (It used to declare
+        // one; since the stream length narrows to a declared total -
+        // nzbfast-local change, 21 Sep 2026 - that shape is refused at
+        // the range itself, pinned at the end of this test.)
+        #[derive(Debug)]
+        struct Short(&'static [u8]);
+        impl BlockingRangeSource for Short {
+            fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+                let at = (offset as usize).min(self.0.len());
+                let n = buf.len().min(self.0.len() - at);
+                buf[..n].copy_from_slice(&self.0[at..at + n]);
+                Ok(n)
+            }
+            fn known_len(&self) -> u64 {
+                self.0.len() as u64
+            }
+            fn total_len(&self) -> Option<u64> {
+                None
+            }
+        }
         let source = ArchiveSource::Stream {
-            source: Arc::clone(&buffer) as Arc<dyn BlockingRangeSource>,
+            source: Arc::new(Short(b"0123")) as Arc<dyn BlockingRangeSource>,
             len: 8,
         };
 
@@ -980,6 +1025,20 @@ mod tests {
             assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
             assert_eq!(out, b"0123", "the bytes that DID arrive are delivered");
         }
+
+        // A source that has DECLARED a total below `len` narrows the
+        // stream to it, so a range past the total is refused before a
+        // reader exists (nzbfast-local change, 21 Sep 2026).
+        let buffer = Arc::new(GrowableBuffer::with_total_len(4));
+        buffer.append(b"0123");
+        let declared = ArchiveSource::Stream {
+            source: Arc::clone(&buffer) as Arc<dyn BlockingRangeSource>,
+            len: 8,
+        };
+        assert_eq!(declared.len().unwrap(), 4);
+        assert!(declared.range_reader(0..8).is_err());
+        assert!(declared.owned_range_reader(0..8).is_err());
+        assert_eq!(declared.read_range(0..4).unwrap(), b"0123");
 
         // And the file-backed reader, whose range is taken on trust from
         // the header rather than checked against the file's length.

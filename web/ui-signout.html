@@ -1,0 +1,77 @@
+<!--
+  ONE sign-out control for every page nzbfast serves behind the login
+  gate: the dashboard and the wall.
+
+  TODO 19 (public request #4) shipped the pill on the dashboard alone.
+  The wall is behind the SAME gate - `crates/nzbfast/src/serve/http.rs`
+  redirects `/wall` to `/login` exactly as it redirects `/` - and it is
+  not a read-only display: it grabs releases, stars watchlist items,
+  hides, merges and re-fetches cards. A person parked there had to walk
+  back to the dashboard to sign out, which is a longer way round than
+  the one-click nav makes it look, and on a shared screen it is the
+  click that matters most.
+
+  WHY A PARTIAL AND NOT TWO COPIES. The action is three facts that must
+  agree in both pages - the endpoint is `/logout`, the method is POST,
+  and where you land afterwards is `/` - and every one of them is a
+  daemon decision the pages only mirror (`route_logout`, and the
+  no-CSRF-token judgement written out at its definition). The wall's
+  sound engine is the register for what a hand copy of a shared
+  behaviour does here: it agreed with the dashboard's until it did not,
+  and then sat there wrong with nothing reporting it. So this is a
+  partial from the start rather than a second copy somebody has to
+  remember to move.
+
+  assets.rs (ui_themed) substitutes this whole snippet for the sign-out
+  placeholder in each page's <head>, beside the design tokens and the
+  sound engine, by the same mechanism. Do not write the placeholder's
+  literal name in here: a single `.replace` does not recurse, so it
+  would be re-emitted into every served page (the trap ui-tokens.html's
+  own header records).
+
+  WHAT IS HERE and what is not. Here: the action, and the reveal that
+  decides whether the control exists for this visitor at all. NOT here:
+  the pill MARKUP, which stays in each page's own nav - the two navs are
+  hand-written HTML in different containers, and holding their
+  destinations to one set is `tools/nav-destinations-gate.py`'s job
+  rather than this file's. Also not here: "Sign out every browser",
+  which is a Settings control and the dashboard has the only Settings.
+
+  WHERE THE TRUTH COMES FROM DIFFERS BY PAGE, and that is deliberate.
+  The dashboard passes `c.web_login` out of the `mode=get_config` it
+  already makes at boot, so switching the login on in Settings reveals
+  the pill without a reload. The wall has no Settings panel, so the
+  answer can only change on another page a reload away - the same
+  argument `loadGrpNames` makes for its one-shot boot fetch - and it
+  reads the server-stamped `WEB_LOGIN` instead, which costs no request
+  and cannot flash a pill in and out on load.
+-->
+<script>
+// Sign THIS browser out. A plain fetch rather than either page's api():
+// /logout is not an /api mode, it takes no key, and the daemon answers
+// it on the cookie alone (see `route_logout` for why it asks for no
+// CSRF token).
+async function signOut(){
+  // AWAITED, and it must stay that way: assigning `location.href` below
+  // can abort a request still in flight, which would leave the daemon
+  // holding a session the user believes they ended. The journey asserts
+  // the session count fell to zero after the click, so an un-awaited
+  // version reddens rather than flakes quietly.
+  try{ await fetch('/logout', {method:'POST'}); }catch(_){}
+  // Whatever the daemon said: the cookies are either gone or were never
+  // going to work, and `/` redirects to the form. A reload rather than
+  // a toast, because every poll the page has in flight is about to be
+  // refused.
+  location.href = '/';
+  return false;
+}
+// Show the control only where it can do something. A sign-out pill on
+// an install with no login form is a button that logs you out of
+// nothing, and hiding it is not cosmetic: it is the difference between
+// "this install has a password" and "this install does not", which is
+// the one thing the nav can honestly say about the feature.
+function revealSignoutPill(on){
+  const so=document.getElementById('navSignout');
+  if(so) so.style.display=on?'':'none';
+}
+</script>

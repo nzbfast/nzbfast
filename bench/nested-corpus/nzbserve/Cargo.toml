@@ -15,3 +15,15 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net",
 
 [profile.release]
 debug = false
+
+# `[patch.crates-io]` applies from the WORKSPACE ROOT and a detached
+# workspace inherits none of the repo root's, so without this table this
+# rig compiles the PUBLISHED lzma-rust2 and sevenz-rust2 while every
+# shipped binary compiles the vendored forks - a rig measuring code the
+# product does not run. Kept in step with the root table by
+# `tools/detached-lock-gate.py`, which reads the LOCK rather than this
+# table: copying the table is not enough on its own when the fork's
+# version is behind the one the lock holds (both agree today).
+[patch.crates-io]
+sevenz-rust2 = { path = "../../../vendor/sevenz-rust2" }
+lzma-rust2 = { path = "../../../vendor/lzma-rust2" }

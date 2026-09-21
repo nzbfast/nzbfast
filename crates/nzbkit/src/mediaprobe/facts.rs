@@ -28,7 +28,7 @@
 //!   contradicted;
 //! - Dolby Vision is never checked at all - Matroska carries it in a
 //!   BlockAdditionMapping this probe does not read, so "no DV signalled"
-//!   is not evidence of absence (see [`hdr_mismatch`]);
+//!   is not evidence of absence (see `hdr_mismatch`);
 //! - an audio claim fails only when NO track in the file belongs to the
 //!   claimed family, and only in the direction that flatters the post
 //!   (a name saying AC3 over an E-AC3 track is an under-sell, not a
@@ -67,6 +67,7 @@ pub struct MediaFacts {
     /// "the container said nothing", which the chip treats alike -
     /// neither is worth a badge.
     pub hdr: Option<String>,
+    /// Runtime in milliseconds, when the container stated one.
     pub duration_ms: Option<u64>,
     /// "mkv", "mp4", "avi", ... - the same lowercase spelling
     /// [`super::Container`] serializes.
@@ -110,7 +111,7 @@ pub struct MediaFacts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
     /// The main video's canonical codec id - the RAW INPUT
-    /// [`vcodec_label`] reduces to [`MediaFacts::vcodec`].
+    /// `vcodec_label` reduces to [`MediaFacts::vcodec`].
     ///
     /// This is the probe's own short name ("hevc", "h264", "av1"), NOT
     /// the container's CodecID (`V_MPEGH/ISO/HEVC`), which is a
@@ -125,12 +126,12 @@ pub struct MediaFacts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcodec_canon: Option<String>,
     /// The strongest audio track's canonical codec id ("eac3", "dts"),
-    /// which [`acodec_label`] reduces to the first half of
+    /// which `acodec_label` reduces to the first half of
     /// [`MediaFacts::audio`]. See [`MediaFacts::vcodec_canon`] for why
     /// it is the canonical name and not the container's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acodec_canon: Option<String>,
-    /// That track's channel COUNT, which [`channels_label`] reduces to
+    /// That track's channel COUNT, which `channels_label` reduces to
     /// the second half of [`MediaFacts::audio`] ("5.1").
     ///
     /// The count and the label are not the same fact and the difference
@@ -140,7 +141,7 @@ pub struct MediaFacts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channels: Option<u32>,
     /// That track's layout string ("stereo", "5.1", "7 ch"), the OTHER
-    /// input [`channels_label`] reads - it is what the label falls back
+    /// input `channels_label` reads - it is what the label falls back
     /// to when the count is zero.
     ///
     /// Today every prober derives this from the count itself, so it
@@ -159,7 +160,7 @@ pub struct MediaFacts {
     /// This pair recovers a distinction the label alone destroys.
     /// [`MediaFacts::hdr`] is `None` both for a file the container
     /// positively described as SDR and for one it said nothing about.
-    /// The chip treats those alike; [`hdr_mismatch`] very much does
+    /// The chip treats those alike; `hdr_mismatch` very much does
     /// not, because only the first is grounds for contradicting a name.
     /// With these stored, a row can still tell them apart: both absent
     /// means the container was silent.
@@ -176,6 +177,7 @@ pub struct MediaFacts {
 /// says {claimed}, but the file is {actual}." and needs no table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mismatch {
+    /// Which claim is contradicted. See [`Field`].
     pub field: Field,
     /// What the release name claims ("2160p", "x265", "Atmos").
     pub claimed: String,
@@ -183,12 +185,19 @@ pub struct Mismatch {
     pub actual: String,
 }
 
+/// Which claim in a release name a [`Mismatch`] contradicts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Field {
+    /// The name's resolution claim ("2160p") against the coded size.
     Resolution,
+    /// The name's video-codec claim ("x265") against the container's.
     Video,
+    /// The name's audio claim ("Atmos") against the strongest track.
     Audio,
+    /// The name's dynamic-range claim ("HDR") against the colour
+    /// signalling. A name claiming HDR over an SDR file is the case
+    /// this field exists for.
     Hdr,
 }
 

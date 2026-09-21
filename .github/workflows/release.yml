@@ -225,8 +225,9 @@ jobs:
         run: rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
       - name: Install zig + cargo-zigbuild
         # One cross-compiler for both musl targets, including the C in
-        # vendor/rapidyenc and the aws-lc-rs build. Both are pinned: the
-        # zig toolchain by PyPI version, cargo-zigbuild by release sha256
+        # crates/nzbkit-base/vendor/rapidyenc and the aws-lc-rs build.
+        # Both are pinned: the zig toolchain by PyPI version,
+        # cargo-zigbuild by release sha256
         # (a version tag alone is mutable, and this binary compiles what
         # gets published).
         run: |

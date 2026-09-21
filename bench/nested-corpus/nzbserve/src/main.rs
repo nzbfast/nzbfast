@@ -62,7 +62,13 @@ struct LegFile {
 
 fn sanitize(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -192,7 +198,11 @@ fn read_yenc_lies(legdir: &Path, files: &mut [LegFile]) {
 fn build_leg(legdir: &Path, art_size: usize) -> BuiltLeg {
     let mut files = read_dir_sorted(&legdir.join("post"), false);
     files.extend(read_dir_sorted(&legdir.join("ghost"), true));
-    assert!(!files.is_empty(), "no files under {}/post", legdir.display());
+    assert!(
+        !files.is_empty(),
+        "no files under {}/post",
+        legdir.display()
+    );
     read_yenc_lies(legdir, &mut files);
 
     let mut articles = HashMap::new();
@@ -247,7 +257,13 @@ fn build_leg(legdir: &Path, art_size: usize) -> BuiltLeg {
         nzb.push_str("</segments>\n</file>\n");
     }
     nzb.push_str("</nzb>\n");
-    BuiltLeg { nzb, articles, missing, total_bytes, n_files: files.len() }
+    BuiltLeg {
+        nzb,
+        articles,
+        missing,
+        total_bytes,
+        n_files: files.len(),
+    }
 }
 
 fn nzb_path(legdir: &Path) -> PathBuf {

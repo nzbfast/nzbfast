@@ -273,3 +273,75 @@ fn a_walker_in_the_refusal_to_requeue_window_is_claimed_by_its_census_ordinal() 
         "its eventual verdict lands as a no-op - one outcome per article"
     );
 }
+
+/// The bounded-wait census (21 Sep 2026): `pending_census_if` answers in
+/// ANY article state - untried and queued, in flight clean, refusal
+/// walking - but only while `accept` says yes to every pending article,
+/// so a caller asking "is nothing but furniture left?" is answered at
+/// the moment that is true and never before. `verdict_walkers` stays
+/// closed on the same state: a clean, untried furniture article is not
+/// a refusal walker, which is exactly why a walker census cannot bound
+/// that tail.
+#[test]
+fn pending_census_if_opens_in_any_state_but_only_for_wanted_articles() {
+    let ctl = QueueControl::default();
+    assert!(
+        ctl.pending_census_if(&|_| true).is_none(),
+        "before attach there is no pool to ask"
+    );
+    let (sh, _) = Shared::new(
+        fresh(&["<a.nfo@x>", "<b.nfo@x>", "<movie@x>"]),
+        &[(server("s"), PoolConfig::default())],
+    );
+    ctl.attach(&sh);
+    let nfo_only = |id: &str| id.contains(".nfo");
+
+    // A payload article still queued: shut, whatever else is pending.
+    assert!(ctl.pending_census_if(&nfo_only).is_none());
+
+    // The payload lands (terminal + completed), leaving two UNTRIED
+    // furniture articles: the census opens, the walker census does not.
+    {
+        let mut q = sh.queue.try_lock().expect("test owns the queue");
+        q.pop_back();
+    }
+    assert!(sh.claim_done("<movie@x>", 2));
+    sh.complete_one();
+    let got = ctl
+        .pending_census_if(&nfo_only)
+        .expect("only furniture left");
+    assert_eq!(got.len(), 2);
+    assert!(
+        ctl.verdict_walkers().is_none(),
+        "untried articles are a download, not a refusal tail"
+    );
+
+    // One goes on the wire clean, the other stays queued: still open,
+    // split across both structures.
+    {
+        let mut q = sh.queue.try_lock().expect("test owns the queue");
+        let w = q.pop_front().expect("a.nfo queued");
+        sh.register_inflight(&w, 0);
+    }
+    let got = ctl.pending_census_if(&nfo_only).expect("split state");
+    assert_eq!(got.len(), 2);
+
+    // A payload article on the wire closes it again.
+    sh.pending.fetch_add(1, Ordering::AcqRel);
+    sh.register_inflight(&work("<movie2@x>"), 0);
+    assert!(ctl.pending_census_if(&nfo_only).is_none());
+    sh.inflight.lock_ok().remove("<movie2@x>");
+    sh.pending.fetch_sub(1, Ordering::AcqRel);
+
+    // The commit half is the walker commit: both get claimed and the
+    // run seals with no outcome ever arriving for them.
+    let finished = sh.finished.subscribe();
+    let claimed = ctl.give_up_covered(&got);
+    assert_eq!(claimed.len(), 2);
+    assert_eq!(sh.pending.load(Ordering::Acquire), 0);
+    assert!(*finished.borrow(), "the last claim seals the run");
+
+    // A pause keeps its queue intact.
+    sh.draining.store(true, Ordering::Release);
+    assert!(ctl.pending_census_if(&|_| true).is_none());
+}

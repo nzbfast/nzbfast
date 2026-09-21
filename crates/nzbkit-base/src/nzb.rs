@@ -4,12 +4,50 @@
 //! <segments><segment bytes number>message-id</segment></segments></file></nzb>`.
 //! We keep the model deliberately close to the wire format; scheduling
 //! concepts (server tiers, block accounting) live elsewhere.
+//!
+//! ```
+//! use nzbkit_base::nzb::{FileKind, Nzb};
+//!
+//! let xml = br#"<?xml version="1.0"?>
+//! <nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+//!   <head><meta type="password">hunter2</meta></head>
+//!   <file subject="[1/2] &quot;demo.part1.rar&quot; yEnc (1/1)" poster="p" date="1700000000">
+//!     <groups><group>alt.binaries.test</group></groups>
+//!     <segments><segment bytes="750000" number="1">a1@example.com</segment></segments>
+//!   </file>
+//!   <file subject="[2/2] &quot;demo.vol000+01.par2&quot; yEnc (1/1)" poster="p" date="1700000000">
+//!     <groups><group>alt.binaries.test</group></groups>
+//!     <segments><segment bytes="250000" number="1">a2@example.com</segment></segments>
+//!   </file>
+//! </nzb>"#;
+//!
+//! let nzb = Nzb::parse(xml).expect("well-formed NZB");
+//! assert_eq!(nzb.files.len(), 2);
+//! assert_eq!(nzb.password(), Some("hunter2"));
+//! assert_eq!(nzb.total_bytes(), 1_000_000);
+//!
+//! // The message-id is what a BODY command asks for, without the
+//! // angle brackets the wire adds.
+//! assert_eq!(nzb.files[0].segments[0].message_id, "a1@example.com");
+//!
+//! // Recovery volumes are told apart from payload here, so a download
+//! // can leave them unfetched until something actually needs repair.
+//! assert_eq!(nzb.files[0].kind(), FileKind::Data);
+//! assert_eq!(nzb.files[1].kind(), FileKind::Par2Volume);
+//! assert_eq!(nzb.eager_bytes(), 750_000);
+//! ```
+
+#![warn(missing_docs)]
 
 use quick_xml::NsReader;
 use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::ResolveResult;
 
+/// Why a document was refused. Every arm is a REFUSAL rather than a
+/// repair: a partly-read manifest is the shape that turns a hostile
+/// NZB into a job that finishes green over zero-filled payload, so
+/// nothing here has a "keep what parsed" reading.
 #[derive(Debug, thiserror::Error)]
 pub enum NzbError {
     // Carries the encoding failures too, since quick-xml 0.42. There was a
@@ -19,12 +57,23 @@ pub enum NzbError {
     // failure now arrives as `quick_xml::Error::Encoding` and nothing in this
     // crate could construct the old variant any more. Do NOT put it back
     // without a call that can actually produce one.
+    /// The document is not well-formed XML, or its bytes are not valid
+    /// UTF-8. Both arrive here since quick-xml 0.42, per the note above.
     #[error("XML error: {0}")]
     Xml(#[from] quick_xml::Error),
+    /// An attribute could not be read: a duplicate name, an unquoted
+    /// value, or a value whose escapes do not resolve.
     #[error("XML attribute error: {0}")]
     Attr(#[from] quick_xml::events::attributes::AttrError),
+    /// Well-formed XML with no `<file>` in it. There is nothing to
+    /// download, so this is refused rather than returned as an empty
+    /// job that reads as complete the moment it starts.
     #[error("NZB contains no files")]
     Empty,
+    /// The byte stream ended with an element still open. Distinct from
+    /// [`NzbError::Xml`] because truncation is the common transport
+    /// failure (a short HTTP body, a half-written file) rather than a
+    /// malformed producer, and a caller may want to retry the FETCH.
     #[error("NZB truncated: document ends inside an open element")]
     Truncated,
     /// An entity in element text that is neither predefined, a character
@@ -161,21 +210,42 @@ struct Over {
     segment: bool,
 }
 
+/// A parsed NZB: the files it declares and the `<head>` metadata that
+/// came with them. Deliberately close to the wire format - nothing here
+/// knows about servers, tiers or block accounting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Nzb {
+    /// The `<file>` entries in document order. Order is preserved
+    /// because posters use it (part 1 first), and because a caller
+    /// that reports "file 3 of 12" must mean the same file the
+    /// manifest did.
     pub files: Vec<NzbFile>,
     /// `<head><meta type="…">value</meta></head>` pairs (type lowercased).
     /// Indexers use these for password/category/title hints.
     pub meta: Vec<(String, String)>,
 }
 
+/// One `<file>`: the subject line that names it, who posted it, and
+/// the articles it is cut into. The subject is the only name most
+/// posts carry, which is why so much of this module is subject
+/// parsing - see [`NzbFile::filename_hint`] and [`NzbFile::classify`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NzbFile {
+    /// The raw `subject=` attribute, XML-normalized and otherwise
+    /// untouched. An obfuscated post may say anything here; the PAR2
+    /// main packet outranks it once one arrives.
     pub subject: String,
+    /// The `poster=` attribute, verbatim. Used as part of the
+    /// clustering key when releases are grouped, never as an identity.
     pub poster: String,
     /// Unix timestamp from the `date` attribute (0 if absent/unparseable).
     pub date: i64,
+    /// Newsgroups the file was posted to, in document order. Any one
+    /// of them is enough to fetch from, so a pool tries them in turn.
     pub groups: Vec<String>,
+    /// The articles the file is cut into, in document order rather
+    /// than by `number` - a producer may write them shuffled, and the
+    /// part number on each [`Segment`] is what places its bytes.
     pub segments: Vec<Segment>,
     /// Declared segments the parser refused (empty or wire-unsafe
     /// message-id). The file's byte range still includes them, so a
@@ -185,6 +255,8 @@ pub struct NzbFile {
     pub dropped_segments: usize,
 }
 
+/// One article: where its bytes belong in the file, roughly how many
+/// there are, and the id a `BODY` command asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
     /// 1-based part number within the file.
@@ -675,6 +747,15 @@ impl Nzb {
     // changed. A producer that really means a tab writes `&#9;`, which
     // normalization leaves alone - both halves are pinned by
     // `subject_whitespace_is_normalized_per_xml_spec`.
+    /// Parse a whole NZB document from bytes.
+    ///
+    /// Namespace-aware by necessity, not by taste: dispatching on the
+    /// local name alone let an unrelated namespace extension shadow
+    /// core vocabulary, so one manifest had two readings and the
+    /// payload was the one that lost (N6-02, above). Structural
+    /// ceilings from [`limits`] are applied as the document is read,
+    /// so a hostile manifest is refused before it is built rather
+    /// than after.
     pub fn parse(xml: &[u8]) -> Result<Nzb, NzbError> {
         // An NsReader, not a plain Reader, and that is the whole of
         // N6-02. Dispatch used to be on `local_name()` alone, so an
@@ -1205,6 +1286,10 @@ impl Nzb {
 }
 
 impl NzbFile {
+    /// Declared encoded size: the sum of the segments' `bytes=`,
+    /// saturating. This is the NZB's own arithmetic and is ON-WIRE
+    /// (yEnc overhead included), so it is a planning figure and not
+    /// the size of the decoded file.
     pub fn bytes(&self) -> u64 {
         self.segments
             .iter()
@@ -1234,6 +1319,10 @@ impl NzbFile {
             .or_else(|| unquoted_filename(&self.subject))
     }
 
+    /// Coarse role of this file: payload, the small main `.par2`, or a
+    /// recovery volume. Decided from the subject alone. Prefer
+    /// [`Self::classify`] when the next question is about the same
+    /// name's shape, so both answers come from one reading.
     pub fn kind(&self) -> FileKind {
         self.classify().kind()
     }

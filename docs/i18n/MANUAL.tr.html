@@ -112,12 +112,13 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
     <li><a href="#automation">10 · Otomasyon</a></li>
     <li><a href="#arr">11 · Sonarr, Radarr &amp; arkadaşları</a></li>
     <li><a href="#remotes">12 · Telefon &amp; uzaktan uygulamalar</a></li>
-    <li><a href="#performance">13 · Performans araçları</a></li>
-    <li><a href="#updates">14 · Güncellemeler</a></li>
-    <li><a href="#cli">15 · Komut satırı</a></li>
-    <li><a href="#api">16 · API'ye genel bakış</a></li>
-    <li><a href="#files">17 · Dosyalar &amp; konumlar</a></li>
-    <li><a href="#troubleshooting">18 · Sorun giderme</a></li>
+    <li><a href="#security">13 · Güvenlik ve erişim</a></li>
+    <li><a href="#performance">14 · Performans araçları</a></li>
+    <li><a href="#updates">15 · Güncellemeler</a></li>
+    <li><a href="#cli">16 · Komut satırı</a></li>
+    <li><a href="#api">17 · API'ye genel bakış</a></li>
+    <li><a href="#files">18 · Dosyalar &amp; konumlar</a></li>
+    <li><a href="#troubleshooting">19 · Sorun giderme</a></li>
   </ol>
 </nav>
 <main>
@@ -634,7 +635,7 @@ ekrana daha çok afiş sığdırır, büyük daha az.</li>
 altında. <b>&#9656;</b> ile veya satıra tıklayarak aç; başlıktaki kutu gösterilen
 sürümleri seçer. Gruplama yalnızca <b>Bu dizin</b> için geçerlidir; <b>Indexer'lar</b>
 ya da <b>İkisi de</b> seçersen tablo yeniden düzleşir ve bunu söyler.</li>
-<li><b>Bir seferde tek haber grubu.</b> Bir sürümün altındaki grup adına tıklayın; sayfa oraya gönderilen sürümlerle sınırlanır ve tablonun üstündeki bir etiket, siz temizleyene kadar grubu söyler. Duvarı da tabloyu da aynı şekilde daraltır, bu yüzden ikisi arasında geçiş yapmak onu korur. Diğer giriş yolu Ayarlar &rarr; Düzenleme &rarr; <b>Dizinleme</b> &rarr; <b>Taranacak gruplar</b> &rarr; <b>Bul…</b>: zaten taradığınız bir grubu açın ve <b>Dizine alınan sürümler</b>e basın.</li>
+<li><b>Bir seferde tek haber grubu.</b> Tablonun üstündeki <b>Grup</b> menüsü dizinlediğiniz grupları listeler; birini seçin, sayfa oraya gönderilen sürümlerle sınırlanır ve adres çubuğu bunu taşır, böylece yeniden yükleme ya da paylaşılan bir bağlantı onu korur. Bir sürümün altındaki grup adına tıklamak da aynı grubu seçer. Duvarı da tabloyu da aynı şekilde daraltır, bu yüzden ikisi arasında geçiş yapmak onu korur. Diğer giriş yolu Ayarlar &rarr; Düzenleme &rarr; <b>Dizinleme</b> &rarr; <b>Taranacak gruplar</b> &rarr; <b>Bul…</b>: zaten taradığınız bir grubu açın ve <b>Dizine alınan sürümler</b>e basın.</li>
 <li><b>Bir başlığın her sürümü</b>, kartını açtığında listelenir: çözünürlük, kodek,
 ses biçimi ve dinamik aralık (Dolby Vision, HDR10) sürüm adından okunur, yanında
 boyut, yaş ve her parçanın sağlayıcında hâlâ durup durmadığı. Ayarlar → Düzenleme →
@@ -677,7 +678,7 @@ gizlemek duvara bir şey öğretir: tek tıkla kabul edeceğin bir filtre öneri
 sonra bütün Reality başlıkları gizlensin mi?»). Gizlediğin her şey ve öğrenilen her
 filtre <b>Gizli &amp; filtreler</b> altında listelenir ve oradan geri alınabilir.</li>
 <li>Bir karttaki küçük <b>erişilebilirlik noktası</b> kâhinin kararıdır
-(<a href="#performance">§13</a>): kehribar rengi «?» sağlayıcılarında belirsiz demektir,
+(<a href="#performance">§14</a>): kehribar rengi «?» sağlayıcılarında belirsiz demektir,
 kırmızı ise parçalarının sürekli eksik geldiği. Halihazırda temizlenen gruplar
 <b>temizleniyor</b> rozeti taşır.</li>
 </ul>
@@ -761,12 +762,12 @@ bir sunucuyu havuza alıp havuzdan çıkarma. Her sunucuda şunlar bulunur:</p>
 <tr><th>Alan</th><th>Notlar</th></tr>
 <tr><td>Adres / port</td><td>SSL portu <b>563</b>'ü kullan. TLS ölçülebilir hiçbir maliyet getirmez - nzbfast her zaman şifreler.</td></tr>
 <tr><td>Kullanıcı adı / parola</td><td><code>config.local.json</code> içinde yerel olarak saklanır, tarayıcıya asla geri gösterilmez. Düzenlemede parolayı boş bırakmak saklananı korur. Parolalar diskte <a href="#passwords">şifrelenmez, gizlenir</a>.</td></tr>
-<tr><td>Bağlantılar</td><td>Sunucu başına eşzamanlı bağlantı. Yükseği tahmin etmek yerine her sağlayıcının en uygun noktasını bulmak için <b>Bağlantı ayarı</b>'nı (<a href="#performance">§13</a>) kullan.</td></tr>
+<tr><td>Bağlantılar</td><td>Sunucu başına eşzamanlı bağlantı. Yükseği tahmin etmek yerine her sağlayıcının en uygun noktasını bulmak için <b>Bağlantı ayarı</b>'nı (<a href="#performance">§14</a>) kullan.</td></tr>
 <tr><td>Düzey (katman)</td><td>0 = birincil; daha yüksek düzeyler yalnızca her alt düzeyin kaçırdığı makaleler için istenen dolum sunucularıdır. Sınırsız hesapları 0'a, blok hesaplarını 1+'a koy.</td></tr>
 <tr><td>Blok boyutu (GB)</td><td>Blok (GB başına ücret) hesaplar için: nzbfast ömür boyu kullanımı buna karşı izler ve bittiğinde sunucuyu kullanmayı bırakır (%85'te uyarı).</td></tr>
-<tr><td>Her bayt faturalandırılır</td><td>Kotalı bir hesap için aç. İndirmelerin sunucuyu tam olarak eskisi gibi kullanır; duran şey nzbfast'in ona kendi trafiğini göndermesidir - otomatik bağlantı ayarlayıcı, sistem kıyaslamasının ağ ayağı ve yerleşik dizin için başlık taramalarının hepsi onu atlar. Seviyeden ve blok boyutundan bağımsızdır, çünkü kotalı bir hesap tek sağlayıcın olabilir ve sınırsız bir hesap seviye 2'de durabilir. Varsayılan olarak kapalı. <b>Bağlantı ayarı</b>'ndaki (<a href="#performance">§13</a>) elle çalıştırılan <b>Test</b> işaretli bir sunucuda yine çalışır ve önce sorar, çünkü orada harcamayı seçen sensin.</td></tr>
+<tr><td>Her bayt faturalandırılır</td><td>Kotalı bir hesap için aç. İndirmelerin sunucuyu tam olarak eskisi gibi kullanır; duran şey nzbfast'in ona kendi trafiğini göndermesidir - otomatik bağlantı ayarlayıcı, sistem kıyaslamasının ağ ayağı ve yerleşik dizin için başlık taramalarının hepsi onu atlar. Seviyeden ve blok boyutundan bağımsızdır, çünkü kotalı bir hesap tek sağlayıcın olabilir ve sınırsız bir hesap seviye 2'de durabilir. Varsayılan olarak kapalı. <b>Bağlantı ayarı</b>'ndaki (<a href="#performance">§14</a>) elle çalıştırılan <b>Test</b> işaretli bir sunucuda yine çalışır ve önce sorar, çünkü orada harcamayı seçen sensin.</td></tr>
 </table></div>
-<p><b>Hesabının bağlantı sınırının altında biraz pay bırak.</b> Bağlantıları sınırın biraz altına ayarlamak hiçbir şeye mal olmaz: hız son bir iki bağlantıdan çok önce düzleşir ve <b>Bağlantı ayarı</b> (<a href="#performance">§13</a>) zaten sınırın altında kalır. İkinci bir cihazın, başka bir istemcinin ya da kopan bir soketten sonraki yeniden denemenin yine de girebilmesini sağlayan şey o boş yerlerdir; aksi hâlde bu taraf her yeri tutarken reddedilirler.</p>
+<p><b>Hesabının bağlantı sınırının altında biraz pay bırak.</b> Bağlantıları sınırın biraz altına ayarlamak hiçbir şeye mal olmaz: hız son bir iki bağlantıdan çok önce düzleşir ve <b>Bağlantı ayarı</b> (<a href="#performance">§14</a>) zaten sınırın altında kalır. İkinci bir cihazın, başka bir istemcinin ya da kopan bir soketten sonraki yeniden denemenin yine de girebilmesini sağlayan şey o boş yerlerdir; aksi hâlde bu taraf her yeri tutarken reddedilirler.</p>
 <p><b>Makinenin açık dosya sınırıyla uğraşman gerekmez.</b> Sistem her bağlantıyı bir
 açık dosya olarak sayar ve macOS bir programı 256 dosyalık sınırla başlatır; birkaç
 sunucuya yayılmış tam bir bağlantı takımı bu sınırı aşabilir. macOS ve Linux'ta nzbfast
@@ -827,7 +828,7 @@ başlatma yok.</li>
 <div class="tip"><b>Öneri</b><em>Farklı</em> backbone'lardaki iki sağlayıcı, aynısındaki üçünü
 yener. Sağlayıcılarından hangisinin kapsamını gerçekten çeşitlendirdiğini ve hangisinin
 birbirinin gereksiz kopyası olduğunu görmek için <b>Sunucu çeşitliliği</b>'ni
-(<a href="#performance">§13</a>) çalıştır.</div>
+(<a href="#performance">§14</a>) çalıştır.</div>
 
 <h2 id="settings">9 · Ayarlar başvurusu</h2>
 <p>Neredeyse her şey panodan, ⚙ Ayarlar altından yapılandırılabilir; dört istisna bu
@@ -842,9 +843,9 @@ yener).</p>
 <tr><th>Ayar</th><th>Ne yapar</th></tr>
 <tr><td>Hız sınırı</td><td>Bayt/sn cinsinden üst sınır (<code>50M</code>, <code>1G</code>, 0 = sınırsız). Uzak uygulamalar yüzde gönderebilir - doğru çevrilsinler diye <i>Hat hızı</i>'nı ayarla. Başlıktaki <b>özel…</b> girdisi aynı sınırı Ayarlar'ı açmadan belirler.</td></tr>
 <tr><td>Otomatik hız</td><td>Diğer ev trafiğine öncelik veren ve hat sessiz olduğunda yeniden genişleyen, RTT denetimli üst sınır.</td></tr>
-<tr><td>Yavaş indirmeleri otomatik ertele</td><td>Diğerleri beklerken tek bir yavaş sunucuda takılan bir iş kuyruğun sonuna taşınır (ilerleme korunur). Bkz. <a href="#performance">§13</a>.</td></tr>
-<tr><td>Boştaki sunucularda ön yükleme</td><td>Etkin işe yararsız sunucular bir sonraki kuyruktakini başlatır. Bkz. <a href="#performance">§13</a>.</td></tr>
-<tr><td>Otomatik güncelleme / Güncelleme denetimi URL'si</td><td>Bkz. <a href="#updates">§14</a>.</td></tr>
+<tr><td>Yavaş indirmeleri otomatik ertele</td><td>Diğerleri beklerken tek bir yavaş sunucuda takılan bir iş kuyruğun sonuna taşınır (ilerleme korunur). Bkz. <a href="#performance">§14</a>.</td></tr>
+<tr><td>Boştaki sunucularda ön yükleme</td><td>Etkin işe yararsız sunucular bir sonraki kuyruktakini başlatır. Bkz. <a href="#performance">§14</a>.</td></tr>
+<tr><td>Otomatik güncelleme / Güncelleme denetimi URL'si</td><td>Bkz. <a href="#updates">§15</a>.</td></tr>
 <tr><td>Hat hızı</td><td>Bağlantının anma hızı - SABnzbd uyumlu uygulamalardan yüzdesel sınırları etkinleştirir.</td></tr>
 <tr><td>Haftalık zamanlama</td><td>Hafta-içi kuralları için satır düzenleyici: verilen gün/saatlerde (yerel saat) duraklat, sürdür ya da bir hız sınırı ayarla. Örn. hafta içi 9–17 arası 20&nbsp;MB/s'ye sınırla, diğer zamanlar sınırsız.</td></tr>
 </table></div>
@@ -1059,7 +1060,7 @@ dolayısıyla bu kuruluma bakan her aygıt için geçerlidir.</p>
 <h3>Gelişmiş: bariz olanların ardındaki ayar düğmeleri</h3>
 <p>Komut satırı bayrağı olmayan altı ayar. Her biri artık kendisine ait ayar kartında
 gelişmiş bir satıra sahiptir ve API üzerinden de ayarlanmaya devam eder
-(<a href="#api">§16</a>), örn.
+(<a href="#api">§17</a>), örn.
 <code>/api?mode=config&amp;name=verify_mode&amp;value=lean&amp;apikey=…</code>. Diğer
 her ayar gibi <code>settings.json</code> dosyasına yazılırlar.</p>
 <div class="tblwrap"><table>
@@ -1067,7 +1068,7 @@ her ayar gibi <code>settings.json</code> dosyasına yazılırlar.</p>
 <tr><td><code>verify_mode</code></td><td><code>full</code> | <code>fast</code> | <code>lean</code> (öntanımlı <code>fast</code>). <code>lean</code> yavaş işlemciler için ek hızdır: fast gibidir, ama PAR2 bir dosyayı kapsar kapsamaz makale başına yEnc CRC'sini de atlar; yani iki yerine tek bir CRC32 katmanı kalır. PAR2'siz indirmeler makale CRC'lerini korur ve işin sonundaki doğrulama ile onarım her iki durumda da değişmez. Yukarıdaki <b>İndirme sırasında denetim</b> seçicisi bu ayardır.</td></tr>
 <tr><td><code>auto_retry_mins</code></td><td>Eksik makale yüzünden ilk kez başarısız olan bir işe tanınan <em>tek</em> otomatik yeniden denemeden önceki bekleme (öntanımlı 20). Yayılma gecikmesi eksik makalelerin gerçek bir nedenidir ve kendiliğinden düzelir; günlük sayesinde yeniden çalıştırma yalnızca hâlâ eksik olanı çeker. Parola ve kaldırma kaynaklı başarısızlıklar asla bu kapsama girmez.</td></tr>
 <tr><td><code>index_scan_par</code></td><td>Dizinleyicinin kaç grubu paralel taradığı (öntanımlı 3, 1-8 aralığına sınırlı).</td></tr>
-<tr><td><code>oracle_sample</code></td><td>Erişilebilirlik kâhininin boştaki STAT bütçesi (<a href="#oracle">§13</a>), sunucu başına saatlik yoklama. Öntanımlı 300, en fazla 3600, <code>0</code> örneklemeyi tümüyle kapatır.</td></tr>
+<tr><td><code>oracle_sample</code></td><td>Erişilebilirlik kâhininin boştaki STAT bütçesi (<a href="#oracle">§14</a>), sunucu başına saatlik yoklama. Öntanımlı 300, en fazla 3600, <code>0</code> örneklemeyi tümüyle kapatır.</td></tr>
 <tr><td><code>predb_max_rows</code></td><td>Akış tablosunun kaç pre duyurusu tuttuğu (varsayılan 250000, 10000-5000000 aralığına kısılır). Saatlik budama bu sayıya iner ve geçmiş içe aktarımı bu sayıyı aşacaksa başlamayı reddeder; böylece bir içe aktarım, bir sonraki budamanın sileceği satırları asla eklemez.</td></tr>
 <tr><td><code>predb_seed_days</code></td><td>Kendi penceresi verilmeden başlatılan geçmiş içe aktarımının ne kadar geriye uzandığı (varsayılan 180 gün, en çok 366). Daha geniş bir pencere, iki saniyede bir istek hızıyla çalışan pre kaynağına daha çok istek demektir.</td></tr>
 </table></div>
@@ -1260,7 +1261,7 @@ ve duvarın bir dokunmatik düzeni vardır. Ayarlar → Uzaktan erişim paneli t
 taranacak bir QR kodu gösterir.</p>
 
 <h3 id="remote-proxy">nzbfast'e ev dışından erişmek</h3>
-<p>Oturum açma sayfası yok, bu bilinçli bir tercih. Oturum çerezine dayalı bir giriş, sonsuza kadar bakımı gereken bir güvenlik yüzeyidir ve açık internete bakan bir şeyin yine de en zayıf kilidi olurdu. nzbfast bunun yerine API anahtarınızla kimlik doğrular ve bu anahtarı URL'de olduğu kadar bir istek başlığında da kabul eder (<code>X-Api-Key</code> veya <code>Authorization: Bearer</code>) - önüne konan bir şeyin girişi düzgün biçimde üstlenmesini sağlayan da tam olarak budur.</p>
+<p>nzbfast sizin API anahtarınızla kimlik doğrular ve bu anahtarı adreste olduğu gibi bir istek başlığında da kabul eder (<code>X-Api-Key</code> ya da <code>Authorization: Bearer</code>); önünde duran bir şeyin girişi düzgünce üstlenmesini sağlayan da budur. Ayrıca, isteğe bağlı olarak, tarayıcıda panelin önünde bir kullanıcı adı ve parola vardır; bu, Sonarr, Radarr ya da telefon uygulamaları için hiçbir şeyi değiştirmez. <a href="#security">§13</a> ikisini karşılaştırır ve her birinin ne zaman doğru yanıt olduğunu söyler.</p>
 <p><b>En basit yanıt onu hiç yayımlamamaktır.</b> Bu makineye ve telefonunuza <b>Tailscale</b> kurun, ikisi de aynı özel ağa katılsın: hiçbir şey dışa açılmaz, yönlendirici ya da sertifika işi gerekmez ve Ayarlar → Uzaktan erişim, Tailscale'i çalışır görür görmez her yerden çalışan bir adres gösterir. Açıkça bir genel alan adına ihtiyacınız yoksa bunu tercih edin.</p>
 <p><b>nzbfast HTTPS'i kendisi de sunabilir.</b> Ayarlar → Güvenlik →
 HTTPS sertifikası / HTTPS özel anahtarı'nı bir PEM sertifikasına ve anahtarına
@@ -1304,7 +1305,139 @@ internetten geçerdi ve hiç anahtar ayarlanmamış bir kurulum onu bulan herkes
 açıktır. Yine de bir bağlantı noktası yönlendirecekseniz, önce bir API anahtarı
 belirleyin ve HTTPS'i açın.</div>
 
-<h2 id="performance">13 · Performans araçları</h2>
+<h2 id="security">13 · Güvenlik ve erişim</h2>
+<p>nzbfast'e kimin ulaşabileceğini denetlemenin dört yolu var ve hepsi ayrı iş
+görür. İkisi nzbfast'in kendi denetlediği kimlik bilgileridir: onunla konuşan her
+programın sunduğu <b>API anahtarı</b> ve isteğe bağlı olan
+<b>panel girişi</b>, yani tarayıcıda sayfaların önündeki bir kullanıcı adı ve
+parola. Diğer ikisi kişiyle değil ağla ilgilidir: servisin hangi adreste yanıt
+verdiği ve önünde duran bir şeyin içeri kimi aldığı. Hiçbiri diğerinin yerini
+tutmaz. Güvenilen bir ağdaki ev kurulumuna yalnızca ilki gerekir; internete
+yayımladığınız bir kurulum dörtten üçünü ister.</p>
+<div class="tblwrap"><table>
+<tr><th>Katman</th><th>Neyi durdurur</th><th>Nerede</th></tr>
+<tr><td>API anahtarı</td><td>API'yi onsuz çağıran her şeyi: başka bir makine, başka bir program, ziyaret ettiğiniz bir web sayfası</td><td>Ayarlar → Güvenlik. İlk çalıştırmada üretilir</td></tr>
+<tr><td>NZB anahtarı</td><td>tek başına hiçbir şeyi. Dağıtmak için daha zayıf bir anahtardır; indirme eklemeye izinlidir, başka bir şeye değil</td><td>Ayarlar → Güvenlik. İsteğe bağlı</td></tr>
+<tr><td>Panel girişi</td><td>parolayı bilmeyen, tarayıcı başındaki bir kişiyi</td><td>Ayarlar → Güvenlik. Öntanımlı olarak kapalı</td></tr>
+<tr><td>Öndeki ağ</td><td>bir kerede bütün ağları: dinleme adresi, güvenlik duvarınız, bir ters vekil sunucu, bir VPN</td><td>Ayarlar → Güvenlik ve nzbfast'in dışında</td></tr>
+</table></div>
+
+<h3 id="sec-apikey">API anahtarı</h3>
+<p>API anahtarı ana kimlik bilgisidir. SAB uyumlu API'nin tamamını korur
+(<a href="#api">§17</a>); yani bütün denetim yüzeyini: kuyruğu, geçmişi, her
+ayarı, sunucu parolalarınızı, kapatma çağrısını. nzbfast ile konuşan her şey onu
+kullanır. Sonarr, Radarr ve *arr ailesinin geri kalanı (<a href="#arr">§11</a>),
+telefondaki nzb360 ve LunaSea (<a href="#remotes">§12</a>) ve NZB Unity ile NZB
+Donkey gibi tarayıcı eklentileri hep aynı anahtarı sunar.</p>
+<p>Bir tane oluşturmanız gerekmez. İlk çalıştırmada nzbfast rastgele bir anahtar
+üretir, ayarlarınızın yanına <code>apikey</code> adlı bir dosyaya kaydeder
+(<a href="#files">§18</a>), terminalde bir kez yazdırır ve yeniden başlatmalar
+boyunca saklar; *arr programlarının onu tutabilmesini sağlayan da budur.
+Ayarlar → Güvenlik anahtarı yeniden gösterir: alan bilerek boştur, okumak için
+<b>Göster</b>'e, değiştirmek için <b>Yeni oluştur</b>'a tıklayın. Değişim anında
+geçerlidir ve kurduğunuz her uygulama, yenisini oraya yapıştırana kadar çalışmayı
+bırakır.</p>
+<p>İstemciler anahtarı adreste <code>apikey=…</code> olarak ya da bir başlıkta,
+<code>X-Api-Key</code> veya <code>Authorization: Bearer</code> olarak
+gönderebilir. Adreslerinizi bir şey günlüğe yazıyorsa başlık yeğlenmelidir ve bir
+ters vekil sunucunun arkasındaki istemciler adına anahtarı eklemesini sağlayan da
+odur.</p>
+
+<h3 id="sec-nzbkey">Yalnızca ekleyen NZB anahtarı</h3>
+<p>NZB anahtarı, tek işi nzbfast'e bir indirme teslim etmek olan her şey için
+bilerek daha zayıf tutulmuş ikinci bir anahtardır. Onu sunan bir NZB ekleyebilir,
+sürümü sorabilir, duraklatma, disk ve uyarı özetini okuyabilir ve kategori
+adlarını alabilir; bir gönderme eklentisinin bir sürümü eklemek ve size kategori
+listesi göstermek için ihtiyacı olan tam da budur. Kuyruğu ya da geçmişi
+okuyamaz, tek bir ayarı bile göremez ya da değiştiremez, hiçbir şeyi duraklatamaz,
+silemez, yeniden deneyemez veya kapatamaz. Gerçek bir anahtarın yerine konacak
+küçültülmüş bir API anahtarı değildir: tam olarak güvenmediğiniz bir makine
+yapılandırmanızı geri okuyamasın diye bir tarayıcı eklentisine yapıştıracağınız
+şeydir.</p>
+
+<h3 id="sec-login">Panel girişi</h3>
+<p>Ayarlar → Güvenlik altında bir kullanıcı adı ve parola belirleyin; nzbfast
+panelin ve afiş duvarının önüne bir giriş sayfası koyar. Öntanımlı olarak
+kapalıdır ve iki alandan biri boş kaldığı sürece hiçbir yerde hiçbir şey
+değişmez. Tek bir durum için vardır: kendi ağınızın dışına yayımladığınız bir
+kurulum, yani bir adresteki anahtarın bir insana yazdırmak isteyeceğiniz şey
+olmadığı yer.</p>
+<p>Parola en az sekiz karakter olmalıdır ve dört biçim daha reddedilir, çünkü
+tahmin eden önce onları dener: kullanıcı adının kendisi,
+<code>password123</code> gibi en çok denenen parolalardan biri,
+<code>aaaaaaaa</code> gibi tek bir karakterin tekrarı ve <code>abcdefgh</code>
+gibi ardışık bir dizi. Ret iletisi hangi kuralın işlediğini söyler. Argon2id
+ile özetlenerek saklanır; yani nzbfast onu size geri gösteremez, yalnızca
+değiştirebilir: kayıtlı olanı korumak için alanı boş bırakın, kaldırmak için
+tek bir boşluk yazın. İki alandan birinin değişmesi bu dahil bütün
+tarayıcıların oturumunu kapatır ve <b>Tüm tarayıcıların oturumunu kapat</b>
+istendiğinde aynısını yapar. Oturum açmış bir tarayıcı, on dört günlük kullanım
+boyunca açık kalır.</p>
+<p><b>Sonarr, Radarr, nzb360, LunaSea veya eklentileriniz için hiçbir şey
+değişmez.</b> Herkesin sorduğu soru budur ve yanıtı şu: bu giriş yalnızca bir
+tarayıcı kimlik bilgisidir. O programlar API anahtarını tam olarak eskisi gibi
+kullanmayı sürdürür ve hiçbir programın bir giriş sayfası doldurması gerekmez.
+Girişin kapsadığı şey, tarayıcı başındaki bir kişidir: panel, duvar ve oturum
+açtıktan sonra bu sayfaların yaptığı API çağrıları.</p>
+<p>Yapmadığı tek şey, API anahtarı olmayan bir kurulumu korumaktır. Giriş
+sayfaları korur, API'yi değil: anahtarsız bir servis, giriş sayfası olsun ya da
+olmasın, kendisine doğrudan soran her şeye yine yanıt verir. Bir anahtar da
+belirleyin. Yayımlanmış bir kurulumda ikisini birden.</p>
+
+<h3 id="sec-outside">Ağınızın dışından ona ulaşmak</h3>
+<p>Üç yanıt işe yarar ve eşdeğer değildirler. Her birinin yapılandırması
+<a href="#remote-proxy">§12</a>'de; burada olan şey nasıl seçileceğidir.</p>
+<div class="tblwrap"><table>
+<tr><th>Yaklaşım</th><th>Size ne verir</th><th>Neye mal olur</th></tr>
+<tr><td><b>Özel bir ağ</b> (Tailscale, WireGuard)</td><td>Hiçbir şey yayımlanmaz. Bulunacak, taranacak ya da tahmin edilecek genel bir adres yoktur, dolayısıyla kimin giriş yapabileceği sorusu hiç doğmaz</td><td>VPN, kullanmak istediğiniz her cihazda çalışıyor olmalı. Genel alan adı yok, yani yazılım kuramadığınız hiçbir şey ona ulaşamaz</td></tr>
+<tr><td><b>Kimlik doğrulayan bir ters vekil sunucu</b> (Caddy, nginx ya da Apache; basic auth, Authelia, Authentik veya oauth2-proxy ile)</td><td>Gerçek bir alan adında gerçek bir ön kapı, zaten yenilediğiniz bir sertifika, diğer servislerinizle paylaşılan tek bir giriş, ve görebildiğiniz yerde hız sınırlama ve günlükler</td><td>Kurulacak ve ayakta tutulacak ikinci bir şey. *arr programlarınız ve telefon uygulamalarınız bir giriş sayfasını dolduramaz, dolayısıyla vekil sunucu geçerli bir API anahtarı taşıyan isteği geçirmelidir</td></tr>
+<tr><td><b>Tek başına nzbfast</b> (<code>tls_cert</code> ve <code>tls_key</code>, artı panel girişi)</td><td>Tek program, vekil sunucu yok. Baştan sona HTTPS ve insanlar için bir giriş sayfası</td><td>Sertifika yenilemesi size kalır. Evinizin ortak girişi yerine nzbfast'in kendi girişini alırsınız ve hatalı parola sınırı adres başına sayılır</td></tr>
+</table></div>
+<p>Hangisini seçerseniz seçin, <b>bir de API anahtarı belirleyin</b>. Vekil sunucu
+öndeki bir katmandır, arkadaki kapının kilidi değil: servise doğrudan ulaşan her
+şey, yerel ağdan ya da vekil yapılandırmasındaki bir hatadan, nzbfast'in kendi
+istediğiyle karşılaşır. Kimlik doğrulayan bir vekilin arkasındaki anahtarsız bir
+kaynak, açık olmaya yanlış yönlenmiş tek bir istek uzaklıktadır.</p>
+<p>Sertifikayı bir vekil sunucuda sonlandırıyorsanız nzbfast'i
+<code>--bind 127.0.0.1</code> ile başlatın ki içeri giden tek yol gerçekten vekil
+olsun. HTTPS'i nzbfast'in kendisinin sunmasını yeğliyorsanız Ayarlar → Güvenlik'i
+bir PEM sertifikasına ve özel anahtarına yöneltip yeniden başlatın. Kaçınılması
+gereken tek şey, ikisi de olmadan yönlendiricide portu açmaktır: bu düz HTTP
+yayımlar ve anahtarınız ile onunla yaptığınız her şey, yol üzerindeki herkesin
+okuyabileceği biçimde interneti aşar.</p>
+
+<h3 id="sec-cors">Tarayıcı eklentileri ve <code>cors_origin</code> ne işe yarar</h3>
+<p><code>cors_origin</code> kimlik doğrulama katmanı değildir ve bunu açıkça
+söylemekte yarar var, çünkü ayar aynı kartın içinde duruyor. Bir tarayıcının hangi
+<i>web sayfalarının</i> bu API'yi okumasına izin verdiğini belirler, o kadar. Bu
+isteklerin her biri yine API anahtarına muhtaçtır; bu ayarın değiştirdiği şey,
+tarayıcının yanıtı soran sayfaya geri verip vermediğidir.</p>
+<p>Öntanımlı değer <code>*</code>'dır ve SABnzbd ile aynıdır. NZB Unity ve NZB
+Donkey gibi eklentilerin, buraya hiçbir şey ayarlamadan, bir anahtar yapıştırır
+yapıştırmaz çalışmasının nedeni budur. Daha sıkı tutmak için izin verdiğiniz
+kaynaklarla değiştirin (<code>https://example.com</code>), virgülle ayırarak. Boş
+bırakmak hiç başlık göndermez ve bu da her eklentiyi engeller.</p>
+
+<h3 id="sec-open">Bunların hiçbirinin korumadığı şeyler</h3>
+<p><b>API anahtarı olmayan bir kurulum açıktır.</b> Anahtar yoksa denetlenecek bir
+kimlik bilgisi de yoktur; dolayısıyla porta ulaşabilen her makinenin tam denetimi
+vardır, ziyaret ettiğiniz her web sayfasının da, çünkü servis onun kendi yerel
+adresinize yaptığı istekleri sizinkilerden ayıramaz. nzbfast bunu, doğru olduğu
+her seferinde, açılışta, günlükte ve panelde söyler. Çözülmesine tek bir alan
+kalmıştır.</p>
+<p><b>Anahtar API'yi korur, makineyi değil.</b> Ayarlar → Güvenlik →
+<b>Şunu dinle</b> hangi adreslerin yanıt vereceğini belirler. Öntanımlı olan
+<code>0.0.0.0</code>, bu makinenin bağlı olduğu her ağda yanıt verir; bir NAS ya
+da bir kapsayıcının ihtiyacı olan budur. <code>127.0.0.1</code> yalnızca bu
+makinede yanıt verir, böylece ağınızdaki başka hiçbir şey, anahtarla bile ona
+ulaşamaz. Dikkat: bu makinede bulunmayan bir adres, sonraki açılışın hiç
+kalkmamasına yol açar ve tek dönüş yolu <code>settings.json</code> dosyasını elle
+düzeltmektir.</p>
+<p><b>Ayar yedeğiniz her şeyi taşır.</b> Aynı karttaki yedek dosyası her ayarı,
+iki anahtarı ve Usenet sunucu parolalarınızı açık biçimde içerir. Onu özel bir
+yerde saklayın ve birine göndermeyi, ona hesaplarınızı göndermek gibi görün.</p>
+
+<h2 id="performance">14 · Performans araçları</h2>
 <h3 id="perf-benchmark">Sistem kıyaslaması</h3>
 <p>Tek tık üç tavanını ölçer - ağ verimi (gerçek 8 saniyelik çok bağlantılı bir sonda),
 CPU doğrulama hızı ve disk yazma hızı - ve cevapla başlar: <b>beklenen en yüksek indirme
@@ -1353,7 +1486,7 @@ sağlayıcıya ilk yerine en son sorulur. Hiçbir şey kaldırılmaz, bu yüzden
 karar indirme yerine biraz zamana mal olur.</li>
 </ul>
 <p class="dim">Karar, kanıttan çıkarılmış bir tahmindir, garanti değil. Tek bir NZB için
-kesin yanıtı <code>nzbfast check</code> (<a href="#cli">§15</a>) gerçek makaleleri
+kesin yanıtı <code>nzbfast check</code> (<a href="#cli">§16</a>) gerçek makaleleri
 sayarak verir. Her ikisi de yanıtları sayar, içerikleri değil. Temiz bir kontrol, sorulduğunda
 makalelerin orada olduğu anlamına gelir; içeriklerinin sağlam olduğu anlamına gelmez: az
 sayıda sağlayıcı, kaldırılmış makaleler için onları reddetmek yerine sahte veriyle yanıt
@@ -1410,7 +1543,7 @@ her zaman biter ve doğru biter; sadece hattı ıslatmaz.</p>
 <p class="dim">Kıyaslamalar her sürüm için yeniden çalıştırılır; yöntem ve makine başına
 rakamlar sonuçların yanında yayımlanır.</p>
 
-<h2 id="updates">14 · Güncellemeler</h2>
+<h2 id="updates">15 · Güncellemeler</h2>
 <ul>
 <li>Güncellemeler <b>yalnızca bildirimdir</b>: nzbfast kendi ikili dosyasını
 asla indirmez ya da değiştirmez ve içinde bunu yapabilecek kod yoktur. Yeni bir
@@ -1425,12 +1558,12 @@ boş bir denetim URL'si de aynısını yapar.</li>
 <h3 id="updating">Ayarlarını kaybetmeden güncelleme</h3>
 <p>Tek bir kural her kurulumu kapsar: <b>bir güncelleme programı değiştirir,
 ayarlarını asla.</b> Yapılandırdığın her şey - sunucular, yollar, API anahtarı,
-kuyruk - tek bir klasördeki bir avuç dosyada yaşar (<a href="#files">§17</a>) ve
+kuyruk - tek bir klasördeki bir avuç dosyada yaşar (<a href="#files">§18</a>) ve
 hiçbir yükleyici, imaj çekme ya da paket yükseltmesi o klasöre dokunmaz. Bir
 güncellemeden sonra ayarlar gitmiş görünüyorsa, bu neredeyse her zaman yeni
 kurulumun <em>farklı, boş</em> bir klasörü okumasındandır, bir şeylerin
 silinmesinden değil; eski dosyalar hâlâ her zaman oldukları yerdedir.
-Kurtarma adımları <a href="#settings-gone">§18</a>'de.</p>
+Kurtarma adımları <a href="#settings-gone">§19</a>'de.</p>
 <div class="tblwrap"><table>
 <tr><th>Kurulum</th><th>Nasıl güncellenir</th></tr>
 <tr><td>macOS uygulaması</td><td>Yeni DMG'yi aç ve <b>NzbFast</b>'i eskisinin
@@ -1466,7 +1599,7 @@ dışında durur, yani ne yükseltme ne de kaldırma onları alıp götürür.</
 <tr><td>Debian / Ubuntu (.deb)<br>Fedora / RHEL (.rpm)</td><td>Yeni paketi eskisinin üzerine kurun: <code>sudo dpkg -i nzbfast_*.deb</code> veya <code>sudo rpm -U nzbfast-*.rpm</code>. Ayar klasörünüz pakete dahil değildir; bu yüzden bir yükseltme içindeki hiçbir şeyi değiştiremez ve <code>/etc/nzbfast/nzbfast.env</code> dosyasındaki kendi düzenlemeleriniz korunur. Servis yalnızca zaten çalışıyorsa yeniden başlatılır.</td></tr>
 <tr><td>Homebrew</td><td><code>brew upgrade nzbfast</code></td></tr>
 <tr><td>Düz ikili dosya</td><td>İkili dosyayı değiştir. Yapılandırman onu
-yaptığın yerde kalır (<a href="#files">§17</a>).</td></tr>
+yaptığın yerde kalır (<a href="#files">§18</a>).</td></tr>
 </table></div>
 <div class="tip"><b>İpucu</b>Sonarr ya da Radarr bağlayan Docker kullanıcıları:
 API anahtarını konteyner tanımının kendisine koy
@@ -1475,7 +1608,7 @@ environment bloğuna). Orada saklanan bir anahtar her konteyner kazasını atlat
 çünkü ana makinede, tanımın içinde yaşar ve her başlangıçta yeniden uygulanır.
 Sonradan Ayarlar'da ayarladığın bir anahtar yine de ona üstün gelir.</div>
 
-<h2 id="cli">15 · Komut satırı</h2>
+<h2 id="cli">16 · Komut satırı</h2>
 <p>Arka plan sürecinin yaptığı her şey ayrıca betiklenebilir. Günlük komutlar:</p>
 <div class="tblwrap"><table>
 <tr><th>Komut</th><th>Amaç</th></tr>
@@ -1497,7 +1630,7 @@ Sonradan Ayarlar'da ayarladığın bir anahtar yine de ona üstün gelir.</div>
 olarak yükler ve eşleşen NZB'yi yazar. Bir işletim aracıdır; açık bir
 <code>--post-server</code> ister ve sizin yerinize asla sunucu seçmez.</p>
 
-<h2 id="api">16 · API'ye genel bakış</h2>
+<h2 id="api">17 · API'ye genel bakış</h2>
 <p>Temel uç nokta: <code>http://host:6789/api?mode=…&amp;apikey=…&amp;output=json</code> -
 SABnzbd uyumlu, bu yüzden mevcut SAB tümleştirmeleri değişmeden çalışır. İki anahtar:
 <b>API anahtarı</b> (tam denetim) ve <b>NZB anahtarı</b> (yalnızca ekleme:
@@ -1516,7 +1649,7 @@ SABnzbd uyumlu, bu yüzden mevcut SAB tümleştirmeleri değişmeden çalışır
 <tr><td>İzleme</td><td><code>/metrics</code> Prometheus metin biçimi 0.0.4 ile yanıt verir: indirme hızı, kuyruk derinliği ve baytlar, sağlayıcı başına bağlantılar, kesintiler ve makale sayıları, alt sistem başına bellek ve çalışma süresi. Baştan sona temel birimler (bayt, saniye), böylece dönüştürmeyi pano yapar ve hiçbir şey önceden yuvarlanmış gelmez. Yalnızca GET ve varsayılan olarak tam API anahtarı gerekir. Anahtarsız sunmak için <code>metrics_open</code> ayarını açın; bu, Prometheus'ta olağan düzendir: iş adı ve yol taşımaz, ancak yapılandırılmış her sağlayıcının ana makine adını porta erişebilen herkese yayımlar.</td></tr>
 </table></div>
 
-<h2 id="files">17 · Dosyalar &amp; konumlar</h2>
+<h2 id="files">18 · Dosyalar &amp; konumlar</h2>
 <p>Ayar klasörünün nerede olduğu nzbfast'in nasıl kurulduğuna bağlıdır.
 Yedeklemeye değer her şey bu tek klasördedir:</p>
 <div class="tblwrap"><table>
@@ -1548,12 +1681,12 @@ orası.</td></tr>
 <tr><td>Harici araçlar</td><td>Hiçbiri gerekmez - RAR çıkarma ve PAR2 onarımı yerleşiktir. Egzotik bir küme yedek olarak harici bir <code>unrar</code> veya <code>par2</code> gerektirirse, nzbfast önce çalıştırılabilir dosyasının yanına, sonra <code>$PATH</code>'e bakar.</td></tr>
 </table></div>
 
-<h2 id="troubleshooting">18 · Sorun giderme</h2>
+<h2 id="troubleshooting">19 · Sorun giderme</h2>
 <div class="tblwrap"><table>
 <tr><th>Belirti</th><th>Denetle</th></tr>
 <tr><td>Yavaş indirmeler</td><td>Önce indirmenin kendisine sor: çalışırken ilerleme çubuğunun altındaki satır <i>bu</i> işi tutan katmanı adlandırır ve o karara tıklamak satırı kanıtlarıyla açar (bkz. <a href="#dash-queue">Kuyruk</a>). <b>Sistem kıyaslaması</b>'nı çalıştır - darboğazı açıkça adlandırır. Ağsa: <b>Bağlantı ayarı</b>'nı çalıştır, sunucu başına bağlantı sayılarını denetle ve sağlayıcılarının hepsinin tek bir backbone olmadığını doğrula (<b>Sunucu çeşitliliği</b>).</td></tr>
 <tr><td>Yalnızca çok büyük işlerde yavaş<br>(NAS ya da az RAM'li makine)</td><td>Beklenen ve ölçülebilir: aç bir bellek bütçesi önbellekleri diske döker ve ~87 GB'ı geçince %20–40 maliyet getirir. Rakamlar ve ne kadar RAM verileceği için <a href="#memory">Bellek bütçesi</a>'ne bak. Daha küçük işler etkilenmez.</td></tr>
-<tr><td>İndirme "makaleler eksik" ile başarısız</td><td>Gönderi süresi dolmuş ya da sağlayıcılarından kaldırılmış. Farklı bir backbone'daki ikinci bir sağlayıcı bunların çoğunu kurtarır. <code>nzbfast check</code> bunu indirmeden önce tahmin eder. Duvar da erişilebilirlik noktasıyla (<a href="#oracle">§13</a>) muhtemelen
+<tr><td>İndirme "makaleler eksik" ile başarısız</td><td>Gönderi süresi dolmuş ya da sağlayıcılarından kaldırılmış. Farklı bir backbone'daki ikinci bir sağlayıcı bunların çoğunu kurtarır. <code>nzbfast check</code> bunu indirmeden önce tahmin eder. Duvar da erişilebilirlik noktasıyla (<a href="#oracle">§14</a>) muhtemelen
 gitmiş olanları önceden işaretler. Bu biçimdeki ilk başarısızlık, bir bekleme sonrası
 kendiliğinden bir kez yinelenir; çünkü yayılma gecikmesi tıpatıp aynı görünür ve
 kendiliğinden düzelir.</td></tr>
@@ -1561,7 +1694,7 @@ kendiliğinden düzelir.</td></tr>
 <tr><td>Bir arşiv çıkarılamıyor</td><td>Parola ve onarım hataları kendilerini Geçmiş satırında adlandırır. Geri kalan her şey için bir kaçış kapısı vardır: Ayarlar → İzleme klasörü &amp; son işlem → <b>Harici unrar ile çıkar</b> (gelişmiş bir ayar) çıkarma işini yerleşik çıkarıcı yerine makinende kurulu <code>unrar</code> programına devreder. Bunun dışında kapalı bırak: yerleşik yol ölçtüğümüz her biçimde daha hızlıdır ve hash adlı gizlenmiş gönderiler zaten her zaman onu kullanır, çünkü unrar onların yeniden adlandırmasını izleyemez. <code>nzbfast get</code> çalıştırmaları için aynı anahtar <code>NZBFAST_NO_NATIVE_UNRAR=1</code> ortam değişkenidir. Yerleşik çıkarıcının reddettiği bir arşivi unrar çıkarırsa, yerleşik yolu düzeltebilmemiz için lütfen bildir.</td></tr>
 <tr><td>Sonarr/Radarr bağlanamıyor</td><td>Port 6789 erişilebilir mi? API anahtarı doğru mu (tam anahtar, NZB anahtarı değil)? İstemci türü SABnzbd olarak mı ayarlı?</td></tr>
 <tr><td>Panel hiç ayarlamadığım bir API anahtarı istiyor</td><td>Yeni bir kurulum kendine bir tane üretir ve onu başlangıçta bir kez yazdırır (<a href="#firstrun-key">§2</a>). Yapılandırmanın yanındaki <code>apikey</code> dosyasında ve başlangıç çıktısındadır. Ya da zaten oturum açmış bir tarayıcıdan Ayarlar → Güvenlik'e kendi anahtarını yaz.</td></tr>
-<tr id="settings-gone"><td>Bir güncellemeden sonra bütün ayarlarım gitmiş görünüyor<br>(sunucular, yollar, API anahtarı)</td><td>Bir güncellemedeki hiçbir şey ayar silmez; bu, nzbfast'in farklı, boş bir klasörü okuduğu anlamına gelir. Önce: Ayarlar'daki API anahtarı alanı tasarım gereği boş görünür - kaybolduğuna karar vermeden önce <b>Show</b>'a tıkla. Docker'da yeni konteynerin <code>/config</code> eşlemesini eskisiyle karşılaştır: değişmiş bir ana makine yolu, farklı bir dizinden çalıştırılan göreli bir yol ya da taze bir appdata klasörü, gerçek ayarların önceki yolda el değmeden dururken nzbfast'i sıfırdan başlatır. Eski klasörü bul (<code>settings.json</code>'ı, yapılandırma dosyanı ve <code>apikey</code>'i ara - konumlar <a href="#files">§17</a>'de), sonra ya eşlemeyi ona geri döndür ya da o dosyaları yeni klasöre kopyalayıp yeniden başlat. Başlangıç günlüğü kullanılan ayar dosyasını tam olarak adlandırır: <code>[settings] applying saved settings from …</code></td></tr>
+<tr id="settings-gone"><td>Bir güncellemeden sonra bütün ayarlarım gitmiş görünüyor<br>(sunucular, yollar, API anahtarı)</td><td>Bir güncellemedeki hiçbir şey ayar silmez; bu, nzbfast'in farklı, boş bir klasörü okuduğu anlamına gelir. Önce: Ayarlar'daki API anahtarı alanı tasarım gereği boş görünür - kaybolduğuna karar vermeden önce <b>Show</b>'a tıkla. Docker'da yeni konteynerin <code>/config</code> eşlemesini eskisiyle karşılaştır: değişmiş bir ana makine yolu, farklı bir dizinden çalıştırılan göreli bir yol ya da taze bir appdata klasörü, gerçek ayarların önceki yolda el değmeden dururken nzbfast'i sıfırdan başlatır. Eski klasörü bul (<code>settings.json</code>'ı, yapılandırma dosyanı ve <code>apikey</code>'i ara - konumlar <a href="#files">§18</a>'de), sonra ya eşlemeyi ona geri döndür ya da o dosyaları yeni klasöre kopyalayıp yeniden başlat. Başlangıç günlüğü kullanılan ayar dosyasını tam olarak adlandırır: <code>[settings] applying saved settings from …</code></td></tr>
 <tr><td>Ağdaki hiçbir şey arka plan sürecine erişemiyor</td><td><code>--bind</code>'ı denetle: <code>127.0.0.1</code> yalnızca nzbfast'in çalıştığı makineye hizmet eder. Varsayılan olan <code>0.0.0.0</code> her arayüze hizmet eder. Sonra makinenin kendi güvenlik duvarını 6789 portu için denetle.</td></tr>
 <tr><td>Göz at kartı küçük kalıyor</td><td>Dizinleyici arka planda büyür - Ayarlar → Dizinleme gruplarının ayarlı olduğunu denetle ve Tarama başına derinleştir'e geçmiş biriktirmesi için zaman ver. "Şimdi tara" bir geçişi zorlar; durum satırı canlı ilerlemeyi gösterir.</td></tr>
 <tr><td>Duvar yanlış/görselsiz gösteriyor</td><td>Ayrıntı sayfası → ✎ Eşleşmeyi düzelt ya da ↻ Meta veriyi yenile. Film aramaları ücretsiz bir OMDb anahtarıyla iyileşir.</td></tr>

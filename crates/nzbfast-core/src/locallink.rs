@@ -267,7 +267,7 @@ pub struct TxMedian {
 
 impl TxMedian {
     /// Fold this probe's Wi-Fi rate in and replace it with the median
-    /// of the last [`TX_SAMPLES`].
+    /// of the last `TX_SAMPLES`.
     ///
     /// Only Wi-Fi: a wired port reports a NEGOTIATED rate, which does
     /// not wander, and a tunnel has no rate to steady.
@@ -779,7 +779,7 @@ pub fn disabled() -> bool {
 }
 
 /// One-shot probe for a caller with no daemon behind it: resolve
-/// `host`:`port` the way [`spawn`]'s loop does, then read the link that
+/// `host`:`port` the way `spawn`'s loop does, then read the link that
 /// carries traffic there. `nzbfast sysbench` is the caller (TODO 210
 /// item (b) on the CLI side); the daemon reads `Daemon::local_link`,
 /// which this deliberately does not touch.

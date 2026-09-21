@@ -8,7 +8,7 @@
 //! import. Everything here is byte-layout parsing - no codec decode, no
 //! external tools, no new dependencies.
 //!
-//! ## Why this is not [`crate::mkv`] / [`crate::mp4`]
+//! ## Why this is not [`crate::mkv`] / `crate::mp4`
 //!
 //! Those two answer a different question over a different reader. They
 //! are pure functions over ONE bounded head slice, and they exist to
@@ -47,6 +47,12 @@
 //! same bytes twice gives the same answer - which is what the fuzz
 //! target asserts (fuzz_targets/mediaprobe.rs).
 
+// Documented in full as part of TODO 84's missing_docs ratchet. The lint
+// is on here so the count cannot climb back, and it reaches the child
+// modules too, which is why facts, fmp4, samples, session and source had
+// to clear with the parent rather than after it.
+#![warn(missing_docs)]
+
 use serde::Serialize;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -77,12 +83,24 @@ pub use facts::MediaFacts;
 /// dashboard panel codes against a stable shape.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MediaInfo {
+    /// Which container the MAGIC BYTES said this is. Never the
+    /// filename's opinion: a hint carries the name, and the name loses.
     pub container: Container,
     pub(crate) duration_ms: Option<u64>,
+    /// How this file can reach a browser, voted on by the ENABLED
+    /// tracks only. [`PlaybackPath::Unknown`] while too little has
+    /// landed to say.
     pub playback: PlaybackPath,
+    /// Every video track the container lists, disabled ones included.
+    /// Order is the container's own.
     pub video: Vec<VideoTrack>,
+    /// Every audio track, in container order. The one a viewer gets by
+    /// default is the one flagged `default`, not the first.
     pub audio: Vec<AudioTrack>,
+    /// Every subtitle track, in container order, text and bitmap alike.
     pub subtitles: Vec<SubTrack>,
+    /// Chapter marks, in container order. Empty when the container has
+    /// none, which is the common case and not a parse failure.
     pub chapters: Vec<Chapter>,
     /// The container's own title, when it wrote one (Matroska
     /// Segment>Info>Title, MP4 `udta/©nam`). Not in the original
@@ -101,7 +119,7 @@ pub struct MediaInfo {
 impl MediaInfo {
     /// Does this file actually carry picture?
     ///
-    /// Counts ENABLED video tracks only, the same rule [`classify`] uses
+    /// Counts ENABLED video tracks only, the same rule `classify` uses
     /// - a container may list a track it has marked off, and a track the
     /// muxer disabled does not make the file a video.
     ///
@@ -148,11 +166,21 @@ impl MediaInfo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
+/// The container the magic bytes identified.
+///
+/// `Webm` is reported separately from `Mkv` although WebM is a Matroska
+/// subset: the two are parsed by the same walk, and the distinction is
+/// what a browser's `canPlayType` actually asks about.
 pub enum Container {
+    /// Matroska.
     Mkv,
+    /// WebM, the Matroska subset a browser will play natively.
     Webm,
+    /// ISO base media (MP4, M4V, MOV).
     Mp4,
+    /// RIFF AVI.
     Avi,
+    /// Nothing recognised, or too few bytes to tell yet.
     Unknown,
 }
 
@@ -173,6 +201,10 @@ pub enum PlaybackPath {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+/// One video track, as the container describes it.
+///
+/// Listed even when the muxer marked it disabled: the panel shows
+/// everything, and only enabled tracks vote on [`PlaybackPath`].
 pub struct VideoTrack {
     /// Canonical short name ("h264", "hevc", "av1", ...), or the raw id
     /// lowercased when we do not recognise it.
@@ -180,7 +212,10 @@ pub struct VideoTrack {
     /// Raw container identifier: MKV CodecID, MP4 sample-entry fourcc,
     /// AVI biCompression fourcc.
     pub(crate) codec_id: String,
+    /// Coded width in pixels. Not the display width: see `display_ar`
+    /// when the pixels are not square.
     pub width: u32,
+    /// Coded height in pixels.
     pub height: u32,
     /// Display aspect as "W:H" reduced by gcd, when the container says
     /// the pixels are not square. `None` means "as coded".
@@ -205,7 +240,14 @@ pub struct VideoTrack {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+/// One audio track, as the container describes it.
+///
+/// The language is the field that most often decides a download is the
+/// wrong one, and it is reported as the muxer wrote it: an untagged
+/// track stays "und" rather than being guessed at.
 pub struct AudioTrack {
+    /// Canonical short name ("aac", "eac3", "dts", ...), or the raw id
+    /// lowercased when we do not recognise it.
     pub codec: String,
     pub(crate) codec_id: String,
     /// Normalised BCP 47; "und" when the muxer said nothing.
@@ -227,6 +269,8 @@ pub struct AudioTrack {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+/// One subtitle track. Whether it can be rendered as text or needs a
+/// picture renderer is `kind`; see [`SubKind`].
 pub struct SubTrack {
     pub(crate) codec: String,
     pub(crate) codec_id: String,
@@ -239,6 +283,7 @@ pub struct SubTrack {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
+/// Whether a subtitle track is timed text or a sequence of pictures.
 pub enum SubKind {
     /// Renderable as timed text.
     Text,
@@ -248,6 +293,7 @@ pub enum SubKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+/// One chapter mark: where it starts and what the container called it.
 pub struct Chapter {
     pub(crate) start_ms: u64,
     /// "" when the container gave a chapter no name.
@@ -282,20 +328,35 @@ pub struct ProbeHint {
 }
 
 #[derive(Debug, thiserror::Error)]
+/// Why a probe stopped.
+///
+/// [`NotYet`](ProbeError::NotYet) and an [`Io`](ProbeError::Io) carrying
+/// `WouldBlock` are NOT damage: they mean bytes have not landed. The
+/// caller answers "pending" and polls again, rather than filing the
+/// file as broken.
 pub enum ProbeError {
+    /// The head bytes landed and match no container this module reads.
     #[error("unrecognized container")]
     UnknownContainer,
     /// The first bytes needed to identify the container are not on disk
     /// yet. The caller answers "pending", not "error".
     #[error("header bytes not yet available")]
     NotYet,
+    /// A read failed. A `WouldBlock` kind here is the gap convention,
+    /// not damage: it means that byte range has not arrived.
     #[error("i/o: {0}")]
     Io(#[from] std::io::Error),
+    /// The container was identified and then contradicted itself.
     #[error("malformed {container}: {what}")]
     Malformed {
+        /// Which container's rules were broken, for the message.
         container: &'static str,
+        /// What specifically did not hold.
         what: &'static str,
     },
+    /// The walk hit its element or byte budget and stopped. The budgets
+    /// are deliberately free of wall-clock time, so probing the same
+    /// bytes twice gives the same answer.
     #[error("probe budget exceeded")]
     BudgetExceeded,
 }
@@ -540,7 +601,7 @@ fn sniff(b: &[u8]) -> Option<Container> {
 /// Head-only and allocation-free on purpose: the callers run over every
 /// file in a finished job's directory and must not pay a container
 /// parse just to ask what a file is. The bytes decide, exactly as in
-/// [`sniff`] - but this is only ever asked about a file that named
+/// `sniff` - but this is only ever asked about a file that named
 /// nothing, so there is no claim here for the bytes to override.
 ///
 /// NOT ONLY RENAME PASSES, which is what this said until 31 Aug 2026.
@@ -548,7 +609,7 @@ fn sniff(b: &[u8]) -> Option<Container> {
 /// CLEANUP door - asks it too, and answering NO there means the file is
 /// DELETED. So the two failure directions are not symmetric any more: a
 /// name this declines to offer costs a hash-named file, and a container
-/// it stops recognising costs the file itself. NARROWING [`sniff`]'s
+/// it stops recognising costs the file itself. NARROWING `sniff`'s
 /// accepted first-box set is therefore a data-loss change in a crate
 /// this one does not build, and wants that door read first. It was one
 /// caller short of that door for months precisely because the door
@@ -674,8 +735,13 @@ pub fn normalize_lang(raw: &str) -> String {
 /// which sleeps up to five minutes) is deliberate: that is right for a
 /// player holding a socket and wrong for a panel that polls.
 pub struct LiveProbeReader {
+    /// The writer whose landed-byte intervals say which reads can be
+    /// served. A read starting on landed bytes and running into a hole
+    /// returns the covered prefix, so progress stays monotone.
     pub w: std::sync::Arc<crate::disk::FileWriter>,
+    /// The output file itself, opened for reading.
     pub f: std::fs::File,
+    /// Current read offset, in bytes from the start of the file.
     pub pos: u64,
 }
 

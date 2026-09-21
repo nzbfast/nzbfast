@@ -13,6 +13,10 @@ use super::*;
 /// Live per-server gauges, updated by workers with relaxed atomics and
 /// readable at any moment (the dashboard's connection-pool view).
 pub struct LiveStats {
+    /// One gauge block per configured server ROW, in fleet order -
+    /// the same order and the same list the fleet build keyed its
+    /// live-tune targets from, so an index here and an index there
+    /// name the same row.
     pub servers: Vec<ServerLive>,
     /// A capped ring of timestamped pool events, so a throughput dip can
     /// be ATTRIBUTED after the fact instead of guessed at.
@@ -145,7 +149,7 @@ pub struct LiveStats {
     pub line_cap_refused: std::sync::atomic::AtomicBool,
     /// TODO 312 item 7: the STALE auto-tune knee holding this fleet
     /// under its own ceiling, `None` when none is
-    /// ([`super::linecap::seed_knee`]).
+    /// (`super::linecap::seed_knee`).
     ///
     /// A PLAIN field and not a gauge, unlike every field above it, and
     /// the difference is real rather than an oversight: the cap is
@@ -185,6 +189,9 @@ pub struct PoolEvent {
     /// own wall-clock, so this is what lets the two be laid on top of
     /// each other; a monotonic instant could not cross the API.
     pub at_ms: u64,
+    /// The server the event is about, by hostname. Two rows on one
+    /// host read alike here; the ring is for attributing a dip by eye,
+    /// not for keying anything.
     pub host: String,
     /// `reconnect` | `rotate` | `cap` | `blocked` | `retired` |
     /// `block` | `missing` | `racing` | `timeout` | `tail` | `drained` - see
@@ -239,6 +246,11 @@ pub(super) const MISSING_BURST: u64 = 25;
 /// means the pool is fighting slow articles hard enough to show.
 pub(super) const RACE_BURST: u64 = 12;
 
+/// Unix milliseconds now, or 0 if the clock is before the epoch.
+///
+/// Wall-clock and not monotonic on purpose: these stamps are laid on
+/// top of the dashboard's own throughput samples, and a monotonic
+/// instant could not cross the API to be compared with them.
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -305,6 +317,8 @@ pub fn row_keys<'a>(hosts: impl IntoIterator<Item = &'a str>) -> Vec<String> {
 /// literal had to be edited whenever an unrelated counter was added.
 #[derive(Default)]
 pub struct ServerLive {
+    /// The server's hostname, for display. Not an identity - see
+    /// [`Self::row_key`].
     pub host: String,
     /// This ROW's identity in the fleet - see [`row_keys`], which mints
     /// it and carries the whole argument for why a hostname is not one.
@@ -434,6 +448,10 @@ pub struct ServerLive {
     /// crosses the crate boundary. It stayed crate-private for as long
     /// as it had no reader at all.
     pub srv_art_ms: AtomicU64,
+    /// True while this row's demand is being held back by our own
+    /// steering (depth-clamped, or passed over by the frontier). A
+    /// rate drop with this set is us, not a provider knee - read it
+    /// before diagnosing one.
     pub steered: AtomicBool,
     /// Unix ms when this server LAST stopped granting sessions, 0 while
     /// it holds one. Set by the first dial that fails or is refused,
@@ -466,7 +484,7 @@ pub struct ServerLive {
     /// mistake of 7 Aug in a different costume.
     ///
     /// High-water across bounces, for the same reason
-    /// [`Shared::flap_cap_seen`] takes one: a bounce can land while the
+    /// `Shared::flap_cap_seen` takes one: a bounce can land while the
     /// server still holds ghosts of sessions it just dropped, which
     /// UNDER-counts the true ceiling; it can never land while the
     /// server is serving MORE than the ceiling.
@@ -528,7 +546,7 @@ impl ServerLive {
     /// provider is actually willing to serve, and the ask it refused.
     ///
     /// `held` is the sessions we were holding at that instant (from
-    /// [`Shared::note_cap_bounce`], which prices the same bounce for
+    /// `Shared::note_cap_bounce`, which prices the same bounce for
     /// the flap clamp). Both counters are high-water and the stamp is
     /// first-write-wins, so the whole fleet bouncing off one cap
     /// reports one episode with one ceiling rather than a race.
@@ -583,6 +601,11 @@ pub struct Refusal {
 }
 
 impl LiveStats {
+    /// Mint the gauges for a fleet, one [`ServerLive`] per row, in the
+    /// order given. Take the row keys from here rather than deriving
+    /// them again at a call site: `row_keys` numbers rows that share a
+    /// host, so a second derivation over a different list answers
+    /// differently.
     pub fn for_servers(servers: &[(ServerConfig, PoolConfig)]) -> Arc<LiveStats> {
         // Minted here from the SAME list, in the same order, that the
         // fleet build keyed its live-tune targets from - so the tuner
@@ -696,8 +719,8 @@ impl LiveStats {
 
     /// Called on every 430/423 this server answers, AFTER
     /// `articles_missing` was bumped. Emits at most one `missing` marker
-    /// per [`BURST_WINDOW_MS`] per server, and only for a window that
-    /// held at least [`MISSING_BURST`] misses - scattered misses are the
+    /// per `BURST_WINDOW_MS` per server, and only for a window that
+    /// held at least `MISSING_BURST` misses - scattered misses are the
     /// retry ladder's normal diet and must not mark the graph.
     pub fn note_missing_burst(&self, idx: usize) {
         let Some(s) = self.servers.get(idx) else {

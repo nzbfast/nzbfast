@@ -31,6 +31,7 @@ fn slot(
         par2_name_demoted: Default::default(),
         par2_sniffed: AtomicBool::new(false),
         total_segments: 10,
+        posted_bytes: 0,
         remaining: AtomicUsize::new(remaining),
         missing: AtomicUsize::new(missing),
         errors: AtomicUsize::new(2),

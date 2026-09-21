@@ -1140,21 +1140,22 @@ fn provider_rate_probe() {
                   &props=claims|labels|descriptions&languages=en|mul&ids=Q83495|Q42|Q1|Q2|Q3"
                 .to_string(),
         };
-        match crate::netfetch::shared_enrich_agent()
-            .get(&url)
-            .set("User-Agent", WIKI_UA)
-            .timeout(std::time::Duration::from_secs(10))
-            .call()
-        {
+        match crate::netfetch::call_keeping_refusal(
+            crate::netfetch::shared_enrich_agent()
+                .get(&url)
+                .header("User-Agent", WIKI_UA)
+                .config()
+                .timeout_global(Some(std::time::Duration::from_secs(10)))
+                .build(),
+        ) {
             Ok(_) => ok += 1,
-            Err(ureq::Error::Status(code, r)) => {
-                let ra = r.header("Retry-After").unwrap_or("-").to_string();
-                let body: String = r
-                    .into_string()
-                    .unwrap_or_default()
-                    .chars()
-                    .take(180)
-                    .collect();
+            Err(e) if e.code().is_some() => {
+                let code = e.code().unwrap_or_default();
+                let ra = e
+                    .retry_after()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "-".into());
+                let body: String = e.body_text().chars().take(180).collect();
                 println!(
                     "  request {i} at {:.1}s: HTTP {code} retry-after={ra} body={body:?}",
                     t0.elapsed().as_secs_f64()
@@ -1326,18 +1327,17 @@ fn wikidata_times_are_normalised() {
 
 // ---- TODO 26c: found / not-found / could-not-ask ---------------------
 
-/// One refused HTTP reply, built the way ureq hands one to the fetchers -
-/// headers and all, so the `Retry-After` under test is a real parsed
-/// header rather than a number typed into the assertion.
-fn refused_response(status: u16, headers: &str) -> ureq::Response {
-    format!("HTTP/1.1 {status} Refused\r\n{headers}Content-Length: 0\r\n\r\n")
-        .parse()
-        .expect("a well-formed response")
-}
-
-/// The same reply as the error `note_http_err` classifies.
-fn refusal(status: u16, headers: &str) -> ureq::Error {
-    ureq::Error::Status(status, refused_response(status, headers))
+/// One refused HTTP reply, headers and all, so the `Retry-After` under
+/// test is a real parsed header rather than a number typed into the
+/// assertion.
+///
+/// ureq 3 dropped the response from its status error, so this is no
+/// longer a `ureq::Response` - but the header text still goes through
+/// the very parser the wire path uses
+/// (`netfetch::refusal_for_test` -> `retry_after_of`), which is what
+/// makes the assertion below discriminating.
+fn refusal(status: u16, headers: &str) -> crate::netfetch::Refusal {
+    crate::netfetch::refusal_for_test(status, headers)
 }
 
 /// A 429 must leave the row RE-ENRICHABLE, and must not be quietly
@@ -1353,11 +1353,7 @@ fn a_429_is_could_not_ask_and_carries_its_retry_after() {
     // The lane calls this against its own bucket, so use one nothing
     // else in the BINARY touches - see the AniList note below for why
     // "in this file" is the wrong scope for a cooldown assertion.
-    let wait = note_refusal(
-        Provider::Srrdb,
-        &refused_response(429, "Retry-After: 900\r\n"),
-        30,
-    );
+    let wait = note_refusal(Provider::Srrdb, &refusal(429, "Retry-After: 900\r\n"), 30);
     note_unreachable();
     assert_eq!(wait, 900, "the header the provider sent was not read");
     assert_eq!(

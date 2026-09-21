@@ -337,10 +337,28 @@ pub fn expand_sources(
 /// of the others, which is why the answer is the reference's and not a
 /// cycle guard.
 ///
-/// The measurement is the reference's UNIX half. Its windows half
-/// branches on `FILE_ATTRIBUTE_DIRECTORY` alone and may follow a
-/// junction where this does not; see `parfast::create::walk`, which
-/// carries the whole of that note and the leg that would settle it.
+/// The measurement is the reference's UNIX half, and the windows half
+/// DOES follow where this refuses - read out of v1.3.0's source
+/// 20 Sep 2026 and RUN on a fleet Windows box on 21 Sep, which confirmed
+/// the reading on every arm (claim
+/// `par2-conformance-windows-link-rows-20sep`). It branches on
+/// `FILE_ATTRIBUTE_DIRECTORY` and on nothing else, and
+/// `FILE_ATTRIBUTE_REPARSE_POINT` occurs nowhere in that tag, so a file
+/// link is taken as a source and a directory link is recursed into. That
+/// makes this rule a STATED windows-only divergence rather than a defect
+/// to fix toward; see `parfast::create::walk`, which carries the whole
+/// note, and `tools/conformance/README.md`'s "Links, and the one answer
+/// that came out of the source".
+///
+/// WHAT THE WINDOWS RUN ADDED: the two TYPED rows are on the windows
+/// tables too and are CLEAN there, because we honour a typed link and so
+/// does the reference on that platform - the divergence closes. This
+/// WALK's own row is posix-only, and not because links are hard there:
+/// windows can spell "walk this whole tree" only as `.`, which the
+/// reference refuses on its own dot guard, or as a wildcard, which is a
+/// separate axis. So the rule this function carries is pinned on the two
+/// posix legs and on no windows one, which is worth knowing before
+/// reading a green windows leg as cover for it.
 ///
 /// # And nothing that is not an ordinary file
 ///

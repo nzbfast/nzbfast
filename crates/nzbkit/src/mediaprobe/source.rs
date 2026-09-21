@@ -143,6 +143,8 @@ pub struct PartialSource {
 }
 
 impl PartialSource {
+    /// A source over `bytes` with NOTHING landed yet. Every read
+    /// answers "not arrived" until `land` or `land_all` says otherwise.
     pub fn new(bytes: Vec<u8>) -> Self {
         PartialSource {
             bytes,
@@ -170,6 +172,8 @@ impl PartialSource {
         *s = merged;
     }
 
+    /// Mark the whole buffer as arrived, which makes this behave like
+    /// an ordinary complete file.
     pub fn land_all(&self) {
         self.land(0, self.bytes.len() as u64);
     }

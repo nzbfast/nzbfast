@@ -1,5 +1,6 @@
 //! §7a / round 39: the QUEUE's own append-only store, the same shape
-//! `histstore.rs` gave history in §129 phase 1a and for the same reason.
+//! `histstore.rs` gave history in §129 phase 1a and for the same reason
+//! (that module's header carries the motivation).
 //!
 //! `save_queue` used to serialize the WHOLE live queue to pretty-printed
 //! JSON and write it atomically to `.spool/queue.json` on every mutation,
@@ -36,7 +37,7 @@
 //! sites do not say WHAT they mutated, and they were not asked to: a
 //! publish serializes the live rows and appends only the lines that
 //! DIFFER from what this process last published (a 64-bit hash per id,
-//! [`QueuePub::published`]). So a site that mutates two jobs and calls
+//! `QueuePub::published`). So a site that mutates two jobs and calls
 //! `save_queue` once still publishes both, exactly as the whole-file
 //! rewrite did, and a mutation whose own save was somehow missed is
 //! picked up by the next publish rather than lost. What the store removes
@@ -64,9 +65,9 @@
 //! real binaries, one built at the commit before this store landed. The
 //! queue comes back either way, through the `queue.json.bak` the
 //! migration's own read leaves behind or, once that is swept, through
-//! `recover_orphaned_spool`. See [`Daemon::sweep_retired_snapshots`] for
+//! `recover_orphaned_spool`. See `Daemon::sweep_retired_snapshots` for
 //! the two retirement copies and their lifetime, and
-//! [`Daemon::legacy_snapshot_outlives_store`] for the way forward; both
+//! `Daemon::legacy_snapshot_outlives_store` for the way forward; both
 //! carry the measurement and what each path costs.
 //!
 //! `queue_rev`, the dashboard's change handle, is still bumped AT this
@@ -250,13 +251,40 @@ impl Daemon {
     /// every API request queues behind it.
     pub(crate) fn queue_rows(&self) -> Vec<Row> {
         let snapshot: Vec<Arc<Mutex<Job>>> = self.queue.lock_ok().iter().cloned().collect();
-        snapshot
+        let mut rows: Vec<Row> = snapshot
             .iter()
             .map(|j| {
                 let g = j.lock_ok();
                 (g.nzo_id.clone(), job_json(&g).to_string())
             })
-            .collect()
+            .collect();
+        // ...plus the terminal records the history store has refused,
+        // which this store carries until history takes them (see
+        // `Daemon::hist_owed`). AFTER the live rows, so the order an
+        // append implies still matches. An entry stops being carried
+        // when the record is back in the live queue (a retry, whose row
+        // above must not be overridden by a stale terminal line) or has
+        // left history (a delete - carrying it on would resurrect it at
+        // the next start). `history` is taken UNDER `hist_owed` here and
+        // nowhere is the reverse order taken.
+        let owed: Vec<Arc<Mutex<Job>>> = {
+            let mut owed = self.hist_owed.lock_ok();
+            if owed.is_empty() {
+                Vec::new()
+            } else {
+                let live: HashSet<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
+                let hist = self.history.lock_ok();
+                owed.retain(|id, j| {
+                    !live.contains(id.as_str()) && hist.iter().any(|h| Arc::ptr_eq(h, j))
+                });
+                owed.values().cloned().collect()
+            }
+        };
+        for j in &owed {
+            let g = j.lock_ok();
+            rows.push((g.nzo_id.clone(), job_json(&g).to_string()));
+        }
+        rows
     }
 
     /// Publish `rows` as the whole live queue, with
@@ -553,6 +581,23 @@ impl Daemon {
         if super::storecut::cut_here(super::storecut::Store::QueueRewrite) {
             return false;
         }
+        // Memory started EMPTY over a file this process could not read,
+        // and the rewrite publishes memory as the whole truth - so it
+        // would replace every row in that file with the ones this run
+        // has seen. Refused for the life of the process; see
+        // `Daemon::queue_store_unreadable`. Appends are not gated here;
+        // the file refuses them itself, at the read+append open.
+        if self.queue_store_unreadable.load(Ordering::Relaxed) {
+            error!(
+                target: "queue",
+                "queue store rewrite {}: refused - the store could not be read at \
+                 start, and a rewrite would replace the rows it holds with the ones \
+                 this run has seen; fix the file and restart",
+                self.queue_store_path().display()
+            );
+            st.rewrite_fail_ms = nzbkit::pool::now_ms().max(1);
+            return false;
+        }
         let now = nzbkit::pool::now_ms();
         let mut buf =
             String::with_capacity(rows.iter().map(|(_, l)| l.len() + 1).sum::<usize>() + 32);
@@ -627,8 +672,27 @@ impl Daemon {
     /// the publish maintains.
     pub fn queue_replay(&self) -> (Vec<Value>, Option<u64>) {
         let path = self.queue_store_path();
-        let Ok(raw) = std::fs::read(&path) else {
-            return (Vec::new(), None);
+        let raw = match crate::histstore::read_store(&path) {
+            Ok(Some(raw)) => raw,
+            Ok(None) => return (Vec::new(), None),
+            Err(e) => {
+                // Absent and unreadable used to be one arm. The queue
+                // still loads empty - there is a queue to run - but the
+                // rewrite that would publish that emptiness over the
+                // unread rows is refused from here, and so is orphan
+                // adoption, which would re-add the unread rows' spool
+                // copies with every saved field dropped (21 Sep 2026
+                // codex sweep, P2-2). `history_replay` has the twin.
+                error!(
+                    target: "queue",
+                    "{}: the queue store exists but could not be read ({e}) - \
+                     starting with an empty queue and refusing to rewrite the \
+                     store; fix the file's permissions and restart nzbfast",
+                    path.display()
+                );
+                self.queue_store_unreadable.store(true, Ordering::Relaxed);
+                return (Vec::new(), None);
+            }
         };
         let replayed = replay_bytes(&raw);
         let mut records: Vec<Value> = Vec::with_capacity(replayed.rows.len());

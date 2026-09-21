@@ -166,6 +166,9 @@ impl Index {
         Ok((rows.collect::<rusqlite::Result<Vec<_>>>()?, total as u64))
     }
 
+    /// One spot by its message-id, `None` when none is stored. The
+    /// msgid is held WITH angle brackets, exactly as OVER reports it -
+    /// pass it in that form.
     pub fn spot_by_msgid(&self, msgid: &str) -> rusqlite::Result<Option<Spot>> {
         let mut stmt = self.db.prepare(
             "SELECT id, msgid, title, category, subcats, size, date,
@@ -185,6 +188,8 @@ impl Index {
         Ok(())
     }
 
+    /// How many spots are stored. A full `COUNT(*)`, so it is exact
+    /// and not cheap.
     pub fn spot_stats(&self) -> rusqlite::Result<u64> {
         self.db
             .query_row("SELECT COUNT(*) FROM spots", [], |r| r.get::<_, i64>(0))
@@ -2184,11 +2189,17 @@ pub const ADULT_SUBCAT: &str = "d75";
 /// A Browse query over the spots table.
 #[derive(Debug, Clone, Default)]
 pub struct SpotQuery {
+    /// Free-text query over spot titles. Empty browses everything.
     pub q: String,
     /// 0-based Spotnet category: 0 video, 1 music, 2 game, 3 application.
     pub category: Option<u8>,
+    /// Include spots filed under [`ADULT_SUBCAT`]. Off by default:
+    /// these are hidden from Browse unless a caller asks for them.
     pub include_adult: bool,
+    /// Most rows to return.
     pub limit: u32,
+    /// Rows to skip, for paging. The browse order is stable
+    /// (`date DESC, id DESC`), so paging does not repeat a row.
     pub offset: u32,
 }
 
@@ -2213,17 +2224,26 @@ pub fn spot_kind(category: u8) -> &'static str {
 /// One ingested Spotnet spot (M14j).
 #[derive(Debug, Clone)]
 pub struct Spot {
+    /// The stored row id. Local to this index; the spot's own identity
+    /// is [`Self::msgid`].
     pub id: i64,
     /// With angle brackets, as seen in OVER.
     pub msgid: String,
+    /// The title the spotter wrote, verbatim. A human claim about the
+    /// content, not a name read off a post.
     pub title: String,
     /// Spotnet category, 0-based: 0 video, 1 music, 2 game, 3 application.
     pub category: u8,
     /// Comma-joined subcategory runs, e.g. `a09,b04`.
     pub subcats: String,
+    /// Size the spotter declared, in bytes. Their figure, not one we
+    /// measured.
     pub size: u64,
     /// Unix timestamp from the spot record.
     pub date: i64,
+    /// The spotter's public-key identity, as the record carries it.
+    /// Stable across spots, so it is what a per-spotter filter keys
+    /// on; it names a key, never a person.
     pub spotter_id: String,
     /// RSA signature verified (always true for stored spots today).
     pub(crate) verified: bool,

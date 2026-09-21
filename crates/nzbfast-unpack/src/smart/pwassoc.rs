@@ -116,6 +116,36 @@ pub fn order_passwords(list: Vec<String>, pw_file: &Path, site: &str, poster: &s
     out
 }
 
+/// The same try-order, each candidate carrying its 1-based position in
+/// the passwords FILE - so an unlock can name WHICH entry won without
+/// ever printing the value, which is the one thing about a password
+/// that is safe to log.
+///
+/// The number is the FILE's and not the walk's. A promoted line keeps
+/// the identity the operator can see in their own editor, so "entry 2"
+/// means the same thing in every job's log whatever the sidecar did
+/// with the order that day; where it was tried is the walk's own count
+/// and belongs beside it rather than inside it. Entries, not line
+/// numbers: [`crate::pwfile::read_password_file`] drops blanks, so a
+/// file with a blank third line has no entry 3 to name. A value that
+/// appears twice is numbered by its FIRST entry, which is the one the
+/// flat order would have reached.
+pub fn order_passwords_indexed(
+    list: Vec<String>,
+    pw_file: &Path,
+    site: &str,
+    poster: &str,
+) -> Vec<(usize, String)> {
+    let numbered = list.clone();
+    order_passwords(list, pw_file, site, poster)
+        .into_iter()
+        .map(|pw| {
+            let n = numbered.iter().position(|p| *p == pw).map_or(0, |i| i + 1);
+            (n, pw)
+        })
+        .collect()
+}
+
 /// The NZB's dominant `poster` attribute - the most common across its
 /// files, so a sidecar posted under another identity cannot claim the
 /// job. Empty when no file carries one.
@@ -255,6 +285,46 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// The entry number travels with the candidate and keeps naming the
+    /// FILE position, whatever the promotion did to the walk order -
+    /// which is the whole point of logging it: "entry 3" means the same
+    /// line to the operator on every job.
+    #[test]
+    fn indexed_order_numbers_by_file_position() {
+        let dir = scratch("pwassoc");
+        let p = pw_file(&dir, &["a", "b", "c"]);
+        // Flat: the walk order and the file order are the same thing.
+        assert_eq!(
+            order_passwords_indexed(list(&p), &p, "", ""),
+            [(1, "a".into()), (2, "b".into()), (3, "c".into())] as [(usize, String); 3]
+        );
+        // Promoted: "c" is tried first and is still entry 3.
+        record_password_assoc(&p, "indexer", "", "c");
+        assert_eq!(
+            order_passwords_indexed(list(&p), &p, "indexer", ""),
+            [(3, "c".into()), (1, "a".into()), (2, "b".into())] as [(usize, String); 3]
+        );
+    }
+
+    /// Blanks are not entries (`read_password_file` drops them) and a
+    /// repeated value is numbered by the entry the flat order would
+    /// have reached - the second copy is never the one that answers.
+    #[test]
+    fn indexed_order_skips_blanks_and_numbers_a_repeat_once() {
+        let dir = scratch("pwassoc");
+        let p = pw_file(&dir, &["a", "", "b", "a"]);
+        assert_eq!(
+            order_passwords_indexed(list(&p), &p, "", ""),
+            [(1, "a".into()), (2, "b".into()), (1, "a".into())] as [(usize, String); 3]
+        );
+        // Promoting the repeat still names its FIRST entry.
+        record_password_assoc(&p, "indexer", "", "a");
+        assert_eq!(
+            order_passwords_indexed(list(&p), &p, "indexer", "")[0],
+            (1, "a".to_string())
+        );
     }
 
     #[test]

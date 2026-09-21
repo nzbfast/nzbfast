@@ -1,6 +1,6 @@
 [package]
 name = "nzbfast"
-version = "1.6.0"
+version = "1.7.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -65,9 +65,6 @@ nzbfast-tasks = { path = "../nzbfast-tasks" }
 # this crate's own feature, and its build.rs writes the OUT_DIR members
 # `assets.rs` reads.
 nzbfast-api = { path = "../nzbfast-api" }
-# `parallel` turns on rars' multithreaded RAR5 block decode (unrar-parity
-# extraction wall speed; members >=16MB fan symbol decode across 4 workers).
-rars = { path = "../../vendor/rars", features = ["parallel"] }
 # Native 7z extraction (Apache-2.0, pure Rust - keeps the zero-external-tools
 # stance). Decode-only: no `compress` encoder, no wasm; aes256/bzip2/ppmd
 # cover the encrypted + non-LZMA methods real posts use.
@@ -105,9 +102,14 @@ rustls = { version = "0.23", features = ["aws-lc-rs"] }
 # cert fails fast with the file named, instead of every browser refusing with
 # its own wording while the daemon log shows nothing.
 x509-parser = "0.18"
+# No `ureq` line here since the ureq 3 port (TODO 326). The bin reaches
+# outbound HTTP only through `nzbfast_core::netfetch` - the SSRF guard,
+# the shared agents and `Refusal` - so the direct edge named nothing
+# once `nettools` stopped matching on `ureq::Error` by hand. Feature
+# resolution is unchanged: netfetch's own `ureq = "3"` carries the same
+# default features this line did.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.150"
-ureq = "2"
 # Update-manifest binary verification (auto-update): sha256 for payload
 # integrity, ed25519 for manifest authenticity (a signature the update
 # origin cannot forge without the offline signing key).
@@ -340,6 +342,17 @@ heavy-tests = []
 # in examples/update_sign.rs so the daemon and the release pipeline use
 # the exact same ed25519 implementation. getrandom seeds keygen.
 [dev-dependencies]
+# The RAR engine, for FIXTURES only: e2e, daemon_bomb, leak_soak and
+# `examples/engine_bench.rs` build archives through its writers, and no
+# production site of this crate names it (extraction reaches the engine
+# through nzbfast-unpack, which is where `parallel` is decided for the
+# shipped binary). A dev-dependency so `cargo check -p nzbfast` - the
+# release-set edge - carries no engine line of its own. The engine is
+# still RESOLVED on that edge, through nzbfast-unpack, so this buys a
+# truthful manifest rather than a smaller build. Same features as
+# nzbfast-unpack's line: a narrower set here would resolve to the union
+# anyway and would say something untrue about the fork.
+rars = { path = "../../vendor/rars", features = ["parallel"] }
 # The same crate as the normal dependency above, with its test seams
 # switched on. Six items this crate's tests reach for were `#[cfg(test)]`
 # while the two crates were one, and `cfg(test)` is invisible across a

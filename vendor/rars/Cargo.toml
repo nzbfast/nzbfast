@@ -13,13 +13,18 @@ publish = false
 # local `#[allow(unsafe_code)]`; its comment has the argument. Since
 # 2026-09-06 src/recovery/gf16_fold.rs is the second home, the SIMD GF(2^16)
 # fold kernels for recovery records, under the same argument (feature-gated
-# intrinsics over slices the safe wrappers bound). Everything else is still
-# refused, and `cargo test -p rars --lib`'s
-# `unsafe_is_confined_to_the_neon_entry` test pins the count at two files.
+# intrinsics over slices the safe wrappers bound). Since 2026-09-16
+# src/crc32/pmull.rs is the third, the PMULL-folded CRC-32 on aarch64, under
+# the same argument. Everything else is still refused, and `cargo test -p
+# rars --lib`'s `unsafe_is_confined_to_the_neon_entry` test pins the count at
+# three files.
 unsafe_code = "deny"
 unused_must_use = "deny"
 
 [features]
+# Exposes `codec::address_filters_harness` for the fork's address-filter
+# bench and fuzz targets. Not an API; never enable it in a shipped build.
+bench-internals = []
 ratio-lab = []
 fast = []
 parallel = ["dep:rayon"]

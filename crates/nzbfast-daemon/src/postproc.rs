@@ -17,7 +17,7 @@
 //! What the lane does NOT do: touch anything inside `get_with_progress`.
 //! The engine's own tail (settle, repair, unpack, the §100 journal
 //! handshake, §101's gates) keeps its exact ordering because it lives
-//! inside the fetch task, which [`run_tail`] merely awaits from a
+//! inside the fetch task, which `run_tail` merely awaits from a
 //! different place than the old inline closure did.
 //!
 //! Kill-switch: `NZBFAST_POSTPROC_INLINE=1` forces width 1 AND
@@ -83,7 +83,7 @@ pub struct PostprocTicket {
     pub index_job_guard: IndexJobGuard,
     /// Retention insurance: this run banked a deferred row's payload
     /// (`no_extract`), so the tail re-queues the row paused instead of
-    /// filing it - see the insurance arm in [`run_tail`]. Run state,
+    /// filing it - see the insurance arm in `run_tail`. Run state,
     /// not a read of the record, for the reason `Running::insurance`
     /// gives.
     pub insurance: bool,
@@ -94,7 +94,7 @@ pub struct PostprocTicket {
     pub oracle_samples: Vec<nzbkit::oracle::Sample>,
     /// This job's per-provider article/byte/cap facts and its post
     /// date, read off the pool at network drain. Folded into the
-    /// 30-day quality ledger down in [`run_tail`], once the outcome
+    /// 30-day quality ledger down in `run_tail`, once the outcome
     /// those facts sat under is known.
     pub prov_facts: Vec<crate::provquality::HostFacts>,
     pub prov_post_unix: i64,
@@ -296,7 +296,7 @@ impl PostprocLane {
     /// script has to be FINISHED before the row appears, because the
     /// word in that row (`Completed`, and `Failed` just as much) is
     /// what a SAB client acts on. See
-    /// [`Daemon::run_post_job_hooks_before_park`] for why that word is
+    /// `Daemon::run_post_job_hooks_before_park` for why that word is
     /// a contract rather than a status line.
     ///
     /// What the runner cannot do is await it in place: those arms run
@@ -1009,6 +1009,124 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
                     );
                 }
             }
+        }
+        d2.save_queue();
+        return;
+    }
+    // TODO 332: A LONG REPAIR WAS FORECAST AND THIS RUN STOOD BACK FROM
+    // IT, so the row owes itself to the QUEUE and never to history. The
+    // whole feature's user-visible half is this arm: the job goes to the
+    // back of the queue ONCE, carrying a reason the drawer prints, so
+    // the person has a chance to see what is coming and stop it.
+    //
+    // ASKED OF THE HANDLE, NOT OF `res`, and that is the load-bearing
+    // choice. Two repair sites can defer and they surface it differently
+    // - the download disk repair unwinds with `RepairError::Deferred`,
+    // so `res` is an `Err`, while the late-set pass answers a tuple and
+    // can only `break`, so `res` is `Ok` and the run "succeeded" with a
+    // late set unrepaired. One gate, read once, covers both; keying off
+    // the error would have filed the second case Completed over a set
+    // nothing repaired.
+    //
+    // THE MARK IS SET HERE AND NOWHERE ELSE. `repair_deferred` is what
+    // makes the policy "defer once, then repair": the worker ANDs it
+    // into `JobSpec::defer_long_repair`, so the next pass arms no veto,
+    // forecasts the same long repair and gets on with it. Setting it in
+    // the same lock hold as the requeue is what stops a job that defers
+    // from cycling forever, which is the one failure this feature can
+    // cause on its own.
+    //
+    // Sits BELOW the insurance arm (an insurance fetch extracts nothing
+    // and arms no veto, so it cannot reach here) and ABOVE the disk-full
+    // park, whose hold is about a resource this row is not waiting on.
+    // Same no-await-since-the-generation-check safety as both.
+    //
+    // Nothing on disk is lost: the veto is answered before the fold,
+    // before the solve and before the patch, so the payload and the
+    // journal are exactly what the download left, and the second pass
+    // resumes from them.
+    //
+    // THE ID IS TAKEN FIRST, on purpose: `park_gen` holds a job record
+    // and then reaches for `tail_cancel` to release the handle, so
+    // taking the two the other way round here would be a lock-order
+    // inversion between two live paths. One `let` is what keeps it a
+    // job-then-hub read like every other.
+    let deferred_repair = {
+        let id = job2.lock_ok().nzo_id.clone();
+        d2.hub
+            .tail_cancel
+            .lock_ok()
+            .get(&id)
+            .and_then(|c| c.repair_deferred())
+    };
+    if let Some(d) = deferred_repair
+        && !job2.lock_ok().tombstone
+    {
+        {
+            let mut j = job2.lock_ok();
+            j.state = JobState::Queued;
+            // Never again for this job - see `Job::repair_deferred`.
+            j.repair_deferred = true;
+            // The abort/demote machinery may have judged this stint and
+            // none of it may outlive the errand, exactly as the
+            // insurance arm says of the same flag.
+            j.demote = false;
+            j.clear_attempt_verdicts();
+            j.downloaded_bytes = on_disk_bytes;
+            // The watchdog's own scheduling state, used for what it is
+            // for: `deferred` is what `pick_job` reads to run this row
+            // only when nothing else is runnable, which IS "the back of
+            // the queue", and the drawer prints `defer_reason` with
+            // "tried <t> ago" off the stamp. The stamp goes on WITH the
+            // flag, never apart from it (see `daemon_park`'s demote arm).
+            j.deferred = true;
+            j.defer_at = unix_now().max(0) as u64;
+            // `defer_count` IS DELIBERATELY NOT TOUCHED. It is the
+            // SLOW-JOB watchdog's own ladder budget - `stall`'s
+            // `defer_count >= 3` is what stops a job that keeps
+            // stalling from being demoted forever - and this deferral
+            // is not a stall and is bounded by something else entirely
+            // (`repair_deferred`, which allows exactly one). Counting
+            // it here would spend a third of a budget belonging to a
+            // different mechanism, and a download that had been
+            // demoted twice for being slow would silently lose the
+            // watchdog's last turn to a repair notice.
+            //
+            // AND THE BACK OF THE QUEUE IS WHERE THE ROW GOES, not a
+            // timer: `pick_job` runs a `deferred` row only when nothing
+            // else is runnable, which is the ruling's own words. On an
+            // otherwise EMPTY queue that means the job comes straight
+            // back and repairs at once - the notice has been published
+            // on the row either way, and inventing a minimum wait here
+            // would be the "block until I answer" the ruling refuses.
+            // MINUTES, never a countdown: `est_secs` is an order of
+            // magnitude fitted to two points on one box - see
+            // `par2repair::RepairForecast::est_secs`. `0` is the shape
+            // nobody has measured, and saying nothing about time is the
+            // honest answer for it.
+            j.defer_reason = if d.est_secs > 0 {
+                format!(
+                    "this download needs a long repair - roughly {} minute(s) to rebuild {} \
+                     block(s). It goes ahead on its own next time round; remove it now if you \
+                     would rather not wait.",
+                    d.est_secs.div_ceil(60),
+                    d.missing_blocks
+                )
+            } else {
+                format!(
+                    "this download needs a long repair to rebuild {} block(s). It goes ahead \
+                     on its own next time round; remove it now if you would rather not wait.",
+                    d.missing_blocks
+                )
+            };
+            info!(
+                target: "repair",
+                "{}: a long repair was forecast ({} block(s), about {} minute(s)) - the job \
+                 goes back to the queue once so it can be stopped; the next pass repairs it",
+                j.nzo_id,
+                d.missing_blocks,
+                d.est_secs.div_ceil(60)
+            );
         }
         d2.save_queue();
         return;

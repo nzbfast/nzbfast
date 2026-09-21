@@ -798,6 +798,11 @@ fn err_kind(e: &RepairError) -> &'static str {
         // one - a retained corpus bought by an attempt somebody called
         // off is not evidence about sets.
         RepairError::Cancelled => "error_cancelled",
+        // Same reading as `Cancelled`, one step earlier: the caller's
+        // long-repair veto stood the repair down before the fold, so
+        // nothing about the set was measured past the survey and this
+        // corpus is not evidence about sets either. TODO 332.
+        RepairError::Deferred { .. } => "error_deferred",
     }
 }
 

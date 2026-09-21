@@ -5,6 +5,11 @@
 //! order. NNTP responses arrive strictly in command order, which is what
 //! makes pipelining safe. AUTHINFO is never pipelined (done once at connect).
 
+// Documented in full as part of TODO 84's missing_docs ratchet. The lint
+// is on here so the count cannot climb back: a new public item in this
+// module (or in `resolve`, which inherits this) needs a doc comment.
+#![warn(missing_docs)]
+
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -15,20 +20,61 @@ use tracing::warn;
 pub mod resolve;
 pub use resolve::{Resolve, ResolveFuture, SystemResolver, install_resolver, resolver_installed};
 
+/// Everything that can go wrong on an NNTP conversation.
+///
+/// The variants split into two classes, and the distinction decides
+/// whether the socket can be reused. [`Io`], [`Closed`], [`Timeout`],
+/// [`Unexpected`] and [`IdMismatch`] are SESSION-level: the connection's
+/// remaining responses can no longer be attributed, so the caller must
+/// drop it rather than issue another command. [`AuthFailed`] and
+/// [`TlsName`] happen before the session is usable at all, and
+/// [`TooLarge`] is a refusal the reader makes deliberately.
+///
+/// [`Io`]: NntpError::Io
+/// [`Closed`]: NntpError::Closed
+/// [`Timeout`]: NntpError::Timeout
+/// [`Unexpected`]: NntpError::Unexpected
+/// [`IdMismatch`]: NntpError::IdMismatch
+/// [`AuthFailed`]: NntpError::AuthFailed
+/// [`TlsName`]: NntpError::TlsName
+/// [`TooLarge`]: NntpError::TooLarge
 #[derive(Debug, thiserror::Error)]
 pub enum NntpError {
+    /// The underlying socket failed: a read, a write, or the TLS layer.
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
+    /// The configured hostname is not a valid TLS server name, so the
+    /// handshake was never attempted. A configuration fault, not a
+    /// network one.
     #[error("invalid TLS server name")]
     TlsName,
+    /// The peer closed the connection while a response was still owed.
     #[error("connection closed by server")]
     Closed,
     /// The server refused to authenticate us. `kind` says whether that is
     /// worth retrying: see [`AuthRefusal`].
     #[error("authentication failed: {line}")]
-    AuthFailed { kind: AuthRefusal, line: String },
+    AuthFailed {
+        /// Whether retrying can ever help, which the reply code alone
+        /// cannot say. See [`AuthRefusal`].
+        kind: AuthRefusal,
+        /// The server's verbatim refusal line, kept because the
+        /// free-form text is what `kind` was classified from and is the
+        /// only thing worth showing an operator.
+        line: String,
+    },
+    /// The server answered a command with a status this client does not
+    /// accept for it. A session-level failure: with responses attributed
+    /// positionally, an unexpected one means the rest cannot be trusted.
     #[error("unexpected response to {cmd}: {line}")]
-    Unexpected { cmd: String, line: String },
+    Unexpected {
+        /// The command that was sent, for the operator log. Carries the
+        /// argument too where the argument is what makes the failure
+        /// legible (`GROUP alt.binaries.x`).
+        cmd: String,
+        /// The server's verbatim status line.
+        line: String,
+    },
     /// The response echoed a message-id, and it is not the one the
     /// caller asked for. On a pipelined connection responses are
     /// attributed POSITIONALLY, so one dropped or reordered response
@@ -39,9 +85,23 @@ pub enum NntpError {
     ///
     /// [`Unexpected`]: NntpError::Unexpected
     #[error("response echoed a different message-id (asked for {expected}): {line}")]
-    IdMismatch { expected: String, line: String },
+    IdMismatch {
+        /// The message-id the caller asked for, which is what the
+        /// echoed one should have matched.
+        expected: String,
+        /// The server's verbatim status line, carrying the id it
+        /// actually echoed.
+        line: String,
+    },
+    /// A multiline response ran past the reader's byte cap and was cut
+    /// off. The cap exists so a buggy or hostile peer cannot grow the
+    /// read buffer without bound; the value carried is the cap, not the
+    /// size the response reached.
     #[error("multiline response exceeded {0} bytes")]
     TooLarge(usize),
+    /// No response arrived within the command timeout. Session-level:
+    /// the answer may still be in flight, so the socket cannot be
+    /// reused without desyncing it.
     #[error("timed out waiting for a server response")]
     Timeout,
 }
@@ -195,6 +255,9 @@ enum StatusLine {
 /// returning an error.
 #[derive(Clone)]
 pub struct Status {
+    /// The three-digit NNTP reply code. Public because callers outside
+    /// this crate branch on it directly; the text beside it stays
+    /// crate-private so the inline representation can change.
     pub code: u16,
     line: StatusLine,
 }
@@ -219,7 +282,7 @@ impl std::fmt::Debug for Status {
 
 impl Status {
     /// A status from an already-parsed code and text. The wire path
-    /// uses [`Status::from_wire`]; this is for callers that synthesize
+    /// uses `Status::from_wire`; this is for callers that synthesize
     /// one rather than reading it off a socket.
     pub fn new(code: u16, line: &str) -> Status {
         let line = if line.len() <= STATUS_INLINE {
@@ -314,7 +377,7 @@ fn status_code_of(text: &str) -> u16 {
 
 /// The message-id a status line echoes, when a plausible one is
 /// present. RFC 3977 responses to BODY/ARTICLE/STAT echo the id
-/// ("222 0 <id> body follows", "220 0 <id> article follows", and some
+/// (`"222 0 <id> body follows"`, `"220 0 <id> article follows"`, and some
 /// servers echo it on 430/423 refusals too) - but plenty of real
 /// providers echo a bare `0` or omit the field entirely, so absence
 /// means "no evidence", never "mismatch". Plausible = an
@@ -388,7 +451,7 @@ pub fn takedown_flavoured(code: u16, line: &[u8]) -> bool {
 
 /// What a STAT status line means: `Ok(true)` the article exists (223),
 /// `Ok(false)` it does not (423/430, plus Giganews's nonstandard
-/// "451 0 <msgid>" for removed/DMCA'd articles - treating that as a
+/// `"451 0 <msgid>"` for removed/DMCA'd articles - treating that as a
 /// protocol error threw away whole sample batches, so Giganews
 /// takedowns were never counted as misses).
 ///
@@ -411,19 +474,39 @@ fn stat_verdict(st: Status) -> Result<bool, NntpError> {
     }
 }
 
+/// A server's answer to `GROUP`: how many articles it holds for that
+/// group and the article-number range they sit in.
+///
+/// `count` is the server's own estimate and is NOT `high - low + 1`:
+/// numbers are retired as articles expire, so the range is almost
+/// always sparse. Use `low` and `high` to drive a scan and `count`
+/// only as a rough size.
 pub struct GroupInfo {
+    /// The server's estimate of how many articles the group holds.
     pub count: u64,
+    /// Lowest article number the server still has.
     pub low: u64,
+    /// Highest article number the server still has.
     pub high: u64,
 }
 
 /// One row of an OVER/XOVER response.
 #[derive(Debug, Clone)]
 pub struct OverEntry {
+    /// Article number within the group this row was fetched from.
+    /// Group-local and not stable across servers.
     pub number: u64,
+    /// The Subject header, decoded by [`decode_header_line`], so the
+    /// latin-1 bytes a Spotnet signature covers survive intact.
     pub subject: String,
+    /// The From header, decoded the same way as `subject`.
     pub from: String,
+    /// The Message-ID, angle brackets included, trimmed of surrounding
+    /// whitespace. This is the identity that survives across servers.
     pub message_id: String,
+    /// The server's declared article size in bytes. ON-WIRE bytes, so
+    /// yEnc overhead is included and this over-reads the decoded
+    /// payload by a few percent.
     pub bytes: u64,
     /// Unix time from the Date field (0 = unparseable).
     pub date: i64,
@@ -436,7 +519,7 @@ pub struct OverEntry {
 ///
 /// `from_utf8_lossy` turns every one of those bytes into U+FFFD, which
 /// both mangles the indexed title and destroys the exact bytes a Spotnet
-/// signature covers (see [`crate::spot`]). A latin-1 fallback is lossless
+/// signature covers (see `crate::spot`). A latin-1 fallback is lossless
 /// and reversible - collapsing each char back to one byte recovers the
 /// wire bytes exactly.
 pub fn decode_header_line(line: &[u8]) -> std::borrow::Cow<'_, str> {
@@ -446,8 +529,39 @@ pub fn decode_header_line(line: &[u8]) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Is this OVER row's Message-ID one we could ever spell on the wire?
+///
+/// An OVER id reaches the wire as `BODY {id}` with NO second parse in
+/// between (index probe -> `probe_fetch` -> [`Connection::body`], and
+/// the Spotnet head/body path), so this is the parse boundary that has
+/// to apply the same gate `nzb::is_wire_safe` applies to an NZB-sourced
+/// id. `str::trim` strips surrounding Unicode whitespace only: an
+/// interior space, NUL or bare CR survives it, and there is no length
+/// bound at all. Such an id is stored in the index as a real article
+/// and can never be fetched.
+///
+/// The OVER spelling carries the angle brackets and the NZB spelling
+/// does not, so the brackets come off before the check - `is_wire_safe`
+/// refuses '<' and '>' by design. `MAX_WIRE_TOKEN` is RFC 3977 3.1's
+/// 512-octet command-line cap, the same figure `nzb.rs` uses.
+fn over_id_is_fetchable(id: &str) -> bool {
+    if id.is_empty() || id.len() > crate::nzb::limits::MAX_WIRE_TOKEN {
+        return false;
+    }
+    let inner = id
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(id);
+    !inner.is_empty() && crate::nzb::is_wire_safe(inner)
+}
+
 /// Parse one raw OVER/XOVER response line. `None` for a line with too few
-/// fields (including the empty tail a trailing newline leaves behind).
+/// fields (including the empty tail a trailing newline leaves behind), and
+/// for a row whose Message-ID could never be spelled on the wire (see
+/// `over_id_is_fetchable`, which is private, so this is not an intra-doc
+/// link: `-D rustdoc::private-intra-doc-links` makes a public item linking
+/// a private one fatal) - the OVER equivalent of the NZB parser's
+/// `dropped_segments` arm.
 pub fn parse_over_line(line: &[u8]) -> Option<OverEntry> {
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     let text = decode_header_line(line);
@@ -456,11 +570,15 @@ pub fn parse_over_line(line: &[u8]) -> Option<OverEntry> {
     if f.len() < 7 {
         return None;
     }
+    let message_id = f[4].trim();
+    if !over_id_is_fetchable(message_id) {
+        return None;
+    }
     Some(OverEntry {
         number: f[0].trim().parse().unwrap_or(0),
         subject: f[1].to_string(),
         from: f[2].to_string(),
-        message_id: f[4].trim().to_string(),
+        message_id: message_id.to_string(),
         bytes: f[6].trim().parse().unwrap_or(0),
         date: parse_nntp_date(f[3]).unwrap_or(0),
     })
@@ -470,8 +588,11 @@ pub fn parse_over_line(line: &[u8]) -> Option<OverEntry> {
 /// current article-number range (high - low ≈ articles on the server).
 #[derive(Debug, Clone)]
 pub struct ActiveGroup {
+    /// The group name, as the server spells it.
     pub name: String,
+    /// Highest article number the server currently holds.
     pub high: u64,
+    /// Lowest article number the server currently holds.
     pub low: u64,
     /// Posting status flag: 'y' posting allowed, 'n' not, 'm' moderated.
     pub status: char,
@@ -1005,6 +1126,21 @@ impl AsyncWrite for Wire {
     }
 }
 
+/// One NNTP session: a socket plus the per-connection state that
+/// decides how the next command is issued.
+///
+/// Commands are split into `send_*` and `read_*` halves so a caller can
+/// PIPELINE, writing several `BODY` commands before consuming any
+/// response. That is safe only because NNTP answers strictly in command
+/// order, which also means responses are attributed POSITIONALLY: one
+/// dropped or reordered response desyncs everything after it, so a
+/// session-level error must end the connection rather than be retried
+/// on it.
+///
+/// The connection also LATCHES what it learns about the server - whether
+/// OVER is understood, whether header compression was negotiated - so a
+/// capability a server lacks costs one doomed round-trip per
+/// connection rather than one per chunk.
 pub struct Connection {
     wire: Wire,
     line: Vec<u8>,
@@ -1653,6 +1789,11 @@ impl Connection {
         Ok(())
     }
 
+    /// Flush everything written by the `send_*_unflushed` calls.
+    ///
+    /// This is the second half of pipelining: queue the commands, then
+    /// flush once, so a batch costs one round-trip rather than one per
+    /// command.
     pub async fn flush(&mut self) -> Result<(), NntpError> {
         self.wire.flush().await?;
         Ok(())
@@ -1941,6 +2082,15 @@ where
 impl Connection {
     // -- Convenience commands -------------------------------------------------
 
+    /// Ask the server what it supports (`CAPABILITIES`, RFC 3977), one
+    /// capability line per element.
+    ///
+    /// Not every server implements the command, and one that does not
+    /// answers a non-101 status, which comes back as
+    /// [`NntpError::Unexpected`] rather than an empty list. Absence of
+    /// a capability here is not proof the feature is missing: several
+    /// providers support `XOVER` or header compression without
+    /// advertising either.
     pub async fn capabilities(&mut self) -> Result<Vec<String>, NntpError> {
         let st = self.exec("CAPABILITIES").await?;
         if st.code != 101 {
@@ -2017,6 +2167,14 @@ impl Connection {
         })
     }
 
+    /// Select a group (`GROUP`) and return the counts the server reports
+    /// for it.
+    ///
+    /// Selecting a group is per-connection state that later
+    /// article-number commands read, so a caller driving several groups
+    /// over one socket must re-issue this between them. A malformed
+    /// count field degrades to 0 rather than failing the command; a
+    /// non-211 status is a [`NntpError::Unexpected`].
     pub async fn group(&mut self, name: &str) -> Result<GroupInfo, NntpError> {
         let st = self.exec(&format!("GROUP {name}")).await?;
         if st.code != 211 {
@@ -2263,7 +2421,7 @@ impl Connection {
     /// Read one BODY response into a caller-supplied buffer (buffer-pool
     /// friendly). `Ok(true)` on 222 with the raw dot-stuffed body appended
     /// to `out`; `Ok(false)` if the article is missing (423/430, plus
-    /// Giganews's nonstandard "451 0 <msgid>" for removed/DMCA'd
+    /// Giganews's nonstandard `"451 0 <msgid>"` for removed/DMCA'd
     /// articles - the same shape `read_stat` already accepts).
     ///
     /// 451 belongs here for the same reason it belongs there, only the
@@ -2354,7 +2512,7 @@ impl Connection {
     ///   body. Any byte arriving resets it, so a slow-but-alive transfer
     ///   is never killed for taking longer than a flat cap - only a
     ///   genuine mid-body stall trips. On top of it rides the A6 rate
-    ///   floor ([`body_rate_floor`]): a body must also average a very
+    ///   floor (`body_rate_floor`): a body must also average a very
     ///   low minimum rate over a rolling window, so a peer dribbling
     ///   single bytes cannot reset the idle deadline forever and squat
     ///   the connection slot for the run.
@@ -2483,7 +2641,7 @@ impl Connection {
 
     /// Read one STAT response: `Ok(true)` if the article exists (223),
     /// `Ok(false)` if not (423/430, plus Giganews's nonstandard
-    /// "451 0 <msgid>" for removed/DMCA'd articles - treating that as a
+    /// `"451 0 <msgid>"` for removed/DMCA'd articles - treating that as a
     /// protocol error threw away whole sample batches, so Giganews
     /// takedowns were never counted as misses).
     ///
@@ -2498,7 +2656,7 @@ impl Connection {
     }
 
     /// [`Self::read_stat`] for a PIPELINED sweep that owns its own
-    /// socket: same command, same verdict alphabet ([`stat_verdict`]),
+    /// socket: same command, same verdict alphabet (`stat_verdict`),
     /// plus the one thing positional attribution requires -
     /// `check_echoed_id` against the id this reply is being filed
     /// against.
@@ -2533,7 +2691,7 @@ impl Connection {
     }
 
     /// TODO 96.4: [`Self::read_stat`] for the PIPELINED path - the same
-    /// command and the same verdict alphabet ([`stat_verdict`], shared
+    /// command and the same verdict alphabet (`stat_verdict`, shared
     /// with the serial reader above), read with the attribution and
     /// alignment discipline [`Self::read_body_into`] applies to a BODY's.
     ///
@@ -2613,7 +2771,7 @@ impl Connection {
     /// alive end to end. One line out, one line back, no state touched -
     /// which is what makes it the right keepalive and the right
     /// validation for a connection parked between jobs (see
-    /// [`crate::warmpool`]). Bounded by [`COMMAND_TIMEOUT`] through
+    /// `crate::warmpool`). Bounded by `COMMAND_TIMEOUT` through
     /// `read_status`, so a peer that has gone mute fails rather than
     /// parking the caller.
     ///

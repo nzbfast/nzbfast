@@ -1,5 +1,8 @@
 //! Which of the two in-band names a downloaded file is written under
-//! (GitHub #63).
+//! (GitHub #63). Carries `FileSlot::write_name` and
+//! `FileSlot::hint_beats`, and - M4-70 - `FileSlot::contested_yenc_name`,
+//! which re-decides that question at settle off what the ARTICLES
+//! declared.
 //!
 //! A post carries the filename TWICE and the two can disagree:
 //!
@@ -173,11 +176,11 @@ impl NameVotes {
     /// `nzbkit::journal::ResumeState::name_votes`, written per contested
     /// slot by `Journal::record_name_votes`.
     ///
-    /// The first entry takes [`Self::first`]'s place and the rest become
-    /// [`Self::others`], which reconstructs exactly the tally the writer
+    /// The first entry takes `Self::first`'s place and the rest become
+    /// `Self::others`, which reconstructs exactly the tally the writer
     /// had: [`FileSlot::contested_yenc_name`] tallies `first` as an
     /// ordinary candidate, so WHICH entry lands there changes no verdict.
-    /// This run's own articles then vote into it through [`Self::note`]
+    /// This run's own articles then vote into it through `Self::note`
     /// like any other.
     pub fn resumed(seed: &[(String, u32)]) -> Self {
         let votes = Self::default();
@@ -408,6 +411,7 @@ mod tests {
             par2_name_demoted: Default::default(),
             par2_sniffed: AtomicBool::new(false),
             total_segments: 1,
+            posted_bytes: 0,
             remaining: AtomicUsize::new(0),
             missing: AtomicUsize::new(0),
             errors: AtomicUsize::new(0),

@@ -15,13 +15,13 @@
 //! Three things carry the correctness:
 //!
 //! - the lane key is the destination root's DEVICE, not its path (see
-//!   [`lane_key`]) - which is what keeps nested roots, a category
+//!   `lane_key`) - which is what keeps nested roots, a category
 //!   override under its own global root, and every job that could land
 //!   in one Season folder on ONE lane;
-//! - [`MOVER_MAX_CONCURRENT`] bounds the whole fleet, because every
+//! - `MOVER_MAX_CONCURRENT` bounds the whole fleet, because every
 //!   move reads the same download volume however many destinations
 //!   there are;
-//! - the pacer's token bucket is one shared instance ([`mover_pacer`]),
+//! - the pacer's token bucket is one shared instance (`mover_pacer`),
 //!   so N concurrent copies divide one budget instead of each granting
 //!   itself the full one.
 
@@ -334,7 +334,7 @@ mod writethrough_tests;
 ///
 /// Moved off `crates/nzbfast-daemon/src/daemon.rs` (TODO 106) to sit with the lanes that
 /// call it - `move_dest_root` in particular is the one lookup
-/// [`lane_key_for`] and [`Daemon::relocate_completed`] must agree on,
+/// `lane_key_for` and [`Daemon::relocate_completed`] must agree on,
 /// and it now lives beside both. A sibling of `daemon` either way, so
 /// the moved methods keep their `pub(super)` exactly.
 impl Daemon {

@@ -196,3 +196,40 @@ async fn a_rejected_over_is_still_an_error() {
     );
     conn.quit().await;
 }
+
+/// An OVER row's Message-ID reaches the wire as `BODY {id}` with no
+/// second parse in between, so `parse_over_line` is the boundary that
+/// has to refuse an id the NZB parser would have charged to
+/// `dropped_segments`: an interior space (the server reads `<a` as the
+/// whole argument), a bare control byte, an empty id, or one past
+/// RFC 3977's 512-octet command-line cap. Each of those is an article
+/// that would be recorded in the index as real and could never be
+/// fetched.
+#[test]
+fn over_row_with_an_unfetchable_message_id_is_dropped() {
+    let row = |id: &str| format!("123\tsubj\tfrom\tdate\t{id}\t\t900\t10").into_bytes();
+
+    // The control: a well-formed row still parses, brackets and all.
+    let ok = super::parse_over_line(&row("<a@news.example>")).expect("good id parses");
+    assert_eq!(ok.message_id, "<a@news.example>");
+    assert_eq!(ok.bytes, 900);
+
+    // Interior space - `str::trim` never removes it.
+    assert!(super::parse_over_line(&row("<a b@news.example>")).is_none());
+    // Interior control bytes, including the bare CR `decode_header_line`
+    // maps through latin-1 intact.
+    assert!(super::parse_over_line(&row("<a\rb@news.example>")).is_none());
+    assert!(super::parse_over_line(&row("<a\0b@news.example>")).is_none());
+    // Empty, and whitespace-only.
+    assert!(super::parse_over_line(&row("")).is_none());
+    assert!(super::parse_over_line(&row("  ")).is_none());
+    assert!(super::parse_over_line(&row("<>")).is_none());
+    // Past the wire cap, so it can never be spelled at all.
+    let long = format!("<{}@x>", "y".repeat(crate::nzb::limits::MAX_WIRE_TOKEN));
+    assert!(super::parse_over_line(&row(&long)).is_none());
+
+    // A bracketless id is what some servers send; it is fetchable and
+    // must keep parsing, or every row from such a server is dropped.
+    let bare = super::parse_over_line(&row("a@news.example")).expect("bare id parses");
+    assert_eq!(bare.message_id, "a@news.example");
+}

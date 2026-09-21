@@ -42,14 +42,49 @@ them depending on how it was received and which verify mode is active.
    only block-granularity check available (`:585`-`:595`, `src_md5` at `:799`).
 
 5. **PAR2 repair, the final authority.** If any block is bad or any file is
-   missing (`damage > 0` at `crates/nzbfast/src/main.rs:2273`), the repair path
-   re-reads the whole file from disk and recomputes, independently of every
-   in-stream verdict, both the per-block MD5 + CRC32 and the whole-file MD5
-   (`crates/nzbkit-base/src/par2repair.rs:1591`-`:1602`). Repair output is accepted
-   only when the recomputed whole-file MD5 equals the FileDesc MD5
-   (`par2repair.rs:1602`, and `crates/nzbkit-base/src/par2.rs:390` for the standalone
-   `verify_file` equivalent). This layer does not trust anything the live
-   verifier decided.
+   missing (`damage > 0` at `crates/nzbfast-engine/src/get/settle.rs:1703`), the
+   repair path re-reads the whole file from disk and recomputes, independently of
+   every in-stream verdict, the IFSC per-block MD5 + CRC32
+   (`crates/nzbkit-base/src/par2repair/verify.rs:499` `verify_pass1_tiered`). What
+   it then proves the REPAIRED bytes against has two tiers, and which one runs is
+   a shipped default rather than a constant:
+
+   - **Per-block tier, which is the shipped default.** `par2repair.rs:3602` reads
+     `crate::par2::fast_check_enabled()`, and when that is on the disk driver's
+     final self-prove of every repaired member goes to `blocks_match_fast`
+     (`par2repair.rs:3616`, defined at
+     `crates/nzbkit-base/src/par2repair/verify.rs:556`): the declared length, the
+     FileDesc 16 KiB head digest, and the IFSC per-block MD5 + CRC32 over every
+     block, all-core. The whole-file FileDesc MD5 is NOT recomputed on this path.
+     It is on by default in both drivers that set it. The daemon resolves
+     `fast_final_check` with `.unwrap_or(true)`, ahead of its own empty-settings
+     early return, so a fresh install whose settings.json is empty or absent runs
+     the tier on (`crates/nzbfast-daemon/src/bootstrap.rs:1157`); and `parfast`
+     runs `set_fast_check(!parsed.opts.slow)`, so every invocation without
+     `--slow` is per-block too (`crates/parfast/src/lib.rs:447`).
+   - **Whole-file tier.** With the tier off - `parfast --slow`, the daemon's
+     `fast_final_check` saved as `false`, or a `nzbfast verify` run with neither
+     `--fast` nor `NZBFAST_VERIFY_IFSC_ONLY` - repair output is accepted only
+     when the recomputed whole-file MD5 equals the FileDesc MD5
+     (`par2repair.rs:3619`-`:3620`, `md5_matches` and `md5_matches_resumed` at
+     `crates/nzbkit-base/src/par2repair/verify.rs:1318` and `:1416`;
+     `crates/nzbkit-base/src/par2/verify.rs:515` `verify_file_path_tiered` is the
+     standalone equivalent). That same whole-file chain runs unconditionally on
+     the MAPPED driver's self-prove (`par2repair.rs:2651`), and
+     `blocks_match_fast` declines to it for any member whose IFSC does not
+     describe every block (`verify.rs:557`-`:558`), so a set with no IFSC packet,
+     or a member whose size does not match, gets the whole-file comparison
+     whatever the setting says.
+
+   The two tiers return the same verdict on every honest file. The one
+   spec-legal shape where they can disagree is pinned as H7 at
+   `verify_pass1_tiered`'s own doc comment: a FileDesc from file A beside an IFSC
+   from file B with the same name, length and 16 KiB head, which the per-block
+   tier calls clean and the whole-file tier calls damaged. That trade is why the
+   tier is a setting rather than a constant, and it is stated again in
+   `docs/ENVIRONMENT.md` under `NZBFAST_VERIFY_IFSC_ONLY`. Under either tier this
+   layer trusts nothing the live verifier decided: every byte it accepts it
+   re-read from disk and re-hashed against the set's own MD5s.
 
 ## What each mode keeps
 
@@ -90,9 +125,11 @@ Two facts hold in all three modes and matter for the analysis below:
   only touches blocks still in `Pending` state (`crates/nzbkit-base/src/live.rs:598`).
   So in fast and lean modes, a CRC32-only claim on a clean job is the last word
   for that block unless repair runs.
-- Repair runs **only when there is damage** (`main.rs:2273`). On a fully clean
-  job, no whole-file MD5 backstop executes for blocks that were claimed OK
-  in-stream by CRC32 alone.
+- Repair runs **only when there is damage**
+  (`crates/nzbfast-engine/src/get/settle.rs:1703`). On a fully clean job, no
+  whole-file MD5 backstop executes for blocks that were claimed OK in-stream by
+  CRC32 alone - and on the shipped per-block tier of layer 5, none executes on
+  the disk driver's repaired output either.
 
 ## After the download: the settle manifest
 
@@ -104,7 +141,7 @@ and every verify path in the tree gates on one being present.
 nzbfast therefore writes the evidence down at the settle seam instead of
 discarding it. A completed job leaves a `.nzbfast.manifest` beside its payload
 (`crates/nzbfast-core/src/manifest.rs:71` for the name,
-`crates/nzbfast/src/serve/postproc.rs` `settle_manifest_and_deferred_par2_sweep`
+`crates/nzbfast-daemon/src/postproc.rs:551` `settle_manifest_and_deferred_par2_sweep`
 for the write). It has two sources, and they are worth telling apart:
 
 - **For a file the PAR2 set covered**, it copies the set's own data rather than
@@ -152,12 +189,12 @@ What it is worth, stated exactly:
   damage set, or every extracted job would report as broken.
 
 `nzbfast verify DIR` reads the manifest when, and only when, there is no PAR2 set
-left to read (`crates/nzbfast/src/main.rs:1340`); PAR2 stays the first choice
-because it can repair as well as judge. Damage exits 1 on both arms. A directory
-with neither exits 0 and says on stderr that nothing was checked, because a
-finished job whose recovery files the cleanup default already removed is the
-normal state of a folder somebody points `verify` at, and convicting it would
-fail every such folder.
+left to read (`crates/nzbfast-core/src/manifest.rs:1058` `verify_cli`); PAR2
+stays the first choice because it can repair as well as judge. Damage exits 1 on
+both arms. A directory with neither exits 0 and says on stderr that nothing was
+checked, because a finished job whose recovery files the cleanup default already
+removed is the normal state of a folder somebody points `verify` at, and
+convicting it would fail every such folder.
 
 The manifest is written for every completed job by default (Settings →
 Downloading → **Checking downloads later**). Turning it off is supported and
@@ -222,15 +259,17 @@ honest weak point:
 **What closes it.** The IFSC packet carries an MD5 per block, and the FileDesc
 carries a whole-file MD5. Those are collision resistant for practical purposes.
 They are always checked in two situations: (a) full mode checks the block MD5
-in-stream, and (b) the repair path recomputes block MD5 and whole-file MD5 the
-moment any damage exists (`par2repair.rs:1591`-`:1602`). So the residual above is
-precisely: *a job where every block passed its CRC32 gate in-stream, nothing
-triggered repair, and the corruption was crafted to match CRC32 but not MD5*. In
-default (fast) mode that requires beating two independent CRC32s or being the
-poster; in lean mode it requires only a poster-crafted CRC32 collision.
+in-stream, and (b) the repair path recomputes the IFSC block MD5 the moment any
+damage exists, plus the whole-file MD5 on the whole-file tier of the layer 5
+split above (`crates/nzbkit-base/src/par2repair/verify.rs:499`, `:556`,
+`:1318`). So the residual above is precisely: *a job where every block passed its
+CRC32 gate in-stream, nothing triggered repair, and the corruption was crafted
+to match CRC32 but not MD5*. In default (fast) mode that requires beating two
+independent CRC32s or being the poster; in lean mode it requires only a
+poster-crafted CRC32 collision.
 
 **When not to use lean.** Lean is the slow-CPU throughput option (about 7% more
-single-core throughput, `crates/nzbfast/src/main.rs:127`-`:132`). Do not use it
+single-core throughput, `crates/nzbfast/src/lib.rs:346`-`:351`). Do not use it
 when the source is untrusted and undetected substitution of block content that
 still repairs to a clean CRC32 would matter to you. Use `full` if you want every
 block MD5-checked in-stream regardless of source. Fast (the default) is the

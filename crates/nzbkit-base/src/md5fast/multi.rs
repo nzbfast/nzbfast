@@ -640,7 +640,7 @@ unsafe fn compress8(
 /// Eight STREAMING MD5 chains in lockstep: the fused create pass feeds
 /// each lane one member's blocks in order, all lanes a block per step,
 /// and finalises a lane when its member ends (then seeds the next one).
-/// The block function is [`compress8`]; a lane fed fewer bytes than the
+/// The block function is `compress8`; a lane fed fewer bytes than the
 /// others in a step is snapshotted around the compress and restored, so
 /// its chain is untouched. Off AVX2 the lanes are eight scalar hashers.
 ///

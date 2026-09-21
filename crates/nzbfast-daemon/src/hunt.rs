@@ -42,7 +42,7 @@
 //!
 //! The whole feature is OFF by default, and it IS switchable from
 //! Settings - `alt_auto_search`, beside `alt_max_copies` and
-//! `alt_max_extra_bytes`, read through [`Daemon::hunt_policy`].
+//! `alt_max_extra_bytes`, read through `Daemon::hunt_policy`.
 //!
 //! This paragraph claimed the opposite until 24 Aug 2026 ("no way to
 //! switch it on from Settings yet: the keys are §282 item 13 and are a
@@ -58,14 +58,14 @@
 //!
 //! ## Two entry points, and only one of them is the daemon's initiative
 //!
-//! §282 item 20 added the second one. [`Daemon::hunt_request`] is the
+//! §282 item 20 added the second one. `Daemon::hunt_request` is the
 //! AUTOMATIC road: a job has failed for good, nothing was held, and the
-//! daemon decides on its own to go looking. [`Daemon::hunt_offer`] and
-//! [`Daemon::hunt_pick`] are the CLICKED road: a person is looking at a
+//! daemon decides on its own to go looking. `Daemon::hunt_offer` and
+//! `Daemon::hunt_pick` are the CLICKED road: a person is looking at a
 //! queue row that `altcand::terminal_reason` says cannot finish, and has
-//! asked for a search. The pick list is [`Daemon::hunt_candidates`] with
+//! asked for a search. The pick list is `Daemon::hunt_candidates` with
 //! the enqueue withheld, so both roads rank, filter and admit by exactly
-//! the same rules; [`Trigger`] carries the difference, which is two
+//! the same rules; `Trigger` carries the difference, which is two
 //! refusals wide and no wider.
 
 use super::giveup::target_keys;
@@ -181,7 +181,7 @@ pub struct HuntState {
 /// One row's cached pick list.
 #[derive(Debug)]
 pub struct HuntOffers {
-    /// When it was taken, for [`OFFER_TTL_SECS`].
+    /// When it was taken, for `OFFER_TTL_SECS`.
     pub at: i64,
     pub cands: Vec<Cand>,
 }
@@ -1730,7 +1730,7 @@ fn hunt_click_gates(
 /// §282 item 20: what a person may pick, ranked.
 ///
 /// Costs one search across the enabled indexers and NO grab: an
-/// indexer's daily grab budget is spent by [`Self::hunt_pick`], on
+/// indexer's daily grab budget is spent by `Self::hunt_pick`, on
 /// the one copy the user actually chose. Nothing is enqueued here
 /// and nothing is downloaded.
 pub fn hunt_offer(d: &Daemon, nzo_id: &str) -> std::result::Result<Value, String> {

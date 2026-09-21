@@ -801,7 +801,7 @@ pub fn multi_fold_width() -> usize {
 /// AVX2-without-GFNI host to run it (the 4-vCPU x86-64 CI runner - the
 /// two boxes the granule was developed on are aarch64 and AVX-512 GFNI).
 /// It was closed at the KERNEL rather than here, by teaching
-/// [`xor_mul_multi_avx2`] to finish a trailing 32-byte unit at half
+/// `xor_mul_multi_avx2` to finish a trailing 32-byte unit at half
 /// width, so the kernel now consumes this granule whole.
 ///
 /// **16 IS SCORED, not deferred.** The sweep that first asked whether it
@@ -875,10 +875,10 @@ pub fn multi_fold_schedule_granule_words(fan_in: usize) -> usize {
 /// A fold coefficient with what the selected fused kernel would
 /// otherwise build for it on EVERY call, built once.
 ///
-/// The x86 nibble-shuffle kernels ([`xor_mul_multi_avx2`] and its SSSE3
+/// The x86 nibble-shuffle kernels (`xor_mul_multi_avx2` and its SSSE3
 /// twin - every AVX2 part without GFNI, which is Intel before Ice Lake
 /// and AMD before Zen 4) need eight 16-byte tables per coefficient, and
-/// [`nibble_tables`] builds them in ~16 shifts and ~60 XORs. Cheap
+/// `nibble_tables` builds them in ~16 shifts and ~60 XORs. Cheap
 /// against a whole-block fold; not cheap against a 1 KiB stripe. The
 /// NTT's dense leaf folds 1 KiB per call at its shipped stripe width and
 /// its coefficients are the SAME 256 kernel values for every leaf of
@@ -1739,6 +1739,40 @@ unsafe fn xor_mul_multi_avx2_n<const N: usize>(
     use std::arch::x86_64::*;
     debug_assert_eq!(srcs.len(), N);
     debug_assert!(srcs.iter().all(|s| s.len() >= units * 32));
+    // THE NIBBLE TABLES MUST BE THIS COEFFICIENT'S, and that is not
+    // something a kernel reading them can take on trust.
+    //
+    // `FoldCoeff::new` deliberately leaves `nl`/`nh` ZERO on a part
+    // whose dispatch never lands on a nibble kernel - a measured
+    // optimisation, 8-10% of a Core Ultra 9 101-block leg. What keeps
+    // that safe is that `xor_mul_multi_prepared`'s dispatch predicate
+    // and `nibble_kernel_selected()` agree about exactly which parts
+    // those are. Edit one without the other and a nibble kernel is
+    // handed zero tables again, `dst ^= 0` for every word, and the fold
+    // contributes NOTHING while returning a count that says it did.
+    //
+    // On 5 Sep 2026 that happened through the kernels' own per-call
+    // build (fixed by `FoldCoeff::with_tables`, whose doc comment has
+    // the account) and only the tests could reach it. The predicate
+    // pair is reachable in PRODUCTION, where the consequence is a
+    // silently wrong PAR2 fold - a repair that writes a corrupt file
+    // and says it succeeded. Nothing else in the tree states the
+    // invariant at the point it is relied on.
+    //
+    // O(1) and exact rather than a "tables look non-zero" heuristic:
+    // `nl[0][n]` is `mul(c, n)` low byte and `nh[0][n]` its high byte,
+    // so at n = 1 the two bytes ARE the coefficient. Zero tables fail
+    // it for every c != 0, and a table built for the WRONG coefficient
+    // fails it too. `debug_assert` and not `assert`: this is a hot SIMD
+    // kernel and the release build must not pay a branch per call.
+    debug_assert!(
+        coeffs
+            .iter()
+            .all(|c| u16::from(c.nl[0][1]) | (u16::from(c.nh[0][1]) << 8) == c.c),
+        "a nibble kernel was handed tables that are not its coefficient's - \
+         xor_mul_multi_prepared's dispatch predicate and nibble_kernel_selected() \
+         have stopped agreeing, and a fold through zero tables contributes nothing"
+    );
     // Whole 64-byte chunks for the 256-bit body, then - when `units` is
     // odd - one 32-byte unit at half width below.
     let chunks = units / 2;
@@ -1960,6 +1994,40 @@ unsafe fn xor_mul_multi_ssse3_n<const N: usize>(
     use std::arch::x86_64::*;
     debug_assert_eq!(srcs.len(), N);
     debug_assert!(srcs.iter().all(|s| s.len() >= chunks * 32));
+    // THE NIBBLE TABLES MUST BE THIS COEFFICIENT'S, and that is not
+    // something a kernel reading them can take on trust.
+    //
+    // `FoldCoeff::new` deliberately leaves `nl`/`nh` ZERO on a part
+    // whose dispatch never lands on a nibble kernel - a measured
+    // optimisation, 8-10% of a Core Ultra 9 101-block leg. What keeps
+    // that safe is that `xor_mul_multi_prepared`'s dispatch predicate
+    // and `nibble_kernel_selected()` agree about exactly which parts
+    // those are. Edit one without the other and a nibble kernel is
+    // handed zero tables again, `dst ^= 0` for every word, and the fold
+    // contributes NOTHING while returning a count that says it did.
+    //
+    // On 5 Sep 2026 that happened through the kernels' own per-call
+    // build (fixed by `FoldCoeff::with_tables`, whose doc comment has
+    // the account) and only the tests could reach it. The predicate
+    // pair is reachable in PRODUCTION, where the consequence is a
+    // silently wrong PAR2 fold - a repair that writes a corrupt file
+    // and says it succeeded. Nothing else in the tree states the
+    // invariant at the point it is relied on.
+    //
+    // O(1) and exact rather than a "tables look non-zero" heuristic:
+    // `nl[0][n]` is `mul(c, n)` low byte and `nh[0][n]` its high byte,
+    // so at n = 1 the two bytes ARE the coefficient. Zero tables fail
+    // it for every c != 0, and a table built for the WRONG coefficient
+    // fails it too. `debug_assert` and not `assert`: this is a hot SIMD
+    // kernel and the release build must not pay a branch per call.
+    debug_assert!(
+        coeffs
+            .iter()
+            .all(|c| u16::from(c.nl[0][1]) | (u16::from(c.nh[0][1]) << 8) == c.c),
+        "a nibble kernel was handed tables that are not its coefficient's - \
+         xor_mul_multi_prepared's dispatch predicate and nibble_kernel_selected() \
+         have stopped agreeing, and a fold through zero tables contributes nothing"
+    );
     // SAFETY: ssse3 is enabled here per #[target_feature] (runtime-
     // verified at the dispatch site). All pointer accesses stay within
     // the first chunks * 32 bytes of each slice: the caller clamps

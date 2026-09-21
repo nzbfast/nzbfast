@@ -1435,6 +1435,9 @@ impl Extractor {
         // TODO 211 (b): close a lone-head split to its own size before
         // its group is judged complete or not.
         self.split_settle(inner)?;
+        // TODO 118.2: a volume only one article ever sized closes to that
+        // claim now, for the same reason.
+        self.size_settle(inner)?;
         let keys: Vec<String> = inner.groups.keys().cloned().collect();
         for key in &keys {
             let has_holds = inner.groups[key]

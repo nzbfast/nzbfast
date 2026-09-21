@@ -506,7 +506,7 @@ pub struct Held {
     /// The volume the evidence is about (the job's output directory, or
     /// the daemon's output root when no job was running).
     pub path: PathBuf,
-    /// [`Evidence::sentence`] - what the log said, and the tooltip of
+    /// `Evidence::sentence` - what the log said, and the tooltip of
     /// last resort. The dashboard composes its OWN sentence from the
     /// two numbers below, because this one is built here in English
     /// and a formatted sentence cannot be translated at the display

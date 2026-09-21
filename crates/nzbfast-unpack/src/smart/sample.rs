@@ -276,7 +276,7 @@ pub(super) fn is_deletable_sample(p: &Path, feature_len: u64, siblings: &[PathBu
     true
 }
 
-/// Plan-time twin of [`is_deletable_sample`]: which of a job's payload
+/// Plan-time twin of `is_deletable_sample`: which of a job's payload
 /// files may be left UNFETCHED entirely, given only what the NZB
 /// declares - names and byte counts, no file on disk to probe.
 ///
@@ -286,7 +286,7 @@ pub(super) fn is_deletable_sample(p: &Path, feature_len: u64, siblings: &[PathBu
 /// returned vector is aligned with the input.
 ///
 /// The decision reuses the sweep's own two halves and adds nothing of
-/// its own: [`is_sample_clip`] for the name (sample/proof stem AND a
+/// its own: `is_sample_clip` for the name (sample/proof stem AND a
 /// video extension) and `SAMPLE_MAX_FRACTION` for the size. What it
 /// cannot reuse is the container probe - `is_deletable_sample` opens
 /// the file and refuses to call anything that RUNS like an episode a

@@ -1,10 +1,10 @@
 {
-    "version": "1.5.0",
+    "version": "1.6.0",
     "description": "The fast Usenet downloader. One self-contained executable: line-rate downloads, one-pass verify and extract, a poster wall, and a built-in indexer.",
     "homepage": "https://nzbfast.github.io/nzbfast/",
     "license": "GPL-3.0-only",
-    "url": "https://github.com/nzbfast/nzbfast/releases/download/v1.5.0/nzbfast-1.5.0-windows-x64.zip",
-    "hash": "5928203605e9e1d994828c66f8be93c0a991c2a588f0adcebf08601065f5ba4e",
+    "url": "https://github.com/nzbfast/nzbfast/releases/download/v1.6.0/nzbfast-1.6.0-windows-x64.zip",
+    "hash": "a8a374a4b894dbb0026ff83ef8810c27da47e89408cabb59e5569919f2f4fa0f",
     "extract_dir": "nzbfast-windows",
     "bin": [
         "nzbfast.exe",

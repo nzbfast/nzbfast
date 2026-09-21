@@ -381,6 +381,21 @@ pub fn restore_job_settings(
 /// shape, and the same rule that a setting absent from settings.json
 /// leaves the daemon's own default alone.
 pub fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::Map<String, Value>) {
+    // The log dial, before anything below it can log: a daemon saved on
+    // "quiet" should not print a page of restore lines on its way to
+    // becoming quiet. An unreadable value leaves the default alone and
+    // says so - once, at warn, which every level here passes.
+    if let Some(v) = saved.get("log_detail").and_then(Value::as_str) {
+        match v.parse::<nzbfast_core::logging::Detail>() {
+            Ok(d) => {
+                nzbfast_core::logging::set_detail(d);
+            }
+            Err(()) => warn!(
+                target: "settings",
+                "ignoring saved log_detail {v:?}: one of quiet, normal, verbose"
+            ),
+        }
+    }
     if let Some(v) = saved.get("ui_locale").and_then(Value::as_str) {
         // The SAME membership test `set_ui_locale` applies, and it is
         // not cosmetic here: this value is stamped into the served HTML
@@ -410,6 +425,32 @@ pub fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::M
     // has to survive the restart as one.
     if let Some(v) = saved.get("cors_origin").and_then(Value::as_str) {
         *daemon.cors_origin.lock_ok() = v.to_string();
+    }
+    // TODO 19 (public request #4): the optional dashboard login.
+    //
+    // `web_password` is restored WITHOUT going near `set_web_password`,
+    // and that is the point: the saved value is already the Argon2id PHC
+    // string the setter produced, so re-hashing it here would store a
+    // hash OF a hash and no password would ever verify again. A saved
+    // value that is not a PHC string is dropped with a warning rather
+    // than installed, because installing it would be a login form that
+    // refuses every password with nothing anywhere saying why.
+    if let Some(v) = saved.get("web_username").and_then(Value::as_str)
+        && !v.trim().is_empty()
+    {
+        *daemon.web_username.lock_ok() = Some(v.trim().to_string());
+    }
+    if let Some(v) = saved.get("web_password").and_then(Value::as_str) {
+        if v.starts_with("$argon2") {
+            *daemon.web_password.lock_ok() = Some(v.to_string());
+        } else if !v.is_empty() {
+            warn!(
+                target: "settings",
+                "ignoring saved web_password: it is not an Argon2 hash. Set the \
+                 password again in Settings > Security; until then the dashboard \
+                 has no login form and the API key is what guards it."
+            );
+        }
     }
     if let Some(v) = saved.get("wall_hide_adult").and_then(Value::as_bool) {
         daemon.wall_hide_adult.store(v, Ordering::Relaxed);
@@ -511,6 +552,7 @@ pub fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::M
         ("rename_media_only", &daemon.rename.media_only),
         ("rename_from_nzb", &daemon.rename.from_nzb),
         ("skip_samples", &daemon.skip_samples),
+        ("repair_defer_long", &daemon.repair_defer_long),
     ] {
         if let Some(v) = saved.get(key).and_then(Value::as_bool) {
             field.store(v, Ordering::Relaxed);

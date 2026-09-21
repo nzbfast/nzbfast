@@ -1404,9 +1404,12 @@ impl Extractor {
             // TODO 211 (b): a split head's mapper spans the joined
             // volume - re-key it at the size it already knows, not
             // the part's.
+            // TODO 118.2: an ordinary volume re-keys at the bound its
+            // trust allows, open-ended until an exact witness lands (a
+            // claim the articles merely agree on is not one).
             let size = match inner.slots[slot].mapper.as_ref() {
                 Some(m) if inner.slots[slot].split_head.is_some() => m.volume_size(),
-                _ => inner.slots[slot].size,
+                _ => inner.slots[slot].mapper_size(),
             };
             // Same base as the mapper being replaced: an SFX volume's
             // archive still starts behind its stub once keyed.
@@ -1659,7 +1662,7 @@ impl Extractor {
 
     /// Seed the routes a resumed run inherits from its journal - see
     /// `Restored::wire_outputs` / `plaintext_outputs` in `journal.rs` and
-    /// the restart paragraph on [`Self::instream_decrypt_allowed`]. Must
+    /// the restart paragraph on `Self::instream_decrypt_allowed`. Must
     /// run before the first span is fed: the wire latch is consulted at
     /// every encrypted span's enqueue, and a span that routed first would
     /// have decided the route on its own.

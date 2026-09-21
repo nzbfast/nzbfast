@@ -61,6 +61,21 @@ pub(super) fn apply_setting_tail(
             d.finish.set_action(a);
             (true, json!(a.as_str()))
         }
+        // The log dial. Refused on an unknown word rather than read as
+        // a default: this is the control that can silence the log, and
+        // a typo that quietly left it loud is the same class of mistake
+        // as one that quietly silenced it (see queue_finished_action).
+        //
+        // `live` is false when the environment pinned the filter, which
+        // is what makes the UI say "applies after restart" - and
+        // `log_detail_warning` says the harder truth beside it.
+        "log_detail" => {
+            let want: nzbfast_core::logging::Detail = v.parse().map_err(|()| {
+                format!("{name}: one of quiet, normal, verbose (got {:?})", v.trim())
+            })?;
+            let live = nzbfast_core::logging::set_detail(want);
+            (live, json!(want.as_str()))
+        }
         "queue_finished_script" => {
             let p = v.trim();
             d.finish

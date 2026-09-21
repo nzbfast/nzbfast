@@ -127,7 +127,7 @@ CLI_VERSION=$(grep -m1 '^version' crates/parfast/Cargo.toml | sed 's/.*"\(.*\)".
 # version: an alpha.4 followed by a beta.5 would claim four betas that
 # never existed. The day the app is no longer a beta, GUI_STAGE goes
 # empty and the `case` below is what stops the filename saying nothing.
-GUI_STAGE=beta.1
+GUI_STAGE=beta.2
 VERSION="${CLI_VERSION%%-*}-$GUI_STAGE"
 
 # The stage in the filename, exactly once. $VERSION now always carries one,

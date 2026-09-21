@@ -712,3 +712,203 @@ async fn password_prompt_never_leaves_archive_packed() {
     .await
     .unwrap();
 }
+
+/// §99 try-order, end to end: the FIRST passworded job from a poster
+/// walks the passwords file and pays for every wrong line above the
+/// winner; the SECOND one from that same poster unlocks on its first
+/// attempt, because the association the first unlock recorded promoted
+/// the winning line to the front.
+///
+/// The unit tests in `smart::pwassoc` prove the ordering FUNCTION. This
+/// is the only place that proves the order reaches a running daemon -
+/// that the sidecar is written where the next job reads it, survives
+/// the job boundary, and is keyed on something both jobs actually
+/// carry. It counts attempts through the ladder's own INFO line, which
+/// names the file ENTRY and the ATTEMPT and never the password: the
+/// fixture's file is `wrong` then `listpw`, so job one must report
+/// entry 2 on attempt 2 and job two entry 2 on attempt 1. Asserting the
+/// entry as well as the attempt is what distinguishes the try-order
+/// working from a file that happens to be one line long.
+///
+/// Site key is empty here - an uploaded NZB has no source indexer - so
+/// this exercises the POSTER arm, which is the one an addfile job can
+/// reach. Both fixtures are posted under the same `poster` attribute
+/// and are otherwise different releases, so nothing but the
+/// association can carry the order across.
+#[tokio::test(flavor = "multi_thread")]
+async fn passwords_file_try_order_promotes_the_winner_for_the_next_job() {
+    use nzbkit::rar::fixtures;
+    let dir = std::env::temp_dir().join(format!("nzbfast-pworder-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    // Two independent encrypted-data RAR5 store volumes sharing one
+    // password - two real downloads, not one job run twice.
+    let mut articles = HashMap::new();
+    let mut nzbs = Vec::new();
+    for (tag, seed) in [("One", 17u8), ("Two", 23u8)] {
+        let inner = payload(80_001, seed);
+        let f = fixtures::encrypt_file("listpw", &inner, 9);
+        let n = f.cipher.len();
+        let vol = fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..n, false, false)], None);
+        let rar = format!("Ordered.{tag}.2026.rar");
+        let segs = make_file_articles(&rar, &vol, 40_000, tag, &mut articles);
+        let mut xml = format!(
+            "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <file poster=\"sharedposter\" date=\"0\" subject=\"&quot;{rar}&quot; yEnc (1/{})\">\n    <groups><group>g</group></groups>\n    <segments>\n",
+            segs.len()
+        );
+        for (id, bytes, num) in &segs {
+            xml.push_str(&format!(
+                "      <segment bytes=\"{bytes}\" number=\"{num}\">{id}</segment>\n"
+            ));
+        }
+        xml.push_str("    </segments>\n  </file>\n</nzb>\n");
+        nzbs.push((format!("Ordered.{tag}.2026"), xml));
+    }
+    let srv = MockServer::start(articles, Chaos::default()).await;
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--apikey")
+            .arg("sekrit")
+            .arg("--out")
+            .arg(dir.join("complete"));
+        c
+    })
+    .await;
+    let port = d.port;
+
+    let dir2 = dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let pct = |s: &str| -> String { s.bytes().map(|b| format!("%{b:02X}")).collect::<String>() };
+        // Two entries, the wrong one first: the order IS the subject.
+        let pw_file = dir2.join("pw.txt");
+        std::fs::write(&pw_file, "not-this-one\nlistpw\n").unwrap();
+        let r = http(
+            port,
+            &format!(
+                "/api?mode=config&name=password_file&value={}&apikey=sekrit&output=json",
+                pct(&pw_file.to_string_lossy())
+            ),
+            None,
+        );
+        assert!(r.contains("\"status\":true"), "{r}");
+
+        let addfile = |nzb_name: &str, xml: &str| {
+            let boundary = "----nzbfastboundary";
+            let mut body = Vec::new();
+            body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"name\"; filename=\"{nzb_name}.nzb\"\r\nContent-Type: application/x-nzb\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(xml.as_bytes());
+            body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+            let ctype = format!("multipart/form-data; boundary={boundary}");
+            let r = http(
+                port,
+                "/api?mode=addfile&apikey=sekrit&output=json",
+                Some((&ctype, &body)),
+            );
+            assert!(r.contains("nzo_ids"), "{r}");
+        };
+        let await_unlocked = |name: &str| {
+            for _ in 0..150 {
+                let h = http(port, "/api?mode=history&apikey=sekrit&output=json", None);
+                if let Some(s) = serde_json::from_str::<serde_json::Value>(&h)
+                    .ok()
+                    .and_then(|v| v["history"]["slots"].as_array().cloned())
+                    .and_then(|s| s.iter().find(|s| s["name"] == name).cloned())
+                    && s["status"] == "Completed"
+                {
+                    assert_eq!(s["password_required"], false, "{s}");
+                    assert_eq!(s["has_password"], true, "{s}");
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            panic!("{name} never completed unlocked");
+        };
+
+        // ONE JOB AT A TIME, and that is load-bearing rather than
+        // tidiness: the association is written when the first unlock
+        // finishes, so a second job that started before it would read
+        // the sidecar that does not exist yet and walk the file - a
+        // pass or a fail decided by which download won a race.
+        addfile(&nzbs[0].0, &nzbs[0].1);
+        await_unlocked(&nzbs[0].0);
+        addfile(&nzbs[1].0, &nzbs[1].1);
+        await_unlocked(&nzbs[1].0);
+    })
+    .await
+    .unwrap();
+
+    // The daemon's own INFO line is the counter. Read AFTER both jobs,
+    // so the two verdicts are in one log and their order is the
+    // daemon's rather than the poll loop's.
+    //
+    // Either unlock path may claim this fixture and the assertion does
+    // not care which: the in-stream probe takes a set that decrypts
+    // one-pass (which is what this RAR5 store shape does today) and the
+    // finalize ladder takes one that does not. Both name the file entry
+    // and where the try-order put it, in those words, so the test reads
+    // the NUMBERS rather than pinning the route - a fixture that starts
+    // decrypting on the other path still asserts the same fact.
+    let log = d.log();
+    let where_in_order = |line: &str| -> usize {
+        for key in ["try-order position ", "on attempt "] {
+            if let Some(rest) = line.split(key).nth(1) {
+                return rest
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or_else(|_| panic!("no number after {key:?} in {line:?}"));
+            }
+        }
+        panic!("unlock line names no position: {line:?}");
+    };
+    let hits: Vec<usize> = log
+        .lines()
+        .filter(|l| l.contains("entry 2 of 2"))
+        .map(where_in_order)
+        .collect();
+    assert_eq!(
+        hits.len(),
+        2,
+        "one unlock verdict naming entry 2 of 2 per job, got {} in:\n{log}",
+        hits.len()
+    );
+    assert_eq!(
+        hits[0], 2,
+        "the first job must pay for the wrong line above the winner"
+    );
+    assert_eq!(
+        hits[1], 1,
+        "the second job must reach the remembered entry FIRST"
+    );
+    // The value never reaches the log, on either job.
+    assert!(
+        !log.contains("listpw"),
+        "password value leaked into the log"
+    );
+}

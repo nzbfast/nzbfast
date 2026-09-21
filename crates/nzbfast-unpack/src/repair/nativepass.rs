@@ -120,6 +120,33 @@ pub(super) fn native_repair_pass(
     // the last phase through them would be the static-word failure this
     // whole change is about, wearing a percentage.
     let control = cancel.map(|c| c.repair_control()).unwrap_or_default();
+    // TODO 332: THE LONG-REPAIR VETO, and this is the ONE site in the
+    // tree that arms it. `SideCancel::repair_control` deliberately does
+    // not carry it, so the late-set round, the nested ladder, the no-set
+    // walk and the mapped driver are byte-for-byte the callers they were.
+    //
+    // WHY ONLY HERE. Deferring means "hand the whole job back to the
+    // queue, nothing written, and let it come round again", and this is
+    // the only repair for which all three clauses hold plainly: it is
+    // THIS job's own recovery set, it runs before anything has been
+    // extracted, and a job that goes round again re-settles and repairs
+    // it. The late-set pass, by contrast, walks sets that may belong to
+    // nobody here at all - a leftover recovery set for somebody else's
+    // release is the ordinary case there - and standing a healthy job
+    // down over one of those would be a trip round the queue for a
+    // repair that was never this job's business. See TODO 332 for what
+    // a lane widening this owes.
+    //
+    // AND NOT ON THE PROBE. `probe` is the pre-purchase adoption probe,
+    // which runs BEFORE any recovery volume has been bought - precisely
+    // the purchase that can turn a scattered recovery set consecutive
+    // and the half-hour fold into seconds. A defer read off it would
+    // postpone a job on a forecast for a repair that is never going to
+    // run, and would spend the one deferral the policy allows doing it.
+    let control = match cancel {
+        Some(c) if !probe => control.with_defer(c.repair_defer()),
+        _ => control,
+    };
     let _run = cancel.map(|c| c.repair_progress().enter());
     match repair_dir_set_with_donors_controlled_as(
         out_dir,
@@ -244,6 +271,26 @@ pub(super) fn native_repair_pass(
         // would say the set is broken when nothing about it is - see
         // `NativeVerdict::Cancelled` and the on-disk contract on
         // `RepairError::Cancelled`.
+        // THE DAEMON'S OWN "NOT NOW" IS NOT A FAILED REPAIR EITHER, and
+        // it is ahead of the backstop for the same reason the cancel is:
+        // falling through to par2cmdline would run externally, at once,
+        // the exact half-hour repair the daemon has just decided to put
+        // off, which is the whole of what TODO 332 exists to prevent.
+        // Nothing was written, so the set is bit-for-bit what it was and
+        // the next pass repairs it from the same recovery data.
+        Err(nzbkit::par2repair::RepairError::Deferred {
+            missing_blocks,
+            est_secs,
+        }) => {
+            info!(
+                target: "repair",
+                "repair put off for now - {missing_blocks} block(s) to rebuild, roughly \
+                 {} minute(s) of work, and this download goes back to the queue once so \
+                 you can stop it if you would rather not (nothing has been written)",
+                est_secs.div_ceil(60)
+            );
+            NativeVerdict::Deferred
+        }
         Err(nzbkit::par2repair::RepairError::Cancelled) => {
             info!(
                 target: "repair",

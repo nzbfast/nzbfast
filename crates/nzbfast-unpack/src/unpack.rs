@@ -140,7 +140,7 @@ impl NestOutcome {
     }
 }
 
-/// The depth [`crate::get::tail`] enters this pass at, once the in-stream
+/// The depth `crate::get::tail` enters this pass at, once the in-stream
 /// half has already run - as against the disk-only path
 /// ([`extract_local`]), which enters at 0.
 ///
@@ -149,7 +149,7 @@ impl NestOutcome {
 /// unpacked - the downloaded volume set itself, by the in-stream chain
 /// or by the ladder arms above the call. It is also what arms this
 /// pass's nested-level PAR2 repair on its FIRST level, through the
-/// `depth > 0` gate in [`extract_nested_capped`]; depth 0 is the top
+/// `depth > 0` gate in `extract_nested_capped`; depth 0 is the top
 /// level `extract_local` already repaired.
 ///
 /// IT IS A LOWER BOUND ON THE LAYERS ALREADY SPENT AND NOT A COUNT OF
@@ -222,11 +222,11 @@ pub(crate) fn extract_nested(
     extract_nested_why(dir, password, depth, &mut None, None)
 }
 
-/// [`extract_nested`] carrying the pass's own reason back out, on the
+/// `extract_nested` carrying the pass's own reason back out, on the
 /// one class of refusal that has one.
 ///
 /// Same contract and same reasoning as
-/// [`crate::rarfix::try_unrar_spent_why`] and
+/// `crate::rarfix::try_unrar_spent_why` and
 /// [`crate::repair::reextract_dir_why`], and it is the last of the three
 /// entry points into the disk ladder to get it: a bomb refused inside
 /// this pass used to arrive at the tail as a bare `Failed`, which the
@@ -2114,7 +2114,7 @@ pub(crate) fn dir_has_named_rar(dir: &std::path::Path) -> Result<bool> {
 /// other executables are deliberately excluded - a payload executable
 /// produced by an outer archive must never be re-exploded.
 ///
-/// That exclusion is why the top-level SFX gate is [`is_sfx_archive`] and
+/// That exclusion is why the top-level SFX gate is `is_sfx_archive` and
 /// lives in the two places that know the file was DOWNLOADED rather than
 /// produced (`extract_one_level` step 3 at depth 0, and the get tail's
 /// slot-path arm). Widening this predicate to cover SFX would reach every

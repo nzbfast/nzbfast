@@ -19,7 +19,7 @@
 //! 2. **The parsed NZB was never weighed.** The byte gate trusted the
 //!    indexer's advertised `Cand.size`, so a result that advertises
 //!    1 MB and supplies a 100 GB NZB walked through a 1 GB ceiling.
-//!    [`Daemon::alt_admit`] is handed the size of what is ACTUALLY
+//!    `Daemon::alt_admit` is handed the size of what is ACTUALLY
 //!    about to start.
 //! 3. **Promotion consulted nothing at all.** With the shipped defaults
 //!    (`hold_count` 2, `max_copies` 2) the original fails, spare A is
@@ -45,7 +45,7 @@
 //! daemon that restarts recomputes the same answer off the same files.
 //!
 //! What a ledger would have bought - atomicity - is bought instead by
-//! [`Daemon::alt_gate`]: one mutex, taken by every door, held across
+//! `Daemon::alt_gate`: one mutex, taken by every door, held across
 //! the read AND the publication. Two admissions for one target cannot
 //! both see pre-publication state, which is the whole of F-09's race.
 //!

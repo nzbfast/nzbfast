@@ -33,6 +33,8 @@
 //!   by roughly the pipeline window and is reported for comparison, not
 //!   summed into the attribution.
 
+#![warn(missing_docs)]
+
 use crate::sync::MutexExt;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -113,9 +115,16 @@ pub enum Sub {
     WriteStageReserve,
 }
 
+/// How many variants [`Sub`] has, and so the width of every gauge
+/// array here. Kept in step with the enum and with [`Sub::name`] by
+/// hand: adding a variant without widening this indexes out of bounds
+/// on the first charge.
 pub const SUB_COUNT: usize = 16;
 
 impl Sub {
+    /// The gauge's stable snake_case key, as it appears in the daemon's
+    /// instrument output and in bench logs. These are parsed by
+    /// harnesses and by the bench readers, so a rename is a wire break.
     pub fn name(self) -> &'static str {
         match self {
             Sub::RawFree => "raw_free",
@@ -183,16 +192,23 @@ pub struct Charge {
 }
 
 impl Charge {
+    /// Charge `n` bytes to `s` now, releasing them when the guard
+    /// drops.
     pub fn new(s: Sub, n: u64) -> Charge {
         add(s, n);
         Charge { sub_of: s, n }
     }
 
+    /// Charge `n` more bytes onto the same guard, for a buffer that
+    /// grew after it was first accounted.
     pub fn grow(&mut self, n: u64) {
         add(self.sub_of, n);
         self.n += n;
     }
 
+    /// Return the whole outstanding charge now and leave the guard
+    /// holding nothing, for a free the code wants accounted at a
+    /// precise line rather than at scope end. Idempotent.
     pub fn release_all(&mut self) {
         sub(self.sub_of, self.n);
         self.n = 0;
@@ -229,14 +245,20 @@ impl Drop for Charge {
 /// Point-in-time snapshot of every gauge (current and peak).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MemGauges {
+    /// Bytes charged and not yet released, per subsystem, indexed by
+    /// `Sub as usize`. Read through [`MemGauges::cur_of`].
     pub cur: [u64; SUB_COUNT],
+    /// The high-water each subsystem has reached since process start
+    /// (or since the last test reset), same indexing. Never falls.
     pub peak: [u64; SUB_COUNT],
 }
 
 impl MemGauges {
+    /// This snapshot's current charge for one subsystem.
     pub fn cur_of(&self, s: Sub) -> u64 {
         self.cur[s as usize]
     }
+    /// This snapshot's high-water for one subsystem.
     pub fn peak_of(&self, s: Sub) -> u64 {
         self.peak[s as usize]
     }
@@ -251,6 +273,11 @@ pub fn cur(s: Sub) -> u64 {
     CUR[s as usize].load(Relaxed)
 }
 
+/// Every gauge's current and peak charge, read as one instant.
+///
+/// Take this rather than looping over [`cur`] when the numbers will be
+/// compared with each other: a per-gauge read walks a moving process
+/// and the sum need not describe any moment that existed.
 pub fn snapshot() -> MemGauges {
     // `vendor/rars` keeps its own counter (it cannot depend on this
     // crate), so its tier is PULLED here rather than charged through
@@ -277,6 +304,9 @@ pub struct PeakAttribution {
     /// EXCLUDING pages the allocator already offered back. rss minus
     /// this is allocator retention at the high-water.
     pub footprint: u64,
+    /// Every gauge, read at that same instant - the attribution
+    /// itself, and what the two byte figures above are to be explained
+    /// by.
     pub gauges: MemGauges,
 }
 
@@ -296,6 +326,9 @@ pub struct PeakRecord {
 }
 
 impl PeakRecord {
+    /// An empty record: no sample seen, so both attributions are
+    /// `None` until a sampler tick runs. `const` so a caller can hold
+    /// one in a static.
     pub const fn new() -> PeakRecord {
         PeakRecord {
             rss_seen: AtomicU64::new(0),
@@ -374,6 +407,12 @@ impl PeakRecord {
         }
     }
 
+    /// The gauge snapshot taken at the sampled RSS high-water. `None`
+    /// until a sampler tick has run. Under a clamped budget this
+    /// instant is chosen by allocator retention rather than by live
+    /// bytes, so [`Self::peak_footprint_attribution`] is the reading
+    /// that answers "where did the memory go" - see
+    /// [`Self::note_rss_sample`].
     pub fn peak_attribution(&self) -> Option<PeakAttribution> {
         *self.at.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -395,11 +434,15 @@ impl PeakRecord {
 /// printed by its own summary.
 static LATEST: Mutex<Option<Arc<PeakRecord>>> = Mutex::new(None);
 
+/// Publish `record` as the process's latest-started job, for readers
+/// with no job in hand. Called when a job's memory sampler spawns; the
+/// previous record is dropped here, so an overlapping older job is
+/// reachable only through its own summary.
 pub fn install_latest_peak_record(record: Arc<PeakRecord>) {
     *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = Some(record);
 }
 
-/// The latest-started job's peak attribution (see [`LATEST`]).
+/// The latest-started job's peak attribution (see `LATEST`).
 pub fn peak_attribution() -> Option<PeakAttribution> {
     let latest = LATEST.lock().unwrap_or_else(|e| e.into_inner()).clone();
     latest.and_then(|r| r.peak_attribution())
@@ -428,7 +471,7 @@ struct LiveRecord {
 /// one exactly then.
 static LIVE: Mutex<Vec<LiveRecord>> = Mutex::new(Vec::new());
 
-/// Add a job's record to [`LIVE`] (called where its sampler spawns).
+/// Add a job's record to `LIVE` (called where its sampler spawns).
 /// Dropped records are pruned on the way past, so a job that ended
 /// without unregistering leaves nothing behind.
 pub fn register_peak_record(run: u64, label: &str, record: &Arc<PeakRecord>) {
@@ -442,7 +485,7 @@ pub fn register_peak_record(run: u64, label: &str, record: &Arc<PeakRecord>) {
 }
 
 /// Drop a job's registry entry (called where its sampler guard drops),
-/// and keep its high-water in [`RECENT`] on the way out.
+/// and keep its high-water in `RECENT` on the way out.
 ///
 /// The guard still holds the `Arc` while its `Drop` runs, so the record
 /// is readable here - this is the one instant at which a job's final
@@ -475,11 +518,15 @@ pub fn unregister_peak_record(run: u64) {
 /// that job's sampler has ticked once.
 #[derive(Clone, Debug)]
 pub struct JobPeak {
+    /// Reader-facing name for the job, the daemon's nzo_id where there
+    /// is one. Not an identity - two jobs can carry the same label.
     pub label: String,
+    /// That job's own RSS high-water attribution, `None` until its
+    /// sampler has ticked once.
     pub at_peak: Option<PeakAttribution>,
 }
 
-/// Every live job's peak attribution, oldest start first. See [`LIVE`].
+/// Every live job's peak attribution, oldest start first. See `LIVE`.
 pub fn live_peak_attributions() -> Vec<JobPeak> {
     let mut live = LIVE.lock_ok();
     live.retain(|r| r.record.strong_count() > 0);
@@ -524,7 +571,7 @@ const RECENT_CAP: usize = 8;
 static RECENT: Mutex<VecDeque<JobPeak>> = Mutex::new(VecDeque::new());
 
 /// The last few finished jobs' peak attributions, oldest first. See
-/// [`RECENT`]. Every row's `at_peak` is `Some` by construction.
+/// `RECENT`. Every row's `at_peak` is `Some` by construction.
 pub fn recent_peak_attributions() -> Vec<JobPeak> {
     RECENT.lock_ok().iter().cloned().collect()
 }

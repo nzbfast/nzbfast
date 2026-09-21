@@ -2,6 +2,10 @@
 //! ARM64 desktop target, with a Rust-native x86-64 inline-assembly port
 //! kept beside it.
 //!
+//! Not part of the real API: this module is public only because
+//! [`crate::par2repair::Md5Resume`] names the type, and because
+//! nzbkit's own benches build against it.
+//!
 //! # Routing, as measured (13 Sep 2026)
 //!
 //! [`Md5`] is [`awslc::Md5`] on x86-64 and ARM64 macOS, Linux and
@@ -1114,7 +1118,6 @@ pub mod winasm {
     }
 }
 
-/// Eight independent messages per pass on AVX2: [`multi::md5_many`].
 pub mod multi;
 
 #[cfg(test)]

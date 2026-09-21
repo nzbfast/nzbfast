@@ -23,7 +23,7 @@ use std::path::Path;
 /// Usenet furniture (`.nfo`, `.sfv`, `.txt`, …) that no server has in
 /// full. It rides on every variant because a job can lose furniture in
 /// any state of repair, and because the count is a separate claim from
-/// the payload one - see [`is_droppable_metadata`].
+/// the payload one - see `is_droppable_metadata`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Verdict {
     Complete {
@@ -45,7 +45,7 @@ pub enum Verdict {
         /// Present when the verdict rests on a budget MEASURED from the
         /// set's own PAR2 Main packet rather than read off volume
         /// filenames. `est_missing` and `recovery` are then BLOCK
-        /// counts, not article counts - see [`measured_verdict`].
+        /// counts, not article counts - see `measured_verdict`.
         measured: Option<Measured>,
         dropped: Vec<String>,
     },
@@ -1679,7 +1679,7 @@ hit n={:<5} p50 {:>7.1} p90 {:>7.1}  miss n={:<5} p50 {:>7.1} p90 {:>7.1}ms  {:?
 }
 
 /// The `check` subcommand. `fast` takes the daemon's profile - see the
-/// `fast` branch in [`check`] - instead of the human report.
+/// `fast` branch in `check` - instead of the human report.
 pub async fn run_check(
     config: &Path,
     nzb: &Path,

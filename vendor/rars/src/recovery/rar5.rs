@@ -3,7 +3,6 @@ const CRC64_XZ_INIT: u64 = 0xffff_ffff_ffff_ffff;
 pub(crate) const FIELD_SIZE: usize = 65_535;
 const FIELD_MASK: u32 = 0xffff;
 const PRIMITIVE_POLYNOMIAL: u32 = 0x1100b;
-const ZERO_LOG_SENTINEL: u32 = (FIELD_SIZE * 2) as u32;
 const MAX_WINRAR602_DATA_SHARDS: u64 = 200;
 const KIB: u64 = 1024;
 const RAR5_RECOVERY_CHUNK_FIXED_HEADER_SIZE: u64 = 0x48;
@@ -170,10 +169,7 @@ pub struct RecoveryGroup {
 /// Derived entirely from `group_count`, so no record is ever trusted to say
 /// which group it belongs to - only checked against this layout.
 pub fn recovery_groups(plan: InlineRecoveryPlan) -> Result<Vec<RecoveryGroup>> {
-    if plan.group_count == 0 {
-        return Err(Error::BadRecoveryChunk);
-    }
-    let count = plan.group_count.div_ceil(RAR5_RECOVERY_PARITY_PER_RECORD_MAX);
+    let count = recovery_group_count(plan)?;
     let count_usize = usize::try_from(count).map_err(|_| Error::PlanOverflow)?;
     let mut groups = Vec::with_capacity(count_usize);
     for index in 0..count {
@@ -186,10 +182,28 @@ pub fn recovery_groups(plan: InlineRecoveryPlan) -> Result<Vec<RecoveryGroup>> {
     Ok(groups)
 }
 
+/// How many groups `plan` splits each data shard into.
+///
+/// The count alone, without building the layout: `group_count` comes off the
+/// wire, so a record parser needs this figure BEFORE it has anything to hold
+/// it against, and materialising one `RecoveryGroup` per group to learn it
+/// turned a ~90-byte crafted `{RB}` record into an arbitrarily large
+/// allocation (`group_count = 2^50` asks for a 275 GB vector, which is an
+/// abort wherever the allocator refuses rather than overcommits).
+fn recovery_group_count(plan: InlineRecoveryPlan) -> Result<u64> {
+    if plan.group_count == 0 {
+        return Err(Error::BadRecoveryChunk);
+    }
+    Ok(plan.group_count.div_ceil(RAR5_RECOVERY_PARITY_PER_RECORD_MAX))
+}
+
 /// Bytes one recovery shard occupies on disk, its record headers included.
+///
+/// Pure arithmetic on purpose: this is the one plan figure
+/// `parse_inline_recovery_chunk` reads from a record it has not yet
+/// validated, so it must cost the same for every `group_count`.
 pub fn shard_record_span(plan: InlineRecoveryPlan) -> Result<u64> {
-    let groups = recovery_groups(plan)?;
-    (groups.len() as u64)
+    recovery_group_count(plan)?
         .checked_mul(plan.header_size)
         .and_then(|headers| headers.checked_add(plan.group_count))
         .ok_or(Error::PlanOverflow)
@@ -670,14 +684,40 @@ pub struct InlineRecoveryFolder {
 }
 
 impl InlineRecoveryFolder {
+    /// A folder that sizes its own fold team from the host's core count,
+    /// which is what a caller with no width to ask for wants.
     pub fn new(prefix_len: u64, recovery_percent: u64) -> Result<Self> {
+        Self::with_thread_cap(prefix_len, recovery_percent, None)
+    }
+
+    /// As [`Self::new`], with a ceiling on the fold team's width.
+    ///
+    /// `threads` is what the CALLER was asked for - `rarfast -mt<n>`, or
+    /// the narrower of that and a `-mm<size>` estimate - and `None` leaves
+    /// the host's core count as the ceiling, which is what `new` passes.
+    /// Either way the team is still capped at [`fold_team::MAX_WORKERS`],
+    /// past which no arm measured faster (see that module), and still
+    /// starts no team at all below [`fold_team::MIN_PREFIX`] or under two
+    /// workers - so `threads = Some(1)` folds serially, as asked.
+    ///
+    /// The width moves no byte: the team's jobs are disjoint and every one
+    /// of them is a fold into the same rows in the same order, so an
+    /// archive is identical whatever this is set to (a test holds it).
+    /// (nzbfast-local addition, 16 Sep 2026; see VENDORING.md.)
+    pub fn with_thread_cap(
+        prefix_len: u64,
+        recovery_percent: u64,
+        threads: Option<usize>,
+    ) -> Result<Self> {
+        #[cfg(not(feature = "parallel"))]
+        let _ = threads;
         let folder = Self::serial(prefix_len, recovery_percent)?;
         #[cfg(feature = "parallel")]
         let folder = {
             let mut folder = folder;
             if prefix_len >= fold_team::MIN_PREFIX {
-                let workers = std::thread::available_parallelism()
-                    .map_or(1, usize::from)
+                let workers = threads
+                    .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
                     .min(fold_team::MAX_WORKERS);
                 folder.start_team(workers, fold_team::BATCH_BYTES);
             }
@@ -1758,8 +1798,14 @@ fn parse_inline_recovery_chunk(input: &[u8], hashed: &mut u64) -> Result<InlineR
     // A real plan (see `plan_inline_recovery`) sets
     // group_count = ceil(protected/data_shards) rounded up to even, whose
     // capacity is therefore always inside protected_size + 2*data_shards.
-    // Holding the record to its own format's arithmetic pins the allocation
-    // to the size of the file we are already holding.
+    // Holding the record to its own format's arithmetic ties capacity to
+    // protected_size - but NOT to any length this parser holds, because
+    // protected_size is itself a wire field. The two callers that own a
+    // buffer are where that bound lands: `repair_inline_recovery_archive`
+    // refuses protected_size > input.len(), and the prefix entry points
+    // require it to equal the prefix they were handed. So nothing here may
+    // size an allocation from these fields, which is why
+    // `shard_record_span` below is pure arithmetic.
     //
     // The even-group_count half also closes the GF16 indexing hole: the
     // recovery kernel walks 2-byte symbols, so an odd shard length reads one
@@ -2160,6 +2206,60 @@ fn striped_fold_on_team(window: usize) -> bool {
 #[cfg(feature = "parallel")]
 const STREAMED_FOLD_PARALLEL: bool = true;
 
+/// Whether a striped repair reads its sources on the calling thread while a
+/// second thread folds them (see `overlapped_stripe_loop`).
+///
+/// The whole cost of the split is one thread spawn per repair - tens of
+/// microseconds - plus one channel send and one receive per source window.
+/// There is no barrier and no pool, so nothing here scales with the host's
+/// thread count, and the only question is whether the repair is big enough
+/// for a spawn to disappear into. A repair that folds less than this reads
+/// its sources in line, exactly as before: the unit tests' toy stripes, an
+/// inline-recovery prefix of a few hundred KiB, and anything else where the
+/// whole job is shorter than the thread that would serve it.
+///
+/// 4 MiB of total window is about 600 microseconds of fold at the 6.8 GB/s
+/// section 16 measured in `rc`, which is an order past the spawn. `rc` itself
+/// is far above it in every shape the round measured: 272 MiB on the 256 MiB
+/// sets, 68 MiB on the 64 MiB one.
+fn read_fold_overlap(stripe_len: usize, sources: usize) -> bool {
+    const MIN_TOTAL_WINDOW: usize = 4 << 20;
+    #[cfg(test)]
+    match read_fold_overlap_override().load(std::sync::atomic::Ordering::Relaxed) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    stripe_len.saturating_mul(sources) >= MIN_TOTAL_WINDOW
+}
+
+/// The one cell `with_read_fold_overlap` writes and `read_fold_overlap`
+/// reads - the same single-cell rule as `fold_team_threads_override`, for the
+/// same reason: a `static` inside each would be two cells. 0 asks the size,
+/// 1 forces the overlapped arm, 2 forces the serial one.
+#[cfg(test)]
+fn read_fold_overlap_override() -> &'static std::sync::atomic::AtomicUsize {
+    use std::sync::atomic::AtomicUsize;
+    static OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+    &OVERRIDE
+}
+
+/// Runs `body` with the read/fold split forced on or off, so a test reaches
+/// BOTH arms without building a repair large enough to clear the gate - which
+/// no unit test can afford. Serialised against itself; the gate chooses an
+/// arm and never a result, so what a concurrent test computes is unaffected.
+#[cfg(test)]
+pub(crate) fn with_read_fold_overlap<T>(on: bool, body: impl FnOnce() -> T) -> T {
+    use std::sync::atomic::Ordering;
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    read_fold_overlap_override().store(if on { 1 } else { 2 }, Ordering::Relaxed);
+    let out = body();
+    read_fold_overlap_override().store(0, Ordering::Relaxed);
+    out
+}
+
 /// One chunk of a table-driven fold; even so chunk starts stay on symbol
 /// boundaries. 64 KiB keeps the destination L2-resident while sources stream.
 const RECOVER_FOLD_CHUNK: usize = 64 * 1024;
@@ -2330,34 +2430,65 @@ fn read_u64(input: &[u8], offset: usize) -> Result<u64> {
         .ok_or(Error::BadRecoveryChunk)
 }
 
+/// Entries in the GF(2^16) exponent table: 2^17.
+///
+/// `mul` indexes it with the sum of two logarithms, each at most 65534, so at
+/// most 131068; `inv` with `65535 - log`, at most 65535. The period stored
+/// twice, 131070 entries, covers both. 2^17 is two entries more because two
+/// `u16` logarithms widened and summed are at most 131070, which the compiler
+/// can prove is inside 2^17 entries, so neither lookup carries a bounds check.
+const GF16_EXP_LEN: usize = 1 << 17;
+
+/// `a^(i mod 65535)` for the primitive element `a = 2`, for every index below
+/// `GF16_EXP_LEN`.
+static GF16_EXP: [u16; GF16_EXP_LEN] = gf16_exp_table();
+
+/// The discrete logarithm base `a` of every nonzero element. Entry 0 is never
+/// read: `mul` and `inv` handle a zero operand before they index it.
+static GF16_LOG: [u16; FIELD_SIZE + 1] = gf16_log_table(&GF16_EXP);
+
+const fn gf16_exp_table() -> [u16; GF16_EXP_LEN] {
+    // What a bit shifted out of the top of a word folds back in as.
+    let reduction = (PRIMITIVE_POLYNOMIAL & FIELD_MASK) as u16;
+    let mut table = [0u16; GF16_EXP_LEN];
+    let mut value: u16 = 1;
+    let mut index = 0;
+    while index < FIELD_SIZE {
+        table[index] = value;
+        let carry = value & 0x8000 != 0;
+        value <<= 1;
+        if carry {
+            value ^= reduction;
+        }
+        index += 1;
+    }
+    while index < GF16_EXP_LEN {
+        table[index] = table[index - FIELD_SIZE];
+        index += 1;
+    }
+    table
+}
+
+const fn gf16_log_table(exp: &[u16; GF16_EXP_LEN]) -> [u16; FIELD_SIZE + 1] {
+    let mut table = [0u16; FIELD_SIZE + 1];
+    let mut index = 0;
+    while index < FIELD_SIZE {
+        table[exp[index] as usize] = index as u16;
+        index += 1;
+    }
+    table
+}
+
+/// GF(2^16) over `x^16 + x^12 + x^3 + x + 1`. The tables are compile-time
+/// data, so a value of this type carries nothing.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct Gf16 {
-    exp: Box<[u16]>,
-    log: Box<[u32]>,
-}
+pub struct Gf16 {}
 
 impl Gf16 {
     pub fn new() -> Self {
-        let mut exp = vec![0u16; FIELD_SIZE * 4 + 1];
-        let mut log = vec![0u32; FIELD_SIZE + 1];
-        let mut value = 1u32;
-        for power in 0..FIELD_SIZE {
-            log[value as usize] = power as u32;
-            exp[power] = value as u16;
-            exp[power + FIELD_SIZE] = value as u16;
-            value <<= 1;
-            if value > FIELD_MASK {
-                value ^= PRIMITIVE_POLYNOMIAL;
-            }
-        }
-        log[0] = ZERO_LOG_SENTINEL;
-        Self {
-            exp: exp.into_boxed_slice(),
-            log: log.into_boxed_slice(),
-        }
+        Self {}
     }
-
     pub fn add(&self, left: u16, right: u16) -> u16 {
         left ^ right
     }
@@ -2366,16 +2497,15 @@ impl Gf16 {
         if left == 0 || right == 0 {
             return 0;
         }
-        let index = self.log[left as usize] + self.log[right as usize];
-        self.exp[index as usize]
+        GF16_EXP
+            [usize::from(GF16_LOG[usize::from(left)]) + usize::from(GF16_LOG[usize::from(right)])]
     }
 
     pub fn inv(&self, value: u16) -> Result<u16> {
         if value == 0 {
             return Err(Error::SingularElement);
         }
-        let index = FIELD_SIZE as u32 - self.log[value as usize];
-        Ok(self.exp[index as usize])
+        Ok(GF16_EXP[FIELD_SIZE - usize::from(GF16_LOG[usize::from(value)])])
     }
 
     pub fn div(&self, numerator: u16, denominator: u16) -> Result<u16> {
@@ -2448,8 +2578,30 @@ fn encode_parity_shards_with_progress(
             }
         };
 
+        // One dispatch per parity row over every data shard - the same shape
+        // and the same work product as the whole-grid repair's rebuilt row,
+        // so it takes that fold's gate rather than a second one of its own.
+        // This fold was the one left ungated on 15 Sep 2026, and it IS
+        // reached in production: the in-memory RAR 5 writer's recovery record
+        // goes `recovery_record_data` -> `build_structural_inline_recovery_data`
+        // -> `encode_inline_recovery_parity` -> here. (The STREAMED writer's
+        // fold is `InlineRecoveryFolder::fold_symbols`, behind
+        // `fold_team::MIN_PREFIX`; rarfast's `.rev` writer is
+        // `fold_stripe_into_parity`, which is serial.) Measured 16 Sep 2026
+        // on both boxes the repair gates were derived on, serial build
+        // against parallel, cold process and warm pool: the encode's curve
+        // sits within the repair's - an M1 Ultra (20 threads) 2.31x at 1 MiB
+        // of work, 1.06-1.08x cold at 4 MiB, 0.97x at 6, 0.74x at 12 and
+        // 0.27x at 64; an M3 Ultra (32 threads) 3.62x at 1 MiB, 1.38x at 4,
+        // 1.11x at 6, 1.07x at 12, 0.97x at 16 and 0.40x at 64. Both boxes
+        // are a cold LOSS exactly where `whole_grid_team_min_work_for` keeps
+        // the fold serial and a win where it does not, so a second constant
+        // would be two numbers for one curve - and minting one from a single
+        // box's figures is the defect 6ebda29 removed. See the host repo's
+        // `research/RARFAST-BENCH-2026-09-14.md` section 15 (nzbfast-local
+        // change, 16 Sep 2026; see VENDORING.md).
         #[cfg(feature = "parallel")]
-        {
+        if whole_grid_fold_on_team(first.len(), data.len()) {
             use rayon::prelude::*;
             parity_row
                 .par_chunks_mut(RECOVER_FOLD_CHUNK)
@@ -2457,8 +2609,9 @@ fn encode_parity_shards_with_progress(
                 .for_each(|(index, destination)| {
                     fold_chunk(destination, index * RECOVER_FOLD_CHUNK);
                 });
+            progress(((recovery_index + 1) * first.len()) as u64);
+            continue;
         }
-        #[cfg(not(feature = "parallel"))]
         for (index, destination) in parity_row.chunks_mut(RECOVER_FOLD_CHUNK).enumerate() {
             fold_chunk(destination, index * RECOVER_FOLD_CHUNK);
         }
@@ -2772,11 +2925,14 @@ impl StripeRepairPlan {
     }
 
     /// Bytes [`repair_shards_striped`] reserves for a given stripe: one
-    /// right-hand-side row and one output row per damaged shard, plus a
-    /// single read buffer. Independent of `data_count` and `shard_len`, which
-    /// is the whole point of the striped path.
+    /// right-hand-side row and one output row per damaged shard, plus TWO
+    /// read buffers - the overlapped arm holds the window being folded and
+    /// the one being read at the same time, and the serial arm is charged the
+    /// same so the bound is one number rather than a mode. Independent of
+    /// `data_count` and `shard_len`, which is the whole point of the striped
+    /// path.
     pub fn working_bytes(&self, stripe_len: usize) -> u64 {
-        (2 * self.damaged.len() as u64 + 1) * stripe_len as u64
+        (2 * self.damaged.len() as u64 + 2) * stripe_len as u64
     }
 
     /// Largest stripe whose working set fits `budget` bytes, rounded to an
@@ -2786,7 +2942,7 @@ impl StripeRepairPlan {
     /// per row - the caller's cue to report an unsupported repair rather
     /// than grind through 2-byte stripes.
     pub fn stripe_len_for_budget(&self, budget: u64) -> Result<usize> {
-        let rows = (2 * self.damaged.len() + 1) as u64;
+        let rows = (2 * self.damaged.len() + 2) as u64;
         let stripe = budget / rows;
         let stripe = usize::try_from(stripe).unwrap_or(usize::MAX);
         if stripe < MIN_STRIPE_LEN.min(self.shard_len) {
@@ -2884,10 +3040,202 @@ where
         }
     }
 
-    let mut scratch = vec![0u8; stripe_len];
-    let mut out = vec![vec![0u8; stripe_len]; damaged_count];
+    /// The same stripe loop with the reads and the fold on different threads.
+    ///
+    /// `rc` rebuilding one volume is single-threaded, and a profile of it (the
+    /// host repo's `research/RARFAST-BENCH-2026-09-14.md` section 16) put
+    /// `pread` at 29% of the process beside the fold's 55%, on the one thread
+    /// there is. Warm, that `pread` is a page copy; cold it is the disk. Either
+    /// way it is time the fold could have been running.
+    ///
+    /// ONE extra thread, spawned once per repair, not a pool. 14.6 gates a
+    /// rayon TEAM off this shape because every dispatch wakes and parks the
+    /// whole pool per window; this hands one source window to one thread that
+    /// is already running and is never joined per stripe, so the cost it has to
+    /// repay is a channel send, not a barrier. The fold is the side that moves,
+    /// because it touches only plain data: the caller's read and write closures
+    /// stay on the calling thread and need no `Send`.
+    ///
+    /// The buffers ping-pong by ownership rather than by lock: the main thread
+    /// reads into whichever of the two it holds, sends it, and takes the other
+    /// back when the worker is done with it. Two windows are resident instead
+    /// of one, which `StripeRepairPlan::working_bytes` reserves for.
+    #[allow(clippy::too_many_arguments)]
+    fn overlapped_stripe_loop<D, R, W, F>(
+        plan: &StripeRepairPlan,
+        stripe_len: usize,
+        visits: &[Visit],
+        fill_tables: F,
+        out: Vec<Vec<u8>>,
+        mut read_data: D,
+        mut read_recovery: R,
+        mut write_damaged: W,
+    ) -> Result<()>
+    where
+        D: FnMut(usize, usize, &mut [u8]) -> Result<()>,
+        R: FnMut(usize, usize, &mut [u8]) -> Result<()>,
+        W: FnMut(usize, usize, &[u8]) -> Result<()>,
+        F: Fn(&Visit, &mut Vec<Option<Gf16MulTable>>),
+    {
+        use std::sync::mpsc;
+
+        enum Job {
+            /// Take the output rows for the stripe about to start.
+            Rows(Vec<Vec<u8>>),
+            /// Fold `len` bytes of this window into them, then give it back.
+            Fold(Vec<u8>, usize, Vec<Option<Gf16MulTable>>),
+            /// The stripe is complete: hand the rows back to be written.
+            Flush,
+        }
+        enum Back {
+            Spare(Vec<u8>, Vec<Option<Gf16MulTable>>),
+            Rows(Vec<Vec<u8>>),
+        }
+
+        let damaged_count = out.len();
+        std::thread::scope(|scope| -> Result<()> {
+            let (job_tx, job_rx) = mpsc::channel::<Job>();
+            let (back_tx, back_rx) = mpsc::channel::<Back>();
+            let worker_back = back_tx.clone();
+            scope.spawn(move || {
+                let mut rows: Option<Vec<Vec<u8>>> = None;
+                while let Ok(job) = job_rx.recv() {
+                    let reply = match job {
+                        Job::Rows(taken) => {
+                            rows = Some(taken);
+                            continue;
+                        }
+                        Job::Fold(window, len, tables) => {
+                            if let Some(rows) = rows.as_mut() {
+                                fold_source_into(rows, &tables, &window[..len]);
+                            }
+                            Back::Spare(window, tables)
+                        }
+                        // `rows` is always present here: the main thread sends
+                        // `Rows` at the head of every stripe and `Flush` only
+                        // at its tail. An empty send would strand it, so send
+                        // whatever is held rather than panicking on a worker.
+                        Job::Flush => Back::Rows(rows.take().unwrap_or_default()),
+                    };
+                    if worker_back.send(reply).is_err() {
+                        return;
+                    }
+                }
+            });
+
+            let mut spare: Vec<(Vec<u8>, Vec<Option<Gf16MulTable>>)> = (0..2)
+                .map(|_| (vec![0u8; stripe_len], Vec::with_capacity(damaged_count)))
+                .collect();
+            let mut out = out;
+            let mut offset = 0usize;
+            while offset < plan.shard_len {
+                let len = stripe_len.min(plan.shard_len - offset);
+                for row in out.iter_mut() {
+                    row[..len].fill(0);
+                }
+                let _ = job_tx.send(Job::Rows(out));
+
+                for visit in visits {
+                    let (mut window, mut tables) = match spare.pop() {
+                        Some(pair) => pair,
+                        None => match back_rx.recv() {
+                            Ok(Back::Spare(window, tables)) => (window, tables),
+                            // The worker is gone, or sent rows nobody asked
+                            // for. Neither can happen while it is folding; if
+                            // it somehow does, fail the repair rather than
+                            // writing a shard that was never folded.
+                            _ => return Err(Error::BadRecoveryChunk),
+                        },
+                    };
+                    let read = match *visit {
+                        Visit::Recovery(slot) => read_recovery(slot, offset, &mut window[..len]),
+                        Visit::Data(index) => read_data(index, offset, &mut window[..len]),
+                    };
+                    // A read error still has to leave the worker unstuck: the
+                    // scope joins it, and it exits when `job_tx` drops with
+                    // this return.
+                    read?;
+                    fill_tables(visit, &mut tables);
+                    let _ = job_tx.send(Job::Fold(window, len, tables));
+                }
+
+                let _ = job_tx.send(Job::Flush);
+                out = loop {
+                    match back_rx.recv() {
+                        Ok(Back::Spare(window, tables)) => spare.push((window, tables)),
+                        Ok(Back::Rows(rows)) => break rows,
+                        Err(_) => return Err(Error::BadRecoveryChunk),
+                    }
+                };
+                if out.len() != damaged_count {
+                    return Err(Error::BadRecoveryChunk);
+                }
+
+                for (slot, shard) in out.iter().enumerate() {
+                    write_damaged(slot, offset, &shard[..len])?;
+                }
+                offset += len;
+            }
+            Ok(())
+        })
+    }
+
+    // The sources a stripe folds, in the order the serial loop read them:
+    // every recovery row first, then every intact data shard whose combined
+    // coefficient is non-zero. Named once, so the overlapped arm below cannot
+    // drift from the serial one.
+    enum Visit {
+        Recovery(usize),
+        Data(usize),
+    }
+    let mut visits: Vec<Visit> = (0..damaged_count).map(Visit::Recovery).collect();
+    for data_index in 0..plan.data_count {
+        if plan.damaged_lookup[data_index] {
+            continue;
+        }
+        if combined.iter().all(|row| row[data_index] == 0) {
+            continue;
+        }
+        visits.push(Visit::Data(data_index));
+    }
+
     // Tables live inline in the Vec (1 KiB each), so clearing and refilling
     // per source allocates nothing after the first stripe.
+    let fill_tables = |visit: &Visit, tables: &mut Vec<Option<Gf16MulTable>>| {
+        tables.clear();
+        match *visit {
+            // Each recovery row's parity enters through the inverse directly.
+            Visit::Recovery(slot) => tables.extend(plan.inverse.iter().map(|row| {
+                let coeff = row[slot];
+                (coeff != 0).then(|| Gf16MulTable::new(coeff))
+            })),
+            // Every intact shard enters through its combined coefficient. One
+            // pass over the set per stripe: the same total I/O the whole-grid
+            // path does, spread so that only one shard's window is resident at
+            // a time.
+            Visit::Data(index) => tables.extend(combined.iter().map(|row| {
+                let coeff = row[index];
+                (coeff != 0).then(|| Gf16MulTable::new(coeff))
+            })),
+        }
+    };
+
+    let mut out = vec![vec![0u8; stripe_len]; damaged_count];
+
+    if read_fold_overlap(stripe_len, visits.len()) {
+        return overlapped_stripe_loop(
+            plan,
+            stripe_len,
+            &visits,
+            fill_tables,
+            out,
+            read_data,
+            read_recovery,
+            write_damaged,
+        );
+    }
+
+    let mut scratch = vec![0u8; stripe_len];
     let mut tables: Vec<Option<Gf16MulTable>> = Vec::with_capacity(damaged_count);
 
     let mut offset = 0usize;
@@ -2897,34 +3245,12 @@ where
             row[..len].fill(0);
         }
 
-        // Each recovery row's parity enters through the inverse directly.
-        for slot in 0..damaged_count {
-            read_recovery(slot, offset, &mut scratch[..len])?;
-            tables.clear();
-            tables.extend(plan.inverse.iter().map(|row| {
-                let coeff = row[slot];
-                (coeff != 0).then(|| Gf16MulTable::new(coeff))
-            }));
-            fold_source_into(&mut out, &tables, &scratch[..len]);
-        }
-
-        // Every intact shard enters through its combined coefficient. One
-        // pass over the set per stripe: the same total I/O the whole-grid
-        // path does, spread so that only one shard's window is resident at
-        // a time.
-        for data_index in 0..plan.data_count {
-            if plan.damaged_lookup[data_index] {
-                continue;
+        for visit in &visits {
+            match *visit {
+                Visit::Recovery(slot) => read_recovery(slot, offset, &mut scratch[..len])?,
+                Visit::Data(index) => read_data(index, offset, &mut scratch[..len])?,
             }
-            if combined.iter().all(|row| row[data_index] == 0) {
-                continue;
-            }
-            read_data(data_index, offset, &mut scratch[..len])?;
-            tables.clear();
-            tables.extend(combined.iter().map(|row| {
-                let coeff = row[data_index];
-                (coeff != 0).then(|| Gf16MulTable::new(coeff))
-            }));
+            fill_tables(visit, &mut tables);
             fold_source_into(&mut out, &tables, &scratch[..len]);
         }
 
@@ -2951,7 +3277,7 @@ mod tests {
         repair_inline_recovery_prefix, repair_inline_recovery_prefix_shards,
         repair_shards_striped, shared_gf16, shard_record_span, solve_damaged_group_shards,
         split_prefix_shard_ranges, split_prefix_shards, split_tables,
-        Error, Gf16, InlineRecoveryPlan, StripeRepairPlan, FIELD_SIZE,
+        Error, Gf16, InlineRecoveryPlan, StripeRepairPlan, FIELD_SIZE, GF16_EXP, GF16_LOG,
         MAX_RECONSTRUCTION_SHARDS, MAX_WINRAR602_DATA_SHARDS,
     };
 
@@ -3164,6 +3490,59 @@ mod tests {
         assert!(small.team.is_none());
     }
 
+    /// The width a caller was asked for reaches the fold team: exactly that
+    /// many threads, still capped at `MAX_WORKERS` and still floored at the
+    /// team's own two, and one thread means no team at all - which is what
+    /// `rarfast -mt1` asks for. Below `MIN_PREFIX` nothing starts whatever
+    /// is asked, because the serial fold is tens of milliseconds there.
+    ///
+    /// It moves no byte: every width writes the same record, which
+    /// `inline_recovery_folder_team_matches_the_whole_prefix_builder` holds
+    /// over 2 to 16 workers against the whole-prefix builder.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn inline_recovery_folder_takes_the_asked_thread_cap() {
+        let cap = |threads: Option<usize>| {
+            super::InlineRecoveryFolder::with_thread_cap(super::fold_team::MIN_PREFIX, 5, threads)
+                .unwrap()
+        };
+        let width = |folder: &super::InlineRecoveryFolder| {
+            folder.team.as_ref().map(super::fold_team::FoldTeam::width)
+        };
+
+        // One thread is a serial fold, as asked.
+        assert!(width(&cap(Some(1))).is_none());
+        // Two and up are exactly what was asked for, to the cap.
+        for asked in 2..=super::fold_team::MAX_WORKERS {
+            assert_eq!(width(&cap(Some(asked))), Some(asked), "asked {asked}");
+        }
+        // Past the cap, the cap - `-mt64` is a legal spelling.
+        for asked in [super::fold_team::MAX_WORKERS + 1, 64] {
+            assert_eq!(
+                width(&cap(Some(asked))),
+                Some(super::fold_team::MAX_WORKERS),
+                "asked {asked}"
+            );
+        }
+        // Asked for nothing, the host's core count under the same cap -
+        // the behaviour every caller had before there was a parameter.
+        let cores = std::thread::available_parallelism().map_or(1, usize::from);
+        let host = if cores >= 2 {
+            Some(cores.min(super::fold_team::MAX_WORKERS))
+        } else {
+            None
+        };
+        assert_eq!(width(&cap(None)), host);
+        // And a short prefix starts nothing, however wide the ask.
+        let short = super::InlineRecoveryFolder::with_thread_cap(
+            super::fold_team::MIN_PREFIX - 2,
+            5,
+            Some(super::fold_team::MAX_WORKERS),
+        )
+        .unwrap();
+        assert!(short.team.is_none());
+    }
+
     /// The repair folds' team gates are work PER THREAD, floored at what the
     /// 20-thread box measured - the first form of this gate was a flat
     /// 12 MiB and cost 12% end to end on a 32-thread box at a 16 MiB window
@@ -3212,6 +3591,59 @@ mod tests {
             assert!(!super::whole_grid_fold_on_team(1 << 20, 4));
             assert!(super::whole_grid_fold_on_team(12 << 20, 1));
         });
+    }
+
+    /// The parity ENCODE takes the whole-grid repair's gate rather than one
+    /// of its own, because 16 Sep 2026 measured its curve inside that one on
+    /// BOTH boxes (VENDORING.md, bench note section 15): a cold loss at 12
+    /// MiB of work on the 32-thread box, where the gate keeps it serial, and
+    /// 0.27-0.40x at 64 MiB, where the gate lets it through. It was the one
+    /// repair-shaped fold left ungated by the 15 Sep lane, and it has a
+    /// production caller - the in-memory RAR 5 writer's recovery record.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn the_parity_encode_takes_the_whole_grid_gate() {
+        super::with_fold_team_threads(32, || {
+            // 12 and 16 MiB of work: a cold loss on this width, held serial.
+            assert!(!super::whole_grid_fold_on_team(768 << 10, 16));
+            assert!(!super::whole_grid_fold_on_team(1 << 20, 16));
+            // 64 MiB, where it measured 0.40x cold.
+            assert!(super::whole_grid_fold_on_team(4 << 20, 16));
+        });
+        super::with_fold_team_threads(20, || {
+            assert!(!super::whole_grid_fold_on_team(768 << 10, 16));
+            assert!(super::whole_grid_fold_on_team(4 << 20, 16));
+        });
+    }
+
+    /// Both sides of that gate write the same parity, against the per-symbol
+    /// reference encoder.
+    #[test]
+    fn the_parity_encode_writes_the_same_rows_on_both_sides_of_its_team_gate() {
+        // Two threads puts the gate at its 12 MiB floor, so the second cell
+        // below reaches the TEAM arm on any host.
+        #[cfg(feature = "parallel")]
+        return super::with_fold_team_threads(2, both_sides_of_the_encode_gate);
+        #[cfg(not(feature = "parallel"))]
+        both_sides_of_the_encode_gate();
+    }
+
+    fn both_sides_of_the_encode_gate() {
+        for (shard_len, count) in [(64 * 1024usize, 4usize), ((12 << 20) / 4 + 2, 4)] {
+            let data: Vec<Vec<u8>> = (0..count)
+                .map(|index| {
+                    (0..shard_len)
+                        .map(|at| (at as u32).wrapping_mul(40_503 + index as u32) as u8)
+                        .collect()
+                })
+                .collect();
+            let refs: Vec<&[u8]> = data.iter().map(Vec::as_slice).collect();
+            assert_eq!(
+                encode_parity_shards(&refs, 2).unwrap(),
+                super::encode_parity_shards_reference(&refs, 2).unwrap(),
+                "shard_len {shard_len}, data {count}"
+            );
+        }
     }
 
     /// Both sides of each gate rebuild the same bytes: the striped repair
@@ -3468,6 +3900,57 @@ mod tests {
             assert_eq!(gf.mul(value, inverse), 1);
         }
         assert_eq!(gf.inv(0), Err(Error::SingularElement));
+    }
+    /// The tables against the field definition, exhaustively: each exponent
+    /// entry is its predecessor times `x` reduced by `0x1100B`, the period is
+    /// exactly 65535, every nonzero element's logarithm round-trips, and every
+    /// nonzero element has an inverse.
+    #[test]
+    fn gf16_tables_match_the_field_definition_exhaustively() {
+        assert_eq!(GF16_EXP[0], 1);
+        for index in 1..GF16_EXP.len() {
+            let shifted = u32::from(GF16_EXP[index - 1]) << 1;
+            let expected = if shifted > 0xffff {
+                shifted ^ 0x1100b
+            } else {
+                shifted
+            };
+            assert_eq!(u32::from(GF16_EXP[index]), expected, "exponent {index}");
+        }
+        assert_eq!(GF16_EXP[FIELD_SIZE], 1, "a^65535 is a^0");
+        for power in 0..FIELD_SIZE {
+            assert_eq!(usize::from(GF16_LOG[usize::from(GF16_EXP[power])]), power);
+        }
+        let gf = Gf16::new();
+        for value in 1..=u16::MAX {
+            assert_eq!(
+                gf.mul(value, gf.inv(value).unwrap()),
+                1,
+                "inverse of {value:#x}"
+            );
+        }
+        assert_eq!(gf.mul(0x8000, 2), 0x100b);
+
+        // And the multiply against a bitwise one that shares nothing with it.
+        let bitwise = |mut left: u32, mut right: u32| {
+            let mut product = 0;
+            while right != 0 {
+                if right & 1 != 0 {
+                    product ^= left;
+                }
+                left <<= 1;
+                if left > 0xffff {
+                    left ^= 0x1100b;
+                }
+                right >>= 1;
+            }
+            product as u16
+        };
+        for left in (0..=u16::MAX).step_by(251) {
+            for right in (0..=u16::MAX).step_by(257) {
+                assert_eq!(gf.mul(left, right), bitwise(left.into(), right.into()));
+            }
+        }
     }
 
     #[test]
@@ -4447,6 +4930,107 @@ mod tests {
     }
 
     #[test]
+    fn rar5_striped_repair_reads_overlapped_match_the_serial_arm_byte_for_byte() {
+        // The read/fold split is a SCHEDULING change: the same sources, in the
+        // same order, into the same rows. So the only thing worth asserting is
+        // that it is invisible in the output - and the arm a unit test would
+        // otherwise never reach, because `read_fold_overlap`'s gate wants more
+        // window than a test can afford to build, is forced here. Stripe
+        // lengths that do not divide the shard, one larger than it, and the
+        // 2-byte minimum, so the short trailing window and the per-stripe rhs
+        // reset are both crossed on the overlapped arm.
+        for &shard_len in &[2usize, 64, 66, 250] {
+            let shards: Vec<Vec<u8>> = (0..5)
+                .map(|i| (0..shard_len).map(|b| (i * 97 + b * 31 + 5) as u8).collect())
+                .collect();
+            let refs: Vec<&[u8]> = shards.iter().map(Vec::as_slice).collect();
+            let parity = encode_parity_shards(&refs, 2).unwrap();
+
+            for damaged in [vec![0usize], vec![2], vec![1, 4]] {
+                let rows: Vec<usize> = (0..damaged.len()).collect();
+                let plan =
+                    StripeRepairPlan::new(shards.len(), 2, shard_len, &damaged, &rows).unwrap();
+                for &stripe in &[2usize, 4, 64, shard_len, shard_len + 2] {
+                    if stripe == 0 || !stripe.is_multiple_of(2) {
+                        continue;
+                    }
+                    let run = |overlap: bool| {
+                        let mut rebuilt = vec![vec![0u8; shard_len]; damaged.len()];
+                        super::with_read_fold_overlap(overlap, || {
+                            repair_shards_striped(
+                                &plan,
+                                stripe,
+                                |index, offset, buf| {
+                                    buf.copy_from_slice(
+                                        &shards[index][offset..offset + buf.len()],
+                                    );
+                                    Ok(())
+                                },
+                                |slot, offset, buf| {
+                                    buf.copy_from_slice(
+                                        &parity[rows[slot]][offset..offset + buf.len()],
+                                    );
+                                    Ok(())
+                                },
+                                |slot, offset, bytes| {
+                                    rebuilt[slot][offset..offset + bytes.len()]
+                                        .copy_from_slice(bytes);
+                                    Ok(())
+                                },
+                            )
+                        })
+                        .unwrap();
+                        rebuilt
+                    };
+                    let serial = run(false);
+                    let overlapped = run(true);
+                    assert_eq!(
+                        serial, overlapped,
+                        "shard_len={shard_len} stripe={stripe} damaged={damaged:?}"
+                    );
+                    for (slot, &index) in plan.damaged().iter().enumerate() {
+                        assert_eq!(overlapped[slot], shards[index], "overlapped arm rebuild");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rar5_striped_repair_read_overlap_gate_matches_the_measured_threshold() {
+        // The gate is a size, not a thread count: nothing about it scales with
+        // the host, which is the whole difference from the fold-team gates
+        // beside it. Pin both sides of 4 MiB of total window, and that the
+        // shape of the split - a few big windows or many small ones - does not
+        // matter, only their product.
+        assert!(!super::read_fold_overlap(64 << 10, 16));
+        assert!(!super::read_fold_overlap((4 << 20) - 2, 1));
+        assert!(super::read_fold_overlap(4 << 20, 1));
+        assert!(super::read_fold_overlap(64 << 10, 64));
+        assert!(super::read_fold_overlap(21 << 20, 17), "rarfast rc's own shape");
+        // A degenerate repair must not multiply its way into the arm.
+        assert!(!super::read_fold_overlap(0, usize::MAX));
+        assert!(!super::read_fold_overlap(2, 0));
+    }
+
+    #[test]
+    fn rar5_striped_repair_working_bytes_reserve_both_read_windows() {
+        // The overlapped arm holds the window it is folding and the window it
+        // is reading at once, and the budget has to have been told: a caller
+        // sizing a stripe from `stripe_len_for_budget` must not then allocate
+        // past the budget it asked about.
+        let plan = StripeRepairPlan::new(6, 3, 1 << 20, &[2], &[0]).unwrap();
+        assert_eq!(plan.working_bytes(1000), 4000);
+        let budget = 40_000u64;
+        let stripe = plan.stripe_len_for_budget(budget).unwrap();
+        assert!(
+            plan.working_bytes(stripe) <= budget,
+            "stripe {stripe} needs {} of a {budget} budget",
+            plan.working_bytes(stripe)
+        );
+    }
+
+    #[test]
     fn rar5_striped_repair_agrees_with_the_whole_grid_at_every_stripe_size() {
         // The stripe length is the parameter most likely to hide an off-by-one:
         // it interacts with the short trailing stripe, the 2-byte symbol walk,
@@ -4770,6 +5354,75 @@ mod tests {
         // The hash is not the thing under test here, but it bounds the whole
         // refusal: a 262 KB record can cost at most one CRC64 over itself.
         assert!(hashed <= record.len() as u64, "hashed {hashed} over a {}-byte record", record.len());
+    }
+
+    /// A ~90-byte record must not be able to make the parser reserve a
+    /// group layout, and `group_count` is the field that used to let it.
+    ///
+    /// `parse_inline_recovery_chunk` reads `protected_size` and
+    /// `group_count` off the wire and checks only that they agree with each
+    /// other (`capacity` inside `[protected_size, protected_size + 2 *
+    /// data_shards]`), never against any buffer it holds - it cannot, since
+    /// the prefix entry points hand it the RECOVERY AREA and the protected
+    /// data is not in it. So the one plan figure it reads before that bound
+    /// lands, `shard_record_span`, has to cost the same whatever the record
+    /// declares. It did not: it built one `RecoveryGroup` per group, so
+    /// `group_count = 2^60` asked for a 281 TB vector from this fixture.
+    #[test]
+    fn rar5_inline_parse_refuses_a_wire_scale_group_count_without_sizing_it() {
+        let data_shards: u64 = 1;
+        let recovery_shards: u64 = 1;
+        // Even, so the GF16 gate passes; equal to protected_size, so the
+        // capacity relation is satisfied exactly.
+        let group_count: u64 = 1 << 60;
+        let protected_size: u64 = group_count;
+        let header_size = 0x48 + data_shards * 8;
+        let total_size = header_size + 2;
+        let plan = InlineRecoveryPlan {
+            data_shards,
+            recovery_shards,
+            group_count,
+            header_size,
+            shard_size: 0,
+        };
+
+        // The pin itself: the span is arithmetic, not a materialised layout.
+        // Reverting `shard_record_span` to `recovery_groups(plan)?.len()`
+        // makes this line allocate 2^44 sixteen-byte groups.
+        let count = group_count.div_ceil(RAR5_RECOVERY_PARITY_PER_RECORD_MAX);
+        assert_eq!(
+            shard_record_span(plan).unwrap(),
+            count * header_size + group_count
+        );
+
+        let mut record = vec![0u8; total_size as usize];
+        record[..4].copy_from_slice(b"{RB}");
+        record[0x0c..0x10].copy_from_slice(&(total_size as u32).to_le_bytes());
+        record[0x10..0x14].copy_from_slice(&(header_size as u32).to_le_bytes());
+        record[0x14] = 1;
+        record[0x15] = 1;
+        record[0x22..0x2a].copy_from_slice(&protected_size.to_le_bytes());
+        record[0x2a..0x32].copy_from_slice(&group_count.to_le_bytes());
+        // A shard_size that does NOT span the declared layout, which is what
+        // the record is refused for - after the span is computed, which is
+        // the point.
+        record[0x32..0x3a].copy_from_slice(&1u64.to_le_bytes());
+        record[0x3a..0x3c].copy_from_slice(&(data_shards as u16).to_le_bytes());
+        record[0x3c..0x3e].copy_from_slice(&(recovery_shards as u16).to_le_bytes());
+        let crc = crc64_xz(&record[0x0c..]);
+        record[0x04..0x0c].copy_from_slice(&crc.to_le_bytes());
+
+        assert!(record.len() < 128, "the fixture stays tiny");
+        let mut hashed = 0u64;
+        assert_eq!(
+            parse_inline_recovery_chunk(&record, &mut hashed).unwrap_err(),
+            Error::BadRecoveryChunk
+        );
+        assert!(
+            hashed <= record.len() as u64,
+            "hashed {hashed} over a {}-byte record",
+            record.len()
+        );
     }
 
     /// Defence in depth for the same grid: even handed a pre-parsed plan,

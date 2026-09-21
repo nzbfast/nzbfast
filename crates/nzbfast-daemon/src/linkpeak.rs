@@ -324,13 +324,13 @@ impl LinkPeak {
         }
     }
 
-    /// The dashboard's 100% anchor - see [`Core::effective`].
+    /// The dashboard's 100% anchor - see `Core::effective`.
     pub fn effective(&self, line_bps: u64) -> (u64, &'static str) {
         self.core.lock_ok().effective(line_bps)
     }
 
     /// Everything the queue poll's chart block needs, in one lock:
-    /// the anchor, its source, and the units hint ([`Core::line_hint`]).
+    /// the anchor, its source, and the units hint (`Core::line_hint`).
     pub fn chart(&self, line_bps: u64) -> (u64, &'static str, bool) {
         let c = self.core.lock_ok();
         let (bps, src) = c.effective(line_bps);

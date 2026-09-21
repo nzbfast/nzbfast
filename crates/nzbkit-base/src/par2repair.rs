@@ -24,7 +24,7 @@
 //! ```
 //!
 //! - |M| unknowns solved from |M| recovery slices by inverting the
-//! matrix A[r][c] = g_{j_c}^{e_r} (every entry a power of two:
+//! matrix `A[r]c` = g_{j_c}^{e_r} (every entry a power of two:
 //! 2^{k_{j_c}·e_r mod 65535}). [`Reconstructor`] streams the present
 //! slices through the syndrome accumulation so the whole data set is
 //! never in memory: peak RAM is |M| syndromes + |M| recovery slices +
@@ -50,6 +50,8 @@
 //! exceeds recovery after the extras scan, identified-but-damaged
 //! targets are scanned too (mid-file insertions leave a half-verified
 //! file whose remaining content is byte-shifted inside itself).
+
+#![warn(missing_docs)]
 
 use crate::disk::case_fold_key as fold_key;
 use crate::gf16;
@@ -108,12 +110,35 @@ fn feed_readers() -> usize {
     })
 }
 
+/// Why a repair could not be completed.
+///
+/// Read the arms as three groups, because a caller that folds them into
+/// one "repair failed" message misinforms its user: the set is BROKEN
+/// ([`Self::Malformed`], [`Self::NoMainPacket`], [`Self::SingularMatrix`],
+/// [`Self::VerifyFailed`]); the set is fine but something is MISSING or
+/// too big right now ([`Self::RecoveryShort`], [`Self::SolveBudget`] -
+/// both retryable, the second on a bigger machine); or nothing is wrong
+/// at all and the caller itself stood the repair down
+/// ([`Self::Cancelled`], [`Self::Deferred`]). Each arm in the last two
+/// groups states what it leaves on disk.
 #[derive(Debug, thiserror::Error)]
 pub enum RepairError {
+    /// A read or write against the recovery set or a member failed.
+    /// Nothing here distinguishes a missing file from a bad disk; both
+    /// arrive as the underlying `io::Error`.
     #[error("{0}")]
     Io(#[from] std::io::Error),
+    /// None of the supplied `.par2` files carried a valid Main packet,
+    /// so there is no recovery set to speak of: the Main packet is what
+    /// names the members and fixes the global slice numbering every RS
+    /// constant is derived from.
     #[error("no valid PAR2 Main packet found in the .par2 files")]
     NoMainPacket,
+    /// The set parsed but does not describe a repairable job: packets
+    /// that disagree with each other, a geometry that cannot hold. Not
+    /// retryable, and deliberately NOT the arm for an everyday
+    /// shortfall - see [`Self::RecoveryShort`], whose text used to be
+    /// reported as this and sent readers after a corrupt download.
     #[error("recovery set malformed: {0}")]
     Malformed(String),
     /// Not enough recovery slices could be VALIDATED to cover the
@@ -132,7 +157,16 @@ pub enum RepairError {
     /// torn one contributes nothing because a recovery slice is
     /// atomic, not because it was skipped.
     #[error("recovery data short: {have} usable recovery slice(s) for {need} missing block(s)")]
-    RecoveryShort { have: usize, need: usize },
+    RecoveryShort {
+        /// Recovery slices that are BOTH present and MD5-valid. A
+        /// partially fetched volume's intact slices are already
+        /// counted; a torn slice contributes nothing because a
+        /// recovery slice is atomic.
+        have: usize,
+        /// Blocks the verify pass found missing. `have >= need` is what
+        /// a repair requires, so this arm means the difference.
+        need: usize,
+    },
     /// The recovery set is fine; the SOLVE just does not fit this
     /// machine's memory budget. Deliberately distinct from
     /// [`Self::Malformed`] for the same reason [`Self::RecoveryShort`]
@@ -152,13 +186,28 @@ pub enum RepairError {
          memory, or raise the budget"
     )]
     SolveBudget {
+        /// Missing blocks, which is the solve's dimension: the window
+        /// is `m` by `block_size`.
         m: usize,
+        /// The set's block size in bytes, from the Main packet.
         block_size: usize,
+        /// What the solve window would have cost, in MB.
         needed_mb: u64,
+        /// This machine's solve-window budget in MB, as
+        /// `NZBFAST_REPAIR_SOLVE_BUDGET` resolved it.
         budget_mb: u64,
     },
+    /// The chosen recovery slices do not span the missing blocks: their
+    /// RS constants are linearly dependent, so the matrix cannot be
+    /// inverted. Distinct from [`Self::RecoveryShort`], where there
+    /// were not enough slices to try in the first place.
     #[error("recovery matrix is singular for this slice combination")]
     SingularMatrix,
+    /// A member was reconstructed and its MD5 still does not match the
+    /// hash the set records for it. Names the file. This means the
+    /// repair ran to completion and produced wrong bytes, so the set
+    /// or the inputs are not what they claim - never retry it
+    /// unchanged.
     #[error("repaired file failed MD5 verification: {0}")]
     VerifyFailed(String),
     /// A caller raised its [`control::PauseGate`]'s cancel while the
@@ -181,6 +230,32 @@ pub enum RepairError {
     /// disk and repairs from the same recovery data.
     #[error("repair cancelled")]
     Cancelled,
+    /// The caller's standing LONG-REPAIR VETO refused this repair at the
+    /// survey point - see [`control::DeferGate`]. TODO 332.
+    ///
+    /// Its own arm beside [`Self::Cancelled`] and for the same reason:
+    /// nothing is wrong with the set, the machine or the recovery data,
+    /// so a caller that reports this as a failed repair tells its user
+    /// their download is broken when the daemon has merely stood back
+    /// from a half-hour fold to give them a chance to see the notice.
+    ///
+    /// WHAT IS LEFT ON DISK: nothing was written at all. The veto is
+    /// answered before the fold, before the solve and before the patch,
+    /// at the same instant an [`AfterSurvey::Stop`] would have been - so
+    /// this is the strongest of the three on-disk contracts here, and it
+    /// is what makes deferring safe by construction rather than by care.
+    /// A later run repairs the same set from the same recovery data.
+    #[error("repair deferred: {est_secs}s of repair for {missing_blocks} missing block(s)")]
+    Deferred {
+        /// Blocks the verify pass found missing, which is what the
+        /// estimate below was derived from and the figure a notice
+        /// should quote.
+        missing_blocks: u64,
+        /// An ORDER OF MAGNITUDE, and `0` where the shape is one nobody
+        /// has measured - see `RepairForecast::est_secs`. Never print it
+        /// as a countdown.
+        est_secs: u64,
+    },
 }
 
 /// The log₂ of the RS constant for each of the first `n` input slices:
@@ -278,7 +353,11 @@ pub struct Reconstructor {
     /// transform solve (see [`forney`]). Chosen at construction, before
     /// any syndrome exists, because the explicit inverse is exactly what
     /// the transform route does not build.
-    solve: BackSub,
+    /// SHARED with every other sweep of a slabbed solve: the plan is
+    /// computed once above the driver's slab loop (`BackSubPlan`,
+    /// TODO 353). One is live at a time either way, so this does not
+    /// move the memory peak - it removes `slabs - 1` rebuilds of it.
+    solve: std::sync::Arc<reconstruct::PlanInner>,
     /// Batches travel to a worker thread that owns the syndrome rows, so
     /// the caller's disk reads overlap the GF math (bounded channel:
     /// one batch queued while one folds).
@@ -535,7 +614,15 @@ impl Drop for Feeder {
 /// into the extracted output), so damaged store-mode sets repair with
 /// no materialized volume files at all.
 pub trait VolumeIo: Sync {
+    /// Fill `buf` from `file` (a Main-packet index) starting at `off`.
+    /// Must fill it completely or fail: a short read is a wrong block,
+    /// and the repair has no way to tell the two apart.
     fn read(&self, file: usize, off: u64, buf: &mut [u8]) -> std::io::Result<()>;
+    /// Write `data` into `file` at `off`. Called only for blocks the
+    /// verify pass found missing, so an implementation may treat every
+    /// write as filling a hole rather than overwriting good bytes.
+    /// `&self` and `Sync`: writes to DIFFERENT blocks arrive
+    /// concurrently.
     fn write(&self, file: usize, off: u64, data: &[u8]) -> std::io::Result<()>;
 }
 
@@ -565,7 +652,7 @@ pub trait VolumeIo: Sync {
 /// par2 verifies the whole set from disk before and after.
 ///
 /// Which digest each file gets, and why that keeps the added cost near
-/// a plain read, is [`self_prove_set`] - including the prefix arm
+/// a plain read, is `self_prove_set` - including the prefix arm
 /// [`repair_mapped_catalog_resumed`] feeds.
 pub fn repair_mapped(
     files: &[(Par2File, Vec<bool>)],
@@ -642,7 +729,7 @@ pub fn repair_mapped_catalog_resumed(
 }
 
 /// [`repair_mapped_catalog_resumed`] under a
-/// [`RepairControl`](control::RepairControl) - progress out of the
+/// [`RepairControl`] - progress out of the
 /// repair, a cancel its loops poll - for the MAPPED in-stream driver's
 /// daemon caller (`nzbfast-unpack`'s `repair::try_mapped_repair`),
 /// which was the last daemon repair path handing this engine a default
@@ -896,6 +983,12 @@ fn repair_mapped_inner(
     // boundary to re-announce it at the way `slab` re-announces per
     // sweep. See `control::RepairRoute` for why the band table needs it.
     control.route(control::RepairRoute::Mapped);
+    // ONE BACK-SUBSTITUTION PLAN FOR THE WHOLE REPAIR (TODO 353), the
+    // disk driver's hoist on this route. `exps` is the selection this
+    // driver pins for the whole attempt - it survives the NTT-fallback
+    // retry - and [`backsub_for_sweep`] carries the rest of the
+    // argument, including why it is filled inside the loop.
+    let mut backsub = None;
     for si in 0..plan.slabs {
         // WHICH SWEEP THIS IS, before anything in it reports. The disk
         // driver says the same thing in the same place and for the same
@@ -950,8 +1043,16 @@ fn repair_mapped_inner(
             control::RepairPhase::Fold,
             work.iter().map(|&(_, _, _, take)| take as u64).sum(),
         );
-        let rec =
-            Reconstructor::new_controlled(w, n_inputs, &missing, &chosen_slab, path, control)?;
+        let backsub = backsub_for_sweep(&mut backsub, n_inputs, &missing, &exps, w, control)?;
+        let rec = Reconstructor::new_controlled_planned(
+            w,
+            n_inputs,
+            &missing,
+            &chosen_slab,
+            path,
+            control,
+            backsub,
+        )?;
         if si == 0 {
             probe.selected = rec.ntt_selected();
             probe.m = missing.len();
@@ -1759,7 +1860,10 @@ pub use survey::{
 // Its own module for the same reason `survey` is: one subject, and the
 // argument about where a pause may park is long enough to need room.
 pub mod control;
-pub use control::{PauseGate, ProgressSink, RepairControl, RepairPhase, RepairRoute};
+pub use control::{
+    DeferGate, DeferredRepair, PauseGate, ProgressSink, RepairControl, RepairPhase, RepairRoute,
+    SolveArm,
+};
 /// Every recovery-set id the PAR2 packets in `dir` carry, in
 /// first-seen (sorted packet-file) order. Finding F12's door: a set
 /// can LAND on disk through another set's naming (par2-of-par2 - the
@@ -2069,6 +2173,100 @@ fn repair_dir_set(
     });
     inv.finish(&out);
     out
+}
+
+/// The back-substitution plan for THIS sweep: computed on the first one
+/// and handed back unchanged to every sweep after it (TODO 353).
+///
+/// WHY THERE IS ANYTHING TO HOIST. A solve window over the memory budget
+/// is swept once per slab, and both drivers build a fresh
+/// [`Reconstructor`] inside that loop - which, until 20 Sep 2026, meant
+/// rebuilding the plan each time. The plan is `A[r][c] =
+/// g_{missing[c]}^{e_r}`, a function of the recovery EXPONENTS and the
+/// input base logs alone, and a slab is a byte range over the same
+/// exponents and the same missing set; both drivers pin one recovery
+/// selection for the whole repair, the disk one refusing outright if it
+/// changes between slabs. So every sweep past the first solved a system
+/// it had already solved. On the structured arms that is a cheap Forney
+/// factorization; on the UNSTRUCTURED arm it is Gauss-Jordan on an
+/// explicit `m x m`, `O(m^3)`, measured at 39.6 s of a 61.6 s repair at
+/// m = 10,000 on ONE slab
+/// (`research/REPAIR-ROW-ACCEPTANCE-2026-09-18.md`) - and that is the
+/// arm that slabs most readily, because `reconstruct::solve_buffers`
+/// prices it as the dense one whatever the gate says (TODO 348 C).
+///
+/// WHY THE SLOT IS FILLED HERE AND NOT ABOVE THE LOOP. Constructing a
+/// `Reconstructor` is itself a reported phase - the inverse announces
+/// `RepairPhase::Solve` and is cancellable per matrix column - and both
+/// drivers announce their sweep and size their fold BEFORE they
+/// construct, on purpose. Computing the plan above the loop would move
+/// that Solve ahead of `slab(0, of)`, into no sweep's frame at all.
+/// Filled on the first sweep instead, the announcement order is exactly
+/// what it was, and sweeps 1..N simply stop announcing an inverse -
+/// which is the "no inverse" case a per-sweep band already handles.
+///
+/// `w` is the SWEEP's width, not the block size: the dense arm's memory
+/// bound is priced against it, and `Reconstructor::build` re-asks that
+/// same bound on every sweep at that sweep's own width, so a hoisted
+/// plan cannot carry a slab past a check the un-hoisted code made.
+/// This sweep's [`Reconstructor`], over recovery payloads the caller
+/// OWNS - the disk driver's door, and the one place the two output
+/// pricings are chosen between.
+///
+/// Extracted 20 Sep 2026 with [`backsub_for_sweep`], which it calls: the
+/// hoist added a per-sweep argument to both constructors and
+/// `repair_dir_set_inner` had no room for it (`tools/size-gate.py`, 0
+/// free of 1,478 before this). A seam rather than a shave - "build this
+/// sweep's reconstructor" is one decision, and the two arms differ only
+/// in which door frees the payloads.
+fn sweep_reconstructor(
+    slot: &mut Option<reconstruct::BackSubPlan>,
+    w: usize,
+    n_inputs: usize,
+    missing: &[usize],
+    exps: &[u32],
+    feed_from: Vec<(u32, Vec<u8>)>,
+    path: SyndromePath,
+    control: &control::RepairControl,
+) -> Result<Reconstructor, RepairError> {
+    let backsub = backsub_for_sweep(slot, n_inputs, missing, exps, w, control)?;
+    if reconstruct::in_place_output() {
+        // A window priced at one buffer cannot afford the borrowed
+        // door's two (`new_controlled_owned`).
+        Reconstructor::new_controlled_owned(
+            w,
+            n_inputs,
+            missing,
+            feed_from,
+            path,
+            control,
+            Some(backsub),
+        )
+    } else {
+        let rec = Reconstructor::new_controlled_planned(
+            w, n_inputs, missing, &feed_from, path, control, backsub,
+        )?;
+        drop(feed_from);
+        Ok(rec)
+    }
+}
+
+fn backsub_for_sweep<'a>(
+    slot: &'a mut Option<reconstruct::BackSubPlan>,
+    n_inputs: usize,
+    missing: &[usize],
+    exps: &[u32],
+    w: usize,
+    control: &control::RepairControl,
+) -> Result<&'a reconstruct::BackSubPlan, RepairError> {
+    if slot.is_none() {
+        *slot = Some(reconstruct::BackSubPlan::for_repair(
+            n_inputs, missing, exps, w, control,
+        )?);
+    }
+    Ok(slot
+        .as_ref()
+        .expect("filled on this sweep or an earlier one"))
 }
 
 fn repair_dir_set_inner(
@@ -2405,9 +2603,13 @@ fn repair_dir_set_inner(
             );
         }
     }
+    // TODO 332's LONG-REPAIR VETO (`control::DeferGate`): the last
+    // instant nothing is written, ahead of the observer so one repair is
+    // never refused twice, `stopped` seeded because a defer IS one here.
+    let deferred = forecast.as_ref().is_some_and(|f| control.defer_long(f));
     let observed = observe.is_some();
-    let mut stopped = false;
-    if let Some(observe) = observe.as_mut() {
+    let mut stopped = deferred;
+    if !deferred && let Some(observe) = observe.as_mut() {
         if let Some(f) = forecast.as_ref() {
             observe.forecast(f);
         }
@@ -2427,6 +2629,9 @@ fn repair_dir_set_inner(
     // observer's answer exists and BEFORE the stop returns `NoDamage`:
     // a stop is not a clean set, and the two are one value below.
     att.survey(&targets, retained.as_ref(), observed, stopped);
+    if deferred {
+        return Err(control.deferred_error());
+    }
     if stopped {
         // The caller's own verdict stands in for the engine's; the
         // surveying entry point turns this into `Ok(None)` and no
@@ -2566,7 +2771,7 @@ fn repair_dir_set_inner(
         if let Some(observer) = observe.as_ref() {
             excluded.extend(observer.adoption_exclusions().iter().cloned());
         }
-        adopt::adopt_blocks(dir, &ctx.donors, &targets, &missing, bs, &excluded)?
+        adopt::adopt_blocks(dir, ctx, &targets, &missing, bs, &excluded)?
     } else {
         (Vec::new(), 0, HashMap::new(), HashSet::new())
     };
@@ -2809,6 +3014,9 @@ fn repair_dir_set_inner(
         // look repaired and are not. Re-selection is refused below
         // rather than followed.
         let pinned: Vec<u32> = recovery.iter().map(|(e, _)| *e).collect();
+        // ...AND BECAUSE IT IS PINNED, SO IS THE BACK-SUBSTITUTION PLAN
+        // (TODO 353): see [`backsub_for_sweep`].
+        let mut backsub = None;
         let mut recovery = recovery;
         for si in 0..plan.slabs {
             // WHICH SWEEP THIS IS, before anything in it reports.
@@ -2885,19 +3093,16 @@ fn repair_dir_set_inner(
             // pre-slab driver dropped them here.
             let feed_from = std::mem::take(&mut recovery);
             let max_exp = feed_from.last().map_or(0, |&(e, _)| e);
-            let mut rec = if reconstruct::in_place_output() {
-                // A window priced at one buffer cannot afford the
-                // borrowed door's two (`new_controlled_owned`).
-                Reconstructor::new_controlled_owned(
-                    w, n_inputs, &missing, feed_from, path, &control,
-                )?
-            } else {
-                let rec = Reconstructor::new_controlled(
-                    w, n_inputs, &missing, &feed_from, path, &control,
-                )?;
-                drop(feed_from);
-                rec
-            };
+            let mut rec = sweep_reconstructor(
+                &mut backsub,
+                w,
+                n_inputs,
+                &missing,
+                &pinned,
+                feed_from,
+                path,
+                &control,
+            )?;
             if si == 0 {
                 probe.selected = rec.ntt_selected();
                 probe.m = missing.len();

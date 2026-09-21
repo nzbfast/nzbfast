@@ -1,5 +1,6 @@
 //! §310 stage 2: the heal wiring - manifest-detected damage to a new
-//! job that re-fetches only what is broken.
+//! job that re-fetches only what is broken, donating from the library
+//! folder.
 //!
 //! Stage 1 gave a finished directory a `.nzbfast.manifest`: every
 //! checksum the download proved, kept beside the payload so the folder
@@ -20,7 +21,7 @@
 //!   PROVENANCE and never by directory, and
 //!   `two_damaged_episodes_re_hunt_their_own_posts` pins it.
 //! * **The search** is §282's, reached through
-//!   [`Daemon::hunt_by_name`] - the fallback road, taken only when the
+//!   `Daemon::hunt_by_name` - the fallback road, taken only when the
 //!   recorded post's own `.nzb` is gone. That function's header sets
 //!   out which §282 gates a heal does not run and why each one is a
 //!   question about a failed job rather than about a damaged file.
@@ -47,10 +48,10 @@
 //!   re-downloads a folder because a byte moved is a daemon nobody can
 //!   leave running on a metered line.
 //! * The door is two steps, the shape §282 item 20's clicked road
-//!   already established. [`Daemon::heal_offer`] reads the directory
+//!   already established. `Daemon::heal_offer` reads the directory
 //!   and reports what is damaged and which post each piece needs; it
 //!   touches no network, spends no indexer grab and enqueues nothing.
-//!   [`Daemon::heal_start`] is the one that spends, and it only ever
+//!   `Daemon::heal_start` is the one that spends, and it only ever
 //!   runs on a directory somebody has just named.
 //!
 //! Whether the daemon should ALSO be able to do this on its own -
@@ -58,10 +59,10 @@
 //! product call this paragraph left open. **It was taken on 2 Sep 2026:
 //! yes, and opt-in.** [`super::healauto`] is that road, and it needed
 //! nothing here changed - it calls [`plan`] once per folder and
-//! [`Daemon::heal_one`] per target, which is what this paragraph
+//! `Daemon::heal_one` per target, which is what this paragraph
 //! predicted. What it did NOT predict, and what that module's header
 //! sets out at length, is that an automatic road needs ceilings of its
-//! OWN: [`MAX_HEAL_JOBS`] below is sized for a person who clicked, and
+//! OWN: `MAX_HEAL_JOBS` below is sized for a person who clicked, and
 //! the argument under it ("the offer states the full count before
 //! anything is spent, so a user who means it can heal the rest by
 //! asking again") is exactly the argument that does not survive
@@ -298,7 +299,7 @@ fn heal_origin(sha: &str) -> String {
 /// knowing - and NOTHING else. No indexer is asked, no grab is
 /// spent, nothing is enqueued and nothing downloads.
 ///
-/// The `source` on each row is what [`Self::heal_start`] would
+/// The `source` on each row is what `Self::heal_start` would
 /// reach for: `recorded` when the exact post's spooled `.nzb` is
 /// still here, `search` when it is not and the name can be aimed
 /// with, `none` when it is not and the name carries no identity - a
@@ -341,7 +342,7 @@ pub fn heal_offer(d: &Daemon, dir: &str) -> std::result::Result<Value, String> {
 /// the library folder set as a donor.
 ///
 /// `sha` names ONE target from the offer's list; empty heals every
-/// target the plan found, capped at [`MAX_HEAL_JOBS`].
+/// target the plan found, capped at `MAX_HEAL_JOBS`.
 ///
 /// The gates are re-run rather than trusted from the offer - the
 /// directory is re-verified here - because the two calls are a user

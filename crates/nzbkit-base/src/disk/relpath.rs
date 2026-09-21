@@ -48,8 +48,8 @@ use std::path::{Path, PathBuf};
 ///
 /// A REFUSAL (the caller flattens), and it stays one - see the "which
 /// cap refuses and which caps" block on [`sanitize_relpath_for`], which
-/// records why this one and [`MAX_TOTAL`] answer differently from
-/// [`MAX_COMPONENT`]. Measured on APFS 31 Aug 2026: a 20-deep tree of
+/// records why this one and `MAX_TOTAL` answer differently from
+/// `MAX_COMPONENT`. Measured on APFS 31 Aug 2026: a 20-deep tree of
 /// short components creates without complaint, so this is a POLICY
 /// budget and not a filesystem fact - and it is load-bearing at a
 /// second site, `journal::restore::unquarantine_partials`, which bounds
@@ -246,7 +246,7 @@ fn cap_component_reserving(s: &str, reserve: usize) -> String {
 }
 
 /// The flat output name, CAPPED: [`sanitize_filename_for`] followed by
-/// [`cap_component`], for a name that becomes exactly one directory
+/// `cap_component`, for a name that becomes exactly one directory
 /// entry and has no front door to be refused at.
 ///
 /// # The division this closes, and why it is a division rather than one
@@ -287,7 +287,7 @@ fn cap_component_reserving(s: &str, reserve: usize) -> String {
 ///
 /// A caller building `{stem}.{ext}` must sanitize and cap the whole
 /// thing, not the stem: a stem capped at 255 with `.mkv` appended is
-/// 259 bytes and is refused just the same. [`cap_component`] carries a
+/// 259 bytes and is refused just the same. `cap_component` carries a
 /// short alphanumeric extension over the shortening for exactly this
 /// reason, so composing first is both correct and the shorter code.
 ///
@@ -343,7 +343,7 @@ pub fn sanitize_filename_capped(name: &str) -> String {
 ///  * capping each composed name independently hashes two different
 ///    inputs, so `{base}.mkv` and `{base}.en.srt` come back with
 ///    DIFFERENT tags and the subtitle stops being that video's;
-///  * capping `base` alone at [`MAX_COMPONENT`] leaves `{base}.mkv`
+///  * capping `base` alone at `MAX_COMPONENT` leaves `{base}.mkv`
 ///    four bytes over, and the write fails exactly as it did before.
 ///
 /// The one answer that keeps both properties is to shorten the stem far
@@ -357,13 +357,13 @@ pub fn sanitize_filename_capped(name: &str) -> String {
 /// Because the caller has them in hand (`.mkv`, `.en.srt`, and `""` for
 /// a folder that carries no tail at all) and an off-by-one in the
 /// arithmetic reintroduces precisely the write error this closes. An
-/// empty `tails` reserves nothing, so this is then [`cap_component`]
+/// empty `tails` reserves nothing, so this is then `cap_component`
 /// itself.
 ///
 /// # Preconditions, and what this deliberately does NOT do
 ///
 /// `stem` must already be sanitized, the same precondition
-/// [`cap_component`] carries and for the same reason. It is NOT
+/// `cap_component` carries and for the same reason. It is NOT
 /// re-sanitized here: the live caller's sanitizer is
 /// `release::sanitize_name`, which produces DISPLAY titles as well as
 /// folder names (`index::claims`, `index::spots` and `identity` all read
@@ -372,7 +372,7 @@ pub fn sanitize_filename_capped(name: &str) -> String {
 /// here would re-decide names that work today, which is a different
 /// change from the one this makes.
 ///
-/// The extension carry-over of [`cap_component`] applies to the stem's
+/// The extension carry-over of `cap_component` applies to the stem's
 /// own trailing dot-segment, which for a release name is almost never
 /// there (`-GROUP` is not alphanumeric) and is harmless when it is: the
 /// caller appends the real extension afterwards, and the pairing holds
@@ -385,7 +385,7 @@ pub fn cap_shared_stem<'a>(stem: &str, tails: impl IntoIterator<Item = &'a str>)
 /// Is a BUILT relative output name - components already sanitized and
 /// capped, '/'-joined - inside the whole-name budget?
 ///
-/// The one door onto [`MAX_TOTAL`] for a sanitizer outside this
+/// The one door onto `MAX_TOTAL` for a sanitizer outside this
 /// module, so the number stays in one place. `rarfix::sanitized_entry_path`
 /// is the caller this exists for: it builds its own path component by
 /// component (it has to - its result is a `PathBuf` under a staging
@@ -403,8 +403,8 @@ pub fn relpath_within_total(rel: &str) -> bool {
 }
 
 /// Is this name within the length rules a REFUSE door holds a name to -
-/// every component within [`MAX_COMPONENT`] bytes and the whole name
-/// within [`MAX_TOTAL`]?
+/// every component within `MAX_COMPONENT` bytes and the whole name
+/// within `MAX_TOTAL`?
 ///
 /// The length rules, asked on their own so a front door can refuse a
 /// name before any network or filesystem work happens. It is
@@ -481,9 +481,9 @@ pub fn sanitize_out_name_for(name: &str, windows: bool) -> String {
 /// `None` for: a name with no separator at all (flat is flat), an
 /// absolute path or drive/UNC prefix, any `..`/`.`/empty component,
 /// more than [`MAX_DEPTH`] components, or a CAPPED form still over
-/// [`MAX_TOTAL`] bytes in all. Surviving components each go through the existing
+/// `MAX_TOTAL` bytes in all. Surviving components each go through the existing
 /// per-component rules ([`sanitize_filename_for`]) and are then capped
-/// at [`MAX_COMPONENT`] ([`cap_component`]), so control characters,
+/// at `MAX_COMPONENT` (`cap_component`), so control characters,
 /// reserved DOS device names, trailing dots and overlong components
 /// are all cleaned per component exactly as a flat name would be.
 ///
@@ -495,9 +495,9 @@ pub fn sanitize_out_name_for(name: &str, windows: bool) -> String {
 /// Blu-ray has to have its directory structure intact for it to play)
 /// is what scores them:
 ///
-///  * [`MAX_COMPONENT`] CAPS, in place, keeping the tree. It is a real
+///  * `MAX_COMPONENT` CAPS, in place, keeping the tree. It is a real
 ///    per-component filesystem limit with an in-place remedy that
-///    already exists: [`cap_component`] shortens the one component
+///    already exists: `cap_component` shortens the one component
 ///    deterministically and every other component is untouched, so the
 ///    tree survives. Refusing threw a playable disc's whole layout away
 ///    to fix one leaf, for precisely the class of name the cap was
@@ -507,7 +507,7 @@ pub fn sanitize_out_name_for(name: &str, windows: bool) -> String {
 ///    (`a_reserved_stem_cannot_grow_a_component_past_the_cap`), so
 ///    "was already too long" and "became too long" got opposite
 ///    answers to the same question.
-///  * [`MAX_TOTAL`] REFUSES, because there is no tree-preserving remedy
+///  * `MAX_TOTAL` REFUSES, because there is no tree-preserving remedy
 ///    to reach for. A name is over it by carrying MANY components, and
 ///    no per-component shortening fixes that; the only answer that
 ///    fits whatever the job directory turns out to be is the flat one
@@ -515,7 +515,7 @@ pub fn sanitize_out_name_for(name: &str, windows: bool) -> String {
 ///    which is this same rule applied consistently: a name long
 ///    because ONE component is long HAS a remedy, so it keeps its
 ///    tree. Its value moved from 1024 to 511 on 31 Aug 2026 because
-///    1024 was unreachable by construction - see [`MAX_TOTAL`], which
+///    1024 was unreachable by construction - see `MAX_TOTAL`, which
 ///    also records why a budget is the only guard available here.
 ///  * [`MAX_DEPTH`] REFUSES, and it is the one that is not a
 ///    filesystem fact at all (measured on APFS 31 Aug 2026: a 20-deep
@@ -523,7 +523,7 @@ pub fn sanitize_out_name_for(name: &str, windows: bool) -> String {
 ///    the flat form is now writable, and the number is read by a second
 ///    site that bounds a directory walk with it - see [`MAX_DEPTH`].
 ///
-/// # Why `rarfix::sanitized_entry_path` gets [`MAX_TOTAL`] and NOT [`MAX_DEPTH`]
+/// # Why `rarfix::sanitized_entry_path` gets `MAX_TOTAL` and NOT [`MAX_DEPTH`]
 ///
 /// It is the same shape of function on the disk-extraction side, and
 /// the two limits reach it differently because its `None` and this
@@ -538,7 +538,7 @@ pub fn sanitize_out_name_for(name: &str, windows: bool) -> String {
 ///  * [`MAX_DEPTH`] stays out. It is a policy budget rather than a
 ///    filesystem fact (a 20-deep tree creates), so spending an
 ///    aborted extraction on it buys nothing.
-///  * [`MAX_TOTAL`] is now enforced there, because that side does not
+///  * `MAX_TOTAL` is now enforced there, because that side does not
 ///    have to refuse to enforce it: over budget it answers with the
 ///    same flat capped NAME this function's callers fall back to, so
 ///    the archive still extracts. Leaving it out was measured to cost
@@ -547,10 +547,10 @@ pub fn sanitize_out_name_for(name: &str, windows: bool) -> String {
 ///    sibling member was not written (31 Aug 2026).
 ///
 /// So the two sides now AGREE on two axes of three. On
-/// [`MAX_COMPONENT`] both compose
+/// `MAX_COMPONENT` both compose
 /// `cap_component(sanitize_filename_for(c))` per component, so
 /// `VIDEO_TS/<300 bytes>.VOB` is spelled identically by both (the last
-/// case commit 7c3fd6a8a left open); on [`MAX_TOTAL`] both fall back
+/// case commit 7c3fd6a8a left open); on `MAX_TOTAL` both fall back
 /// to `sanitize_filename_capped_for` of the whole name, which is the
 /// same function, so an over-budget member is spelled identically too.
 /// They still part on DEPTH, deliberately and for the reason above;
@@ -998,7 +998,7 @@ pub fn prepare_out_path(root: &Path, out_name: &str) -> io::Result<PathBuf> {
 /// for a caller holding only a path, and it can bind no more than the
 /// leaf and its immediate parent.
 ///
-/// Same containment boundary as [`walk_out_dirs`], asked with
+/// Same containment boundary as `walk_out_dirs`, asked with
 /// `RootLink::Refuse` - so this refuses exactly what [`open_out_leaf`]
 /// refuses at the root (for a flat name the leaf's parent IS the root)
 /// and nothing is loosened by moving a write site onto it.

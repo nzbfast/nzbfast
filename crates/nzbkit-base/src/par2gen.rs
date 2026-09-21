@@ -65,9 +65,6 @@ use crate::par2::{
     MAX_BLOCK_SIZE, TYPE_COMMASCI, TYPE_COMMUNI, TYPE_FILEDESC, TYPE_IFSC, TYPE_MAIN, TYPE_RECVSLIC,
 };
 
-/// The create's progress sink, cancel gate and the trail a cancel
-/// unlinks - the repair's `par2repair::control` machinery, faced for
-/// this side. Added 12 Sep 2026 (claim `par2gen-create-control`).
 pub mod control;
 mod duplicates;
 /// How wide the create's fold runs - the fused path's per-window pacer
@@ -102,7 +99,7 @@ mod digest_cache_tests;
 pub(crate) fn seam_duplicates(bs: usize, rows: usize, sources: usize) -> bool {
     duplicates::enabled(bs, rows, sources)
 }
-use control::{CreateControl, CreatePhase, CreateTrail};
+use control::{CreateControl, CreatePhase, CreateTrail, SetMember};
 pub use fold_pace::PACED_WIDTH_FLOOR;
 use fold_pace::{BatchFoldPacer, create_fold_pacing_enabled, paced_width};
 use packets::{append_packet, prepare_recovery_seals, write_recovery_packet};
@@ -432,7 +429,7 @@ pub fn scan_pool_budget_bytes() -> u64 {
 
 /// The accumulator bytes a create starting NOW would be handed: the
 /// process budget less what the creates already live have claimed, through
-/// the same [`scan::admission_plan`] `CreateAdmission::acquire` runs. A
+/// the same `scan::admission_plan` `CreateAdmission::acquire` runs. A
 /// scheduler's reading - the next create's own acquire is what binds.
 pub fn accum_bytes_for_next_create() -> u64 {
     let ceiling = crate::mem::process_budget().total;
@@ -450,7 +447,7 @@ pub fn accum_bytes_for_next_create() -> u64 {
 /// one serial chain, and a create that is NOT - several batches because
 /// its rows outgrew what the budget has left, the transform, a small set
 /// on the two-pass scan - is not the shape two-at-once was measured on. It
-/// asks the create's own gates ([`fusion_arms`], the batch size
+/// asks the create's own gates (`fusion_arms`, the batch size
 /// [`accum_bytes_for_next_create`] allows, the read window, and the pacing
 /// and overlap knobs) rather than restating any of them. Two things it
 /// cannot see: a source that is not a regular file (`FusedScan::open_all`
@@ -703,7 +700,7 @@ pub enum CriticalLayout {
     Head,
     /// A recovery packet first, then critical packets, repeating - the
     /// distribution measured off par2cmdline 1.3.0 and pinned in
-    /// [`interleave_schedule`].
+    /// `interleave_schedule`.
     Interleaved,
 }
 
@@ -1337,7 +1334,7 @@ fn check_create_inputs(
 }
 
 /// `Some((first, last))` when the recovery exponents would run past
-/// 65535, for [`check_create_inputs`].
+/// 65535, for `check_create_inputs`.
 ///
 /// `pub` since 12 Sep 2026, for the same reason
 /// `parfast::create::volume_ceiling` is: a Create PANE has to be able to say
@@ -1399,7 +1396,10 @@ fn write_member(
     body: &[u8],
 ) -> Result<(), Par2GenError> {
     let path = dir.join(name);
-    let mut f = trail.create(dir, name).map_err(io(&path))?;
+    // A [`SetMember`], not a `File`: only `trail.create` can mint one,
+    // so this line cannot be rewritten into a bare create without a
+    // type error. See `control::SetMember`.
+    let mut f: SetMember = trail.create(dir, name).map_err(io(&path))?;
     std::io::Write::write_all(&mut f, body).map_err(io(&path))?;
     Ok(())
 }

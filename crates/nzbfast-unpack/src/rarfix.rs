@@ -677,7 +677,7 @@ fn packed_groups(dir: &std::path::Path, first: &std::path::Path) -> Vec<(String,
 /// Part B of the 2026-07-29 one-pass spec: a set that just unpacked has
 /// spent its volumes - they are our own working files, removed in place
 /// (`fs::remove_file`, never the trash path). Callers hand this exactly
-/// what [`try_unrar_spent`] reported, so every deliberate keep (a failed
+/// what `try_unrar_spent` reported, so every deliberate keep (a failed
 /// or partial unpack, an encrypted set still waiting for its password,
 /// the obfuscated sweep's refusals) never reaches here.
 pub fn remove_spent_volumes(vols: &[PathBuf]) {
@@ -731,10 +731,10 @@ pub(crate) fn try_rar_rr_repair(dir: &std::path::Path, password: Option<&str>) -
     try_rar_rr_repair_hinted(dir, password, None)
 }
 
-/// [`try_rar_rr_repair`] that also names WHY it refused, on the one
+/// `try_rar_rr_repair` that also names WHY it refused, on the one
 /// class of refusal that is about the DISK rather than the archive.
 ///
-/// Same contract as [`try_unrar_spent_why`], which this rung's
+/// Same contract as `try_unrar_spent_why`, which this rung's
 /// extraction delegates to: `Err(None)` is the ordinary failure the
 /// caller words itself, `Err(Some(why))` is a bomb verdict that must be
 /// quoted rather than paraphrased. This closed the third and last rung

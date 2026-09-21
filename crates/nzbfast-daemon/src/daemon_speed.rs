@@ -171,6 +171,36 @@ impl Daemon {
             self.progress.load(Ordering::Relaxed).saturating_add(drain)
         })
     }
+
+    /// Each job on the wire at its own rate - see [`JobRates`] for why a
+    /// queue row must not divide by [`Self::current_speed_bps`].
+    ///
+    /// Same read-inside-the-lock discipline as `window_rate`: the owners
+    /// and their counters are read under `job_win`'s own lock, and the two
+    /// slots together under `active_dl`, the lock the hand-over writes
+    /// both in (`wire_counters` reads them the same way) - so a poll can
+    /// never see one job in BOTH slots, or pair a counter with the wrong
+    /// owner. Lock order is `job_win` -> `active_dl` -> `drain_dl`, and
+    /// `job_win` is touched here and nowhere else in the tree.
+    pub fn job_rates(&self) -> JobRates {
+        let mut wins = self.job_win.lock_ok();
+        // Nothing on the wire: forget both windows, exactly as
+        // `current_speed_bps` clears `speed_win`, so the next download
+        // starts a fresh measurement.
+        if self.started_at.lock_ok().is_none() {
+            *wins = JobRateWins::default();
+            return JobRates::default();
+        }
+        let owner = self.active_dl.lock_ok();
+        let drain = self.drain_dl.lock_ok();
+        let active = owner
+            .as_deref()
+            .map(|id| (id, self.progress.load(Ordering::Relaxed)));
+        let drain = drain
+            .as_ref()
+            .map(|s| (s.nzo_id.as_str(), s.progress.load(Ordering::Relaxed)));
+        wins.step(Instant::now(), active, drain)
+    }
 }
 
 /// Bytes/sec over a ~5 s rolling window of monotonic byte samples.
@@ -226,7 +256,15 @@ pub(crate) fn window_rate(
 ) -> f64 {
     let win = &mut *win.lock_ok();
     let done = read_done();
-    let now = Instant::now();
+    sample_window(win, Instant::now(), done)
+}
+
+/// The rules of [`window_rate`] with the lock and the counter read taken
+/// out, so the SAME arithmetic serves the whole-line window and each
+/// per-job one ([`JobRateWins`]): two hand-copied windows would be two
+/// rates computed slightly differently and compared as if they agreed.
+/// The caller owns the lock and has already read `done` under it.
+fn sample_window(win: &mut VecDeque<(Instant, u64)>, now: Instant, done: u64) -> f64 {
     if win.back().is_some_and(|&(_, b)| done < b) {
         win.clear();
     }
@@ -248,6 +286,99 @@ pub(crate) fn window_rate(
         _ => 0.0,
     }
 }
+
+/// Each job on the wire at its OWN rate: bytes/sec off its own counter,
+/// not the line's.
+///
+/// `current_speed_bps` is the whole line - the active job plus whatever
+/// the previous job is still draining behind it - and that is the right
+/// figure for the header and the speed chart. It is the WRONG divisor for
+/// a row: 0.5 GB left on a finishing job crawling at 1.7 MB/s reads
+/// "3 seconds left" while its successor takes the line at 110 MB/s, for
+/// as long as the crawl lasts (seen 21 Sep 2026: minutes, ending at "0s"
+/// with 33 MiB still to fetch). A row's ETA is its own bytes over its own
+/// rate, so each slot on the wire carries one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct JobRates {
+    /// The active download: `(nzo_id, bytes/sec)`.
+    pub active: Option<(String, f64)>,
+    /// The predecessor still draining behind it, if any.
+    pub drain: Option<(String, f64)>,
+}
+
+impl JobRates {
+    /// `nzo_id`'s own rate, or `None` when that job is on neither slot
+    /// (a queued row has no rate of its own). `Some(0.0)` is a stall, or
+    /// a window with nothing to compare yet - the same 0 every
+    /// `window_rate` answers with - and is deliberately not `None`.
+    pub fn of(&self, nzo_id: &str) -> Option<f64> {
+        [&self.active, &self.drain]
+            .into_iter()
+            .flatten()
+            .find(|(id, _)| id == nzo_id)
+            .map(|&(_, bps)| bps)
+    }
+}
+
+type JobWin = Option<(String, VecDeque<(Instant, u64)>)>;
+
+/// The two per-job windows behind [`JobRates`]. One value under one
+/// mutex (`Daemon::job_win`), so the pair is read in one instant, and
+/// each window remembers WHICH job it belongs to: the active counter is
+/// re-pointed at a fresh zero per job, and telling a new job from the old
+/// one by "the counter went backwards" alone fails as soon as the new
+/// one has out-run the old figure between two polls.
+#[derive(Default)]
+pub struct JobRateWins {
+    active: JobWin,
+    drain: JobWin,
+}
+
+impl JobRateWins {
+    /// One sampling step. `active` and `drain` are `(owner, counter)` as
+    /// read together by the caller; `None` is "that slot is empty".
+    fn step(
+        &mut self,
+        now: Instant,
+        active: Option<(&str, u64)>,
+        drain: Option<(&str, u64)>,
+    ) -> JobRates {
+        // The hand-over: the job that was active a poll ago is the one
+        // draining now, and its counter is the very cell it was counting
+        // into (`DrainSlot::progress` is the old `progress` handle), so
+        // its window is still a true history of it. Carrying it across
+        // keeps the draining row's rate continuous instead of reading 0
+        // for the first second of every hand-over.
+        if let Some((did, _)) = drain {
+            let has = self.drain.as_ref().is_some_and(|(id, _)| id == did);
+            let was_active = self.active.as_ref().is_some_and(|(id, _)| id == did);
+            if !has && was_active {
+                self.drain = self.active.take();
+            }
+        }
+        JobRates {
+            active: Self::feed(&mut self.active, now, active),
+            drain: Self::feed(&mut self.drain, now, drain),
+        }
+    }
+
+    fn feed(slot: &mut JobWin, now: Instant, cur: Option<(&str, u64)>) -> Option<(String, f64)> {
+        let Some((id, done)) = cur else {
+            *slot = None;
+            return None;
+        };
+        let (sid, win) = slot.get_or_insert_with(|| (id.to_string(), VecDeque::new()));
+        if sid != id {
+            *sid = id.to_string();
+            win.clear();
+        }
+        Some((id.to_string(), sample_window(win, now, done)))
+    }
+}
+
+#[cfg(test)]
+#[path = "daemon_speed_tests.rs"]
+mod job_rate_tests;
 
 #[cfg(test)]
 mod window_rate_tests {

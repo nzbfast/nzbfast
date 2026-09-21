@@ -171,7 +171,7 @@ impl Index {
     /// `None` to let it run as long as it likes.
     ///
     /// A no-op on a connection that never called
-    /// [`Self::install_query_deadline`]: the stamp is written and no
+    /// `Self::install_query_deadline`: the stamp is written and no
     /// callback ever reads it.
     ///
     /// **Disarming is not optional.** These connections are POOLED and

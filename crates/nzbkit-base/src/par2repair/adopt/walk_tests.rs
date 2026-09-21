@@ -69,8 +69,22 @@ fn names(dir: &Path, got: &[(PathBuf, u64)]) -> Vec<String> {
         .collect()
 }
 
+/// `ctx.declared` as the packet scan hands it over: FOLDED by
+/// `name_identity_key` against the destination volume's own answer, not
+/// raw strings. A test that passes raw ones passes on a case-sensitive
+/// volume and silently demotes nothing on this Mac's APFS, which is the
+/// green-over-nothing shape - so every declared set in this file is
+/// built here.
+fn declared_set(dir: &Path, names: &[&str]) -> HashSet<String> {
+    let fold = crate::disk::case_insensitive_dir(dir);
+    names
+        .iter()
+        .map(|n| crate::par2repair::name_identity_key(fold, n))
+        .collect()
+}
+
 fn candidates(dir: &Path, donors: &[PathBuf], targets: &[Target]) -> (Vec<(PathBuf, u64)>, usize) {
-    adoption_candidates(dir, donors, targets, &HashSet::new()).expect("candidates")
+    adoption_candidates(dir, donors, targets, &HashSet::new(), &HashSet::new()).expect("candidates")
 }
 
 /// The row's arm 1: a tree-named set whose payload sits under an
@@ -164,4 +178,95 @@ fn an_identified_target_in_the_tree_is_not_its_own_source() {
     let targets = [tree_target(dir, "VIDEO_TS/VTS_01_1.VOB", 13, true)];
     let (got, _) = candidates(dir, &[], &targets);
     assert_eq!(names(dir, &got), vec!["VIDEO_TS/stray.bin"]);
+}
+
+/// The 20 Sep 2026 ordering change, claim
+/// `parfast-adoption-order-demote-declared-20sep`. A neighbouring set's
+/// members sort LAST whatever their names would otherwise do, so the
+/// sliding scan's `settled_at` cut fires before the folder's other post
+/// is read. The token here is `f7e2...`, which sorts AFTER `Show.` in
+/// plain path order - the `late` arm the rig measured at 39.3 G
+/// instructions per neighbour GiB.
+#[test]
+fn a_neighbouring_sets_declared_payload_sorts_last() {
+    let dir = &tmpdir("demote");
+    write(&dir.join("f7e2b4a19c3d8056"), b"the obfuscated donor");
+    write(&dir.join("Show.S01E02.part0.mkv"), b"a neighbours payload");
+    write(&dir.join("Show.S01E02.part1.mkv"), b"a neighbours payload");
+    let targets = [tree_target(dir, "Show.S01E01.part0.mkv", 20, false)];
+    let declared = declared_set(dir, &["Show.S01E02.part0.mkv", "Show.S01E02.part1.mkv"]);
+    let (got, _) =
+        adoption_candidates(dir, &[], &targets, &HashSet::new(), &declared).expect("candidates");
+    assert_eq!(
+        names(dir, &got),
+        vec![
+            "f7e2b4a19c3d8056",
+            "Show.S01E02.part0.mkv",
+            "Show.S01E02.part1.mkv",
+        ],
+        "the donor first, the neighbour's two members after it - and BOTH still present"
+    );
+}
+
+/// The half of that rule that is not the demotion: DEMOTED, NEVER
+/// EXCLUDED. With no donor of our own in the folder the neighbour is
+/// still the whole candidate list, so a neighbour that really does hold
+/// our bytes is still reachable - which is the failure
+/// `research/SAB-MULTISET-WILDCARD-2026-09-20.md` measured in the
+/// reference binary and this must never reintroduce.
+#[test]
+fn demotion_never_removes_a_candidate() {
+    let dir = &tmpdir("demote-keeps");
+    write(&dir.join("Show.S01E02.part0.mkv"), b"a neighbours payload");
+    let targets = [tree_target(dir, "Show.S01E01.part0.mkv", 20, false)];
+    let declared = declared_set(dir, &["Show.S01E02.part0.mkv"]);
+    let (got, _) =
+        adoption_candidates(dir, &[], &targets, &HashSet::new(), &declared).expect("candidates");
+    assert_eq!(names(dir, &got), vec!["Show.S01E02.part0.mkv"]);
+}
+
+/// `declared` is directory-wide and so names OUR set's members too. An
+/// UNIDENTIFIED target of this set is a candidate on purpose - a member
+/// whose bytes are shifted or prepended is found by rolling over its
+/// own file - so it must keep its place at the front. Demoting it would
+/// give away the single-set case to buy the multi-set one.
+#[test]
+fn our_own_declared_names_are_not_demoted() {
+    let dir = &tmpdir("demote-ours");
+    write(&dir.join("Show.S01E01.part0.mkv"), b"shifted own payload");
+    write(&dir.join("Show.S01E02.part0.mkv"), b"a neighbours payload");
+    // Not identified: nothing on disk verified, which is what puts our
+    // own member in the candidate list in the first place.
+    let targets = [tree_target(dir, "Show.S01E01.part0.mkv", 19, false)];
+    let declared = declared_set(dir, &["Show.S01E01.part0.mkv", "Show.S01E02.part0.mkv"]);
+    let (got, _) =
+        adoption_candidates(dir, &[], &targets, &HashSet::new(), &declared).expect("candidates");
+    assert_eq!(
+        names(dir, &got),
+        vec!["Show.S01E01.part0.mkv", "Show.S01E02.part0.mkv"]
+    );
+}
+
+/// The order is a STABLE partition: within each of the two classes the
+/// list is byte-for-byte the (depth, path) order it always was, so the
+/// first-writer-wins merge at `sliding_scan` still has a total,
+/// deterministic order to be keyed on. An empty `declared` - every
+/// single-set repair - yields exactly the old list.
+#[test]
+fn the_partition_is_stable_within_each_class() {
+    let dir = &tmpdir("demote-stable");
+    for n in ["b.bin", "a.bin", "z.bin", "m.bin"] {
+        write(&dir.join(n), b"bytes");
+    }
+    let (plain, _) =
+        adoption_candidates(dir, &[], &[], &HashSet::new(), &HashSet::new()).expect("candidates");
+    assert_eq!(names(dir, &plain), vec!["a.bin", "b.bin", "m.bin", "z.bin"]);
+    let declared = declared_set(dir, &["a.bin", "m.bin"]);
+    let (split, _) =
+        adoption_candidates(dir, &[], &[], &HashSet::new(), &declared).expect("candidates");
+    assert_eq!(
+        names(dir, &split),
+        vec!["b.bin", "z.bin", "a.bin", "m.bin"],
+        "each class keeps its own ascending path order"
+    );
 }

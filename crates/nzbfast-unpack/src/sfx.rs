@@ -6,7 +6,7 @@
 //! Three families, found two different ways. RAR and 7-Zip are located by
 //! scanning the head for their magic; zip is located from its TAIL, by
 //! `nzbkit::zip::stubbed_archive`, because a forward scan for a zip
-//! signature claims ordinary programs (see [`sfx_kind`] for the numbers).
+//! signature claims ordinary programs (see `sfx_kind` for the numbers).
 //! Zip is also the one family that is never carved - its reader takes the
 //! stub's length from the container's own geometry.
 //!

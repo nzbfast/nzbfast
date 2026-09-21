@@ -28,8 +28,12 @@ RUN mkdir -p crates/nzbkit/src crates/nzbfast/src \
     && echo 'fn main(){}' > crates/nzbfast/src/main.rs \
     && echo '' > crates/nzbkit/src/lib.rs \
     && cargo build --release -p nzbfast 2>/dev/null || true
-# Real sources (vendor/ carries the rapidyenc C for the build.rs FFI;
-# web/ + docs/MANUAL.html are include_str!-embedded by serve.rs).
+# Real sources. vendor/ carries the rars/tiny_http/lzma-rust2 forks;
+# rapidyenc's C++ for the build.rs FFI moved UNDER crates/ on 20 Sep 2026
+# (crates/nzbkit-base/vendor/rapidyenc, TODO 84 blocker 2) so it arrives
+# with the `COPY crates/` below - which is BEFORE the real build, so the
+# ordering here still holds. web/ + docs/MANUAL.html are
+# include_str!-embedded by serve.rs.
 COPY vendor/ vendor/
 COPY web/ web/
 # The whole docs tree: MANUAL.html plus docs/i18n/MANUAL.<lang>.html -

@@ -17,8 +17,8 @@
 //! millions of rows, which is exactly the kind of instrumentation that
 //! shows up as a benchmark regression and gets ripped out again. So a
 //! worker bumps a relaxed [`AtomicU64`] per BATCH - a fold unit, a
-//! block, a member - and [`RepairControl::step`] calls the sink only
-//! when the count crosses one of [`STEPS`] buckets. Over a whole phase
+//! block, a member - and `RepairControl::step` calls the sink only
+//! when the count crosses one of `STEPS` buckets. Over a whole phase
 //! the sink is called at most `STEPS` times however many batches there
 //! were, and the per-batch cost is one relaxed add plus two multiplies.
 //!
@@ -123,12 +123,56 @@ pub enum RepairRoute {
     Mapped,
 }
 
+/// Which arm of [`RepairPhase::Solve`] is reporting.
+///
+/// The phase is entered TWICE within one sweep on the unstructured
+/// (Gauss-Jordan) route, in two different units and on opposite sides
+/// of the fold: the m x m inverse reports per matrix COLUMN before a
+/// block is read, and the back-substitution reports in fold UNITS after
+/// the feed is in. A caller weighing the phases into one bar cannot
+/// tell them apart from the `progress` calls alone - both say `Solve` -
+/// so it gave them one band, the first arm walked it to the top and the
+/// monotone bar swallowed the second whole. Measured 18 Sep 2026 on the
+/// m = 10,000 gapped fixture: the queue row read `95%` unchanged for
+/// 19.0 s of a 63.7 s repair
+/// (`research/REPAIR-ROW-ACCEPTANCE-2026-09-18.md`, TODO 352).
+///
+/// Announced from the DRIVER thread, before that arm's own
+/// `RepairControl::begin` and never concurrently with a `progress`
+/// call - the same contract as [`ProgressSink::slab`] and
+/// [`ProgressSink::route`]. A route that has no inverse to compute
+/// (every structured selection: Forney, the progression arms) announces
+/// [`BackSub`](Self::BackSub) alone, and a sink that hears only that one
+/// must keep exactly the single band it always had, or the arm that
+/// never runs leaves a dead region where the freeze used to be.
+///
+/// # Why this is not a fifth `RepairPhase`
+///
+/// "Rebuilding the missing blocks" is the honest sentence for both
+/// arms, and a user waiting on a repair does not care which matrix
+/// operation is running. A phase of its own would cost a new word in
+/// 16 locales to say something nobody asked. What the caller needs is
+/// not a new name, it is the FRAME - which is what this is, the same
+/// way `slab` is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SolveArm {
+    /// The Gauss-Jordan inverse of the explicit m x m, per matrix
+    /// COLUMN. Runs BEFORE the fold - `Reconstructor::new_controlled`
+    /// builds the back-substitution the feed will pour into - so a band
+    /// table that places it after the fold puts the whole feed below
+    /// something already published and a monotone bar discards it.
+    Inverse,
+    /// The back-substitution, in fold UNITS. Runs after the feed, where
+    /// `RepairPhase::Solve` has always been placed.
+    BackSub,
+}
+
 /// Where a repair's progress goes.
 ///
 /// `Send + Sync` and `&self`, because it is called from worker threads -
 /// the fold's readers, the solve's unit drain - and never from one
 /// place. An implementation must be CHEAP and must not block: it runs
-/// on a thread that is doing the repair, and [`STEPS`] bounds how often
+/// on a thread that is doing the repair, and `STEPS` bounds how often
 /// it is called but not what it does when it is. Publishing into a
 /// mutex-guarded snapshot and waking a host is the shape this was built
 /// for.
@@ -140,6 +184,10 @@ pub enum RepairRoute {
 /// so a caller must not assume `done` never goes backwards ACROSS calls
 /// with the same phase.
 pub trait ProgressSink: Send + Sync {
+    /// `done` of `total` units of `phase`, called from a repair
+    /// thread. The only required method. Do cheap work here and hand
+    /// the numbers to a host - see the type doc for what the counters
+    /// do and do not promise.
     fn progress(&self, phase: RepairPhase, done: u64, total: u64);
 
     /// WHICH ROUTE IS REPORTING - see [`RepairRoute`].
@@ -196,6 +244,16 @@ pub trait ProgressSink: Send + Sync {
     /// of a slabbed repair's wall for exactly that reason
     /// (`research/REPAIR-SLABBED-BAR-2026-09-16.md`).
     fn slab(&self, _index: usize, _of: usize) {}
+
+    /// WHICH ARM OF THE SOLVE IS REPORTING - see [`SolveArm`].
+    ///
+    /// DEFAULTED, for the narrow reason [`route`](Self::route) is and
+    /// not the wider one [`slab`](Self::slab) had: a sink that draws
+    /// one bar per phase sees the two arms as one phase entered twice,
+    /// which is what they are, and is correct ignoring this. Implement
+    /// it only if a band table weighs `Solve` into a shared bar, where
+    /// giving both arms one band means the second is swallowed whole.
+    fn solve_arm(&self, _arm: SolveArm) {}
 }
 
 /// A `Fn` is a sink, so a caller that only wants a closure stays one.
@@ -279,10 +337,10 @@ struct GateState {
 /// reads something the guard does not name is the shape
 /// `tools/wait-recheck-gate.py` refuses to classify, and it is right to:
 /// a reader cannot tell what ends such a loop. So `cancelled` is a field
-/// of [`GateState`] and [`gate`](Self::gate) opens on it, exactly as
+/// of `GateState` and [`gate`](Self::gate) opens on it, exactly as
 /// `parfast_session::runner::Control::gate` does.
 ///
-/// [`hot`](Self::hot) is a WRITE-THROUGH MIRROR of that field and
+/// `hot` is a WRITE-THROUGH MIRROR of that field and
 /// nothing else. It is written only under the lock, by the one function
 /// that writes the field; it is read only by [`RepairControl::cancelled`],
 /// which is polled per fold unit and per written block by every worker
@@ -306,6 +364,8 @@ pub struct PauseGate {
 }
 
 impl PauseGate {
+    /// An open gate: not paused, not cancelled. Shared, because both
+    /// the repair threads and whoever drives the controls hold it.
     pub fn new() -> Arc<PauseGate> {
         Arc::new(PauseGate::default())
     }
@@ -327,6 +387,9 @@ impl PauseGate {
         self.wake.notify_all();
     }
 
+    /// Park the repair at the next gate point, or release it. NOT
+    /// sticky, unlike [`Self::cancel`], and it cannot un-cancel: a
+    /// cancelled gate stays cancelled whatever is set here.
     pub fn set_paused(&self, paused: bool) {
         let mut st = self.lock();
         st.paused = paused;
@@ -336,6 +399,8 @@ impl PauseGate {
         self.wake.notify_all();
     }
 
+    /// Has [`Self::cancel`] been called? One relaxed load off the hot
+    /// mirror, so a per-block loop can afford to ask.
     pub fn is_cancelled(&self) -> bool {
         self.hot.load(Ordering::Relaxed)
     }
@@ -346,6 +411,10 @@ impl PauseGate {
         self.held.load(Ordering::Relaxed)
     }
 
+    /// Is the repair parked? `false` once cancelled, because a
+    /// cancelled repair is not waiting for a resume - a caller drawing
+    /// a "Paused" badge off this must not keep drawing it after
+    /// Cancel.
     pub fn is_paused(&self) -> bool {
         let st = *self.lock();
         st.paused && !st.cancelled
@@ -400,6 +469,113 @@ struct Meter {
     reported: Mutex<u64>,
 }
 
+/// A caller's standing veto on a LONG repair, and what it saw when it
+/// used it.
+///
+/// TODO 332. The engine already works out, at the survey point, that a
+/// repair is the shape worth warning about
+/// ([`RepairForecast::is_long`](super::RepairForecast::is_long)) and
+/// says so in the log before a byte is written. A DAEMON needs to be
+/// able to act on that rather than only print it: the ruling of 8 Sep
+/// 2026 is that it must never block on a question nobody may be there
+/// to answer, but that it may push the job to the back of the queue
+/// ONCE so the person has a chance to see the notice and back out.
+///
+/// # Why it rides on the control rather than on the observer
+///
+/// The observer handshake ([`SurveyObserver`](super::SurveyObserver))
+/// can already refuse a repair, and it is the right door for a CLI: a
+/// `parfast` run is a person at a terminal, and `AfterSurvey::Stop`
+/// means "this process is done with this set". It is the wrong door for
+/// the daemon for two reasons. A stop is spelled `NoDamage` on every
+/// entry but the surveying one, which would tell the tail the set
+/// verifies when it does not; and the daemon's repair sites reach the
+/// driver through four different entry points, three of which pass the
+/// trivial always-`Repair` observer the controlled doors build for
+/// them, so there is no observer of the daemon's own to hang anything
+/// on. The control is the one value every entry already takes.
+///
+/// WHICH SITES OPT IN IS THE CALLER'S BUSINESS, not this type's: a gate
+/// reaches the driver only where a caller puts one on the control it
+/// passes. Today that is exactly one site (`nzbfast`'s download disk
+/// repair), and the four others are unchanged - the argument for the
+/// narrowness is at that call, because it is an argument about jobs and
+/// queues rather than about repairs.
+///
+/// The verdict is `RepairError::Deferred`(super::RepairError::
+/// Deferred) and NOT a status, for the same reason
+/// [`RepairError::Cancelled`](super::RepairError::Cancelled) is an
+/// error: the set was not repaired and the caller must not read the
+/// return as a set that was fine.
+///
+/// # ARMED, then FIRED, and never armed again by the engine
+///
+/// `arm` is the caller saying "the setting is on AND this job has not
+/// been deferred yet" - the engine holds no policy and cannot work out
+/// either half. Firing DISARMS, so one armed gate can stop at most one
+/// repair however many recovery sets a run walks. The once-only
+/// property across RUNS is the caller's: it is the caller that decides
+/// not to arm the gate the second time round, from a mark it kept on
+/// the job. The engine's half is deliberately the smaller one.
+#[derive(Debug, Default)]
+pub struct DeferGate {
+    armed: AtomicBool,
+    fired: AtomicBool,
+    /// The forecast it fired on, so the caller can say WHY in the
+    /// notice it shows. Only meaningful once `fired` is set.
+    blocks: AtomicU64,
+    est_secs: AtomicU64,
+}
+
+/// What a fired [`DeferGate`] saw - the forecast the repair would have
+/// run, for the caller's notice. An order of magnitude, never a
+/// countdown: see `RepairForecast::est_secs`(super::RepairForecast::
+/// est_secs), which is fitted to two points on one box.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeferredRepair {
+    /// Blocks the survey found missing - the figure a notice should
+    /// quote, since it is measured rather than fitted.
+    pub missing_blocks: u64,
+    /// `0` where the shape is one nobody has measured.
+    pub est_secs: u64,
+}
+
+impl DeferGate {
+    /// An armed gate. There is no disarmed constructor on purpose: a
+    /// caller that does not want the veto passes no gate at all, and
+    /// the inert control is then byte-for-byte the one it had before.
+    pub fn armed() -> Arc<DeferGate> {
+        let g = DeferGate::default();
+        g.armed.store(true, Ordering::Relaxed);
+        Arc::new(g)
+    }
+
+    /// What this gate stopped, or `None` if it never fired.
+    pub fn fired(&self) -> Option<DeferredRepair> {
+        self.fired.load(Ordering::Acquire).then(|| DeferredRepair {
+            missing_blocks: self.blocks.load(Ordering::Relaxed),
+            est_secs: self.est_secs.load(Ordering::Relaxed),
+        })
+    }
+
+    /// The engine's half: is THIS forecast one the caller wants to
+    /// stand back from? Fires (and disarms) when it is.
+    fn consider(&self, f: &super::RepairForecast) -> bool {
+        if !f.is_long() || !self.armed.swap(false, Ordering::AcqRel) {
+            return false;
+        }
+        self.blocks
+            .store(f.missing_blocks as u64, Ordering::Relaxed);
+        self.est_secs
+            .store(f.est_secs.unwrap_or(0), Ordering::Relaxed);
+        // Release LAST: `fired()` reads the two fields above after an
+        // acquire load of this one, so a reader that sees the flag sees
+        // the forecast that set it.
+        self.fired.store(true, Ordering::Release);
+        true
+    }
+}
+
 /// Progress out, cancel in, pause parked - as one cheap, clonable value.
 ///
 /// Cloning is two `Arc` bumps at most; a default one is three `None`s
@@ -416,6 +592,11 @@ pub struct RepairControl {
     /// see [`RepairControl::reporting_only`]. `None` is a full control
     /// and the default.
     only: Option<RepairPhase>,
+    /// The caller's standing veto on a long repair - see [`DeferGate`].
+    /// `None` on every control that has not asked for one, which is
+    /// every control there was before TODO 332 and every CLI control
+    /// still.
+    defer: Option<Arc<DeferGate>>,
 }
 
 impl std::fmt::Debug for RepairControl {
@@ -438,6 +619,49 @@ impl RepairControl {
             gate,
             meters: any.then(|| Arc::new(std::array::from_fn(|_| Meter::default()))),
             only: None,
+            defer: None,
+        }
+    }
+
+    /// This control with a long-repair veto on it - see [`DeferGate`].
+    ///
+    /// A builder rather than a third argument to [`new`](Self::new),
+    /// because the veto is orthogonal to both halves of the attended
+    /// pair and every existing caller would otherwise have to type
+    /// `None` to say nothing. It does NOT make a control active: a
+    /// caller holding a gate and nothing else can still stop a repair
+    /// before it starts, and `is_active`/`is_attended` go on meaning
+    /// exactly what they meant.
+    #[must_use]
+    pub fn with_defer(mut self, defer: Option<Arc<DeferGate>>) -> RepairControl {
+        self.defer = defer;
+        self
+    }
+
+    /// Does the caller want to stand back from THIS repair? Asked once
+    /// per attempt, at the survey point, before anything is written.
+    pub(crate) fn defer_long(&self, f: &super::RepairForecast) -> bool {
+        self.defer.as_ref().is_some_and(|d| d.consider(f))
+    }
+
+    /// The error a fired veto unwinds with, carrying the forecast it
+    /// stood back from - what the driver returns the instant
+    /// [`defer_long`](Self::defer_long) has answered true.
+    ///
+    /// Reads the gate back rather than being handed the forecast,
+    /// because the gate is the thing the CALLER will read too (it holds
+    /// the same two numbers for the notice it shows), so there is one
+    /// place those numbers come from. `defer_long` answering true is
+    /// the only thing that sets them, so the default is unreachable.
+    pub(crate) fn deferred_error(&self) -> super::RepairError {
+        let d = self
+            .defer
+            .as_ref()
+            .and_then(|g| g.fired())
+            .unwrap_or_default();
+        super::RepairError::Deferred {
+            missing_blocks: d.missing_blocks,
+            est_secs: d.est_secs,
         }
     }
 
@@ -518,6 +742,11 @@ impl RepairControl {
             gate: self.gate.clone(),
             meters: self.meters.clone(),
             only: Some(phase),
+            // NOT carried. The veto is answered ONCE, at the survey
+            // point, on the full control the driver holds; a narrowed
+            // view exists for a worker inside a phase, which is long
+            // past the last moment a repair could be stood back from.
+            defer: None,
         }
     }
 
@@ -609,6 +838,25 @@ impl RepairControl {
         }
     }
 
+    /// Announce which arm of the solve is reporting - see [`SolveArm`].
+    ///
+    /// Driver thread only, before that arm's own [`Self::begin`]. No
+    /// meter of its own for the same reason [`Self::slab`] has none: an
+    /// arm is not a phase and has no `(done, total)` - the phase it
+    /// belongs to carries those - it is the frame that phase is read
+    /// in. Masked on a narrowed view (`reporting_only`), exactly as the
+    /// other two frame hooks are: the tiled fold's grid drain re-sizes
+    /// `Solve` from inside the fold and must not move the host's frame
+    /// with it.
+    pub(crate) fn solve_arm(&self, arm: SolveArm) {
+        if self.only.is_some() {
+            return;
+        }
+        if let Some(s) = self.sink.as_ref() {
+            s.solve_arm(arm);
+        }
+    }
+
     /// One batch of `add` units done.
     ///
     /// SAFE IN A HOT LOOP, which is the whole point: a relaxed
@@ -630,6 +878,21 @@ impl RepairControl {
 
     /// Tell the sink where the phase is NOW, at most once per bucket and
     /// always in order. See [`Meter`] for why this is a lock.
+    ///
+    /// A CONCURRENT WORKER'S REPORT IS SWALLOWED WHOLE, not merely
+    /// deferred, and a caller counting samples has to expect it: two
+    /// workers that finish close together both cross a bucket, the first
+    /// to take the lock reads the pair's COMBINED `done` and reports it,
+    /// and the second finds its own bucket already covered and says
+    /// nothing. So the sink can hear ONE update from a grid of many
+    /// units. Measured 20 Sep 2026 on a 16-core Windows box, the PAR2
+    /// fold over a two-unit grid with the process oversubscribed on four
+    /// CPUs: 50 cold runs, 14 of them lost at least one report this way
+    /// and 4 came down to the announcement and the landing - which is
+    /// what reddened a loaded Windows CI shard on 18 Sep 2026 against a
+    /// test that read a sample count as a grid width. This is the rate
+    /// limit working, not a lost update: the value the first worker
+    /// published is the FRESHER one.
     fn announce(&self, phase: RepairPhase, m: &Meter, total: u64) {
         let mut reported = m.reported.lock().unwrap_or_else(|p| p.into_inner());
         // Read FRESH under the lock: another worker may have got here
@@ -932,5 +1195,108 @@ mod tests {
             calls.iter().all(|&(_, done, total)| done <= total),
             "{calls:?}"
         );
+    }
+
+    /// TODO 332's engine half, and the whole of what the engine knows
+    /// about deferring: a gate fires on the LONG shape and only on it,
+    /// and firing DISARMS it.
+    ///
+    /// The disarm is what bounds a single run: a job may walk several
+    /// recovery sets (the disk repair per declined set, then the
+    /// late-set round over the directory), and a gate that stayed armed
+    /// would answer "not now" to every one of them from one armed bit.
+    /// The ACROSS-RUNS half is not here and cannot be - it is the
+    /// caller's mark on the job, which is why the engine's half is
+    /// deliberately the smaller one.
+    #[test]
+    fn a_defer_gate_fires_on_the_long_shape_once_and_then_stands_aside() {
+        let long = super::super::RepairForecast {
+            missing_blocks: super::super::MAX_REPAIR_DIM + 1,
+            block_size: 65536,
+            solve: super::super::SolveKind::Unstructured,
+            est_secs: Some(1800),
+        };
+        let gate = DeferGate::armed();
+        assert_eq!(gate.fired(), None, "an armed gate has seen nothing yet");
+        assert!(gate.consider(&long), "the long shape is what it is for");
+        assert_eq!(
+            gate.fired(),
+            Some(DeferredRepair {
+                missing_blocks: (super::super::MAX_REPAIR_DIM + 1) as u64,
+                est_secs: 1800,
+            }),
+            "it carries the forecast it fired on, so the caller can say WHY"
+        );
+        assert!(
+            !gate.consider(&long),
+            "ONCE. A second set in the same run repairs - a gate that \
+             stayed armed would stand back from every set a job walks"
+        );
+    }
+
+    /// The same gate says nothing at all about the shapes the warn does
+    /// not warn about: a structured solve is seconds at every size the
+    /// format allows, and a small unstructured one is not worth a trip
+    /// round the queue. `is_long` is the ONE switch, shared with the
+    /// log line - so a caller cannot be deferred over something it was
+    /// never told about.
+    #[test]
+    fn a_defer_gate_stays_armed_for_a_repair_nobody_warns_about() {
+        let gate = DeferGate::armed();
+        let structured = super::super::RepairForecast {
+            missing_blocks: super::super::MAX_REPAIR_DIM + 1,
+            block_size: 65536,
+            solve: super::super::SolveKind::Structured,
+            est_secs: None,
+        };
+        let small = super::super::RepairForecast {
+            missing_blocks: 12,
+            block_size: 65536,
+            solve: super::super::SolveKind::Unstructured,
+            est_secs: Some(1),
+        };
+        assert!(!gate.consider(&structured));
+        assert!(!gate.consider(&small));
+        assert_eq!(
+            gate.fired(),
+            None,
+            "neither shape is one the engine warns about, so neither may \
+             spend the job's one deferral"
+        );
+        let long = super::super::RepairForecast {
+            solve: super::super::SolveKind::Unstructured,
+            ..structured
+        };
+        assert!(
+            gate.consider(&long),
+            "and refusing those two must not have disarmed it"
+        );
+    }
+
+    /// A control with no gate is the control every caller had before
+    /// TODO 332, answer for answer - and a NARROWED view never carries
+    /// one, because it exists for a worker inside a phase, long past the
+    /// last moment a repair could be stood back from.
+    #[test]
+    fn only_a_control_that_was_given_a_gate_can_defer() {
+        let long = super::super::RepairForecast {
+            missing_blocks: super::super::MAX_REPAIR_DIM + 1,
+            block_size: 65536,
+            solve: super::super::SolveKind::Unstructured,
+            est_secs: Some(1800),
+        };
+        assert!(!RepairControl::default().defer_long(&long));
+        let armed = RepairControl::default().with_defer(Some(DeferGate::armed()));
+        assert!(
+            !armed.is_active() && !armed.is_attended(),
+            "a veto is not a sink and not a gate: it must not make an \
+             inert control report as watched, which is what lifts the \
+             unattended unstructured ceiling"
+        );
+        assert!(
+            !armed.reporting_only(RepairPhase::Fold).defer_long(&long),
+            "a narrowed view may not answer the veto"
+        );
+        assert!(armed.defer_long(&long), "the full control still does");
     }
 }

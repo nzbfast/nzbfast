@@ -18,11 +18,11 @@ pub enum Kind {
     /// never enriched, shown only under the wall's "Other" tab.
     Software,
     /// Music posts - scene albums ("Artist-Album-2021-GROUP") and the
-    /// tagged form ("Artist - Album (2021) [FLAC]"). `title` carries
+    /// tagged form ("Artist - Album (2021) FLAC"). `title` carries
     /// "Artist - Album" so the card reads correctly before any provider
     /// answers; `credit_split` recovers the two halves for MusicBrainz.
     Music,
-    /// Books / ebooks ("Author - Title (2019) [epub]"). Same
+    /// Books / ebooks ("Author - Title (2019) epub"). Same
     /// "Credit - Work" title convention as Music.
     Book,
     /// Obfuscated / unparseable - hidden from the wall by default.
@@ -86,7 +86,7 @@ pub struct Parsed {
     ///   a monthly magazine has no day to give ("Slam.TruePDF-September.
     ///   2016"), and without a month there is no issue identity at all -
     ///   every September of every year keyed onto one card. Read by
-    ///   [`month_issue`], which is armed on the Books lane alone.
+    ///   `month_issue`, which is armed on the Books lane alone.
     ///
     /// None for everything else. A caller that has to WRITE a calendar
     /// date must go through [`air_date_parts`], which takes the eight-
@@ -114,7 +114,7 @@ pub struct Parsed {
     /// magazine in `alt.binaries.e-book.magazines` back down off the
     /// Books lane to an evidence-free movie at junk 60.
     pub(crate) daily: bool,
-    /// Dedupe key: movies "m:<title>:<year>", tv "t:<title>" (a show's
+    /// Dedupe key: movies `"m:<title>:<year>"`, tv `"t:<title>"` (a show's
     /// seasons and episodes all group under one card).
     pub key: String,
     /// True when this parse came from the ROT13/ROT18 rescue - the raw
@@ -946,7 +946,7 @@ pub fn stem_is_a_name(stem: &str) -> bool {
 /// the single half if so.
 ///
 /// THE one home of the de-doubling rule, `pub` for that reason: the
-/// naming seam ([`crate::index::Index::apply_named`]) collapses on the
+/// naming seam (`crate::index::Index::apply_named`) collapses on the
 /// way in, the claims arbitration asks whether a standing name is this
 /// shape, and the one-shot repair asks the same question of rows
 /// written before either. Three readers, one predicate.
@@ -1934,6 +1934,33 @@ pub fn norm_title(t: &str) -> String {
         .join(" ")
 }
 
+/// Parse one release name into the facts it carries.
+///
+/// Pure text in, structured facts out: no lookups, no I/O, and no
+/// opinion about what the caller does next. Every field is optional
+/// because a posted name may say nothing at all, and `key` is the
+/// dedupe identity five encodes of one film share.
+///
+/// ```
+/// use nzbkit_base::release::{self, Kind};
+///
+/// let p = release::parse_release("Max.Payne.2008.1080p.BluRay.x264-GRP");
+/// assert_eq!(p.kind, Kind::Movie);
+/// assert_eq!(p.title, "Max Payne");
+/// assert_eq!(p.year, Some(2008));
+/// assert_eq!(p.res.as_deref(), Some("1080p"));
+/// assert_eq!(p.source.as_deref(), Some("BluRay"));
+/// assert_eq!(p.group.as_deref(), Some("GRP"));
+/// assert_eq!(p.key, "m:max payne:2008");
+///
+/// // An episode names its show, and a show's episodes share one key.
+/// let e = release::parse_release("Some.Show.S02E05.1080p.WEB-GRP");
+/// assert_eq!(e.kind, Kind::Tv);
+/// assert_eq!((e.season, e.episode), (Some(2), Some(5)));
+///
+/// // A name that says nothing is Other rather than a guess.
+/// assert_eq!(release::parse_release("abc123def456").kind, Kind::Other);
+/// ```
 pub fn parse_release(stem: &str) -> Parsed {
     let direct = parse_one(stem, false);
     if let Some(mut p) = reversed_rescue(stem, &direct) {

@@ -38,6 +38,7 @@
 //! one of the three lists fails it.
 
 use crate::scratch;
+use nzbkit::mem::MemBudget;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -62,6 +63,12 @@ const SETTABLE_NOT_ECHOED: &[&str] = &[
     "omdb_key",
     "scoreboard_key",
     "tmdb_key",
+    // TODO 19: the dashboard password. What is STORED is the Argon2id
+    // PHC string, and echoing even that back would hand a hash to
+    // anyone holding the API key; `has_web_password` is all the UI
+    // learns. The USERNAME beside it is an ordinary echoed setting and
+    // is deliberately not on this list.
+    "web_password",
     "index_interests_applied",
 ];
 
@@ -103,6 +110,12 @@ const ECHOED_READ_ONLY: &[&str] = &[
     "has_omdb",
     "has_scoreboard_key",
     "has_tmdb",
+    "has_web_password",
+    // TODO 19: derived - whether a login form exists is "both halves
+    // set", which `websession::login_on` owns, and how many browsers
+    // are signed in is runtime state with nothing to write.
+    "web_login",
+    "web_sessions",
     // How many passwords the passwords file currently holds - display
     // only; the file itself (not this row) is what you edit.
     "password_file_count",
@@ -2570,8 +2583,26 @@ fn mem_limit_is_restart_only_and_the_surface_says_so() {
     let dir = scratch("memlimit");
 
     // A figure no machine's auto-sizing would land on by chance, so an
-    // equality below cannot pass by coincidence.
-    const WANT: u64 = 3_000_000_000;
+    // equality below cannot pass by coincidence - and one THIS TARGET
+    // can actually hold, because every assertion below is that the
+    // saved figure survives unchanged, which a CLAMPED figure cannot
+    // do. 3 GB is fine on every box this fleet owns; on a 32-bit one
+    // `MemBudget::with_total` clamps at the address-space ceiling
+    // (1 GiB), so the daemon booted with 1,073,741,824, said so in a
+    // WARN, and this test read the product being right as a failure.
+    // That reddened `armv7-cross` on 18 Sep 2026 (run 35328391890,
+    // sha 8ec109e9) - the third red of exactly this shape, after
+    // `4c1f4869f` and `287ea0d0b` on 16 Sep: a fixture asserting an
+    // outcome only a 64-bit `usize` implies.
+    //
+    // Asked of `max_total()` rather than written out, for the reason
+    // its own docstring gives - the ceiling is a private const behind a
+    // `cfg` nobody on this fleet compiles, so a literal here would be a
+    // second copy that cannot be checked. The 1 MiB step keeps the
+    // figure off the round ceiling itself, so the `assert_ne!` below
+    // stays a real guard on 32-bit rather than comparing against a
+    // number auto-sizing could plausibly land on.
+    let want: u64 = 3_000_000_000_u64.min(MemBudget::max_total().saturating_sub(1 << 20));
 
     let booted = {
         let d = serve(&dir);
@@ -2579,11 +2610,11 @@ fn mem_limit_is_restart_only_and_the_surface_says_so() {
         let booted = before["mem_budget_total"].as_u64().unwrap();
         assert!(booted > 0, "the daemon reported no resolved budget");
         assert_ne!(
-            booted, WANT,
+            booted, want,
             "the fixture figure collided with this box's auto-sized budget"
         );
 
-        let r = api(d.port, &format!("mode=config&name=mem_limit&value={WANT}"));
+        let r = api(d.port, &format!("mode=config&name=mem_limit&value={want}"));
         assert_eq!(r["status"].as_bool(), Some(true), "mem_limit rejected: {r}");
         // The daemon tells the caller it did not take effect. This is
         // the machine-readable half of the restart-only contract; the
@@ -2599,7 +2630,7 @@ fn mem_limit_is_restart_only_and_the_surface_says_so() {
         // it is exactly what makes the next assertion necessary.
         assert_eq!(
             after["mem_limit"].as_u64(),
-            Some(WANT),
+            Some(want),
             "the saved figure did not echo back"
         );
         // ...and the RUNNING figure does not move.
@@ -2623,7 +2654,7 @@ fn mem_limit_is_restart_only_and_the_surface_says_so() {
     let after = settings_block(d.port);
     assert_eq!(
         after["mem_budget_total"].as_u64(),
-        Some(WANT),
+        Some(want),
         "the saved mem_limit did not take effect across a restart \
          (boot figure was {booted})"
     );

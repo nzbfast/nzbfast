@@ -105,6 +105,15 @@ pub(super) fn apply_setting_naming(
             d.skip_samples.store(on, Ordering::Relaxed);
             (true, json!(on))
         }
+        // TODO 332. Takes effect from the NEXT job to start: the flag is
+        // sampled once per download, where the job's own already-deferred
+        // mark is ANDed with it, so turning it on mid-repair does not
+        // stop the fold that is already running.
+        "repair_defer_long" => {
+            let on = flag();
+            d.repair_defer_long.store(on, Ordering::Relaxed);
+            (true, json!(on))
+        }
         "rename_from_nzb" => {
             let on = flag();
             d.rename.from_nzb.store(on, Ordering::Relaxed);

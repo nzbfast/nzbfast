@@ -208,7 +208,7 @@ fn a_deep_stub_or_a_non_sfx_name_lands_on_disk_intact() {
 #[test]
 fn a_compressed_rar_sfx_chases_in_stream() {
     let data = noisy(120_000, 9);
-    let vol = rars_compressed_volume(&[("a.bin", &data)]);
+    let vol = compressed_archive(&[("a.bin", &data)]);
     assert_not_store(&vol);
     let file = sfx(3_000, &vol);
     let (dir, rep) = run("sfx-rar-comp", "pack.exe", &file, 51);
@@ -224,7 +224,7 @@ fn a_compressed_rar_sfx_chases_in_stream() {
 #[test]
 fn a_compressed_rar_sfx_demotes_to_the_whole_exe_with_the_chase_off() {
     let data = noisy(120_000, 9);
-    let vol = rars_compressed_volume(&[("a.bin", &data)]);
+    let vol = compressed_archive(&[("a.bin", &data)]);
     assert_not_store(&vol);
     let file = sfx(3_000, &vol);
     let dir = tmpdir("sfx-rar-comp-off");
@@ -263,7 +263,7 @@ fn a_compressed_rar_sfx_demotes_to_the_whole_exe_with_the_chase_off() {
 #[test]
 fn the_same_bytes_under_a_non_sfx_name_demote_unmarked() {
     let data = noisy(120_000, 9);
-    let vol = rars_compressed_volume(&[("a.bin", &data)]);
+    let vol = compressed_archive(&[("a.bin", &data)]);
     let file = sfx(3_000, &vol);
     let (dir, rep) = run("sfx-name-comp", "pack.dat", &file, 53);
     assert_eq!(std::fs::read(dir.join("pack.dat")).unwrap(), file);

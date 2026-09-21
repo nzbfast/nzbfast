@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// its own.
 ///
 /// That flag is set from a TERMINAL fetch verdict, and
-/// [`Extractor::note_article_lost`] says in its own doc why that lands
+/// `Extractor::note_article_lost` says in its own doc why that lands
 /// late: "verdicts typically land AFTER the pile has built (retries
 /// exhaust last)". The drop-behind trim reads the flag as its veto -
 /// "no lost article anywhere in the job: a demote waiting to happen,

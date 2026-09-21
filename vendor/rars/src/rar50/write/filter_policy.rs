@@ -2,7 +2,7 @@ use super::*;
 use crate::codec::rar50::{
     encode_lz_member_pooled, encode_lz_member_with_options,
     encode_lz_member_with_options_and_progress, EncodeOptions, EncoderScratchPool, LiveSpanEncoder,
-    Rar50FilterSpec, Unpack50Encoder, MAX_FILTER_BLOCK_LENGTH,
+    Rar50Encoder, Rar50FilterSpec, MAX_FILTER_BLOCK_LENGTH,
 };
 use crate::x86_filter_scan::auto_x86_filter_ranges;
 
@@ -256,7 +256,7 @@ fn encode_sampled_filter_probe(
 ) -> crate::codec::Result<Vec<u8>> {
     match kind {
         None => encode_lz_member_pooled(sample, &[], 0, options, None, scratch),
-        Some(kind) => Unpack50Encoder::with_options(options).encode_member_with_filters_pooled(
+        Some(kind) => Rar50Encoder::with_options(options).encode_member_with_filters_pooled(
             sample,
             0,
             &[Rar50FilterSpec::new(kind)],
@@ -433,7 +433,7 @@ pub(super) fn should_store_compressed_payload(
 
 #[cfg(test)]
 pub(super) fn encode_with_solid_reset_policy(
-    encoder: &mut Unpack50Encoder,
+    encoder: &mut Rar50Encoder,
     data: &[u8],
     algorithm_version: u8,
     options: EncodeOptions,
@@ -453,7 +453,7 @@ pub(super) fn encode_with_solid_reset_policy(
 /// the tests compare against.
 #[cfg(test)]
 pub(super) fn encode_with_solid_reset_policy_and_progress(
-    encoder: &mut Unpack50Encoder,
+    encoder: &mut Rar50Encoder,
     data: &[u8],
     algorithm_version: u8,
     options: EncodeOptions,
@@ -489,7 +489,7 @@ pub(super) fn encode_with_solid_reset_policy_and_progress(
             .encode_member(data, algorithm_version)
             .map_err(Error::from)?
     };
-    let mut fresh = Unpack50Encoder::with_options(options);
+    let mut fresh = Rar50Encoder::with_options(options);
     let fresh_packed = if let Some(progress) = progress {
         fresh
             .encode_member_with_progress(data, algorithm_version, progress)
@@ -1325,7 +1325,7 @@ fn encode_member_with_filter_progress(
     options: EncodeOptions,
     progress: Option<&mut dyn FnMut(usize) -> bool>,
 ) -> crate::codec::Result<Vec<u8>> {
-    let mut encoder = Unpack50Encoder::with_options(options);
+    let mut encoder = Rar50Encoder::with_options(options);
     if let Some(progress) = progress {
         encoder.encode_member_with_filters_and_progress(
             data,
@@ -1334,7 +1334,7 @@ fn encode_member_with_filter_progress(
             progress,
         )
     } else {
-        Unpack50Encoder::with_options(options).encode_member_with_filter(
+        Rar50Encoder::with_options(options).encode_member_with_filter(
             data,
             algorithm_version,
             Rar50FilterSpec::new(filter),
@@ -1359,7 +1359,7 @@ fn encode_member_with_filter_specs_progress(
     options: EncodeOptions,
     progress: Option<&mut dyn FnMut(usize) -> bool>,
 ) -> crate::codec::Result<Vec<u8>> {
-    let mut encoder = Unpack50Encoder::with_options(options);
+    let mut encoder = Rar50Encoder::with_options(options);
     match progress {
         Some(progress) => encoder.encode_member_with_filters_and_progress(
             data,
@@ -1378,11 +1378,7 @@ pub(super) fn encode_member_with_filter_spec(
     filter: Rar50FilterSpec,
     options: EncodeOptions,
 ) -> crate::codec::Result<Vec<u8>> {
-    Unpack50Encoder::with_options(options).encode_member_with_filter(
-        data,
-        algorithm_version,
-        filter,
-    )
+    Rar50Encoder::with_options(options).encode_member_with_filter(data, algorithm_version, filter)
 }
 
 #[cfg(test)]
@@ -1392,11 +1388,7 @@ pub(super) fn encode_member_with_filter_specs(
     filters: &[Rar50FilterSpec],
     options: EncodeOptions,
 ) -> crate::codec::Result<Vec<u8>> {
-    Unpack50Encoder::with_options(options).encode_member_with_filters(
-        data,
-        algorithm_version,
-        filters,
-    )
+    Rar50Encoder::with_options(options).encode_member_with_filters(data, algorithm_version, filters)
 }
 
 pub(super) fn solid_compression_flag(solid_continuation: bool) -> u64 {
@@ -1423,7 +1415,7 @@ mod tests {
     }
 
     fn decode(packed: &[u8], len: usize) -> Vec<u8> {
-        crate::codec::rar50::Unpack50Decoder::new()
+        crate::codec::rar50::Rar50Decoder::new()
             .decode_member(packed, 0, len, false, crate::codec::rar50::DecodeMode::Lz)
             .unwrap()
     }
@@ -1515,7 +1507,7 @@ mod tests {
                     .chain(SAMPLED_FILTER_DELTA_KINDS)
                     .map(Some),
             ) {
-                let mut fresh = Unpack50Encoder::with_options(options);
+                let mut fresh = Rar50Encoder::with_options(options);
                 let expected = match kind {
                     None => fresh.encode_member(&data, 0),
                     Some(kind) => fresh.encode_member_with_filter(
@@ -1771,14 +1763,14 @@ mod tests {
         ] {
             // The serial walk, as the encoder-based policy runs it.
             let mut expected = Vec::new();
-            let mut encoder = Unpack50Encoder::with_options(options);
+            let mut encoder = Rar50Encoder::with_options(options);
             for (index, member) in slices.iter().enumerate() {
                 if index == 0 {
                     expected.push((encoder.encode_member(member, 0).unwrap(), false));
                     continue;
                 }
                 let continued = encoder.encode_member(member, 0).unwrap();
-                let mut fresh_encoder = Unpack50Encoder::with_options(options);
+                let mut fresh_encoder = Rar50Encoder::with_options(options);
                 let fresh = fresh_encoder.encode_member(member, 0).unwrap();
                 if rule(fresh.len(), continued.len()) {
                     encoder = fresh_encoder;

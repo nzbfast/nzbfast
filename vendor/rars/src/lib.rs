@@ -16,7 +16,6 @@ pub mod crc32;
 pub mod crypto;
 pub mod detect;
 pub mod error;
-mod fast;
 pub mod features;
 mod io_util;
 // nzbfast-local change (3 Sep 2026): the decode path's own live-byte
@@ -36,6 +35,9 @@ mod volume_extract;
 mod write_entropy;
 mod write_progress;
 mod x86_filter_scan;
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub use x86_filter_scan::harness as x86_filter_scan_harness;
 
 pub use detect::{detect_archive_family, find_archive_start, ArchiveSignature, SFX_SCAN_LIMIT};
 pub use error::{Error, Result};
@@ -666,6 +668,30 @@ impl Archive {
         }
     }
 
+    /// [`Self::extract_to_with_options`] that may write members
+    /// CONCURRENTLY, each into its own writer from `concurrent`, instead of
+    /// handing every member's bytes to `open` on this thread. The contract
+    /// is [`ConcurrentOpen`]'s. RAR 5 only: the older families never call
+    /// `concurrent` and extract exactly as `extract_to_with_options` does.
+    pub fn extract_to_concurrent<F>(
+        &self,
+        options: ArchiveReadOptions<'_>,
+        concurrent: &ConcurrentOpen<'_>,
+        mut open: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+    {
+        match self {
+            Self::Rar50Plus(archive) => archive.extract_to_concurrent(
+                options,
+                &|ordinal, meta| concurrent(ordinal, &rar50_meta(meta)),
+                |meta| open(&rar50_meta(meta)),
+            ),
+            _ => self.extract_to_with_options(options, open),
+        }
+    }
+
     /// Extracts independent non-solid members in parallel, buffering decoded
     /// file bytes before replaying writes in archive order.
     ///
@@ -1151,6 +1177,46 @@ where
         }
     }
 }
+
+/// [`extract_volumes_to_with_options`] that may write members
+/// CONCURRENTLY; the volume-set twin of [`Archive::extract_to_concurrent`],
+/// under the same [`ConcurrentOpen`] contract. RAR 5 only: other families
+/// extract exactly as `extract_volumes_to_with_options` does.
+pub fn extract_volumes_to_concurrent<F>(
+    archives: &[Archive],
+    options: ArchiveReadOptions<'_>,
+    concurrent: &ConcurrentOpen<'_>,
+    mut open: F,
+) -> Result<()>
+where
+    F: FnMut(&ExtractedEntryMeta) -> Result<Box<dyn Write>>,
+{
+    let adapted =
+        |ordinal: usize, meta: &rar50::ExtractedEntryMeta| concurrent(ordinal, &rar50_meta(meta));
+    if let [Archive::Rar50Plus(archive)] = archives {
+        return rar50::extract_volumes_to_concurrent(
+            std::slice::from_ref(archive),
+            options,
+            &adapted,
+            |meta| open(&rar50_meta(meta)),
+        );
+    }
+    match archives.first().map(Archive::family) {
+        Some(ArchiveFamily::Rar50Plus) => {
+            let typed = rar50_volumes(archives)?;
+            rar50::extract_volumes_to_concurrent(&typed, options, &adapted, |meta| {
+                open(&rar50_meta(meta))
+            })
+        }
+        _ => extract_volumes_to_with_options(archives, options, open),
+    }
+}
+
+/// The worker-side opener of [`Archive::extract_to_concurrent`] and
+/// [`extract_volumes_to_concurrent`], over the common entry metadata. The
+/// contract is [`rar50::ConcurrentOpen`]'s, which is where it is written.
+pub type ConcurrentOpen<'a> =
+    dyn Fn(usize, &ExtractedEntryMeta) -> Result<Option<Box<dyn Write + Send>>> + Sync + 'a;
 
 /// [`extract_volumes_to_with_options`] reporting each volume the engine
 /// is finished with.

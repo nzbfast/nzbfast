@@ -1083,3 +1083,106 @@ fn the_locked_probe_declines_a_demoted_job() {
         "a full disk already names its own remedy"
     );
 }
+
+/// TODO 332, and the ONE property that makes the defer safe: a job that
+/// has already been sent round once repairs on the next pass.
+///
+/// Without the mark this predicate reads it from, the second pass
+/// forecasts the same long repair, defers again, and the job cycles
+/// until a user deletes it - a download that never finishes, which is
+/// strictly worse than the slow repair the setting was turned on to get
+/// warning of. The ruling is "defer ONCE, then repair" and this is where
+/// the "once" lives.
+#[test]
+fn a_long_repair_defers_once_and_then_goes_ahead() {
+    assert!(
+        crate::job::defers_long_repair(true, false, false),
+        "setting on, never deferred, an ordinary run - this is the one \
+         case that defers"
+    );
+    assert!(
+        !crate::job::defers_long_repair(true, true, false),
+        "THE SECOND PASS MUST REPAIR. A job already marked as deferred \
+         may never defer again, whatever the setting says, or it never \
+         finishes at all"
+    );
+    assert!(
+        !crate::job::defers_long_repair(false, false, false),
+        "off is off: the daemon's job is to finish downloads, and a \
+         person who never asked for the notice is better served by a \
+         slow repair than by a job that waits"
+    );
+    assert!(
+        !crate::job::defers_long_repair(true, false, true),
+        "an insurance fetch banks volumes and extracts nothing, so \
+         there is no repair to stand back from - deferring one would \
+         send a row the user has not promoted anywhere"
+    );
+}
+
+/// The tail's defer arm must SET the mark the predicate above reads, in
+/// the same lock hold as the requeue, and it must return before the job
+/// is filed.
+///
+/// A source-reflection test in `run_tail`'s own shape (see
+/// `postproc::tests::the_insurance_arm_returns_before_finalize_ever_runs`,
+/// which pins the neighbouring arm the same way), because the thing that
+/// can go wrong is an ORDERING and a missing assignment, not a value any
+/// behavioural row would reach without a real 8,192-block repair.
+///
+/// FIX A HIT by putting the assignment back, never by loosening this.
+#[test]
+fn the_defer_arm_marks_the_job_before_it_requeues_it() {
+    let body = include_str!("postproc.rs");
+    let arm = body
+        .find("if let Some(d) = deferred_repair")
+        .expect("run_tail has a defer arm - TODO 332");
+    let mark = body
+        .find("j.repair_deferred = true;")
+        .expect("the defer arm sets the once-only mark");
+    let full = body
+        .find("park_on_full_disk(")
+        .expect("run_tail still parks on a full disk");
+    assert!(
+        arm < mark,
+        "the mark must be set INSIDE the defer arm, not somewhere above it"
+    );
+    assert!(
+        mark < full,
+        "the defer arm must mark and return ABOVE the disk-full park and \
+         everything after it - a deferred row owes itself to the queue, \
+         never to history"
+    );
+}
+
+// ---- set_priority ----
+
+/// Every priority change leaves a line, and only a change does: the log
+/// is how anyone learns a row was made Force (which runs through a queue
+/// pause) and by what. A write that lands on the value the row already
+/// has is silent, so a client that re-sends its priority cannot flood it.
+#[test]
+fn set_priority_logs_a_change_by_id_and_stays_quiet_for_a_no_op() {
+    let mut j = crate::job_from_json(&serde_json::json!({
+        "nzo_id": "SABnzbd_nzo_p1", "name": "Some.Release.Name", "nzb_path": "/tmp/x.nzb",
+        "out_dir": "/tmp/o", "state": "Queued", "priority": 0,
+    }))
+    .unwrap();
+    let ((), lines) = crate::testutil::capture_log(|| {
+        j.set_priority(2, "priority write");
+        j.set_priority(2, "priority write");
+        j.set_priority(0, "moved to the front of the queue");
+    });
+    assert_eq!(
+        lines,
+        [
+            "[queue] SABnzbd_nzo_p1: priority Normal -> Force (priority write)",
+            "[queue] SABnzbd_nzo_p1: priority Force -> Normal (moved to the front of the queue)",
+        ]
+    );
+    assert_eq!(j.priority, 0);
+    assert!(
+        lines.iter().all(|l| !l.contains("Some.Release.Name")),
+        "the line is about a number: it names the row by id and not by release"
+    );
+}

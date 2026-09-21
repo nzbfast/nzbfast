@@ -25,10 +25,10 @@ pub fn reextract_dir(dir: &std::path::Path, password: Option<&str>) -> Result<bo
     Ok(reextract_dir_why(dir, password)?.is_ok())
 }
 
-/// [`reextract_dir`] that also names WHY it failed, on the one class of
+/// `reextract_dir` that also names WHY it failed, on the one class of
 /// failure that is about the DISK rather than the archive.
 ///
-/// Same contract and same reasoning as [`crate::rarfix::try_unrar_spent_why`],
+/// Same contract and same reasoning as `crate::rarfix::try_unrar_spent_why`,
 /// which this delegates to for its own last rung: `Err(None)` is the
 /// ordinary failure the caller words itself, `Err(Some(why))` is a bomb
 /// verdict that must be quoted rather than paraphrased. Both of this
@@ -38,7 +38,7 @@ pub fn reextract_dir(dir: &std::path::Path, password: Option<&str>) -> Result<bo
 /// those blame the archive for a full disk.
 ///
 /// The third caller - `smart`'s password unlock - read the plain
-/// [`reextract_dir`] until 22 Aug 2026, on the reasoning that "did this
+/// `reextract_dir` until 22 Aug 2026, on the reasoning that "did this
 /// password open anything" has no job message to compose. It has: its
 /// own callers walk a LIST of candidates, so one bomb verdict refused
 /// every password in the operator's file in turn and the job was then
@@ -296,7 +296,7 @@ pub fn reextract_dir_outcome(
     // the snapshot either), so the credit is 0.
     let unpacked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     mark.rewind();
-    crate::unpackprog::watch(&unpacked, &[], 0);
+    crate::unpackprog::watch(&unpacked, 0, 0);
     let sample = |ex: &Extractor| {
         let (done, total) = ex
             .writers_snapshot()
@@ -1580,7 +1580,7 @@ async fn wait_for_the_decode_to_reach_the_damage(
 /// par-only post (target never in the NZB), or a posted file whose
 /// every article vanished - is rebuilt the same way, except its spans
 /// cannot patch through a mapping that never existed. They FEED through
-/// [`Extractor::write_repair`], the normal arrival path, in offset
+/// `Extractor::write_repair`, the normal arrival path, in offset
 /// order (the solver emits blocks in slice order, which is offset order
 /// per file): the mapper, the store path, the chase attach all run
 /// exactly as if the articles had downloaded, so the rebuilt volume
@@ -1976,6 +1976,41 @@ pub async fn try_mapped_repair(
     }
 }
 
+/// The error a DEFERRED repair unwinds with - TODO 332.
+///
+/// The words are the user's: this message becomes the queue row's
+/// `defer_reason`, which is the whole point of deferring at all. The
+/// figure comes off the job's own gate, so it is the forecast the engine
+/// actually stood back from rather than a number composed here; a run
+/// that somehow has no gate to read still says something true.
+///
+/// MINUTES, never a countdown. `est_secs` is fitted to two measured
+/// points on one 20-core arm64 box (`survey::RepairForecast::est_secs`)
+/// and is an order of magnitude - a second architecture would say
+/// whether the exponent travels and nobody has measured one. Rounding up
+/// to whole minutes is what keeps the presentation honest about that.
+fn deferred_repair_error(cancel: Option<&crate::repair::SideCancel>) -> anyhow::Error {
+    match cancel.and_then(|c| c.repair_deferred()) {
+        Some(d) if d.est_secs > 0 => anyhow::anyhow!(
+            "a long repair is needed - about {} minute(s) of work to rebuild {} block(s). \
+             This download has been put back in the queue once so you can stop it if you \
+             would rather not; it repairs on its own next time round.",
+            d.est_secs.div_ceil(60),
+            d.missing_blocks
+        ),
+        Some(d) => anyhow::anyhow!(
+            "a long repair is needed to rebuild {} block(s). This download has been put \
+             back in the queue once so you can stop it if you would rather not; it repairs \
+             on its own next time round.",
+            d.missing_blocks
+        ),
+        None => anyhow::anyhow!(
+            "a long repair is needed. This download has been put back in the queue once so \
+             you can stop it if you would rather not; it repairs on its own next time round."
+        ),
+    }
+}
+
 /// Damaged path: fetch the cheapest set of recovery volumes covering
 /// `needed` blocks (exact-fit by declared slice counts), then hand the
 /// directory to par2cmdline for Reed-Solomon repair.
@@ -2269,6 +2304,17 @@ pub async fn fetch_and_repair(
     if native == NativeVerdict::Cancelled {
         return Ok(false);
     }
+    // THE DAEMON STOOD BACK - TODO 332. An ERROR and not `Ok(false)`,
+    // which is the one place this verdict parts company with the cancel
+    // beside it. A cancel's job is tombstoned, so `Ok(false)` is a no-op
+    // by the time anyone reads it; a deferred job is alive and must go
+    // BACK TO THE QUEUE, and `Ok(false)` here would file it Failed over
+    // a set nothing has touched. The tail tells this apart from a real
+    // failure off the handle's own gate, never off this message - see
+    // `postproc::run_tail`'s defer arm.
+    if native == NativeVerdict::Deferred {
+        return Err(deferred_repair_error(cancel));
+    }
 
     // par2cmdline fallback - the escape hatch for anything the native
     // path declines. Out of line since 12 Sep 2026: the invocation, the
@@ -2351,6 +2397,14 @@ pub async fn fetch_and_repair(
     // failed even with every recovery volume" warn is not printed.
     if native == NativeVerdict::Cancelled {
         return Ok(false);
+    }
+    // The escalation's own defer arm - see the first pass's above.
+    // Reachable: the veto is answered per ATTEMPT, so a set whose first
+    // pass was short and whose escalated pass finally has enough
+    // recovery to fold defers HERE, on the forecast for the repair that
+    // would actually have run.
+    if native == NativeVerdict::Deferred {
+        return Err(deferred_repair_error(cancel));
     }
     if hatch.second_pass(out_dir, extractor)? {
         return Ok(true);

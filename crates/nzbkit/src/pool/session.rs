@@ -2358,19 +2358,40 @@ async fn idle_turn(
     // job earlier. The permit goes with this worker's return (see
     // `worker`).
     shared.note_idle_after_dry(ctx.idx);
+    // BEFORE the retire, not after it. The dump used to sit one branch
+    // down, so a worker that handed its socket over returned without
+    // ever dumping and the debug channel could show the SURVIVORS
+    // idling but never the shed that produced them - which cost the
+    // 20 Sep 2026 drain-tail diagnosis lane a round
+    // (`research/DRAIN-TAIL-ONE-SOCKET-REPRO-2026-09-20.md`, "what
+    // NZBFAST_POOL_DEBUG can and cannot witness"). It is no dearer
+    // here: `debug_dump_idle` throttles itself to one dump per 5 s and
+    // takes the queue lock with `try_lock`, and the env read below it
+    // is the one this loop always did.
+    let pool_debug = std::env::var_os("NZBFAST_POOL_DEBUG").is_some();
+    if pool_debug {
+        shared.debug_dump_idle();
+    }
     // CLAIMED, not peeked: this arm is the one that acts on the answer,
     // and `want_handoff` alone let every idle worker on a server reach
     // the same conclusion at once. See `claim_handoff`.
     if shared.claim_handoff(ctx.idx) {
+        if pool_debug {
+            // One line and no locks - the dump above is throttled to
+            // 5 s and a shed is the event that must not be swallowed.
+            info!(
+                target: "pool-debug",
+                "shed: server {} handed a socket to the successor (alive now {})",
+                ctx.idx,
+                shared.alive[ctx.idx].load(Ordering::Relaxed),
+            );
+        }
         shared.note_session_end(ctx.idx, 4);
         release_drained_conn(cfg, server, shared, ctx.idx, conn).await;
         return IdleTurn::Retire;
     }
     // Idle but articles are still in flight elsewhere and may requeue
     // (or become dup candidates) - re-check shortly.
-    if std::env::var_os("NZBFAST_POOL_DEBUG").is_some() {
-        shared.debug_dump_idle();
-    }
     tokio::time::sleep(Duration::from_millis(25)).await;
     IdleTurn::Keep(conn)
 }

@@ -20,7 +20,7 @@ pub(super) const NESTED_MAX_DEPTH_DEFAULT: usize = 5;
 
 /// The absolute ceiling a store-only chain may raise the cap to.
 ///
-/// Only COMPRESSING layers count against [`NESTED_MAX_DEPTH_DEFAULT`],
+/// Only COMPRESSING layers count against `NESTED_MAX_DEPTH_DEFAULT`,
 /// because that cap is a decompression-bomb backstop and a STORED layer
 /// cannot expand - its every level is the same bytes with a header on
 /// the front. That is right about the BOMB and would be wrong as an open
@@ -343,6 +343,110 @@ pub(super) fn rar_drop_env_off_value(v: Option<&str>) -> bool {
     v == Some("1")
 }
 
+/// Default working set a nested chase keeps behind the RAR engine's
+/// read frontier when the progress trim below is switched ON: 256 MB.
+///
+/// A rung of the stage 2 ladder rather than a chosen number - the
+/// measurement is that there IS no good rung, because the trade is
+/// linear with no knee anywhere on it
+/// (`research/NESTED-CHASE-HOLDS-2026-09-20.md` section 6). This is
+/// the middle of the ladder, so a lane that switches the arm on
+/// without naming a margin gets the rung the table describes.
+pub(super) const CHASE_PROGRESS_MARGIN_DEFAULT: u64 = 256_000_000;
+
+/// The chase's PROGRESS trim (TODO 13 stage 2), which is **OFF unless
+/// asked for**: `NZBFAST_CHASE_PROGRESS_TRIM=1`.
+///
+/// It is the one gate in this file that is opt-IN rather than an
+/// escape hatch, and the inversion is the finding rather than an
+/// oversight. What it does is release a nested chase's consumed prefix
+/// as the engine's read frontier passes it, instead of waiting for
+/// something to breach the holds cap - which is real relief and was
+/// worth building, because stage 1 measured a nested chase holding its
+/// whole 589 MB input for the life of the job with the trim running
+/// zero passes.
+///
+/// It is off because the exchange rate is bad and was measured, on the
+/// rig, at a 20 MB/s paced line over the 18-volume fixture:
+///
+/// | margin | holds peak | released | peak RSS | disk |
+/// |---|---|---|---|---|
+/// | off  | 589 MB | 0      | 0.92 GB | 0.97x |
+/// | 512M | 589 MB | 235 MB | 0.90 GB | 1.22x |
+/// | 256M | 292 MB | 436 MB | 0.67 GB | 1.41x |
+/// | 64M  | 236 MB | 537 MB | 0.67 GB | 1.50x |
+///
+/// Three things in that table decide it. At depth > 0 a release is a
+/// SPILL, and the disk column moves **one byte per byte released** -
+/// exactly, across every rung. The RAM it buys back is much less than
+/// that, because the peak lands before most of the trimming does. And
+/// the bottom rung (1.50 GB written, 0.67 GB resident) is WORSE on
+/// both axes than simply demoting the level to disk, which stage 1
+/// measured at 1.47x and 0.40 GB - so trimming hard is not a cheaper
+/// one-pass, it is a more expensive demotion. Between the ends the
+/// line is straight; there is no knee to ship at.
+///
+/// The residual it relieves is also bounded by the holds cap, which is
+/// derived from the box's own memory - so under the cap the RAM is by
+/// construction affordable, and this spends disk to relieve a pressure
+/// the cap says is not there. Over the cap is a different regime with
+/// its own machinery (the pressure trim, and the park).
+///
+/// So it ships as a switch and a measurement rather than a policy.
+/// Latched at construction.
+pub(super) fn chase_progress_trim_env_on() -> bool {
+    chase_progress_trim_env_on_value(std::env::var("NZBFAST_CHASE_PROGRESS_TRIM").ok().as_deref())
+}
+
+/// Pure parse of the progress-trim value (same rationale as
+/// [`nested_env_off_value`]).
+pub(super) fn chase_progress_trim_env_on_value(v: Option<&str>) -> bool {
+    v == Some("1")
+}
+
+/// The margin rung for a ladder leg: `NZBFAST_CHASE_TRIM_MARGIN`, in
+/// bytes with decimal `K`/`M`/`G` suffixes, parsed exactly as
+/// `--mem-limit` and `NZBFAST_HOLDS_CAP` are. Unset (or unparseable)
+/// leaves [`CHASE_PROGRESS_MARGIN_DEFAULT`] alone, and it does nothing
+/// at all unless the arm above is switched on. Latched at
+/// construction.
+///
+/// `0` is accepted and means "release everything the engine has read
+/// past, as soon as it has read past it" - the far end of the ladder,
+/// not an off switch.
+//
+// env-default-gate: this read site answers Option and applies no
+// default of its own, on purpose - `0` is a real rung of the ladder
+// and would be indistinguishable from "unset" if the fallback lived
+// here. The real default is the named constant
+// `CHASE_PROGRESS_MARGIN_DEFAULT` (256,000,000, the value the doc row
+// quotes), applied once at `Extractor::build` in `extract/mod.rs`
+// beside the arm's own gate, and inherited from there by a child
+// extractor at construction.
+pub(super) fn chase_progress_margin_env() -> Option<u64> {
+    chase_progress_margin_env_value(
+        std::env::var("NZBFAST_CHASE_TRIM_MARGIN")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+    )
+}
+
+/// Pure parse of the margin value. Decimal suffixes, matching
+/// `nzbkit_base::mem`'s `parse_decimal_size` - `M` is 1,000,000 and NOT
+/// a mebibyte, so a ladder rung reads the same in the env, in the leg
+/// log and in the table.
+pub(super) fn chase_progress_margin_env_value(v: Option<&str>) -> Option<u64> {
+    let v = v?;
+    let (digits, mult) = match v.as_bytes().last()? {
+        b'k' | b'K' => (&v[..v.len() - 1], 1_000u64),
+        b'm' | b'M' => (&v[..v.len() - 1], 1_000_000),
+        b'g' | b'G' => (&v[..v.len() - 1], 1_000_000_000),
+        _ => (v, 1),
+    };
+    digits.trim().parse::<u64>().ok()?.checked_mul(mult)
+}
+
 /// Escape hatch for the drop's LOSS-DOUBT veto
 /// ([`crate::extract::LossDoubt`]): with it set, only a TERMINAL verdict
 /// stands the drop down and a held one does not - the pre-30 Aug 2026
@@ -415,7 +519,7 @@ pub(super) fn output_crc_env_off_value(v: Option<&str>) -> bool {
 
 impl Extractor {
     /// Ceiling on how much space an inner-file writer may RESERVE, shared
-    /// by every nesting level (see [`Limits::prealloc_cap`]). Pass the
+    /// by every nesting level (see `Limits::prealloc_cap`). Pass the
     /// NZB's posted byte count: a store archive cannot legitimately unpack
     /// to more than what was posted, and preallocation past the ceiling is
     /// only an optimisation the writer does without.
@@ -569,6 +673,30 @@ impl Extractor {
         self.inner.lock_ok().rar_drop_on = on;
     }
 
+    /// Chase PROGRESS-trim arm (see `NZBFAST_CHASE_PROGRESS_TRIM`,
+    /// latched at construction), which ships OFF - so this is the
+    /// switch that turns it ON rather than an escape hatch. Off: a
+    /// nested chase holds its whole input until something breaches the
+    /// holds cap. Same set-before-spans discipline as the gates above,
+    /// and here it is load-bearing twice over: the arm is read on the
+    /// routing path AND its margin is latched into the chase worker's
+    /// wake spacing when the worker starts, so flipping either
+    /// mid-job leaves a chase already in flight on the old rung and
+    /// makes a leg's numbers unreadable.
+    pub fn set_chase_progress_trim(&self, on: bool) {
+        self.inner.lock_ok().chase_progress_trim_on = on;
+    }
+
+    /// The working set a nested chase keeps behind the engine's read
+    /// frontier, in bytes (see `NZBFAST_CHASE_TRIM_MARGIN`, latched at
+    /// construction). The ladder rung, for a test or a bench leg that
+    /// wants one without an environment variable. `0` releases
+    /// everything the engine has read past; it does nothing at all
+    /// unless [`Self::set_chase_progress_trim`] switched the arm on.
+    pub fn set_chase_progress_margin(&self, bytes: u64) {
+        self.inner.lock_ok().chase_progress_margin = bytes;
+    }
+
     /// Final-output CRC gate (see `NZBFAST_NO_OUTPUT_CRC`, latched at
     /// construction; default on). Same set-before-spans discipline as
     /// the other gates - composition happens as spans route, so a
@@ -582,7 +710,7 @@ impl Extractor {
     /// daemon wires this to its seek/promote ladder, so a child extractor
     /// that classifies an inner .7z can front-load the articles carrying
     /// its end header. Composition runs child -> parent through
-    /// [`Self::promote_file`], translating each level's file ranges
+    /// `Self::promote_file`, translating each level's file ranges
     /// through the level above (all-store levels only; a compressed level
     /// in between yields no mapping and the promote is skipped - the
     /// chase reaches those bytes sequentially anyway). Install before any

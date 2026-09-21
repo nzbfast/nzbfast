@@ -396,7 +396,7 @@ pub struct Shaped {
     /// Unix time the flag was raised.
     pub since: u64,
     /// The per-connection rate it fell FROM - the recovery bar (80% of
-    /// this) and the dashboard's "it managed ~X on <date>" figure.
+    /// this) and the dashboard's "it managed ~X on `<date>`" figure.
     pub ref_per_conn_bps: f64,
 }
 

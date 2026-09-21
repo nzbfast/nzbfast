@@ -46,6 +46,20 @@ impl SimdHasher {
         self.state.update(input);
     }
 
+    /// [`Self::update`] over several pieces hashed as if concatenated.
+    ///
+    /// This kernel has no batch to gain - its leaves read their blocks in
+    /// place at a stride of eight on ONE thread, so a piece costs what its
+    /// bytes cost wherever the boundary falls. It carries the method only
+    /// because the shared caller ([`super::super::extract::digest_pieces`])
+    /// hands whole batches over, and the aarch64 leaf team does gain from
+    /// them (`portable.rs` has the table).
+    pub(crate) fn update_pieces(&mut self, pieces: &[&[u8]]) {
+        for piece in pieces {
+            self.state.update(piece);
+        }
+    }
+
     pub(crate) fn finalize(self) -> [u8; OUT_BYTES] {
         let mut out = [0u8; OUT_BYTES];
         out.copy_from_slice(self.state.finalize().as_bytes());

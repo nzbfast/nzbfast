@@ -1,6 +1,6 @@
 [package]
 name = "nzbfast-api"
-version = "1.6.0"
+version = "1.7.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -102,10 +102,12 @@ flate2 = "1"
 nzbfast-core = { path = "../nzbfast-core", features = ["test-support"] }
 nzbfast-unpack = { path = "../nzbfast-unpack", features = ["test-support"] }
 nzbfast-daemon = { path = "../nzbfast-daemon", features = ["test-support"] }
-# The update-manifest tests in `tests_grabs.rs`: `ureq` serves the
-# manifest over a scratch listener and `ed25519-dalek` mints the signing
-# key the daemon is asked to verify against. Dev-only - nothing in this
-# crate's production code fetches or verifies an update.
-ureq = "2"
+# The update-manifest tests in `tests_grabs.rs`: `ed25519-dalek` mints
+# the signing key the daemon is asked to verify against. Dev-only -
+# nothing in this crate's production code fetches or verifies an update.
+# `ureq` stood beside it until the ureq 3 port (TODO 326): those tests
+# reach the wire through `nzbfast_core::netfetch`, which is the only
+# place this workspace builds an agent, so the direct edge named
+# nothing.
 ed25519-dalek = "3"
 hex = "0.4"

@@ -60,6 +60,7 @@
 
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::crc32::{crc32, Crc32};
@@ -304,6 +305,330 @@ pub fn data_volume_matches(path: &Path, slot: &crate::rar50::Rev5DataVolume) -> 
     crc.finish() == slot.crc32
 }
 
+/// One read of the verify pass, and one message to the worker.
+///
+/// **This is a channel unit, not a read unit, and that is why it is not the
+/// 256 KiB the in-line loop above reads in.** Built at 256 KiB - to match
+/// that loop - the split LOST: 1.012 warm and 1.002 cold on the 256 MiB
+/// `-v16m` cell, against a base that was already 5.1 ms of user+sys cheaper.
+/// 304 MiB at 256 KiB is about 1,200 sends and 1,200 chances for the worker
+/// to park and be woken, and the `semaphore_wait_trap` that costs is charged
+/// as system time on a process that is already system-bound. At 1 MiB the
+/// same code wins 0.946 warm and 0.890 cold and adds 1.0 ms of CPU rather
+/// than 5.1. 4 MiB was measured too and is not better (0.961 / 0.878) for
+/// four times the resident bytes. Section 21's fold split never had to find
+/// this, because its windows are MiB-scale already.
+const VERIFY_CHUNK: usize = 1024 * 1024;
+
+/// How many `VERIFY_CHUNK` buffers the overlapped verify keeps alive, and
+/// therefore how far ahead of the CRC the reader may run. Two is the
+/// ping-pong `overlapped_stripe_loop` uses on the repair side, and is the
+/// smallest count that overlaps anything at all: the reader fills one while
+/// the worker consumes the other.
+///
+/// A deeper queue was the open question section 21.5 left, and it is
+/// answered: four buffers measure 0.948 warm and 0.890 cold against two at
+/// 0.946 and 0.890 - the same number twice. The reader is not waiting on the
+/// worker, so letting it run further ahead buys nothing.
+const VERIFY_BUFFERS: usize = 2;
+
+/// Whether a verify pass reads its volumes on the calling thread while a
+/// second thread CRCs them.
+///
+/// Same shape and same reasoning as the repair side's `read_fold_overlap`:
+/// the whole cost is one thread spawn per pass plus a channel send and a
+/// receive per 256 KiB chunk, none of which scales with the host's thread
+/// count, so the only question is whether the pass is long enough for a
+/// spawn to disappear into. The threshold is the same 4 MiB of total bytes,
+/// for the same reason - it is an order of magnitude past the spawn - and
+/// `rc` is far above it in every real shape: 272 MiB on a 256 MiB set.
+///
+/// Below it the pass reads in line, exactly as before: the unit tests' toy
+/// volumes, and a set of a few small parts where the spawn would be most of
+/// the work.
+fn verify_read_overlap(total_bytes: u64) -> bool {
+    const MIN_TOTAL_BYTES: u64 = 4 << 20;
+    #[cfg(test)]
+    match verify_read_overlap_override().load(std::sync::atomic::Ordering::Relaxed) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    total_bytes >= MIN_TOTAL_BYTES
+}
+
+/// The one cell `with_verify_read_overlap` writes and `verify_read_overlap`
+/// reads. 0 asks the size, 1 forces the overlapped arm, 2 forces the serial
+/// one - the same single-cell rule, and for the same reason, as the repair
+/// side's `read_fold_overlap_override`.
+#[cfg(test)]
+fn verify_read_overlap_override() -> &'static std::sync::atomic::AtomicUsize {
+    use std::sync::atomic::AtomicUsize;
+    static OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+    &OVERRIDE
+}
+
+/// Runs `body` with the read/CRC split forced on or off, so a test reaches
+/// BOTH arms without building a set large enough to clear the gate.
+/// Serialised against itself; the gate chooses an arm and never an answer,
+/// so what a concurrent test computes is unaffected.
+#[cfg(test)]
+pub(crate) fn with_verify_read_overlap<T>(on: bool, body: impl FnOnce() -> T) -> T {
+    use std::sync::atomic::Ordering;
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    verify_read_overlap_override().store(if on { 1 } else { 2 }, Ordering::Relaxed);
+    let out = body();
+    verify_read_overlap_override().store(0, Ordering::Relaxed);
+    out
+}
+
+/// One thing `rc`'s verify side must CRC before it can plan a repair.
+///
+/// The two halves of that side arrive in different shapes and that is the
+/// only reason this enum exists. A data volume is a PATH the verify opens
+/// itself, so a set of many parts needs one descriptor at a time rather than
+/// one each; a `.rev` payload is a RANGE of a source the caller already holds
+/// open, because the CLI has to parse each `.rev`'s header before it knows
+/// where the payload starts. Everything after the first read is identical -
+/// stream bytes, CRC them, compare against a declared CRC32 - which is what
+/// lets both halves feed ONE worker and one spawn.
+pub enum VerifyTarget<'a> {
+    /// A data volume on disk: open it, check its length against the slot,
+    /// then CRC the whole file. A volume that cannot be opened or is the
+    /// wrong length is `false` without being read.
+    Volume(&'a Path, &'a crate::rar50::Rev5DataVolume),
+    /// A byte range of an already-open source, and the CRC32 it must have.
+    Payload(&'a dyn RangeSource, Range<u64>, u32),
+}
+
+impl VerifyTarget<'_> {
+    /// Bytes this target will read if it is read at all, for the gate's
+    /// total. A volume that turns out to be the wrong length reads none of
+    /// them, which only ever makes the gate's estimate generous.
+    fn bytes(&self) -> u64 {
+        match self {
+            VerifyTarget::Volume(_, slot) => slot.file_size,
+            VerifyTarget::Payload(_, range, _) => range.end.saturating_sub(range.start),
+        }
+    }
+}
+
+/// Whether the bytes of `range` in `src` have the CRC32 `expected`, read in
+/// bounded chunks on the calling thread.
+///
+/// The serial half of a [`VerifyTarget::Payload`], and the body
+/// [`crate::rar50::verify_rev5_payload`] calls, so there is one copy of this
+/// loop rather than one per caller.
+pub fn payload_matches(src: &dyn RangeSource, range: &Range<u64>, expected: u32) -> Result<bool> {
+    let mut crc = Crc32::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut position = range.start;
+    while position < range.end {
+        // Clamp in u64 BEFORE narrowing: on a 32-bit target a remaining span
+        // that is a multiple of 4 GiB casts to 0 and the loop never advances.
+        // (nzbfast-local change, 27 Aug 2026 - re-apply on the next rars
+        // re-sync, see vendor/rars/VENDORING.md.)
+        let take = (range.end - position).min(buf.len() as u64) as usize;
+        src.read_at(position, &mut buf[..take])?;
+        crc.update(&buf[..take]);
+        position += take as u64;
+    }
+    Ok(crc.finish() == expected)
+}
+
+/// [`data_volume_matches`] over a whole set at once, reading on the calling
+/// thread while a worker thread CRCs what was read.
+///
+/// A thin wrapper over [`sources_match`], kept because it is the shape every
+/// caller that has only volumes wants, and because it is what the unit tests
+/// compare the batch against.
+pub fn data_volumes_match(volumes: &[(&Path, &crate::rar50::Rev5DataVolume)]) -> Vec<bool> {
+    let targets: Vec<VerifyTarget<'_>> = volumes
+        .iter()
+        .map(|(path, slot)| VerifyTarget::Volume(path, slot))
+        .collect();
+    sources_match(&targets)
+}
+
+/// Every CRC `rc`'s verify side owes, in ONE pass: the calling thread reads
+/// while a worker thread CRCs what was read.
+///
+/// **Why the batch exists at all.** `rc` reads the set twice and a bit.
+/// Counted on a 256 MiB `-v16m` set (17 data volumes, 3 recovery volumes),
+/// the verify side reads ~256 MiB of surviving data volumes to learn which
+/// are missing - a volume that is present but wrong is missing as far as the
+/// arithmetic is concerned - plus 48 MiB of `.rev` payloads to learn which
+/// equations are sound; and then
+/// [`crate::rar50::repair_rev5_volumes_streaming`] reads the survivors again
+/// to fold them. The repair half already overlaps its reads with its fold,
+/// and the data-volume half was overlapped before this; this covers the whole
+/// verify side, `.rev` payloads included. That last half is about 16% of the
+/// verify side's bytes on this shape and MORE on a set with more recovery
+/// rows - at `-rv10p` over 65 volumes a set carries 7 rows, not 3.
+///
+/// Measured warm on that set, `rc` spends about 20 ms of user time against
+/// 50 ms of system time, so the read path IS the process and the CRC fits
+/// inside it with room to spare - which is exactly the shape a split can
+/// hide.
+///
+/// **One call rather than one per half, deliberately.** Both halves want the
+/// same worker, and feeding them through one spawn means the worker is still
+/// CRCing the last data volume while the reader has already moved on to the
+/// first `.rev` - one drain at the end of the verify side instead of one per
+/// half. [`VerifyTarget`] exists only to carry the one difference between
+/// them, which is where the bytes come from.
+///
+/// The answers are per target and in the caller's order. A volume that cannot
+/// be opened, is the wrong length, or fails a read is `false`, which is what
+/// the single-volume call says too; a payload whose read fails is `false` for
+/// the same reason.
+///
+/// The buffers ping-pong by ownership rather than by lock, as on the repair
+/// side: the reader fills whichever it holds, sends it, and takes the other
+/// back when the worker is done. Volumes are opened one at a time, so a set
+/// of many parts does not need a descriptor each.
+pub fn sources_match(targets: &[VerifyTarget<'_>]) -> Vec<bool> {
+    let total: u64 = targets.iter().map(VerifyTarget::bytes).sum();
+    if !verify_read_overlap(total) {
+        return targets
+            .iter()
+            .map(|target| match target {
+                VerifyTarget::Volume(path, slot) => data_volume_matches(path, slot),
+                VerifyTarget::Payload(src, range, expected) => {
+                    payload_matches(*src, range, *expected).unwrap_or(false)
+                }
+            })
+            .collect();
+    }
+    overlapped_sources_match(targets)
+}
+
+/// The split arm of [`sources_match`]. Separate so the serial arm above stays
+/// readable as the thing this one has to agree with.
+fn overlapped_sources_match(targets: &[VerifyTarget<'_>]) -> Vec<bool> {
+    use std::sync::mpsc;
+
+    /// What the reader hands the worker.
+    enum Job {
+        /// Start a fresh target: reset the running CRC.
+        Begin,
+        /// CRC the first `len` bytes of this buffer, then give it back.
+        Chunk(Vec<u8>, usize),
+        /// The target ended: compare against the CRC it declares and record
+        /// the answer.
+        End(u32),
+        /// The target's read failed part way. Record a `false` and move on -
+        /// the bytes already folded into the running CRC are meaningless now,
+        /// and `Begin` clears them.
+        Abort,
+    }
+
+    let mut answers = vec![false; targets.len()];
+    // Which targets were actually streamed, in the order they were streamed.
+    // Everything else (unopenable, wrong length) the reader answers itself and
+    // never mentions to the worker.
+    let mut streamed: Vec<usize> = Vec::with_capacity(targets.len());
+
+    let verdicts = std::thread::scope(|scope| {
+        let (job_tx, job_rx) = mpsc::channel::<Job>();
+        let (back_tx, back_rx) = mpsc::channel::<Vec<u8>>();
+        let worker = scope.spawn(move || {
+            let mut out: Vec<bool> = Vec::new();
+            let mut crc = Crc32::new();
+            while let Ok(job) = job_rx.recv() {
+                match job {
+                    Job::Begin => crc = Crc32::new(),
+                    Job::Chunk(buf, len) => {
+                        crc.update(&buf[..len]);
+                        if back_tx.send(buf).is_err() {
+                            return out;
+                        }
+                    }
+                    Job::End(expected) => out.push(crc.finish() == expected),
+                    Job::Abort => out.push(false),
+                }
+            }
+            out
+        });
+
+        let mut spare: Vec<Vec<u8>> = (0..VERIFY_BUFFERS)
+            .map(|_| vec![0u8; VERIFY_CHUNK])
+            .collect();
+        for (index, target) in targets.iter().enumerate() {
+            // A volume's `FileSource` lives only as long as this iteration,
+            // which is what keeps a set of many parts to one descriptor at a
+            // time; a payload's source is the caller's and outlives us both.
+            let opened;
+            let (source, range, expected): (&dyn RangeSource, Range<u64>, u32) = match target {
+                VerifyTarget::Volume(path, slot) => {
+                    let Ok(file) = FileSource::open(path) else {
+                        continue;
+                    };
+                    if file.len() != slot.file_size {
+                        continue;
+                    }
+                    opened = file;
+                    (&opened, 0..slot.file_size, slot.crc32)
+                }
+                VerifyTarget::Payload(src, range, expected) => (*src, range.clone(), *expected),
+            };
+            streamed.push(index);
+            let _ = job_tx.send(Job::Begin);
+            let mut offset = range.start;
+            let mut failed = false;
+            while offset < range.end {
+                let mut buf = match spare.pop() {
+                    Some(buf) => buf,
+                    // The worker only stops answering if it is gone, which
+                    // inside this scope means it panicked. Nothing is left to
+                    // read with, so end the target as a failure and let the
+                    // remaining sends fall on a dead channel.
+                    None => match back_rx.recv() {
+                        Ok(buf) => buf,
+                        Err(_) => {
+                            failed = true;
+                            break;
+                        }
+                    },
+                };
+                // Clamp in u64 BEFORE narrowing, for the reason
+                // `payload_matches` gives: on a 32-bit target a remaining span
+                // that is a multiple of 4 GiB casts to 0.
+                let take = (range.end - offset).min(VERIFY_CHUNK as u64) as usize;
+                if source.read_at(offset, &mut buf[..take]).is_err() {
+                    spare.push(buf);
+                    failed = true;
+                    break;
+                }
+                offset += take as u64;
+                let _ = job_tx.send(Job::Chunk(buf, take));
+            }
+            let _ = job_tx.send(if failed {
+                Job::Abort
+            } else {
+                Job::End(expected)
+            });
+        }
+        // Dropping the sender is what ends the worker's loop and lets it hand
+        // back what it decided.
+        drop(job_tx);
+        worker.join().unwrap_or_default()
+    });
+
+    // A worker that panicked returns nothing, and every target it was asked
+    // about keeps the `false` it started with - the same answer an unreadable
+    // volume gets, which is the safe direction: `rc` then treats the volume as
+    // missing rather than folding bytes nobody checked.
+    for (slot, verdict) in streamed.iter().zip(verdicts) {
+        answers[*slot] = verdict;
+    }
+    answers
+}
+
 /// The default recovery volume count for a data volume count, which the
 /// reference spells `rv` with no number.
 ///
@@ -388,6 +713,166 @@ mod tests {
                 theirs,
                 "recovery volume {} does not match WinRAR's own bytes",
                 n + 1
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Both arms of the batched verify have to say what the
+    /// volume-at-a-time call says, on every shape `rc` can hand it: a
+    /// volume that matches, one whose bytes were changed under it, one
+    /// whose length changed, and one that is not there at all. The gate
+    /// is forced both ways, because no unit test can afford a set past
+    /// its 4 MiB threshold.
+    #[test]
+    fn the_batched_verify_agrees_with_the_one_at_a_time_call_on_both_arms() {
+        let dir = scratch("batchverify");
+        let sizes = [8192usize, 8192, 8192, 3001];
+        let data: Vec<PathBuf> = sizes
+            .iter()
+            .enumerate()
+            .map(|(index, &len)| {
+                let path = dir.join(format!("set.part{}.rar", index + 1));
+                let bytes: Vec<u8> = (0..len)
+                    .map(|byte| (byte * 31 + index * 17 + 3) as u8)
+                    .collect();
+                std::fs::write(&path, &bytes).expect("write volume");
+                path
+            })
+            .collect();
+        let outputs: Vec<PathBuf> = (1..=2)
+            .map(|n| dir.join(format!("set.part{n}.rev")))
+            .collect();
+        write_rev_volumes(&data, &outputs, |_, _| {}).expect("write");
+        let meta = read_rev5_meta(&FileSource::open(&outputs[0]).expect("open rev")).expect("meta");
+        let slots = meta.meta.data_volumes.clone();
+
+        // Volume 1 stays good. Volume 2 keeps its length and loses a byte,
+        // which only the CRC can catch. Volume 3 grows, which the length
+        // check catches first. Volume 4 is deleted.
+        let mut two = std::fs::read(&data[1]).expect("read");
+        two[100] ^= 0xff;
+        std::fs::write(&data[1], &two).expect("rewrite");
+        let mut three = std::fs::read(&data[2]).expect("read");
+        three.push(0);
+        std::fs::write(&data[2], &three).expect("rewrite");
+        std::fs::remove_file(&data[3]).expect("remove");
+
+        let pairs: Vec<(&Path, &crate::rar50::Rev5DataVolume)> = data
+            .iter()
+            .map(PathBuf::as_path)
+            .zip(slots.iter())
+            .collect();
+        let one_at_a_time: Vec<bool> = pairs
+            .iter()
+            .map(|(path, slot)| data_volume_matches(path, slot))
+            .collect();
+        assert_eq!(
+            one_at_a_time,
+            vec![true, false, false, false],
+            "the shapes this test means to cover"
+        );
+        for on in [false, true] {
+            let batched = with_verify_read_overlap(on, || data_volumes_match(&pairs));
+            assert_eq!(
+                batched, one_at_a_time,
+                "the batched verify disagrees with the single-volume call, overlap arm {on}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The `.rev` payloads go through the same batch as the data volumes, so
+    /// the same agreement has to hold for them: `sources_match` over a MIXED
+    /// list must say exactly what the one-at-a-time calls say, on both arms
+    /// of the gate.
+    ///
+    /// Five shapes, which are the ones the batch can actually be handed: a
+    /// sound volume; a sound payload; a payload with a byte flipped inside it
+    /// at the same length, which only the CRC can catch; a range that runs off
+    /// the end of its file, so the read fails part way; and an empty range.
+    /// All of them are far below the 4 MiB gate, which is why the override
+    /// exists - the same single-cell rule as `read_fold_overlap_override`.
+    #[test]
+    fn the_batch_agrees_with_the_one_at_a_time_call_on_rev_payloads_too() {
+        let dir = scratch("revbatch");
+        let sizes = [4096usize, 4096, 4096];
+        let data: Vec<PathBuf> = sizes
+            .iter()
+            .enumerate()
+            .map(|(index, &size)| {
+                let path = dir.join(format!("set.part{}.rar", index + 1));
+                let bytes: Vec<u8> = (0..size).map(|n| (n as u8).wrapping_mul(7)).collect();
+                std::fs::write(&path, &bytes).expect("write volume");
+                path
+            })
+            .collect();
+        let outputs: Vec<PathBuf> = (1..=2)
+            .map(|n| dir.join(format!("set.part{n}.rev")))
+            .collect();
+        write_rev_volumes(&data, &outputs, |_, _| {}).expect("write");
+        let metas: Vec<crate::rar50::Rev5VolumeRef> = outputs
+            .iter()
+            .map(|path| read_rev5_meta(&FileSource::open(path).expect("open rev")).expect("meta"))
+            .collect();
+        let slots = metas[0].meta.data_volumes.clone();
+
+        // The second `.rev` loses a byte inside its payload: same length, so
+        // only the CRC can see it.
+        let mut second = std::fs::read(&outputs[1]).expect("read rev");
+        let at = metas[1].payload.start as usize;
+        second[at] ^= 0xff;
+        std::fs::write(&outputs[1], &second).expect("rewrite rev");
+
+        let sources: Vec<FileSource> = outputs
+            .iter()
+            .map(|path| FileSource::open(path).expect("open rev"))
+            .collect();
+        // A range that runs past the real file, so the read fails part way and
+        // the answer must be `false` rather than a panic.
+        let short = dir.join("short.bin");
+        std::fs::write(&short, [0u8; 64]).expect("write short");
+        let short_source = FileSource::open(&short).expect("open short");
+
+        let targets: Vec<VerifyTarget<'_>> = vec![
+            VerifyTarget::Volume(data[0].as_path(), &slots[0]),
+            VerifyTarget::Payload(
+                &sources[0],
+                metas[0].payload.clone(),
+                metas[0].meta.payload_crc32,
+            ),
+            VerifyTarget::Payload(
+                &sources[1],
+                metas[1].payload.clone(),
+                metas[1].meta.payload_crc32,
+            ),
+            VerifyTarget::Payload(&short_source, 0..4096, 0),
+            VerifyTarget::Payload(&sources[0], 0..0, Crc32::new().finish()),
+        ];
+        let one_at_a_time: Vec<bool> = targets
+            .iter()
+            .map(|target| match target {
+                VerifyTarget::Volume(path, slot) => data_volume_matches(path, slot),
+                VerifyTarget::Payload(src, range, expected) => {
+                    payload_matches(*src, range, *expected).unwrap_or(false)
+                }
+            })
+            .collect();
+        assert_eq!(
+            one_at_a_time,
+            vec![true, true, false, false, true],
+            "the shapes this test means to cover"
+        );
+        // ...and the sound payload really does reach the same answer through
+        // `verify_rev5_payload`, so the two entry points cannot drift apart.
+        assert!(verify_rev5_payload(&sources[0], &metas[0]).expect("verify"));
+        assert!(!verify_rev5_payload(&sources[1], &metas[1]).expect("verify"));
+
+        for on in [false, true] {
+            let batched = with_verify_read_overlap(on, || sources_match(&targets));
+            assert_eq!(
+                batched, one_at_a_time,
+                "the batched verify disagrees with the one-at-a-time call, overlap arm {on}"
             );
         }
         std::fs::remove_dir_all(&dir).ok();

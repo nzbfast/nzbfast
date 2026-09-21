@@ -28,7 +28,7 @@
 #[path = "ratio_lab/regions.rs"]
 mod regions;
 use rars::codec::rar50::ratio::{Encoder, FilteredEncoder, Policy};
-use rars::codec::rar50::{EncodeOptions, Rar50FilterKind, Rar50FilterSpec, Unpack50Encoder};
+use rars::codec::rar50::{EncodeOptions, Rar50FilterKind, Rar50FilterSpec, Rar50Encoder};
 use rars::crc32::crc32;
 use std::{fs, path::Path, time::Instant};
 
@@ -154,7 +154,7 @@ fn archive(files: &[(String, Vec<u8>)], dict: usize, solid: bool, mode: &str) ->
         .with_lazy_matching(true)
         .with_max_match_distance(dict)
         .with_optimal_parse(optimal);
-    let mut filtered = Unpack50Encoder::with_options(filter_options);
+    let mut filtered = Rar50Encoder::with_options(filter_options);
     let mut tree_filtered = FilteredEncoder::new(dict, optimal);
     let channels = mode
         .strip_prefix("delta")
@@ -166,7 +166,7 @@ fn archive(files: &[(String, Vec<u8>)], dict: usize, solid: bool, mode: &str) ->
             data.clone()
         } else if mode.starts_with("region") {
             if !solid || i == 0 {
-                filtered = Unpack50Encoder::with_options(filter_options);
+                filtered = Rar50Encoder::with_options(filter_options);
             }
             let span = if mode == "region64" {
                 64 * 1024
@@ -189,7 +189,7 @@ fn archive(files: &[(String, Vec<u8>)], dict: usize, solid: bool, mode: &str) ->
             }
         } else if let Some(channels) = channels {
             if !solid || i == 0 {
-                filtered = Unpack50Encoder::with_options(filter_options);
+                filtered = Rar50Encoder::with_options(filter_options);
             }
             if tree {
                 let specs = if data.is_empty() {

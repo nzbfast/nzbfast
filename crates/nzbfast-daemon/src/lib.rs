@@ -211,23 +211,16 @@ pub mod spare;
 
 pub mod giveup;
 
-/// §310 stage 2: the heal wiring - settle-manifest damage to a job that
-/// re-fetches only what is broken, donating from the library folder.
 pub mod heal;
 
-/// §310: the scheduled heal - the same two functions on a cadence, with
-/// the ceilings a road nobody clicked has to bring of its own.
 pub mod healauto;
 
 pub mod histmigrate;
 
 pub mod histstore;
 
-/// §7a: the queue's own append-only store, history's `histstore` shape
-/// applied to the queue - see that module's header for the motivation.
 pub mod queuestore;
 
-/// §282 section C: hunt for a replacement when a job cannot complete.
 pub mod hunt;
 
 // insurance.rs: retention insurance - bank a deferred row's
@@ -420,6 +413,12 @@ use stream::*;
 
 pub mod httputil;
 
+// TODO 19 (public request #4): the optional dashboard login - password
+// hashing, the session store and the cookie plumbing. Not glob-imported:
+// every caller is a route in the bin and names it by path, and the
+// module's `check`/`create` are generic enough words to want the prefix.
+pub mod websession;
+
 // Not glob-imported: only the handoff redeem in `bootstrap` asks it, by
 // path. Which local account owns the far end of a loopback connection.
 pub mod peeracct;
@@ -474,6 +473,9 @@ pub mod history;
 
 #[cfg(test)]
 mod history_space_tests;
+
+#[cfg(test)]
+mod persist_fault_tests;
 
 pub mod sched;
 use sched::*;
@@ -858,7 +860,7 @@ pub fn live_daemons() -> usize {
 }
 
 /// In-process stop for embedded builds (the iOS staticlib, where exec
-/// and process exit are not available): [`serve`] returns instead of
+/// and process exit are not available): `serve` returns instead of
 /// parking and the HTTP workers wind up, closing the listener. This is
 /// NOT the graceful wind-down the signal path runs - the embedded host
 /// stops the tokio runtime after serve() returns, which is what cancels
@@ -868,7 +870,7 @@ pub fn live_daemons() -> usize {
 ///
 /// Stopping the runtime is NOT enough on its own: the auxiliary lanes
 /// are plain OS threads, invisible to `shutdown_timeout`, so this also
-/// wakes the blocking [`stop_gate`] every [`RunStop::sleep`] waits on.
+/// wakes the blocking `stop_gate` every [`RunStop::sleep`] waits on.
 // dead_code: only the embedded crate root (lib.rs, `ffi` feature) has a
 // caller; the CLI daemon stops by process exit. The module compiles
 // under both roots, so the bin build sees this as dead.

@@ -9,6 +9,47 @@ use super::*;
 use crate::sync::MutexExt;
 
 impl Extractor {
+    /// TODO 118.2 (b): would [`Self::try_attach_sevenz`] act on this head
+    /// if only the slot's size were trusted? True for a 7z-shaped slot -
+    /// a continuation part by name, or a start header behind
+    /// `archive_base` - that the chase gates admit and whose `size` is
+    /// still a bare, unrepeated claim ([`Slot::size_agreed`] is 0: an
+    /// agreed claim suffices here, for the reason given there). The 7z
+    /// reader seeks to the container's END to
+    /// open it and a split's whole geometry is `part 1's size`, so unlike
+    /// the RAR chase this one cannot run open-ended and must not run on a
+    /// claim the poster may have randomized; the caller parks the head
+    /// until the ladder closes ([`Extractor::resniff_parked_head`]).
+    /// A slot with NO claim at all is not parked: the attach refuses it
+    /// today and nothing would ever release it.
+    pub(super) fn sevenz_awaits_size(
+        &self,
+        inner: &Inner,
+        slot: usize,
+        data: &[u8],
+        archive_base: u64,
+    ) -> bool {
+        let s = &inner.slots[slot];
+        if (self.depth == 0 && !inner.top_sevenz_on)
+            || !inner.nested_on
+            || !inner.sevenz_on
+            || inner.protect_sources
+            || s.size == 0
+            || s.size_agreed() != 0
+            || inner.self_weak.upgrade().is_none()
+        {
+            return false;
+        }
+        if matches!(sevenz_part_name(&s.name), Some((_, idx)) if idx > 1) {
+            return true;
+        }
+        usize::try_from(archive_base)
+            .ok()
+            .and_then(|b| data.get(b..))
+            .and_then(sevenz_start_header)
+            .is_some()
+    }
+
     /// Attach the 7z chase (phase 3) to a child slot whose offset-0
     /// sniff found 7z magic: parse the start header for the end-header
     /// (footer) range, flip the slot to SevenZ, seed a frontier buffer
@@ -58,7 +99,15 @@ impl Extractor {
         {
             return Ok(false);
         }
-        let size = inner.slots[slot].size;
+        // Trusted by construction on the download path: an untrusted
+        // 7z-shaped head parks in `sniff_and_route` (`sevenz_awaits_size`)
+        // and comes back here only once the ladder closed. A nested
+        // delivery sets the size directly from the parent's entry.
+        // `trusted_size` and NOT `size`: where a witness corroborated a
+        // length the poster's declaration contradicts, the declaration
+        // stays on the slot for the completion census and the container
+        // is opened at the truth.
+        let size = inner.slots[slot].trusted_size();
         let part = sevenz_part_name(&inner.slots[slot].name);
         // A continuation part: no signature to sniff, so its name is the
         // only thing that identifies it. It joins the container open
@@ -195,7 +244,8 @@ impl Extractor {
         ctl: Arc<SevenZCtl>,
         idx: u32,
     ) -> io::Result<bool> {
-        let size = inner.slots[slot].size;
+        // `trusted_size`, for the reason `sevenz_try_attach` gives.
+        let size = inner.slots[slot].trusted_size();
         let buf = Arc::new(FrontierBuffer::new_gated(
             size,
             self.chase_gate(inner, slot),
@@ -1784,6 +1834,83 @@ mod tests {
             );
             assert_eq!(std::fs::read(dir.join("F.bin")).unwrap(), f, "order {t}");
             // The point of the whole exercise: no materialized archive.
+            assert_eq!(dir_files(&dir), vec!["F.bin".to_string()], "order {t}");
+            assert_eq!(shape_of(&ex), ["7z", "one-pass"], "order {t}");
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /// TODO 118.2 (b): the random-`size=` poster on a posted `.7z`. The
+    /// 7z reader seeks to the container's END to open it, so a chase
+    /// needs the true length at attach and can never run open-ended the
+    /// way the RAR chase does. It therefore does not attach on a claim
+    /// at all: the offset-0 sniff PARKS until the slot's size is trusted
+    /// (a second agreeing article, or the engine's exact witness), and
+    /// the parked head is re-sniffed by the write that brings the trust.
+    /// Every article here carries a different false claim and the exact
+    /// witness rides with the last segment, in all three orders - the
+    /// natural one is the worst, the head arriving first on a claim that
+    /// nothing corroborates until the very end.
+    #[test]
+    fn sevenz_top_level_with_random_false_sizes_chases_one_pass_once_corroborated() {
+        // `noisy`, not `payload`: the latter packs to a few hundred
+        // bytes, ONE article, and a one-article file's exact witness
+        // lands before its head - the shape under test never happens.
+        let f = noisy(280_000, 122);
+        let arch = sevenz_archive(&[("F.bin", &f)], None, false);
+        let art = 7000usize;
+        let n_arts = arch.len().div_ceil(art);
+        assert!(n_arts >= 10, "want many articles, got {n_arts}");
+        // A real shuffle for the third order: the `(i * 7 + 3) % n`
+        // stride the sibling tests use is a permutation only when 7 and
+        // `n` are coprime, and at this fixture's count it fed three
+        // articles of twenty-one.
+        let mut shuffled: Vec<usize> = (0..n_arts).collect();
+        let mut state = 122u64;
+        for i in (1..shuffled.len()).rev() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            shuffled.swap(i, (state >> 33) as usize % (i + 1));
+        }
+        let orders: Vec<Vec<usize>> = vec![
+            (0..n_arts).collect(),       // tail last
+            (0..n_arts).rev().collect(), // tail first
+            shuffled,
+        ];
+        for (t, order) in orders.iter().enumerate() {
+            assert_eq!(
+                {
+                    let mut o = order.clone();
+                    o.sort_unstable();
+                    o
+                },
+                (0..n_arts).collect::<Vec<_>>(),
+                "order {t} is not a permutation"
+            );
+            let dir = tmpdir(&format!("7z-top-random-size{t}"));
+            let ex = Arc::new(Extractor::new(&dir, 1, true));
+            ex.anchor();
+            let mut seen = vec![false; n_arts];
+            for &i in order {
+                if std::mem::replace(&mut seen[i], true) {
+                    continue;
+                }
+                let s = i * art;
+                let e = (s + art).min(arch.len());
+                let lie = 3_000 + ((i * 7_919) % 200_000) as u64;
+                assert_ne!(lie, arch.len() as u64);
+                if i + 1 == n_arts {
+                    ex.corroborate_size(0, arch.len() as u64).unwrap();
+                }
+                ex.write(0, "release.7z", lie, s as u64, &arch[s..e])
+                    .unwrap();
+            }
+            let rep = finish_within(&ex, 60).unwrap();
+            assert!(
+                rep.fallbacks.is_empty(),
+                "order {t}: a random size= claim bounded the 7z chase: {:?}",
+                rep.fallbacks
+            );
+            assert_eq!(std::fs::read(dir.join("F.bin")).unwrap(), f, "order {t}");
             assert_eq!(dir_files(&dir), vec!["F.bin".to_string()], "order {t}");
             assert_eq!(shape_of(&ex), ["7z", "one-pass"], "order {t}");
             std::fs::remove_dir_all(&dir).unwrap();

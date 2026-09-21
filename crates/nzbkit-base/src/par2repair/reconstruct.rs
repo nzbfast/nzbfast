@@ -650,6 +650,59 @@ impl Drop for ForcedSolveBudget {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Every back-substitution plan [`Reconstructor::build`] has USED on
+    /// this thread since the last [`BacksubPlanTally`]: the arm's label,
+    /// `m`, and the slab width that construction ran at. One entry per
+    /// SWEEP, whether the plan was computed for it or handed in.
+    static BACKSUB_PLANS: std::cell::RefCell<Vec<(&'static str, usize, usize)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// Every plan actually COMPUTED on this thread - the `O(m^3)`
+    /// inverse on the unstructured arm. The pair is the whole of what
+    /// TODO 353 is about: sweeps against solves of the same system.
+    static BACKSUB_COMPUTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Collect the back-substitution plans built on this thread. Test-only,
+/// and the instrument TODO 353 was opened to read: the plan is a
+/// function of the recovery EXPONENTS and the missing set, and a slab is
+/// a byte range over both, so a driver that builds one per sweep builds
+/// the same one every time. Counting them is the half a wall-clock
+/// timing cannot state on its own.
+#[cfg(test)]
+pub(crate) struct BacksubPlanTally(Vec<(&'static str, usize, usize)>, usize);
+
+#[cfg(test)]
+impl BacksubPlanTally {
+    /// Start a fresh tally, stashing whatever the thread had already
+    /// accumulated so a nested use restores it.
+    pub(crate) fn take() -> Self {
+        Self(
+            BACKSUB_PLANS.with(|p| std::mem::take(&mut *p.borrow_mut())),
+            BACKSUB_COMPUTES.with(|c| c.replace(0)),
+        )
+    }
+    /// One entry per CONSTRUCTION since [`take`](Self::take) - per
+    /// sweep of a slabbed solve.
+    pub(crate) fn plans(&self) -> Vec<(&'static str, usize, usize)> {
+        BACKSUB_PLANS.with(|p| p.borrow().clone())
+    }
+    /// How many of those constructions solved a system rather than
+    /// reusing a hoisted plan.
+    pub(crate) fn computed(&self) -> usize {
+        BACKSUB_COMPUTES.with(|c| c.get())
+    }
+}
+
+#[cfg(test)]
+impl Drop for BacksubPlanTally {
+    fn drop(&mut self) {
+        BACKSUB_PLANS.with(|p| *p.borrow_mut() = std::mem::take(&mut self.0));
+        BACKSUB_COMPUTES.with(|c| c.set(self.1));
+    }
+}
+
 /// How the feed pipeline between the readers and the fold worker is
 /// sized: the batch the readers split, how deep the channel queues, how
 /// much the worker coalesces into one fold call, and how many arenas the
@@ -1134,6 +1187,218 @@ impl std::ops::Deref for RebuiltBlock {
     }
 }
 
+/// The back-substitution plan for ONE repair: which arm the solve takes
+/// and the factorization or inverse it takes it with.
+///
+/// SEPARATE FROM THE CONSTRUCTOR SINCE 20 SEP 2026 (TODO 353) because a
+/// slabbed solve calls that constructor once per sweep and this is the
+/// half of it that does not vary. `A[r][c] = g_{missing[c]}^{e_r}` is
+/// built from the recovery EXPONENTS and the input base logs; a slab is
+/// a byte range over the same exponents and the same missing set, and
+/// both drivers pin one recovery selection for the whole repair (the
+/// disk driver refuses outright if it changes between slabs). So every
+/// sweep past the first was rebuilding a plan it already had.
+///
+/// It is `Arc`-shared rather than cloned, so the hoist does not move the
+/// memory peak: the dense arm's `~4*m^2` bytes were live for the whole of
+/// each sweep already, and one plan is live at a time either way.
+#[derive(Clone)]
+pub(crate) struct BackSubPlan {
+    solve: std::sync::Arc<PlanInner>,
+    /// Which arm, for the timing line and [`Reconstructor::backsub_arm`].
+    label: &'static str,
+    /// The Gauss-Jordan arm, whose memory bound is re-asserted per sweep
+    /// against that sweep's own block size. The other arms have no such
+    /// check to keep.
+    unstructured: bool,
+}
+
+/// The plan and its memory-floor charge, behind ONE `Arc` so the charge
+/// is taken once and released when the last sweep lets go of it.
+pub(super) struct PlanInner {
+    pub(super) solve: BackSub,
+    /// UNCHARGED UNTIL 20 SEP 2026, and that was a hole in the floor
+    /// rather than a saving: the dense arm's explicit inverse is `m`
+    /// rows of `m` u16, which is 200 MB at m = 10,000 and up to 134 MB
+    /// at the repair cap, live from construction to the last sweep's
+    /// back-substitution - and `Sub::RepairWork` could not see a byte of
+    /// it. TODO 353 asked for the hoist's peak to be PRICED with this
+    /// gauge, which is not a question the gauge could answer while the
+    /// allocation it turns on was invisible to it. The structured arms
+    /// carry no charge here: the Forney plan's tables are `O(m)` and the
+    /// Vandermonde arm's inverse is the same `BackSub::Dense` shape
+    /// charged the same way.
+    _charge: crate::memgauge::Charge,
+}
+
+impl BackSubPlan {
+    /// The plan for `missing` rebuilt from recovery exponents `exps`.
+    ///
+    /// `block_size` is read for the dense arm's memory bound ONLY. A
+    /// driver hoisting this above its slab loop therefore has to pass
+    /// the width the SWEEPS will run at, not the whole block size - and
+    /// `build` re-asks that same bound per sweep, so a hoist cannot
+    /// smuggle a slab past it.
+    pub(crate) fn compute(
+        base_logs: &[u32],
+        missing: &[usize],
+        exps: &[u32],
+        block_size: usize,
+        control: &control::RepairControl,
+    ) -> Result<BackSubPlan, RepairError> {
+        let t_inv = std::time::Instant::now();
+        // Consecutive exponents (both repair paths pick the SMALLEST
+        // available, so this is the norm - gaps mean recovery packets
+        // were themselves lost) make A a Vandermonde in the bases times
+        // a diagonal, whose explicit inverse costs O(m²) instead of
+        // Gauss-Jordan's O(m³).
+        //
+        // Past `forney::backsub_gate` the same factorization is used a
+        // second way: the solve runs through two transforms and the
+        // explicit inverse is never built at all (m² entries - 134 MB
+        // and 62 ms at the repair cap), so this is a fork, not a stage.
+        //
+        // THE SAME RULE `selection_structured` answers for a driver's
+        // plan, from the same two helpers, so the plan and this fork
+        // cannot disagree about which arm a selection takes.
+        let consecutive = exponents_consecutive(exps);
+        let ks: Vec<u32> = missing.iter().map(|&j| base_logs[j]).collect();
+        let progression = if !consecutive && progressions_enabled() {
+            progression_parameters(&ks, exps)
+        } else {
+            None
+        };
+        let (solve_ks, solve_e0) = progression
+            .as_ref()
+            .map(|(k, e)| (k.as_slice(), *e))
+            .unwrap_or((&ks, exps.first().copied().unwrap_or(0)));
+        let structured = if consecutive || progression.is_some() {
+            if forney::backsub_gate(missing.len()) {
+                ForneyPlan::prepare(solve_ks, solve_e0).map(BackSub::Forney)
+            } else {
+                invert_vandermonde(solve_ks, solve_e0).map(BackSub::Dense)
+            }
+        } else {
+            None
+        };
+        let (label, unstructured, solve) = match structured {
+            Some(s @ BackSub::Forney(_)) => ("forney", false, s),
+            Some(s) => {
+                // `--fast` arms the joint solve INSIDE the Forney
+                // route; a repair that takes any other route never
+                // offers it a decision to make, and a CLI that only
+                // watched `joint_stripe` would report nothing at all.
+                // Recorded here because this is the one place the fork
+                // is taken (TODO 340). It is a LATCH, so a hoist that
+                // reaches it once rather than once per sweep records
+                // the same thing.
+                forney::note_joint_not_forney();
+                ("vandermonde", false, s)
+            }
+            None => {
+                // NO STRUCTURE TO EXPLOIT, so this is Gauss-Jordan on an
+                // explicit m x m: the `O(m^3)` setup and `~4*m^2` bytes.
+                // `check_repair_dim` admitted this m against the FORNEY
+                // arm's bound - it runs before the exponents are examined
+                // and cannot know the set would land here - so the DENSE
+                // arm's own bound is re-asserted at the point the arm is
+                // actually chosen. Reached when the recovery exponents
+                // are neither consecutive nor a relabelable progression,
+                // which means recovery packets were themselves lost.
+                //
+                // Since 8 Sep 2026 that bound is MEMORY rather than a
+                // flat dimension, so this re-assert changed with it: the
+                // check is the same one `check_repair_dim_within` makes,
+                // asked again now that the arm is known. A set that fits
+                // is repaired, slowly if it must be; only one that does
+                // not fit is refused, and it is refused naming memory.
+                // See the block on `check_repair_dim` for the four
+                // premises the old flat cap rested on and which of them
+                // survived being measured. `build` asks it AGAIN per
+                // sweep when a hoisted plan is handed in, which is what
+                // keeps it a per-slab check.
+                forney::note_joint_not_forney();
+                check_repair_dim_dense(missing.len(), block_size, control)?;
+                // The `O(m^3)` elimination below is minutes at the sizes
+                // that make the unstructured arm worth warning about, so
+                // it reports per matrix COLUMN and is cancellable there.
+                //
+                // WHICH ARM, before it reports a column. This is the
+                // FIRST of the two `Solve` entries a sweep makes and
+                // the only one that runs before the fold; a sink told
+                // nothing weighs the pair as one phase, and the second
+                // arm - the back-substitution, twenty seconds of the
+                // measured minute - is then swallowed whole by a bar
+                // this one already walked to the top of its band. See
+                // `control::SolveArm` and TODO 352.
+                //
+                // AND SINCE TODO 353 IT IS ANNOUNCED ONCE PER REPAIR
+                // rather than once per sweep, because this whole fork
+                // now runs once: a slabbed repair's sweeps 1..N compute
+                // no inverse and so announce no `Inverse` arm, which is
+                // the unsplit case the line above describes and the
+                // band already handles.
+                control.solve_arm(control::SolveArm::Inverse);
+                control.begin(control::RepairPhase::Solve, missing.len() as u64);
+                // A[r][c] = g_{missing[c]}^{e_r} = 2^{k·e mod 65535}
+                let a: Vec<Vec<u16>> = exps
+                    .iter()
+                    .map(|e| {
+                        missing
+                            .iter()
+                            .map(|&j| gf16::pow2(base_logs[j] as u64 * *e as u64))
+                            .collect()
+                    })
+                    .collect();
+                let inv = invert_controlled(a, control)?;
+                control.finish(control::RepairPhase::Solve);
+                ("gauss-jordan", true, BackSub::Dense(inv))
+            }
+        };
+        if std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
+            info!(
+                target: "repair-timing",
+                "back-substitution setup ({}x{0}, {label}): {:.2?}",
+                missing.len(),
+                t_inv.elapsed()
+            );
+        }
+        #[cfg(test)]
+        BACKSUB_COMPUTES.with(|c| c.set(c.get() + 1));
+        let charged = match &solve {
+            BackSub::Dense(inv) => inv.iter().map(|r| (r.len() * 2) as u64).sum(),
+            BackSub::Forney(_) => 0,
+        };
+        Ok(BackSubPlan {
+            solve: std::sync::Arc::new(PlanInner {
+                solve,
+                _charge: crate::memgauge::Charge::new(crate::memgauge::Sub::RepairWork, charged),
+            }),
+            label,
+            unstructured,
+        })
+    }
+
+    /// The plan a DRIVER hoists above its slab loop, from the inputs it
+    /// has there: the recovery selection it has pinned for the whole
+    /// repair, and the width its sweeps will run at.
+    pub(crate) fn for_repair(
+        n_inputs: usize,
+        missing: &[usize],
+        exps: &[u32],
+        slab_width: usize,
+        control: &control::RepairControl,
+    ) -> Result<BackSubPlan, RepairError> {
+        let base_logs = input_base_logs(n_inputs)?;
+        if let Some(&j) = missing.iter().find(|&&j| j >= n_inputs) {
+            return Err(RepairError::Malformed(format!(
+                "missing index {j} out of range ({n_inputs} inputs)"
+            )));
+        }
+        BackSubPlan::compute(&base_logs, missing, exps, slab_width, control)
+    }
+}
+
 impl Reconstructor {
     /// `recovery` payloads are only READ here (widened into the u16
     /// syndrome rows before the fold worker spawns), so borrowed slices
@@ -1174,7 +1439,7 @@ impl Reconstructor {
     /// and neither is reachable from the driver: the Gauss-Jordan
     /// inverse built below (`O(m^3)`, and the whole of the unstructured
     /// arm's setup), and the dense back-substitution in
-    /// [`finish_blocks_reported`](Self::finish_blocks_reported). Both
+    /// `finish_blocks_reported`. Both
     /// take the control from here. See `par2repair::control`.
     ///
     /// The FOLD WORKER is neither: it is spawned below and outlives
@@ -1207,7 +1472,31 @@ impl Reconstructor {
         control: &control::RepairControl,
     ) -> Result<Reconstructor, RepairError> {
         let borrowed: Vec<(u32, &[u8])> = recovery.iter().map(|(e, d)| (*e, d.as_ref())).collect();
-        Self::build(block_size, n_inputs, missing, borrowed, path, control)
+        Self::build(block_size, n_inputs, missing, borrowed, path, control, None)
+    }
+
+    /// [`new_controlled`](Self::new_controlled) with the sweep-invariant
+    /// half of the construction handed in (TODO 353). Taken by both
+    /// drivers inside their slab loops.
+    pub(super) fn new_controlled_planned<D: AsRef<[u8]>>(
+        block_size: usize,
+        n_inputs: usize,
+        missing: &[usize],
+        recovery: &[(u32, D)],
+        path: SyndromePath,
+        control: &control::RepairControl,
+        plan: &BackSubPlan,
+    ) -> Result<Reconstructor, RepairError> {
+        let borrowed: Vec<(u32, &[u8])> = recovery.iter().map(|(e, d)| (*e, d.as_ref())).collect();
+        Self::build(
+            block_size,
+            n_inputs,
+            missing,
+            borrowed,
+            path,
+            control,
+            Some(plan),
+        )
     }
 
     /// [`new_controlled`](Self::new_controlled) over OWNED recovery
@@ -1225,10 +1514,14 @@ impl Reconstructor {
         recovery: Vec<(u32, Vec<u8>)>,
         path: SyndromePath,
         control: &control::RepairControl,
+        plan: Option<&BackSubPlan>,
     ) -> Result<Reconstructor, RepairError> {
-        Self::build(block_size, n_inputs, missing, recovery, path, control)
+        Self::build(block_size, n_inputs, missing, recovery, path, control, plan)
     }
 
+    /// `plan` is the back-substitution plan a slabbed driver hoisted
+    /// above its sweep loop (TODO 353); `None` computes one here, which
+    /// is what every direct caller and every one-slab repair does.
     fn build<D: AsRef<[u8]>>(
         block_size: usize,
         n_inputs: usize,
@@ -1236,6 +1529,7 @@ impl Reconstructor {
         recovery: Vec<(u32, D)>,
         path: SyndromePath,
         control: &control::RepairControl,
+        plan: Option<&BackSubPlan>,
     ) -> Result<Reconstructor, RepairError> {
         if block_size == 0 || !block_size.is_multiple_of(2) {
             return Err(RepairError::Malformed(format!(
@@ -1261,103 +1555,35 @@ impl Reconstructor {
                 "missing index {j} out of range ({n_inputs} inputs)"
             )));
         }
-        let t_inv = std::time::Instant::now();
-        // Consecutive exponents (both repair paths pick the SMALLEST
-        // available, so this is the norm - gaps mean recovery packets
-        // were themselves lost) make A a Vandermonde in the bases times
-        // a diagonal, whose explicit inverse costs O(m²) instead of
-        // Gauss-Jordan's O(m³).
-        //
-        // Past `forney::backsub_gate` the same factorization is used a
-        // second way: the solve runs through two transforms and the
-        // explicit inverse is never built at all (m² entries - 134 MB
-        // and 62 ms at the repair cap), so this is a fork, not a stage.
-        //
-        // THE SAME RULE `selection_structured` answers for a driver's
-        // plan, from the same two helpers, so the plan and this fork
-        // cannot disagree about which arm a selection takes.
         let exps: Vec<u32> = recovery.iter().map(|r| r.0).collect();
-        let consecutive = exponents_consecutive(&exps);
-        let ks: Vec<u32> = missing.iter().map(|&j| base_logs[j]).collect();
-        let progression = if !consecutive && progressions_enabled() {
-            progression_parameters(&ks, &exps)
-        } else {
-            None
-        };
-        let (solve_ks, solve_e0) = progression
-            .as_ref()
-            .map(|(k, e)| (k.as_slice(), *e))
-            .unwrap_or((&ks, recovery.first().map_or(0, |r| r.0)));
-        let structured = if consecutive || progression.is_some() {
-            if forney::backsub_gate(missing.len()) {
-                ForneyPlan::prepare(solve_ks, solve_e0).map(BackSub::Forney)
-            } else {
-                invert_vandermonde(solve_ks, solve_e0).map(BackSub::Dense)
+        // ONE PLAN PER REPAIR, NOT ONE PER SWEEP (TODO 353). A slabbed
+        // solve calls this constructor once per slab, and until 20 Sep
+        // 2026 each of those calls rebuilt the plan below from scratch -
+        // the same plan every time, because it is a function of the
+        // recovery EXPONENTS and the missing set and a slab is a byte
+        // range over both. On the unstructured arm that is the `O(m^3)`
+        // Gauss-Jordan inverse, 39.6 s of a 61.6 s repair at m = 10,000
+        // (`research/REPAIR-ROW-ACCEPTANCE-2026-09-18.md`), paid
+        // `plan.slabs` times for one answer. The drivers now compute it
+        // above their slab loop and hand it in; a direct caller that
+        // hands in `None` gets the old behaviour, which is also the
+        // one-slab case where there was never anything to hoist.
+        //
+        // WHAT STAYS PER SWEEP is every check that reads `block_size`,
+        // which the slab genuinely moves: `check_repair_dim` above, and
+        // the dense arm's own memory bound re-asserted here.
+        let plan = match plan {
+            Some(p) => {
+                if p.unstructured {
+                    check_repair_dim_dense(missing.len(), block_size, control)?;
+                }
+                p.clone()
             }
-        } else {
-            None
+            None => BackSubPlan::compute(&base_logs, missing, &exps, block_size, control)?,
         };
-        let (label, solve) = match structured {
-            Some(s @ BackSub::Forney(_)) => ("forney", s),
-            Some(s) => {
-                // `--fast` arms the joint solve INSIDE the Forney
-                // route; a repair that takes any other route never
-                // offers it a decision to make, and a CLI that only
-                // watched `joint_stripe` would report nothing at all.
-                // Recorded here because this is the one place the fork
-                // is taken (TODO 340).
-                forney::note_joint_not_forney();
-                ("vandermonde", s)
-            }
-            None => {
-                // NO STRUCTURE TO EXPLOIT, so this is Gauss-Jordan on an
-                // explicit m x m: the `O(m^3)` setup and `~4*m^2` bytes.
-                // `check_repair_dim` admitted this m against the FORNEY
-                // arm's bound - it runs before the exponents are examined
-                // and cannot know the set would land here - so the DENSE
-                // arm's own bound is re-asserted at the point the arm is
-                // actually chosen. Reached when the recovery exponents
-                // are neither consecutive nor a relabelable progression,
-                // which means recovery packets were themselves lost.
-                //
-                // Since 8 Sep 2026 that bound is MEMORY rather than a
-                // flat dimension, so this re-assert changed with it: the
-                // check is the same one `check_repair_dim_within` makes,
-                // asked again now that the arm is known. A set that fits
-                // is repaired, slowly if it must be; only one that does
-                // not fit is refused, and it is refused naming memory.
-                // See the block on `check_repair_dim` for the four
-                // premises the old flat cap rested on and which of them
-                // survived being measured.
-                forney::note_joint_not_forney();
-                check_repair_dim_dense(missing.len(), block_size, control)?;
-                // The `O(m^3)` elimination below is minutes at the sizes
-                // that make the unstructured arm worth warning about, so
-                // it reports per matrix COLUMN and is cancellable there.
-                control.begin(control::RepairPhase::Solve, missing.len() as u64);
-                // A[r][c] = g_{missing[c]}^{e_r} = 2^{k·e mod 65535}
-                let a: Vec<Vec<u16>> = recovery
-                    .iter()
-                    .map(|(e, _)| {
-                        missing
-                            .iter()
-                            .map(|&j| gf16::pow2(base_logs[j] as u64 * *e as u64))
-                            .collect()
-                    })
-                    .collect();
-                let inv = invert_controlled(a, control)?;
-                control.finish(control::RepairPhase::Solve);
-                ("gauss-jordan", BackSub::Dense(inv))
-            }
-        };
-        if std::env::var_os("NZBFAST_REPAIR_TIMING").is_some() {
-            info!(
-                target: "repair-timing",
-                "back-substitution setup ({}x{0}, {label}): {:.2?}",
-                missing.len(),
-                t_inv.elapsed()
-            );
-        }
+        #[cfg(test)]
+        BACKSUB_PLANS.with(|t| t.borrow_mut().push((plan.label, missing.len(), block_size)));
+        let (label, solve) = (plan.label, plan.solve);
         let words = block_size / 2;
         // Memory-floor gauge: the syndrome rows are the repair's one
         // whole-run allocation - m x block_size, live from here to the
@@ -1829,9 +2055,16 @@ impl Reconstructor {
         // moves to the solve and lands, over a stretch measured in
         // seconds. Honest either way, and better than the bar that sat
         // still through all of it before 12 Sep 2026.
+        // WHICH ARM: the back-substitution, the SECOND `Solve` entry of
+        // the sweep and the one that runs after the feed. Announced on
+        // every route, including the three that compute no inverse at
+        // all - a sink hearing this one alone is being told that the
+        // phase is NOT split, which is what keeps an ordinary repair's
+        // band exactly the one it always had. See `control::SolveArm`.
+        self.control.solve_arm(control::SolveArm::BackSub);
         self.control
             .begin(control::RepairPhase::Solve, m.max(1) as u64);
-        let (label, out, _out_charge) = match &self.solve {
+        let (label, out, _out_charge) = match &self.solve.solve {
             _ if m == 0 => ("empty", Vec::new(), charge(0)),
             BackSub::Dense(inverse) => {
                 // Same tiled multi-accumulate as the syndrome fold: the

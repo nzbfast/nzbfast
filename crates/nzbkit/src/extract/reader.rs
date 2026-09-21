@@ -513,7 +513,7 @@ impl Extractor {
     /// sit composed in the piece CRCs, and without the marker the
     /// composition would clip the rewrite as a duplicate and keep the
     /// stale value - demoting, at finish, a job whose output healed
-    /// cleanly (see [`CrcRuns::overwrite`]).
+    /// cleanly (see `CrcRuns::overwrite`).
     ///
     /// A PLAIN slot takes the same patch, and needs none of that
     /// machinery: its volume view IS its output file, so the span lands
@@ -1261,7 +1261,7 @@ impl Extractor {
     ///   that already forfeited has volume files, which is the ordinary
     ///   path.
     /// - **Nothing was DROPPED.** A dropping trim released the consumed
-    ///   prefix with no copy anywhere ([`ChaseSlot::dropped`]); a repair
+    ///   prefix with no copy anywhere (`ChaseSlot::dropped`); a repair
     ///   there has nothing to patch and the re-fetch that fixes a demote
     ///   (`get/dropped.rs`) has no equivalent here.
     /// - **The buffer has not already conflicted.** Sticky, and it means
@@ -1272,7 +1272,7 @@ impl Extractor {
     /// blocking read parks at a hole, so it cannot have consumed a
     /// block that never arrived - and where bytes DID arrive and are
     /// wrong, byte-comparing them against the rebuilt copy is exactly
-    /// what [`FrontierBuffer::write_span`] already does. The verdict is
+    /// what `FrontierBuffer::write_span` already does. The verdict is
     /// therefore read once, afterwards, from
     /// [`Self::chase_repair_conflicted`], under the pause that makes
     /// the whole patch atomic against the engine

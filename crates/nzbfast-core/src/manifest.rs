@@ -18,8 +18,8 @@
 //! entry - name and length, honestly marked unverifiable - which meant
 //! an extracted film that rotted was invisible to `verify` and to the
 //! heal behind it. `write_reconciled` now reads every file the set never
-//! covered and records a CRC32 block grid for it ([`grid_from_disk`]),
-//! so it is [`Role::Payload`] like anything else and a heal can act on
+//! covered and records a CRC32 block grid for it (`grid_from_disk`),
+//! so it is `Role::Payload` like anything else and a heal can act on
 //! it. The measurement that chose the grid over a whole-file MD5, and
 //! chose to hash at the manifest write rather than ride the finalize
 //! move's read, is in that function's header: the read is 5% of the cost
@@ -174,7 +174,7 @@ pub enum FileStatus {
     /// `Some(false)` carrying the verdict.
     ///
     /// `md5_ok` is an OPTION because an entry hashed off the disk
-    /// ([`grid_from_disk`]) carries a block grid and no whole-file
+    /// (`grid_from_disk`) carries a block grid and no whole-file
     /// digest, so there is no MD5 to have an opinion about. `None` is
     /// "none was recorded", which is a different statement from "it did
     /// not match" and reads differently in a damage report; a bare
@@ -220,7 +220,7 @@ impl VerifyReport {
 impl Manifest {
     /// Build from the settle-time PAR2 set. `archive` says whether the
     /// covered files are volumes an extract tail will consume (their
-    /// role becomes [`Role::Source`] if they are gone by write time).
+    /// role becomes `Role::Source` if they are gone by write time).
     /// [`Self::from_set`] over EVERY recovery set the post carried.
     ///
     /// TODO 311: a post may ship one set per file, and a manifest built
@@ -306,7 +306,7 @@ impl Manifest {
     /// - a 16 KiB read per candidate, never a whole-file read, and
     /// memoized so a set of same-length volumes costs one read each
     /// rather than one per (entry, candidate) pair. A set entry found
-    /// nowhere flips to [`Role::Source`]: the tail consumed it.
+    /// nowhere flips to `Role::Source`: the tail consumed it.
     ///
     /// **Carry-forward.** A TV-filed job's `out_dir` is the SHARED season
     /// folder claimed by every episode in it (`Job::filed`), so this
@@ -322,7 +322,7 @@ impl Manifest {
     /// rematch would be reads spent on a case that cannot arise.
     ///
     /// **Recovery files.** A `.par2` still on disk here (the user has
-    /// cleanup off) is recorded [`Role::Source`], not presence, because
+    /// cleanup off) is recorded `Role::Source`, not presence, because
     /// it is precisely the file the cleanup default deletes. Recorded as
     /// presence it would report `Missing` the day the user turns cleanup
     /// on - a false damage report in the one situation this whole module
@@ -330,7 +330,7 @@ impl Manifest {
     ///
     /// **The archive flag is re-judged per file, here.** `from_sets`
     /// takes ONE post-wide `archive` boolean (the extractor's latched
-    /// shape) and stamps [`Role::Source`] on every covered entry, which
+    /// shape) and stamps `Role::Source` on every covered entry, which
     /// is the right INITIAL guess and the wrong final answer for a
     /// MIXED set: a PAR2 set that covers RAR volumes routinely covers a
     /// loose companion too - a `.srt`, an `.nfo`, an `.sfv`, or a loose
@@ -339,15 +339,15 @@ impl Manifest {
     /// and `all_ok` ACCEPTS `SourceGone` - so deleting it left the
     /// integrity feature certifying a damaged directory as clean. So
     /// every entry matched to a file that IS on disk is demoted back to
-    /// [`Role::Payload`] unless the file itself is archive-or-recovery
-    /// material (see [`is_consumable_source`]). The two arms that find
+    /// `Role::Payload` unless the file itself is archive-or-recovery
+    /// material (see `is_consumable_source`). The two arms that find
     /// nothing on disk are deliberately untouched: an entry the tail
     /// really did consume is gone, and `Source` is the only honest thing
     /// to say about it.
     ///
     /// **Everything else on disk the set never covered is HASHED HERE**
-    /// - a CRC32 block grid read off the file, [`grid_from_disk`] - and
-    /// becomes a [`Role::Payload`] entry rather than the presence stub
+    /// - a CRC32 block grid read off the file, `grid_from_disk` - and
+    /// becomes a `Role::Payload` entry rather than the presence stub
     /// it was until 2 Sep 2026. That is the whole of the extracted-media
     /// case: for an archive post the PAR2 set covers the volumes, so
     /// before this the film the user actually keeps was recorded as name
@@ -357,7 +357,7 @@ impl Manifest {
     ///
     /// Two families are deliberately left as they were: recovery data
     /// (a source, per the paragraph above) and archive material a later
-    /// sweep may legitimately take ([`is_consumable_source`]), which
+    /// sweep may legitimately take (`is_consumable_source`), which
     /// would report as damage the day it is swept. A file the grid pass
     /// cannot read also falls back to a presence entry, because "I could
     /// not read this" is not a checksum.

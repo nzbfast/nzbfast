@@ -19,6 +19,8 @@
 //! we already serve would be a lie in the other direction. Identity
 //! itself is [`stem_evidence`]'s one rule: a stem proves what it means.
 
+#![warn(missing_docs)]
+
 use super::*;
 
 /// How far our `first_posted` may sit from the reference's usenetdate
@@ -110,17 +112,41 @@ pub fn stem_evidence(stem: &str) -> StemEvidence {
 pub struct ScoreboardSample {
     /// Reference host (never the URL - it can carry a key).
     pub source: String,
+    /// Newznab category the sample was drawn under (movies, tv, audio,
+    /// books). The aggregate in [`ScoreboardCat`] groups on this, so a
+    /// coverage figure is always per-category and never a single
+    /// number over the whole feed.
     pub category: String,
+    /// The reference's own id for this release. Half of the
+    /// `UNIQUE(source, ref_guid)` key the store upserts on, which is
+    /// what lets a later calibration run correct a verdict in place
+    /// rather than appending a second opinion.
     pub ref_guid: String,
+    /// The display name the reference publishes. This is the name
+    /// `have_named` demands exact title and episode parity WITH - it
+    /// is the claim being checked, not evidence about our own index.
     pub ref_name: String,
+    /// Size the reference reports, in bytes. On-wire, so the band scan
+    /// applies the yEnc factor before comparing it with ours.
     pub ref_size: u64,
+    /// The reference's usenetdate as a unix timestamp - when the post
+    /// went up, not when the reference saw it. The 48 h band is
+    /// centred here.
     pub ref_posted: i64,
+    /// Newsgroup the reference names, verbatim, or empty when it names
+    /// none. Recorded for later analysis; the match does not key on it.
     pub ref_group: String,
     /// have_named | have_unnamed | missing
     pub verdict: String,
+    /// Our release row the verdict was reached against, or 0 when the
+    /// verdict is `missing`. A row id and not a name: the name can
+    /// change under a naming lane while the identity does not.
     pub matched_release_id: i64,
     /// stem | band | subject_stem ('' when missing)
     pub key_used: String,
+    /// How far behind the reference we were, in seconds: our
+    /// `first_posted` less [`Self::ref_posted`]. Only meaningful when
+    /// something matched, and 0 otherwise.
     pub lag_secs: i64,
 }
 
@@ -131,17 +157,34 @@ pub struct ScoreboardMatch {
     pub verdict: &'static str,
     /// stem | band ('' when missing)
     pub key_used: &'static str,
+    /// The matched release's row id, or 0 when nothing matched.
     pub release_id: i64,
+    /// Seconds we trailed the reference, 0 when nothing matched. See
+    /// [`ScoreboardSample::lag_secs`].
     pub lag_secs: i64,
 }
 
 /// Per-category aggregate over a window of samples.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScoreboardCat {
+    /// The newznab category these counts are over.
     pub category: String,
+    /// Samples in the window for this category - the denominator for
+    /// every percentage a consumer computes from the three counts
+    /// below, which sum to it.
     pub total: u64,
+    /// Held under the reference's own name, at exact title and episode
+    /// parity. The only count that is a hard number.
     pub have_named: u64,
+    /// Present but not named: a stem token or a size-and-time band hit.
+    /// An ESTIMATE, whose false-positive rate the calibration subset
+    /// measures, and consumers must present it as one - never as a
+    /// hard coverage figure.
     pub have_unnamed: u64,
+    /// Neither name nor presence could be shown. This is the verdict as
+    /// of the last run: `scoreboard_recheck` upgrades rows sampled
+    /// ahead of our own scanner, so a fresh window reads high here and
+    /// settles as lag rather than a permanent hole.
     pub missing: u64,
     /// Median `lag_secs` over the samples we DO have (named or not).
     /// 0 when there were no hits.

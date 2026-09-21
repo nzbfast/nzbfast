@@ -57,6 +57,17 @@ fresh from /dev/urandom each generation and pinned by sha256 in each
 leg's `manifest.json`, so any two copies of a generated corpus are
 verifiable even though their bytes differ.
 
+One leg is the exception, and it has to be: `r2c-depth2-store-compressed`
+draws its payload through a 16-symbol alphabet instead (still
+`/dev/urandom`, still fresh per generation, still sha256-pinned), because
+urandom does not compress. RAR falls back to STORE per entry when
+compression would not shrink the data - it records `-m0` in the header
+whatever flag you passed - so from the day it landed until 20 Sep 2026
+this leg was a second copy of `r2-depth2-store-store`, and the corpus had
+two store-in-store legs and no coverage of a compressed inner level at
+all. `require_compressed` in `lib.sh` now asserts the RECORDED method
+after the inner archive is built, so the leg cannot silently revert.
+
 ## The legs
 
 ### realistic - shapes seen in everyday posts (1.5 GB payloads)
@@ -65,7 +76,7 @@ verifiable even though their bytes differ.
 | --- | ----- | ----- |
 | r1-depth1-store | store RAR volumes + PAR2 | 1 |
 | r2-depth2-store-store | store RAR inside store RAR | 2 |
-| r2c-depth2-store-compressed | compressed RAR inside store RAR | 2 |
+| r2c-depth2-store-compressed | compressed (`-m3`) RAR inside store RAR | 2 |
 | r3-rar-wrap-7z | 7z (LZMA2) inside store RAR | 2 |
 | r4-inner-damaged | intact post, damaged inner RAR, its PAR2 packed alongside | 2 |
 | r5-zip | zip (store) + PAR2 | 1 |

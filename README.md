@@ -273,7 +273,7 @@ with `-C link-arg=-static`.
 
 ## Third-party components
 
-- [rapidyenc](vendor/rapidyenc) - SIMD yEnc decoding (see its license)
+- [rapidyenc](crates/nzbkit-base/vendor/rapidyenc) - SIMD yEnc decoding (see its license)
 - [rars](vendor/rars) (MIT OR Apache-2.0) - pure-Rust RAR extraction,
   so RAR handling is fully native. PAR2 repair is native too; a
   separately installed `unrar` or `par2` is invoked from `$PATH` only

@@ -71,6 +71,17 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn CreateWatch) -> 
         sink.err("You must specify a Recovery file.");
         return crate::EXIT_INVALID_ARGS;
     };
+    // A WILDCARD IN THE RECOVERY-FILE NAME IS A REFUSAL, NOT A
+    // FILENAME. Without this, `parfast c -b32 *.par2 text.txt` exited 0
+    // on macOS and linux having written two files literally CALLED
+    // `*.par2` and `*.vol0+1.par2` - a set the user never asked for,
+    // under a name no later command can name back without quoting, and
+    // exit 0 said it had worked. The reference refuses it outright.
+    // See `cli::refuse_wildcard_set_name` for both lines, the exit
+    // code, and why the check is posix-only.
+    if let Some(code) = crate::cli::refuse_wildcard_set_name(&par2, sink) {
+        return code;
+    }
     let dir = par2
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -135,7 +146,20 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn CreateWatch) -> 
 
     print_header(opts, sink, block_size, members.len(), blocks, recovery);
     for m in &members {
-        sink.line(Level::Terse, &format!("Opening: {}", m.name));
+        // THE CONSOLE LINE IS PLATFORM-SPELLED AND THE STORED NAME IS
+        // NOT, and par2cmdline makes the same split: it prints the name
+        // it opened the file by and writes `/` into the FileDesc packet.
+        // Printing `m.name` straight was right only while the two could
+        // not differ, which is every posix box - on windows it gives
+        // `Opening: linkdir/nested.txt` against the reference's
+        // `linkdir\nested.txt`, which the windows conformance leg's
+        // `create-symlink-dir-only` row caught the day it existed. See
+        // `spec_member_name` for the other half and for why no row had
+        // ever put a subdirectory member in a windows set before.
+        sink.line(
+            Level::Terse,
+            &format!("Opening: {}", display_member_name(&m.name)),
+        );
     }
 
     // The COUNT, never a percentage: par2cmdline's switches select an
@@ -295,6 +319,34 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// The SOURCE-argument half of the wildcard refusal - see the long
+/// comment in [`collect`] for the defect it replaces, the reason it is
+/// spelled `has_wildcard && !exists`, and where it deliberately
+/// over-refuses.
+///
+/// The message is modelled on the reference's own set-name refusal
+/// (`par2 file must not have a wildcard in it.`) rather than on
+/// `Ignoring non-existent source file`, one word changed, because it is
+/// the same kind of statement - an argument the tool will not act on -
+/// and because the reference's non-existent-source handling is a SILENT
+/// drop at exit 0, which is the behaviour being refused rather than a
+/// model for refusing it. It names the argument, which the reference's
+/// line does not, because a create can carry many sources and the user
+/// needs to know which one to expand by hand.
+///
+/// Exit 3 (`EXIT_INVALID_ARGS`), matching the set-name refusal and
+/// every other argument refusal in this dialect.
+fn refuse_wildcard_source(f: &Path, sink: &mut Sink) -> Option<u8> {
+    if !crate::cli::has_wildcard(f) || f.exists() {
+        return None;
+    }
+    sink.err(&format!(
+        "Source file must not have a wildcard in it: {}",
+        f.display()
+    ));
+    Some(crate::EXIT_INVALID_ARGS)
+}
+
 /// The members, with the reference's skip rules applied and announced.
 fn collect(
     opts: &Options,
@@ -307,9 +359,71 @@ fn collect(
     if opts.archive.is_some()
         && let Some(first) = &opts.par2
     {
+        // Under `-a` the first bare argument is a MEMBER, not the set
+        // name, so it takes the SOURCE refusal below and not
+        // `refuse_wildcard_set_name` - which `run` has already applied
+        // to the archive name itself. Checked here rather than left to
+        // the loop because this push does not go through it.
+        if let Some(code) = refuse_wildcard_source(first, sink) {
+            return Err(code);
+        }
         named.push(first.clone());
     }
     for f in &opts.files {
+        // A WILDCARD SOURCE ARGUMENT IS REFUSED BY NAME, because the
+        // alternative measured on this code was a SILENT MEMBER DROP at
+        // exit 0.
+        //
+        // par2cmdline expands wildcards itself on every platform
+        // (`cli::has_wildcard`); `parfast` expands none. Until this
+        // check, an argument we could not expand simply failed the
+        // `std::fs::metadata` probe further down and fell out of the
+        // member list, so `parfast c -b32 out.par2 *.txt rand.bin`
+        // wrote a VALID, VERIFIABLE set protecting `rand.bin` alone -
+        // one member where the reference has three - and said `Done`.
+        // Confirmed by loading that set with the reference: `Target:
+        // "rand.bin" - found. All files are correct.` The refusal only
+        // ever fired when the drop emptied the list ENTIRELY, which is
+        // why it read as "parfast does not glob" rather than as the
+        // silent-drop class it actually was. A user protecting a
+        // directory before deleting the originals lost the `.txt` half
+        // of their set and was told nothing - and on Windows, where
+        // `cmd.exe` expands no glob of its own, that is the ORDINARY
+        // path rather than a corner of it.
+        //
+        // Classified HERE, at the argument, rather than at `run`'s
+        // empty-member-list door, because the empty case is the one
+        // that was already loud; the defect is every case that is not.
+        // The `@listfile` route needs no second check: `cli` pushes
+        // each line of a listfile into `opts.files`, so a wildcard LINE
+        // arrives here as the same argument by a different road, which
+        // is also how `commandline.cpp` routes the two.
+        //
+        // NOT `has_wildcard` ALONE - the argument must also fail to
+        // exist. `*` and `?` are ordinary filename characters on unix,
+        // so a real file called `weird?.bin` is still protected, and
+        // only an argument that names nothing on disk AND carries a
+        // metacharacter is treated as a pattern we cannot expand.
+        //
+        // WHERE THIS OVER-REFUSES, DELIBERATELY: a pattern that matches
+        // NOTHING. `par2 c -b32 out.par2 *.nosuch rand.bin` exits 0 on
+        // the reference with `rand.bin` alone, because the reference
+        // globs, finds nothing, and drops the argument silently the way
+        // it drops a missing literal (`out.par2 text.txt nosuch.txt` is
+        // exit 0 with `text.txt` there too - measured, 21 Sep 2026, so
+        // the silent drop of a MISSING LITERAL is the reference's own
+        // behaviour and is left alone). `parfast` cannot tell "this
+        // pattern matched nothing" from "we cannot expand this pattern"
+        // without implementing the globber, and guessing the first is
+        // exactly the guess that produced the defect above. So the
+        // over-refusal is the safe side of a choice that has no free
+        // answer, it is pinned by the `create-wildcard-nomatch` row so
+        // it cannot become invisible, and implementing globbing removes
+        // it - which is an open design question about this dialect's
+        // scope and is not this function's to settle.
+        if let Some(code) = refuse_wildcard_source(f, sink) {
+            return Err(code);
+        }
         if opts.recurse && f.is_dir() {
             // The windows guard is on the ARGUMENT too, not only on the
             // directories the walk finds below it: the reference reaches
@@ -420,16 +534,14 @@ fn collect(
         // must resolve the path the same way or the accept and the name
         // disagree.
         let cpath = canonical_pathname(&path);
-        let name = opts
+        let rel = opts
             .basepath
             .as_deref()
             .map(canonical_pathname)
             .and_then(|bp| cpath.strip_prefix(&bp).ok().map(Path::to_path_buf))
             .or_else(|| path.strip_prefix(dir).ok().map(Path::to_path_buf))
-            .unwrap_or_else(|| path.clone())
-            .to_string_lossy()
-            .trim_start_matches("./")
-            .to_string();
+            .unwrap_or_else(|| path.clone());
+        let name = spec_member_name(&rel);
         out.push(Member { name, path });
     }
     Ok(out)
@@ -494,22 +606,61 @@ fn strip_par2_suffix(name: &str) -> &str {
 /// worse than protecting it, and that departure is the same one `within`
 /// and the basepath default already make.
 ///
-/// # THE MEASUREMENT IS THE UNIX HALF'S, AND WINDOWS IS UNMEASURED
+/// # BOTH HALVES ARE MEASURED NOW, AND THEY DISAGREE
 ///
+/// Read out of v1.3.0's source 20 Sep 2026 (claim
+/// `par2-conformance-macos-leg-link-row-20sep`) and RUN on a fleet
+/// Windows box the next day (claim
+/// `par2-conformance-windows-link-rows-20sep`), which confirmed the
+/// reading on every arm.
 /// `FindFiles` is written twice and the two halves already disagree
 /// about `.` (see `dot_named`, and README.md's windows section). The
 /// windows half hands its argument to `FindFirstFileW` and branches on
-/// `FILE_ATTRIBUTE_DIRECTORY` alone - it never looks at
-/// `FILE_ATTRIBUTE_REPARSE_POINT` - so the reference there may well
-/// FOLLOW a junction or a directory symlink where the unix half does
-/// not, which would make this rule a windows-only divergence. Nobody has
-/// run it: there is no windows par2 reference on the box this was
-/// measured on, the conformance matrix has no link row on any platform,
-/// and `par2-conformance` in CI never runs this binary at all. The
-/// windows leg (`tools/conformance/README.md`, "Both windows legs")
-/// is where that gets an answer. Until it does, the safety argument
-/// decides it: a 95-member set built out of one file is a worse answer
-/// than a link left out and counted.
+/// `FILE_ATTRIBUTE_DIRECTORY` and on nothing else: the string
+/// `FILE_ATTRIBUTE_REPARSE_POINT` does not occur anywhere in that tag's
+/// source, and neither does any other link test. So a FILE link, having
+/// no DIRECTORY bit, is pushed onto the match list and the later open
+/// follows the reparse point; a directory symlink or a JUNCTION has the
+/// bit and is RECURSED INTO. **The reference follows a link on windows
+/// and refuses one on unix, from the same tag, so this rule IS a
+/// windows-only divergence** - a stated one, recorded in
+/// `tools/conformance/README.md` ("Links, and the one answer that came
+/// out of the source"), not a defect to fix toward.
+///
+/// WHAT RUNNING IT CHANGED, AND IT IS NOT WHAT THE READING PREDICTED
+/// FOR US: the divergence is the reference's, not ours, and on windows
+/// it CLOSES. `parfast` honours a link the user TYPED on every platform,
+/// and on windows so does the reference - so `create-symlink-named` and
+/// `create-symlink-dir-only` are clean on both windows legs, field for
+/// field, and the six waivers that cover them on the three posix legs
+/// are scoped away from windows rather than left to swallow it
+/// (allow/par2.txt section 8). The rule this function carries is
+/// unchanged and was not fixed toward anything.
+///
+/// The unix half is now MEASURED on every push rather than by hand: the
+/// three `linkset` rows landed the same day, `par2-conformance` runs
+/// this binary on linux and `par2-conformance-macos` on macOS. What they
+/// found is the paragraph above this heading, not this one - the WALK
+/// matches the reference on every field, and the typed ARGUMENT is where
+/// we differ. The safety argument still decides that: a 95-member set
+/// built out of one file is a worse answer than a link left out and
+/// counted.
+///
+/// THE WINDOWS ROWS ARE THE TWO TYPED ONES ONLY, and that is a fact
+/// about windows' command line rather than about links: this WALK's own
+/// row needs a spelling for "walk this whole tree", and windows has
+/// neither `.` (exit 3 there, on the `dot_named` guard) nor a
+/// wildcard the candidate expands. See the row in
+/// `tools/conformance/run.py`. So the walk half of the rule below is
+/// still measured on the two posix legs alone, and the typed half is
+/// measured on all five.
+///
+/// The capture used the same MSBuild-from-tag reference both committed
+/// windows tables already came from, and a directory SYMLINK rather than
+/// the junction this was expected to need - a junction cannot survive
+/// the harness's per-row copy and its `readlink` is an absolute path.
+/// Both windows tables moved 71 -> 73 rows with no pre-existing row
+/// moving a byte.
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
@@ -556,6 +707,54 @@ fn last_component(p: &Path) -> &str {
         Some(i) => &s[i + 1..],
         None => s,
     }
+}
+
+/// The same name spelled the way the PLATFORM writes a path, for the
+/// console only. A no-op on unix, where `MAIN_SEPARATOR` already is `/`
+/// and a stored name holds no other slash - `spec_member_name` builds it
+/// out of components, so every `/` in it IS a separator.
+fn display_member_name(name: &str) -> String {
+    name.replace('/', std::path::MAIN_SEPARATOR_STR)
+}
+
+/// The FileDesc name the spec asks for, which is FORWARD-SLASHED.
+///
+/// `Member::name` is documented as "the RELATIVE path, forward-slashed",
+/// and until 21 Sep 2026 this built it with `to_string_lossy()`, which is
+/// the PLATFORM separator - so every set `parfast` created on Windows
+/// holding a member in a SUBDIRECTORY stored `linkdir\nested.txt` where
+/// par2cmdline stores `linkdir/nested.txt`. PAR2 2.0 gives the filename
+/// field one separator and it is `/`; a backslash there is not a path to
+/// any other implementation, it is one filename with a backslash in it,
+/// so the directory tree a recursive create exists to preserve does not
+/// survive the set. Our own reader was not what hid it -
+/// `nzbkit_base::disk::relpath::sanitize_relpath_for` accepts `\` on
+/// purpose, because other Windows tools write it too - so the sets
+/// round-tripped through our own stack and failed only against everyone
+/// else's.
+///
+/// MEASURED, not reasoned: on a native x86 Windows box, `parfast c -R
+/// out.par2 linkdir` wrote `linkdir\nested.txt` against the reference's
+/// `linkdir/nested.txt`, same packet counts and a different digest. It
+/// had never been seen because it needs a set holding a member below the
+/// top level, and `create-symlink-dir-only` is the ONLY row of the
+/// windows par2 matrix that builds one - the two rows that do so on
+/// posix, `create-recurse` and `create-symlink-recurse`, both refuse on
+/// windows at exit 3 on the `.` argument.
+///
+/// `components()` and NOT `replace('\\', "/")`, which would be wrong on
+/// unix: a backslash is an ORDINARY CHARACTER in a unix filename, so
+/// `a\b.txt` is one component there and must stay one. Joining
+/// components re-spells only what the platform actually treats as a
+/// separator, which makes this the same expression on both and lets it
+/// be tested on either.
+fn spec_member_name(rel: &Path) -> String {
+    let joined = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    joined.trim_start_matches("./").to_string()
 }
 
 /// `DiskFile::GetCanonicalPathname`, which is TWO functions and they do
@@ -1237,7 +1436,48 @@ fn digits(n: u64) -> usize {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    /// THE FileDesc NAME IS FORWARD-SLASHED ON EVERY PLATFORM, which is
+    /// `Member`'s documented contract and was broken on windows only -
+    /// see `spec_member_name`. This test runs on any host because the
+    /// helper re-spells COMPONENTS rather than replacing a character, so
+    /// the unix side of it (a backslash that is part of a filename and
+    /// must survive) is checkable from the same box as the windows side.
+    #[test]
+    fn a_member_name_uses_the_spec_separator() {
+        assert_eq!(spec_member_name(Path::new("text.txt")), "text.txt");
+        assert_eq!(spec_member_name(Path::new("./text.txt")), "text.txt");
+        // The case the windows conformance row found: a member below the
+        // top level. On unix this is already one component per level and
+        // the answer is unchanged; on windows `to_string_lossy` gave
+        // `linkdir\nested.txt` here and this gives the spec's spelling.
+        let nested: std::path::PathBuf = ["linkdir", "nested.txt"].iter().collect();
+        assert_eq!(spec_member_name(&nested), "linkdir/nested.txt");
+        let deep: std::path::PathBuf = ["a", "b", "c.bin"].iter().collect();
+        assert_eq!(spec_member_name(&deep), "a/b/c.bin");
+        // AND A SEPARATOR THAT IS NOT ONE. On unix a backslash is an
+        // ordinary filename character, so this is ONE component and must
+        // come back whole - which is why the fix joins components and
+        // does not `replace('\\', "/")`. On windows such a name cannot
+        // exist, and `components()` splits it, so the assertion is
+        // written for the platform that can hold it.
+        #[cfg(unix)]
+        assert_eq!(
+            spec_member_name(Path::new(r"weird\name.txt")),
+            r"weird\name.txt"
+        );
+        // AND THE CONSOLE HALF GOES BACK THE OTHER WAY. par2cmdline
+        // prints the path it opened and stores the spec's spelling, so
+        // the two differ on windows and agree everywhere else.
+        let shown = display_member_name(&spec_member_name(&nested));
+        #[cfg(unix)]
+        assert_eq!(shown, "linkdir/nested.txt");
+        #[cfg(windows)]
+        assert_eq!(shown, r"linkdir\nested.txt");
+        assert_eq!(display_member_name("text.txt"), "text.txt");
+    }
 
     /// UNDER `-a` THE FIRST BARE ARGUMENT IS A MEMBER, NOT THE OUTPUT -
     /// and the no-self-overwrite guard below shipped reading it as the
@@ -1346,6 +1586,135 @@ mod tests {
             names,
             vec!["chosen/movie.mkv".to_string()],
             "one ordinary file in the chosen folder, protected once"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A WILDCARD SOURCE BESIDE A LITERAL REFUSES, AND WRITES NOTHING.
+    ///
+    /// The regression this pins is not "parfast does not glob" - that
+    /// was always true and always loud. It is the SILENT half: the
+    /// unexpandable argument used to be dropped from the member list,
+    /// so the surviving literal carried the create to exit 0 and a
+    /// valid set protecting one file of two was written with no
+    /// diagnostic at all. The assertion that matters is the third one:
+    /// no set on disk. An exit code alone would still pass if the
+    /// create refused AFTER writing an index.
+    #[test]
+    fn a_wildcard_source_beside_a_literal_refuses_and_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!(
+            "parfast-wildcard-drop-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("text.txt"), b"a text member\n").unwrap();
+        std::fs::write(dir.join("rand.bin"), vec![7u8; 40_000]).unwrap();
+
+        let opts = Options {
+            par2: Some(dir.join("out.par2")),
+            files: vec![dir.join("*.txt"), dir.join("rand.bin")],
+            block_size: Some(8192),
+            recovery_count: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            run(&opts, &mut crate::out::Sink::buffered()),
+            crate::EXIT_INVALID_ARGS,
+            "a wildcard source argument must fail the create, not be dropped from it"
+        );
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".par2"))
+            .collect();
+        assert!(
+            left.is_empty(),
+            "the refused create still wrote a set: {left:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AND THE REFUSAL DOES NOT REACH A REAL FILE WHOSE NAME CONTAINS A
+    /// METACHARACTER. `*` and `?` are ordinary filename characters on
+    /// unix, so the test is `has_wildcard AND does not exist` rather
+    /// than `has_wildcard` alone - a blanket refusal would stop
+    /// protecting a file the reference opens without comment, which is
+    /// a regression in the opposite direction from the one above.
+    ///
+    /// Unix only: `?` cannot appear in a Win32 filename, so there is no
+    /// such file to create on windows and the case does not exist there.
+    #[cfg(unix)]
+    #[test]
+    fn a_real_file_whose_name_holds_a_metacharacter_is_still_protected() {
+        let dir = std::env::temp_dir().join(format!(
+            "parfast-wildcard-literal-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let odd = dir.join("weird?.bin");
+        std::fs::write(&odd, vec![3u8; 40_000]).unwrap();
+
+        let opts = Options {
+            par2: Some(dir.join("out.par2")),
+            files: vec![odd],
+            block_size: Some(8192),
+            recovery_count: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            run(&opts, &mut crate::out::Sink::buffered()),
+            crate::EXIT_SUCCESS,
+            "a file that really exists must be protected whatever its name spells"
+        );
+        assert!(dir.join("out.par2").exists(), "no index was written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A WILDCARD IN THE SET NAME NEVER BECOMES A FILENAME. Before this,
+    /// `parfast c -b32 *.par2 text.txt` exited 0 on posix having written
+    /// files literally called `*.par2` and `*.vol0+1.par2`. The
+    /// reference refuses it outright.
+    ///
+    /// Posix only, matching `cli::refuse_wildcard_set_name`'s own gate:
+    /// on windows the reference never reaches its check either and both
+    /// binaries fail at the OS instead, with a different exit code.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_wildcard_set_name_is_refused_rather_than_created() {
+        let dir = std::env::temp_dir().join(format!(
+            "parfast-wildcard-setname-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("text.txt"), vec![5u8; 40_000]).unwrap();
+
+        let opts = Options {
+            par2: Some(dir.join("*.par2")),
+            files: vec![dir.join("text.txt")],
+            block_size: Some(8192),
+            recovery_count: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            run(&opts, &mut crate::out::Sink::buffered()),
+            crate::EXIT_INVALID_ARGS
+        );
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains('*'))
+            .collect();
+        assert!(
+            left.is_empty(),
+            "a file was created under a name holding a wildcard: {left:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

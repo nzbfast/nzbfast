@@ -228,7 +228,7 @@ pub struct Availability {
     /// The wrapper binary, when there is one.
     pub wrapper: Option<PathBuf>,
     /// Whether the strict (read-confining) shape is usable. False on
-    /// macOS without [`BSD_PROFILE`], and on every rung that cannot
+    /// macOS without `BSD_PROFILE`, and on every rung that cannot
     /// restrict reads at all. This is the health row's `reads_confined`.
     pub strict: bool,
     /// Whether a write outside the policy's directories is refused.
@@ -312,7 +312,7 @@ impl Policy {
     }
 
     /// Let the child read under `dir` as well. Symlinks are resolved the
-    /// same way the constructors do - see [`resolve`].
+    /// same way the constructors do - see `resolve`.
     pub fn allow_read(&mut self, dir: &Path) {
         let dir = resolve(dir);
         if !self.readable.contains(&dir) {
@@ -402,7 +402,7 @@ pub mod mac {
     /// and a lossy conversion would silently confine a DIFFERENT
     /// directory - the one failure mode a sandbox must not have).
     ///
-    /// `bsd_profile` says whether [`super::BSD_PROFILE`] is on this
+    /// `bsd_profile` says whether `super::BSD_PROFILE` is on this
     /// machine; with it false the strict shape is not attempted at all,
     /// because without that import a `(deny default)` profile aborts the
     /// child at dyld time.
@@ -702,7 +702,7 @@ pub mod windows {
     pub const EXIT_NOT_CONFINED: i32 = 231;
 
     /// The helper's answer when the child could not be spawned at all.
-    /// [`super::locate`] resolves the program before anything is
+    /// `super::locate` resolves the program before anything is
     /// wrapped, so reaching this means the file went away in between.
     /// 127 is the shell's own "not found", which is the nearest true
     /// thing to say.

@@ -112,12 +112,13 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
     <li><a href="#automation">10 · Automatisering</a></li>
     <li><a href="#arr">11 · Sonarr, Radarr &amp; venner</a></li>
     <li><a href="#remotes">12 · Telefon &amp; fjernbetjenings-apps</a></li>
-    <li><a href="#performance">13 · Ydelsesværktøjer</a></li>
-    <li><a href="#updates">14 · Opdateringer</a></li>
-    <li><a href="#cli">15 · Kommandolinje</a></li>
-    <li><a href="#api">16 · API-oversigt</a></li>
-    <li><a href="#files">17 · Filer &amp; placeringer</a></li>
-    <li><a href="#troubleshooting">18 · Fejlfinding</a></li>
+    <li><a href="#security">13 · Sikkerhed &amp; adgang</a></li>
+    <li><a href="#performance">14 · Ydelsesværktøjer</a></li>
+    <li><a href="#updates">15 · Opdateringer</a></li>
+    <li><a href="#cli">16 · Kommandolinje</a></li>
+    <li><a href="#api">17 · API-oversigt</a></li>
+    <li><a href="#files">18 · Filer &amp; placeringer</a></li>
+    <li><a href="#troubleshooting">19 · Fejlfinding</a></li>
   </ol>
 </nav>
 <main>
@@ -636,7 +637,7 @@ releases under. Åbn den med <b>&#9656;</b> eller ved at klikke på rækken;
 afkrydsningen på titlen vælger de viste releases. Gruppering gælder kun <b>Dette
 indeks</b>; vælger du <b>Indeksere</b> eller <b>Begge</b>, bliver tabellen flad igen
 og siger det.</li>
-<li><b>Én nyhedsgruppe ad gangen.</b> Klik på gruppenavnet under en release, så indsnævres siden til de releases, der er lagt ud der; en pille over tabellen nævner gruppen, indtil du rydder den. Den indsnævrer både væggen og tabellen, så du beholder den, når du skifter mellem dem. Den anden vej ind er Indstillinger &rarr; Organisering &rarr; <b>Indeksering</b> &rarr; <b>Grupper der skal scannes</b> &rarr; <b>Find…</b>: åbn en gruppe, du allerede scanner, og tryk <b>Indekserede releases</b>.</li>
+<li><b>Én nyhedsgruppe ad gangen.</b> Menuen <b>Gruppe</b> over tabellen viser de grupper, du indekserer; vælg en, så indsnævres siden til de releases, der er lagt ud der, og adresselinjen bærer den, så en genindlæsning eller et delt link beholder den. Et klik på gruppenavnet under en release vælger den samme gruppe. Den indsnævrer både væggen og tabellen, så du beholder den, når du skifter mellem dem. Den anden vej ind er Indstillinger &rarr; Organisering &rarr; <b>Indeksering</b> &rarr; <b>Grupper der skal scannes</b> &rarr; <b>Find…</b>: åbn en gruppe, du allerede scanner, og tryk <b>Indekserede releases</b>.</li>
 <li><b>Alle releases af en titel</b> står i dens kort, når du åbner det, med
 opløsning, codec, lydformat og dynamikområde (Dolby Vision, HDR10) læst ud af
 release-navnet, plus størrelse, alder og om hver del stadig ligger hos din udbyder.
@@ -679,7 +680,7 @@ lignende, lærer væggen noget: den foreslår et filter, du godtager med ét kli
 alle Reality-titler fra nu af?«). Alt det skjulte, og hvert lært filter, står under
 <b>Skjult &amp; filtre</b> og kan fortrydes der.</li>
 <li>En lille <b>tilgængelighedsprik</b> på et felt er oraklets dom
-(<a href="#performance">§13</a>): et gult »?« betyder usikkert hos dine udbydere, rødt
+(<a href="#performance">§14</a>): et gult »?« betyder usikkert hos dine udbydere, rødt
 at delene bliver ved med at mangle. Hele grupper, der er ved at blive ryddet, får et
 <b>ryddet</b>-mærke.</li>
 </ul>
@@ -765,12 +766,12 @@ server ind i eller ud af puljen. Hver server har:</p>
 <tr><th>Felt</th><th>Noter</th></tr>
 <tr><td>Host / port</td><td>Brug SSL-port <b>563</b>. TLS koster intet måleligt - nzbfast krypterer altid.</td></tr>
 <tr><td>Brugernavn / adgangskode</td><td>Gemmes lokalt i <code>config.local.json</code>, vises aldrig tilbage til browseren. Lader du adgangskoden stå tom ved redigering, beholdes den gemte. Adgangskoder er <a href="#passwords">sløret på disken, ikke krypteret</a>.</td></tr>
-<tr><td>Forbindelser</td><td>Samtidige forbindelser pr. server. Brug <b>Forbindelsestuning</b> (<a href="#performance">§13</a>) til at finde hver udbyders bedste punkt frem for at gætte højt.</td></tr>
+<tr><td>Forbindelser</td><td>Samtidige forbindelser pr. server. Brug <b>Forbindelsestuning</b> (<a href="#performance">§14</a>) til at finde hver udbyders bedste punkt frem for at gætte højt.</td></tr>
 <tr><td>Niveau (tier)</td><td>0 = primær; højere niveauer er fill-servere, der kun spørges om artikler, som alle lavere niveauer missede. Sæt ubegrænsede konti på 0, blok-konti på 1+.</td></tr>
 <tr><td>Blokstørrelse (GB)</td><td>Til blok-konti (betaling pr. GB): nzbfast holder styr på livstidsforbruget mod dette og holder op med at bruge serveren, når den er brugt op (advarsel ved 85%).</td></tr>
-<tr><td>Hver byte faktureres</td><td>Slå til for en konto med målt forbrug. Dine downloads bruger serveren præcis som før; det, der stopper, er, at nzbfast sender den trafik på egen hånd - den automatiske forbindelsestuner, systemtestens netværksdel og header-scanninger til det indbyggede indeks springer den alle over. Uafhængig af niveauet og af blokstørrelsen, for en målt konto kan være din eneste udbyder, og en ubegrænset kan stå på niveau 2. Slået fra som standard. Den manuelle <b>Test</b> i <b>Forbindelsestuning</b> (<a href="#performance">§13</a>) virker stadig på en markeret server og spørger først, for dér er det dig, der vælger at bruge penge.</td></tr>
+<tr><td>Hver byte faktureres</td><td>Slå til for en konto med målt forbrug. Dine downloads bruger serveren præcis som før; det, der stopper, er, at nzbfast sender den trafik på egen hånd - den automatiske forbindelsestuner, systemtestens netværksdel og header-scanninger til det indbyggede indeks springer den alle over. Uafhængig af niveauet og af blokstørrelsen, for en målt konto kan være din eneste udbyder, og en ubegrænset kan stå på niveau 2. Slået fra som standard. Den manuelle <b>Test</b> i <b>Forbindelsestuning</b> (<a href="#performance">§14</a>) virker stadig på en markeret server og spørger først, for dér er det dig, der vælger at bruge penge.</td></tr>
 </table></div>
-<p><b>Lad der være lidt luft under kontoens forbindelsesgrænse.</b> At sætte forbindelserne lidt under grænsen koster ingenting: gennemløbet flader ud længe før de sidste en eller to forbindelser, og <b>Forbindelsestuning</b> (<a href="#performance">§13</a>) lander alligevel under. Det er de ledige pladser, der lader en anden enhed, et andet program eller et nyt forsøg efter en afbrudt socket komme ind alligevel i stedet for at blive afvist, mens denne her optager hver eneste plads.</p>
+<p><b>Lad der være lidt luft under kontoens forbindelsesgrænse.</b> At sætte forbindelserne lidt under grænsen koster ingenting: gennemløbet flader ud længe før de sidste en eller to forbindelser, og <b>Forbindelsestuning</b> (<a href="#performance">§14</a>) lander alligevel under. Det er de ledige pladser, der lader en anden enhed, et andet program eller et nyt forsøg efter en afbrudt socket komme ind alligevel i stedet for at blive afvist, mens denne her optager hver eneste plads.</p>
 <p><b>Du behøver ikke holde styr på maskinens grænse for åbne filer.</b> Systemet tæller
 hver forbindelse som en åben fil, og macOS starter et program med en grænse på 256 af dem,
 som et fuldt sæt forbindelser fordelt på flere servere kan passere. På macOS og Linux
@@ -826,7 +827,7 @@ den fandt, og kopierer servere ind (springer dubletter over).</li>
 <li>Serverændringer gælder fra den <em>næste</em> download - ingen genstart.</li>
 </ul>
 <div class="tip"><b>Anbefaling</b>To udbydere på <em>forskellige</em> backbones
-slår tre på den samme. Kør <b>Server-diversitet</b> (<a href="#performance">§13</a>)
+slår tre på den samme. Kør <b>Server-diversitet</b> (<a href="#performance">§14</a>)
 for at se, hvilke af dine udbydere der reelt spreder din dækning, og hvilke der er
 redundante kopier af hinanden.</div>
 
@@ -843,9 +844,9 @@ brugerfladen slår flag på kommandolinjen).</p>
 <tr><th>Indstilling</th><th>Hvad den gør</th></tr>
 <tr><td>Hastighedsgrænse</td><td>Loft i bytes/sek. (<code>50M</code>, <code>1G</code>, 0 = ubegrænset). Fjern-apps kan sende procenter - sæt <i>Linjehastighed</i>, så de oversættes korrekt. Punktet <b>tilpasset…</b> i toplinjen sætter det samme loft uden at åbne Indstillinger.</td></tr>
 <tr><td>Auto-hastighed</td><td>RTT-styret loft, der viger for anden trafik i husstanden og udvider sig igen, når linjen er stille.</td></tr>
-<tr><td>Udskyd langsomme downloads automatisk</td><td>Et job, der hænger på én langsom server, mens andre venter, flyttes bagest i køen (fremgang beholdes). Se <a href="#performance">§13</a>.</td></tr>
-<tr><td>Prefetch på ledige servere</td><td>Servere, der er ubrugelige for det aktive job, starter det næste i køen. Se <a href="#performance">§13</a>.</td></tr>
-<tr><td>Auto-opdatering / URL til opdateringstjek</td><td>Se <a href="#updates">§14</a>.</td></tr>
+<tr><td>Udskyd langsomme downloads automatisk</td><td>Et job, der hænger på én langsom server, mens andre venter, flyttes bagest i køen (fremgang beholdes). Se <a href="#performance">§14</a>.</td></tr>
+<tr><td>Prefetch på ledige servere</td><td>Servere, der er ubrugelige for det aktive job, starter det næste i køen. Se <a href="#performance">§14</a>.</td></tr>
+<tr><td>Auto-opdatering / URL til opdateringstjek</td><td>Se <a href="#updates">§15</a>.</td></tr>
 <tr><td>Linjehastighed</td><td>Din forbindelses angivne hastighed - muliggør procentvise grænser fra SABnzbd-kompatible apps.</td></tr>
 <tr><td>Ugeplan</td><td>Rækkeeditor til regler efter ugetidspunkt: pause, genoptag eller sæt en hastighedsgrænse på givne dage/tidspunkter (lokal tid). F.eks. begræns til 20&nbsp;MB/s på hverdage 9–17, ubegrænset ellers.</td></tr>
 </table></div>
@@ -1058,7 +1059,7 @@ hver enhed, der kigger på denne installation.</p>
 <h3>Avanceret: knapperne bag de indlysende</h3>
 <p>Seks indstillinger uden flag på kommandolinjen. Hver har nu en avanceret række på det
 indstillingskort, den hører til, og kan stadig sættes via API'et
-(<a href="#api">§16</a>), f.eks.
+(<a href="#api">§17</a>), f.eks.
 <code>/api?mode=config&amp;name=verify_mode&amp;value=lean&amp;apikey=…</code>. Som
 alle andre gemmes de i <code>settings.json</code>.</p>
 <div class="tblwrap"><table>
@@ -1066,7 +1067,7 @@ alle andre gemmes de i <code>settings.json</code>.</p>
 <tr><td><code>verify_mode</code></td><td><code>full</code> | <code>fast</code> | <code>lean</code> (standard <code>fast</code>). <code>lean</code> er skubbet til langsomme CPU'er: som fast, men springer desuden yEnc-CRC pr. artikel over, så snart PAR2 dækker en fil, altså ét CRC32-lag i stedet for to. Downloads uden PAR2 beholder deres artikel-CRC'er, og verificering og reparation i slutningen af jobbet er uændrede i begge tilfælde. Vælgeren <b>Kontrol under download</b> ovenfor er denne indstilling.</td></tr>
 <tr><td><code>auto_retry_mins</code></td><td>Ventetid før det <em>ene</em> automatiske gentagne forsøg, som en første fejl med manglende artikler får (standard 20). Propagationsforsinkelse er en reel årsag til manglende artikler og løser sig selv; takket være journalen henter genkørslen kun det, der stadig mangler. Fejl på grund af adgangskode eller takedown kvalificerer sig aldrig.</td></tr>
 <tr><td><code>index_scan_par</code></td><td>Hvor mange grupper indekseringen skanner parallelt (standard 3, begrænset til 1-8).</td></tr>
-<tr><td><code>oracle_sample</code></td><td>Tilgængelighedsoraklets STAT-budget i tomgang (<a href="#oracle">§13</a>), sonderinger i timen pr. server. Standard 300, maks. 3600, <code>0</code> slår sampling helt fra.</td></tr>
+<tr><td><code>oracle_sample</code></td><td>Tilgængelighedsoraklets STAT-budget i tomgang (<a href="#oracle">§14</a>), sonderinger i timen pr. server. Standard 300, maks. 3600, <code>0</code> slår sampling helt fra.</td></tr>
 <tr><td><code>predb_max_rows</code></td><td>Hvor mange pre-annonceringer feed-tabellen beholder (standard 250000, begrænset til 10000-5000000). Den timelige beskæring skærer ned til det tal, og den historiske import nægter at starte, hvis den ville gå forbi det, så en import aldrig tilføjer rækker, som den næste beskæring sletter.</td></tr>
 <tr><td><code>predb_seed_days</code></td><td>Hvor langt tilbage en historisk import når, når den startes uden sit eget vindue (standard 180 dage, højst 366). Et større vindue er flere forespørgsler til pre-kilden, som kører i takten en hvert andet sekund.</td></tr>
 </table></div>
@@ -1259,7 +1260,7 @@ dashboardet og væggen har et touch-layout. Panelet Indstillinger → Fjernadgan
 de præcise URL'er og en QR-kode til at scanne.</p>
 
 <h3 id="remote-proxy">Nå nzbfast udefra</h3>
-<p>Der er ingen loginside, og det er med vilje. Et login med sessionscookie er en sikkerhedsflade, der skal vedligeholdes for altid, og den ville stadig være den svageste lås på noget, der vender mod det åbne internet. nzbfast godkender i stedet med din API-nøgle og tager nøglen både i en forespørgselsheader og i URL'en (<code>X-Api-Key</code> eller <code>Authorization: Bearer</code>) - og det er netop det, der lader noget foran klare loginet ordentligt.</p>
+<p>nzbfast godkender med din API-nøgle, og den tager imod nøglen i et forespørgselshoved lige så vel som i adressen (<code>X-Api-Key</code> eller <code>Authorization: Bearer</code>), og det er netop det, der lader noget foran den håndtere login ordentligt. Der findes også, valgfrit, et brugernavn og en adgangskode foran dashboardet i en browser, som intet ændrer for Sonarr, Radarr eller telefonapps; <a href="#security">§13</a> sammenligner de to og siger, hvornår hver af dem er det rigtige svar.</p>
 <p><b>Det enkleste er slet ikke at offentliggøre den.</b> Installer <b>Tailscale</b> på denne maskine og på telefonen, så er begge på det samme private net: intet er eksponeret, hverken router eller certifikat skal røres, og Indstillinger → Fjernadgang viser en adresse, der virker overalt, så snart Tailscale kører. Vælg det, medmindre du direkte har brug for et offentligt domæne.</p>
 <p><b>nzbfast kan også selv servere HTTPS.</b> Peg Indstillinger → Sikkerhed →
 HTTPS-certifikat / HTTPS-privatnøgle på et PEM-certifikat og dets nøgle (eller
@@ -1302,7 +1303,139 @@ enhver undervejs, og en installation helt uden nøgle står åben for den, der
 finder den. Videresender du alligevel en port, så sæt en API-nøgle først og slå
 HTTPS til.</div>
 
-<h2 id="performance">13 · Ydelsesværktøjer</h2>
+<h2 id="security">13 · Sikkerhed &amp; adgang</h2>
+<p>nzbfast har fire måder at styre, hvem der kan nå den, og de gør ikke det
+samme. To er legitimationsoplysninger, den selv tjekker: <b>API-nøglen</b>, som
+ethvert program, der taler med den, viser frem, og den valgfrie
+<b>dashboard-login</b>, et brugernavn og en adgangskode foran siderne i en
+browser. De to andre handler om nettet frem for om personen: hvilken adresse
+tjenesten svarer på, og om noget foran den styrer, hvem der lukkes ind. Ingen af
+dem erstatter en anden. En hjemmeinstallation på et betroet net har kun brug for
+den første; en installation, du har offentliggjort på internettet, vil have tre
+af de fire.</p>
+<div class="tblwrap"><table>
+<tr><th>Lag</th><th>Hvad det stopper</th><th>Hvor</th></tr>
+<tr><td>API-nøgle</td><td>alt, der kalder API'et uden den: en anden maskine, et andet program, en webside du tilfældigvis besøger</td><td>Indstillinger → Sikkerhed. Oprettes ved første start</td></tr>
+<tr><td>NZB-nøgle</td><td>ingenting i sig selv. Det er en svagere nøgle til at dele ud, som må tilføje downloads og intet andet</td><td>Indstillinger → Sikkerhed. Valgfri</td></tr>
+<tr><td>Dashboard-login</td><td>en person ved en browser, der ikke kender adgangskoden</td><td>Indstillinger → Sikkerhed. Slået fra som standard</td></tr>
+<tr><td>Nettet foran</td><td>hele netværk på én gang: lytteadressen, din firewall, en omvendt proxy, et VPN</td><td>Indstillinger → Sikkerhed, og uden for nzbfast</td></tr>
+</table></div>
+
+<h3 id="sec-apikey">API-nøglen</h3>
+<p>API-nøglen er den vigtigste legitimation. Den beskytter hele det
+SAB-kompatible API (<a href="#api">§17</a>), og det er hele kontrolfladen: køen,
+historikken, hver eneste indstilling, dine serveradgangskoder, kaldet der lukker
+ned. Alt, der taler med nzbfast, bruger den. Sonarr, Radarr og resten af
+*arr-familien (<a href="#arr">§11</a>), nzb360 og LunaSea på en telefon
+(<a href="#remotes">§12</a>) og browserudvidelser som NZB Unity og NZB Donkey
+viser alle den samme nøgle frem.</p>
+<p>Du behøver ikke oprette en. Ved første start danner nzbfast en tilfældig
+nøgle, gemmer den ved siden af dine indstillinger i en fil ved navn
+<code>apikey</code> (<a href="#files">§18</a>), skriver den én gang i terminalen
+og beholder den på tværs af genstarter, hvilket er netop det, *arr-programmerne
+har brug for. Indstillinger → Sikkerhed viser den igen: feltet er tomt med vilje,
+så klik <b>Vis</b> for at læse den og <b>Opret ny</b> for at udskifte den.
+Udskiftningen virker med det samme, og hver app, du har sat op, holder op med at
+virke, indtil du indsætter den nye.</p>
+<p>Klienter må sende nøglen i adressen som <code>apikey=…</code> eller i et
+hoved, som <code>X-Api-Key</code> eller <code>Authorization: Bearer</code>.
+Hovedet er at foretrække, så snart noget logger dine adresser, og det er det, der
+lader en omvendt proxy tilføje nøglen for klienterne bagved.</p>
+
+<h3 id="sec-nzbkey">NZB-nøglen, kun til at tilføje</h3>
+<p>NZB-nøglen er en anden, bevidst svagere nøgle til alt, hvis eneste opgave er
+at aflevere en download til nzbfast. Den, der viser den frem, må tilføje en NZB,
+spørge om versionen, læse sammendraget af pause, disk og advarsler og hente
+kategorinavnene, altså præcis det, en udvidelse har brug for for at tilføje en
+release og vise dig en kategoriliste. Den må ikke læse køen eller historikken,
+ikke se eller ændre en eneste indstilling og ikke sætte på pause, slette, prøve
+igen eller lukke noget ned. Den er ikke en mindre udgave af API-nøglen, man
+sætter i stedet for en rigtig: den er noget, du indsætter i en browserudvidelse,
+så en maskine, du ikke stoler fuldt ud på, ikke kan læse din konfiguration
+tilbage.</p>
+
+<h3 id="sec-login">Dashboard-login</h3>
+<p>Sæt et brugernavn og en adgangskode under Indstillinger → Sikkerhed, så
+stiller nzbfast en loginside foran dashboardet og plakatvæggen. Den er slået fra
+som standard, og så længe et af de to felter er tomt, ændres der intet nogen
+steder. Den findes til én situation: en installation, du har offentliggjort ud
+over dit eget net, hvor en nøgle i en adresse ikke er det, du vil have et
+menneske til at taste.</p>
+<p>Adgangskoden skal være på mindst otte tegn, og fire andre former bliver
+afvist, fordi de er det første en gætter prøver: selve brugernavnet, en af de
+mest gættede adgangskoder som <code>password123</code>, ét enkelt gentaget tegn
+som <code>aaaaaaaa</code> og en ubrudt række som <code>abcdefgh</code>.
+Afvisningen siger, hvilken regel det var. Den gemmes hashet med Argon2id,
+hvilket betyder, at nzbfast ikke kan vise den til dig igen, kun udskifte den:
+lad feltet stå tomt for at beholde den, der allerede er gemt, og skriv et
+enkelt mellemrum for at fjerne den. At ændre et af de to felter logger alle
+browsere ud, også denne, og <b>Log alle browsere ud</b> gør det samme, når du
+vil. En browser, der er logget ind, bliver det i fjorten dages brug.</p>
+<p><b>Det ændrer intet for Sonarr, Radarr, nzb360, LunaSea eller dine
+udvidelser.</b> Det er spørgsmålet, alle har, og svaret er, at dette login
+udelukkende er en browserlegitimation. De programmer bruger API-nøglen præcis som
+før, og intet program skal udfylde en loginside. Det, login dækker, er et
+menneske med en browser: dashboardet, væggen og de API-kald, de sider foretager,
+når du først er logget ind.</p>
+<p>Det eneste, det ikke gør, er at beskytte en installation uden API-nøgle. Login
+vogter siderne, ikke API'et: en tjeneste uden nøgle svarer stadig alt, der
+spørger den direkte, loginside eller ej. Sæt også en nøgle. På en offentliggjort
+installation begge dele.</p>
+
+<h3 id="sec-outside">Nå den udefra dit net</h3>
+<p>Tre svar virker, og de er ikke lige gode. <a href="#remote-proxy">§12</a> har
+opsætningen til hvert af dem; her handler det om at vælge.</p>
+<div class="tblwrap"><table>
+<tr><th>Fremgangsmåde</th><th>Hvad den giver</th><th>Hvad den koster</th></tr>
+<tr><td><b>Et privat net</b> (Tailscale, WireGuard)</td><td>Der offentliggøres slet ingenting. Der er ingen offentlig adresse at finde, skanne eller gætte, så spørgsmålet om, hvem der må logge ind, opstår aldrig</td><td>VPN'et skal køre på hver enhed, du vil bruge. Intet offentligt domæne, så intet, du ikke kan installere software på, når frem</td></tr>
+<tr><td><b>En omvendt proxy, der godkender</b> (Caddy, nginx eller Apache, med basic auth, Authelia, Authentik eller oauth2-proxy)</td><td>En rigtig hoveddør på et rigtigt domæne, med et certifikat, du alligevel fornyer, ét login delt med dine andre tjenester, og hastighedsgrænser og logge, hvor du kan se dem</td><td>Endnu en ting at sætte op og holde kørende. Dine *arr og telefonapps kan ikke udfylde en loginside, så proxyen skal lukke en forespørgsel med en gyldig API-nøgle igennem</td></tr>
+<tr><td><b>nzbfast alene</b> (<code>tls_cert</code> og <code>tls_key</code> plus dashboard-login)</td><td>Ét program, ingen proxy. HTTPS hele vejen og en loginside til mennesker</td><td>Fornyelsen af certifikatet er din. Du får nzbfasts eget login i stedet for husstandens, og grænsen for forkerte adgangskoder tælles pr. adresse</td></tr>
+</table></div>
+<p>Uanset hvad du vælger, <b>sæt også en API-nøgle</b>. En proxy er et lag foran,
+ikke en lås på døren bagved: alt, der når tjenesten direkte, på det lokale net
+eller gennem en fejl i proxyopsætningen, møder det, nzbfast selv kræver. Et
+nøgleløst udspring bag en godkendende proxy er én fejlrutet forespørgsel fra at
+stå åbent.</p>
+<p>Afslutter du certifikatet i en proxy, så start nzbfast med
+<code>--bind 127.0.0.1</code>, så proxyen virkelig er den eneste vej ind. Vil du
+hellere have, at nzbfast selv leverer HTTPS, så peg Indstillinger → Sikkerhed mod
+et PEM-certifikat og dets private nøgle og genstart. Det eneste, man skal undgå,
+er at videresende porten i routeren uden nogen af delene: det offentliggør almindelig
+HTTP, og din nøgle og alt, du gør med den, krydser internettet læsbart for enhver
+på vejen.</p>
+
+<h3 id="sec-cors">Browserudvidelser, og hvad <code>cors_origin</code> er til</h3>
+<p><code>cors_origin</code> er ikke godkendelseslaget, og det er værd at sige
+tydeligt, for indstillingen ligger i det samme kort. Den afgør, hvilke
+<i>websider</i> en browser lader læse dette API, og intet andet. Hver af de
+forespørgsler har stadig brug for API-nøglen; det, indstillingen ændrer, er, om
+browseren giver svaret tilbage til den side, der spurgte.</p>
+<p>Standarden er <code>*</code>, ligesom i SABnzbd. Derfor virker udvidelser som
+NZB Unity og NZB Donkey, så snart du indsætter en nøgle, uden at sætte noget op
+her. Vil du have det strammere, så erstat den med de oprindelser, du tillader
+(<code>https://example.com</code>), adskilt af kommaer. Tom sender slet intet
+hoved, hvilket blokerer enhver udvidelse.</p>
+
+<h3 id="sec-open">Hvad intet af dette beskytter</h3>
+<p><b>En installation uden API-nøgle står åben.</b> Uden nøgle er der ingen
+legitimation at tjekke, så enhver vært, der kan nå porten, har fuld kontrol, og
+det har enhver webside, du besøger, også, for tjenesten kan ikke skelne dens
+forespørgsler til din egen lokale adresse fra dine egne. nzbfast siger det ved
+start, i loggen og i dashboardet, hver gang det er sandt. Der er ét felt til, før
+det er løst.</p>
+<p><b>En nøgle beskytter API'et, ikke maskinen.</b> Indstillinger → Sikkerhed →
+<b>Lyt på</b> afgør, hvilke adresser der overhovedet svarer. <code>0.0.0.0</code>,
+standarden, svarer på hvert net, denne maskine er på, hvilket er det, en NAS eller
+en container har brug for. <code>127.0.0.1</code> svarer kun på denne maskine, så
+intet andet på dit net når den, heller ikke med nøglen. Pas på: en adresse, denne
+maskine ikke har, gør, at næste start slet ikke kommer op, og eneste vej tilbage
+er at rette <code>settings.json</code> i hånden.</p>
+<p><b>Din sikkerhedskopi af indstillingerne indeholder alt.</b> Sikkerhedskopien i
+samme kort bærer hver indstilling, begge nøgler og dine Usenet-serveradgangskoder
+i klartekst. Gem den et privat sted, og betragt det at sende den til nogen som at
+sende dem dine konti.</p>
+
+<h2 id="performance">14 · Ydelsesværktøjer</h2>
 <h3 id="perf-benchmark">System-benchmark</h3>
 <p>Ét klik måler dine tre lofter - netværksgennemløb (en rigtig 8-sekunders
 multi-forbindelses-sondering), CPU-verificeringshastighed og diskskrivningshastighed - og leder
@@ -1353,7 +1486,7 @@ den udbyder sidst for det download i stedet for først. Intet fjernes, så et fo
 koster lidt tid frem for selve downloadet.</li>
 </ul>
 <p class="dim">Dommen er en forudsigelse ud fra indicier, ikke en garanti. For et
-håndfast svar om én NZB tæller <code>nzbfast check</code> (<a href="#cli">§15</a>) de
+håndfast svar om én NZB tæller <code>nzbfast check</code> (<a href="#cli">§16</a>) de
 faktiske artikler. Begge tæller svar, ikke indhold. Et rent tjek betyder, at artiklerne var der, da der
 blev spurgt, ikke at det, de indeholder, er ubeskadiget: et lille antal udbydere svarer
 for fjernede artikler med attrapdata i stedet for at afvise dem, og det viser sig først
@@ -1412,7 +1545,7 @@ den mætter bare ikke linjen.</p>
 <p class="dim">Benchmarks køres igen for hver udgivelse; metode og tal pr. maskine
 offentliggøres sammen med resultaterne.</p>
 
-<h2 id="updates">14 · Opdateringer</h2>
+<h2 id="updates">15 · Opdateringer</h2>
 <ul>
 <li>Opdateringer er <b>kun besked</b>: nzbfast downloader eller udskifter
 aldrig sin egen binær, og der er ingen kode i den, der kan. Når en ny version
@@ -1428,12 +1561,12 @@ opdateringsmanifestet; en tom opdaterings-URL gør det samme.</li>
 <h3 id="updating">Opdatering uden at miste dine indstillinger</h3>
 <p>Én regel dækker enhver installation: <b>en opdatering udskifter programmet, aldrig
 dine indstillinger.</b> Alt, hvad du har konfigureret - servere, stier, API-nøglen,
-køen - bor i en håndfuld filer i én mappe (<a href="#files">§17</a>), og intet
+køen - bor i en håndfuld filer i én mappe (<a href="#files">§18</a>), og intet
 installationsprogram, image-pull eller pakkeopgradering rører den mappe. Når
 indstillinger alligevel ser væk ud efter en opdatering, er det næsten altid, fordi
 den nye installation læser en <em>anden, tom</em> mappe, ikke fordi noget blev
 slettet; de gamle filer ligger stadig, hvor de altid har ligget.
-<a href="#settings-gone">§18</a> har trinnene til at få dem tilbage.</p>
+<a href="#settings-gone">§19</a> har trinnene til at få dem tilbage.</p>
 <div class="tblwrap"><table>
 <tr><th>Installation</th><th>Sådan opdaterer du</th></tr>
 <tr><td>macOS-appen</td><td>Åbn den nye DMG og træk <b>NzbFast</b> ind i
@@ -1469,7 +1602,7 @@ dem med.</td></tr>
 <tr><td>Debian / Ubuntu (.deb)<br>Fedora / RHEL (.rpm)</td><td>Installer den nye pakke oven på den gamle: <code>sudo dpkg -i nzbfast_*.deb</code> eller <code>sudo rpm -U nzbfast-*.rpm</code>. Din indstillingsmappe er ikke en del af pakken, så en opgradering kan ikke erstatte noget i den, og dine egne ændringer i <code>/etc/nzbfast/nzbfast.env</code> bevares. Tjenesten genstartes kun, hvis den allerede kørte.</td></tr>
 <tr><td>Homebrew</td><td><code>brew upgrade nzbfast</code></td></tr>
 <tr><td>Ren binær</td><td>Udskift binæren. Din konfiguration bliver, hvor du lavede
-den (<a href="#files">§17</a>).</td></tr>
+den (<a href="#files">§18</a>).</td></tr>
 </table></div>
 <div class="tip"><b>Tip</b>Docker-brugere, der kobler Sonarr eller Radarr på: læg
 API-nøglen i selve containerdefinitionen
@@ -1478,7 +1611,7 @@ eller Unraid-skabelon). En nøgle, der ligger dér, overlever ethvert containeru
 fordi den bor på værten, i definitionen, og bliver lagt på igen ved hver start. En
 nøgle, du senere sætter under Indstillinger, vinder stadig over den.</div>
 
-<h2 id="cli">15 · Kommandolinje</h2>
+<h2 id="cli">16 · Kommandolinje</h2>
 <p>Alt, hvad daemonen gør, kan også scriptes. De daglige kommandoer:</p>
 <div class="tblwrap"><table>
 <tr><th>Kommando</th><th>Formål</th></tr>
@@ -1500,7 +1633,7 @@ kommando tager <code>--config</code> og <code>--help</code>. Dertil kommer <code
 yEnc-artikler og skriver den tilhørende NZB. Et driftsværktøj; det kræver et
 udtrykkeligt <code>--post-server</code> og vælger aldrig en server for dig.</p>
 
-<h2 id="api">16 · API-oversigt</h2>
+<h2 id="api">17 · API-oversigt</h2>
 <p>Basis-endpoint: <code>http://host:6789/api?mode=…&amp;apikey=…&amp;output=json</code> -
 SABnzbd-kompatibelt, så eksisterende SAB-integrationer virker uændret. To nøgler:
 <b>API-nøglen</b> (fuld kontrol) og <b>NZB-nøglen</b> (kun-tilføj:
@@ -1519,7 +1652,7 @@ SABnzbd-kompatibelt, så eksisterende SAB-integrationer virker uændret. To nøg
 <tr><td>Overvågning</td><td><code>/metrics</code> svarer i Prometheus-tekstformatet 0.0.4: downloadhastighed, kødybde og byte, forbindelser pr. udbyder, udfald og artikeltællinger, hukommelse pr. delsystem og oppetid. Basisenheder hele vejen (byte, sekunder), så panelet omregner, og intet ankommer forudafrundet. Kun GET, og som standard kræves den fulde API-nøgle. Sæt <code>metrics_open</code> for at servere det uden nøgle, hvilket er den sædvanlige Prometheus-opsætning: det indeholder ingen jobnavne og ingen stier, men det offentliggør værtsnavnet for hver opsat udbyder til enhver, der kan nå porten.</td></tr>
 </table></div>
 
-<h2 id="files">17 · Filer &amp; placeringer</h2>
+<h2 id="files">18 · Filer &amp; placeringer</h2>
 <p>Hvor indstillingsmappen ligger, afhænger af, hvordan nzbfast blev installeret.
 Denne ene mappe rummer alt, hvad der er værd at tage backup af:</p>
 <div class="tblwrap"><table>
@@ -1550,20 +1683,20 @@ hvor end <code>--config</code> / <code>$NZBFAST_CONFIG</code> peger hen.</td></t
 <tr><td>Eksterne værktøjer</td><td>Ingen nødvendige - RAR-udpakning og PAR2-reparation er native. Hvis et eksotisk sæt nogensinde kræver en ekstern <code>unrar</code> eller <code>par2</code> som fallback, kigger nzbfast ved siden af sin eksekverbare fil, derefter på <code>$PATH</code>.</td></tr>
 </table></div>
 
-<h2 id="troubleshooting">18 · Fejlfinding</h2>
+<h2 id="troubleshooting">19 · Fejlfinding</h2>
 <div class="tblwrap"><table>
 <tr><th>Symptom</th><th>Tjek</th></tr>
 <tr><td>Langsomme downloads</td><td>Spørg først downloaden selv: mens den kører, navngiver linjen under dens statuslinje det lag, der holder <i>dette</i> job tilbage, og et klik på konklusionen åbner rækken på beviserne (se <a href="#dash-queue">Kø</a>). Kør <b>System-benchmark</b> - den udpeger flaskehalsen direkte. Er det netværket: kør <b>Forbindelsestuning</b>, tjek antal forbindelser pr. server, og bekræft, at dine udbydere ikke alle er én backbone (<b>Server-diversitet</b>).</td></tr>
 <tr><td>Langsom kun på meget store jobs<br>(NAS eller maskine med lidt RAM)</td><td>Forventet og måleligt: et udsultet hukommelsesbudget spiller caches til disk og koster 20–40% efter ~87 GB. Se <a href="#memory">Hukommelsesbudget</a> for tallene og hvor meget RAM, den skal have. Mindre jobs er upåvirkede.</td></tr>
 <tr><td>Download fejler med "articles missing"</td><td>Posten er udløbet eller blev fjernet hos dine udbydere. En anden udbyder på en anden backbone redder de fleste af disse. <code>nzbfast check</code> forudsiger dette før download. Og væggen markerer på forhånd de sandsynligt forsvundne med sin
-tilgængelighedsprik (<a href="#oracle">§13</a>). En første fejl af den type prøver sig
+tilgængelighedsprik (<a href="#oracle">§14</a>). En første fejl af den type prøver sig
 selv igen én gang efter en ventetid, for propagationsforsinkelse ser præcis sådan ud og
 løser sig selv.</td></tr>
 <tr><td>Færdigt arkiv vil have en adgangskode</td><td>Historik-rækken viser 🔑 - indtast adgangskoden der; jobbet bliver færdigt på stedet. </td></tr>
 <tr><td>Et arkiv pakkes ikke ud</td><td>Adgangskode- og reparationsfejl navngiver sig selv i historik-rækken. For alt andet findes der en nødudgang: Indstillinger → Watch-mappe &amp; efterbehandling → <b>Udpak med eksternt unrar</b> (en avanceret indstilling) overlader udpakningen til programmet <code>unrar</code>, der er installeret på din maskine, i stedet for den indbyggede udpakker. Lad den ellers være slået fra: den indbyggede vej er hurtigere på alle former, vi har målt, og slørede poster med hash-navne bruger den alligevel altid, fordi unrar ikke kan følge deres omdøbning. Den samme kontakt for <code>nzbfast get</code>-kørsler er miljøvariablen <code>NZBFAST_NO_NATIVE_UNRAR=1</code>. Hvis unrar udpakker et arkiv, som den indbyggede udpakker afviste, så meld det gerne, så vi kan reparere den indbyggede vej.</td></tr>
 <tr><td>Sonarr/Radarr kan ikke forbinde</td><td>Kan port 6789 nås? API-nøgle korrekt (fuld nøgle, ikke NZB-nøgle)? Klienttype sat til SABnzbd?</td></tr>
 <tr><td>Dashboardet beder om en API-nøgle, jeg aldrig har sat</td><td>En ny installation laver selv en og skriver den ud én gang ved opstart (<a href="#firstrun-key">§2</a>). Den står i filen <code>apikey</code> ved siden af din konfiguration, og i opstartsudskriften. Eller skriv din egen nøgle ind under Indstillinger → Sikkerhed fra en browser, der allerede er logget ind.</td></tr>
-<tr id="settings-gone"><td>Alle mine indstillinger ser væk ud efter en opdatering<br>(servere, stier, API-nøgle)</td><td>Intet i en opdatering sletter indstillinger; det her betyder, at nzbfast læser en anden, tom mappe. Først: API-nøglefeltet under Indstillinger vises tomt med vilje - klik <b>Show</b>, før du konkluderer, at den er væk. På Docker: sammenlign den nye containers <code>/config</code>-mapning med den gamles: en ændret værtssti, en relativ sti kørt fra en anden mappe eller en frisk appdata-mappe starter alle sammen nzbfast helt forfra, mens dine rigtige indstillinger ligger urørte på den tidligere sti. Find den gamle mappe (kig efter <code>settings.json</code>, din konfigurationsfil og <code>apikey</code> - placeringer i <a href="#files">§17</a>), og peg så enten mapningen tilbage på den, eller kopiér de filer ind i den nye mappe og genstart. Opstartsloggen navngiver præcis den indstillingsfil, der er i brug: <code>[settings] applying saved settings from …</code></td></tr>
+<tr id="settings-gone"><td>Alle mine indstillinger ser væk ud efter en opdatering<br>(servere, stier, API-nøgle)</td><td>Intet i en opdatering sletter indstillinger; det her betyder, at nzbfast læser en anden, tom mappe. Først: API-nøglefeltet under Indstillinger vises tomt med vilje - klik <b>Show</b>, før du konkluderer, at den er væk. På Docker: sammenlign den nye containers <code>/config</code>-mapning med den gamles: en ændret værtssti, en relativ sti kørt fra en anden mappe eller en frisk appdata-mappe starter alle sammen nzbfast helt forfra, mens dine rigtige indstillinger ligger urørte på den tidligere sti. Find den gamle mappe (kig efter <code>settings.json</code>, din konfigurationsfil og <code>apikey</code> - placeringer i <a href="#files">§18</a>), og peg så enten mapningen tilbage på den, eller kopiér de filer ind i den nye mappe og genstart. Opstartsloggen navngiver præcis den indstillingsfil, der er i brug: <code>[settings] applying saved settings from …</code></td></tr>
 <tr><td>Intet på netværket kan nå daemonen</td><td>Tjek <code>--bind</code>: <code>127.0.0.1</code> betjener kun den maskine, nzbfast kører på. Standarden, <code>0.0.0.0</code>, betjener hver grænseflade. Tjek derefter maskinens egen firewall for port 6789.</td></tr>
 <tr><td>Gennemse-kortet forbliver lille</td><td>Indexeren vokser i baggrunden - tjek, at grupper er sat under Indstillinger → Indeksering, og giv Uddyb pr. scanning tid til at opbygge historik. "Scan nu" fremtvinger en gennemgang; statuslinjen viser live fremgang.</td></tr>
 <tr><td>Væggen viser forkert/intet artwork</td><td>Detaljeark → ✎ Ret match eller ↻ Genopfrisk metadata. Filmopslag forbedres med en gratis OMDb-nøgle.</td></tr>

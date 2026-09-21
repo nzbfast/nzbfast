@@ -24,7 +24,7 @@
 //! The original therefore stays exactly where it was until the job's
 //! own finalize. What goes to the destination early is a paced copy,
 //! and the whole-job move at the end deletes the original instead of
-//! copying it again ([`Daemon::early_reconcile`]). Against the baseline
+//! copying it again (`Daemon::early_reconcile`). Against the baseline
 //! that is the SAME total I/O - a cross-device move is a copy plus a
 //! delete either way - moved earlier in time, and paced through the
 //! mover's own bucket so it never outbids a live download.
@@ -39,7 +39,7 @@
 //! (`keep_media_only`, `sweep_junk`) decide what to delete by asking
 //! `largest_video(dir)` - a question whose answer changes if the
 //! biggest episode has been published out from under it. Every one of
-//! those is a settings-gated pass, so [`Daemon::early_publish_dest`]
+//! those is a settings-gated pass, so `Daemon::early_publish_dest`
 //! simply refuses the job when any of them is armed.
 //!
 //! That is not as narrow as it reads: it is exactly the shape an *arr
@@ -57,7 +57,7 @@
 //! can rewrite a file whose blocks passed in stream but failed the
 //! read-back. Neither is a setting, so neither can be gated out. Both
 //! are caught the same way - the record carries (name, len, mtime) as
-//! they stood at publish time, and [`Daemon::early_reconcile`] keeps
+//! they stood at publish time, and `Daemon::early_reconcile` keeps
 //! the destination copy only when all three still match. Anything else
 //! discards the copy and lets the ordinary whole-job move carry the
 //! file, which is the baseline behaviour for that file and nothing
@@ -114,7 +114,7 @@ pub struct EarlyFile {
     /// published by a build that could not record it.
     pub nzf_id: String,
     /// The directory the copy was published INTO, as
-    /// [`Daemon::early_publish_dest`] derived it at publish time - the
+    /// `Daemon::early_publish_dest` derived it at publish time - the
     /// copy is at `dest/name`.
     ///
     /// Recorded rather than re-derived, because re-deriving at spend

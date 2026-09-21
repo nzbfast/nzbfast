@@ -14,10 +14,6 @@
 //! `crate::unpack::FileSlot`, `crate::unpack::slot_name::NameVotes`, the
 //! bare names reached through `super::*` - is unchanged.
 
-/// GH #63: which of the post's two names a slot's file is written
-/// under. Carries `FileSlot::write_name` and `FileSlot::hint_beats`,
-/// and - M4-70 - `FileSlot::contested_yenc_name`, which re-decides that
-/// question at settle off what the ARTICLES declared.
 pub mod slot_name;
 
 pub struct FileSlot {
@@ -34,7 +30,7 @@ pub struct FileSlot {
     /// alone, and an active set has since named these bytes as one of
     /// its own PAYLOAD files - md5-16k over the first 16 KiB plus an
     /// exact length, the same evidence
-    /// [`SniffCtl::matched_deferred`] rescues a wrongly-deferred slot
+    /// `SniffCtl::matched_deferred` rescues a wrongly-deferred slot
     /// on. Set once, at settle, by
     /// `crate::get::settle::reclaim_par2_named_payload`.
     ///
@@ -53,6 +49,15 @@ pub struct FileSlot {
     /// cleared.
     pub par2_sniffed: std::sync::atomic::AtomicBool,
     pub total_segments: usize,
+    /// The NZB's declared bytes for this file: the sum of its segments'
+    /// `bytes=` attributes, 0 when the NZB declares none. ENCODED bytes,
+    /// so for any yEnc post it is at or above the decoded length - which
+    /// makes it the one size bound the download holds that the article
+    /// itself did not write. `get::workers::clamp_to_declared_size`
+    /// falls back to it when an article's `=ybegin size=` is contradicted
+    /// by that same article's `=ypart` range (TODO 118.2: a poster seen
+    /// 20 Sep 2026 writes a fresh random `size=` on every article).
+    pub posted_bytes: u64,
     pub remaining: std::sync::atomic::AtomicUsize,
     pub missing: std::sync::atomic::AtomicUsize,
     /// Decode or write failures charged to THIS slot. The global

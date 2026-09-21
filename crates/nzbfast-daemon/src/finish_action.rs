@@ -20,7 +20,7 @@
 //!     paused by design, and the subscribers that spin a disk down do
 //!     not care. Shutting the machine down over a job the user paused
 //!     five minutes ago and means to resume is a different matter, so
-//!     [`drain_blocker`] re-checks the queue and refuses on anything the
+//!     `drain_blocker` re-checks the queue and refuses on anything the
 //!     user could still resume. Held alternatives (priority -3, paused
 //!     by design, invisible until their primary fails) are the one
 //!     exception, or an install that keeps duplicates around would never

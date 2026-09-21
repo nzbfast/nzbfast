@@ -1506,7 +1506,7 @@ fn link_capped(anchor: (u64, &'static str), link_ceiling: Option<u64>) -> (u64, 
     }
 }
 
-/// [`link_capped`] over what the daemon currently holds.
+/// `link_capped` over what the daemon currently holds.
 pub fn anchor(d: &super::daemon::Daemon, line_bps: u64) -> (u64, &'static str) {
     let ceiling = d
         .local_link

@@ -79,7 +79,7 @@ pub struct VolumeYield {
     /// COMPLETENESS, not evidence: `failed == 0` is still the only
     /// value that means every chosen volume landed whole, whoever lost
     /// the articles. The verdict about the SOURCE reads [`Self::ours`]
-    /// out of this first - see [`Self::source_asked`].
+    /// out of this first - see `Self::source_asked`.
     pub failed: u32,
     /// Of [`Self::failed`], the ones that are evidence about US rather
     /// than about the source. TODO 307 item 1's residue, 26 Aug 2026.
@@ -99,7 +99,7 @@ pub struct VolumeYield {
     /// declined anything.
     ///
     /// What that cost, and it is the whole reason for the field:
-    /// [`Self::source_will_not_serve`] drives
+    /// `Self::source_will_not_serve` drives
     /// `RepairShortfall::Unservable`, whose clause tells the user "the
     /// payload is not the problem here, so a different source for the
     /// same release is what would fix it". A fleet that wound down mid
@@ -750,7 +750,7 @@ fn spawn_side_stall_watchdog(
 
 /// Inner driver for recovery-volume side-fetches: downloads the given
 /// article set on its own small pool and assembles the volume file(s)
-/// in `out_dir`. Returns ([`VolumeFailures`], paths written) - the
+/// in `out_dir`. Returns (`VolumeFailures`, paths written) - the
 /// failure count is how a caller tells a COMPLETE volume from a
 /// partial one, and only a complete volume may ever enter a whole-file
 /// exclusion list (a partial one must stay fetchable for its missing

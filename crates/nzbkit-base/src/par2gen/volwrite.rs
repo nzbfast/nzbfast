@@ -101,7 +101,7 @@ pub(super) fn write_batch(
                     // truncating a file this run does not own, and the
                     // error reaches the caller through this closure's
                     // own `io(&path)` mapping like any other.
-                    let file = trail.create(dir, name)?;
+                    let file: SetMember = trail.create(dir, name)?;
                     // Fine-sliced sets feed many 4 KiB packets, so
                     // coalesce their small writes; a large slice
                     // bypasses the buffer and streams straight out
@@ -185,7 +185,19 @@ pub(super) fn write_batch(
 
 /// The real critical block over the placeholder - at the front of the
 /// index and of every `Head` volume, and at each recorded packet offset
-/// of an interleaved one. The placeholder and the real block hold the
+/// of an interleaved one.
+///
+/// # The one write path here that is NOT a [`SetMember`]
+///
+/// This is a REOPEN of a member `write_batch` above already created
+/// through the door, and it deliberately holds a raw `std::fs::File`.
+/// Its chain carries no `.create`, no `.create_new` and no `.truncate`,
+/// so it cannot bring a file into existence: there is nothing for the
+/// door to refuse and nothing new to note - noting it a second time
+/// would be a duplicate in the cancel's unlink list. Threading a
+/// `SetMember` to it would mean giving that type a construction that
+/// does not create, which is precisely the hole it exists to close, so
+/// the separation is create-versus-reopen and this is the reopen side. The placeholder and the real block hold the
 /// same packets at the same lengths (the caller's set-id and length
 /// check is what makes that true), so a recorded offset still names the
 /// packet it named when it was written.

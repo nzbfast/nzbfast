@@ -11,7 +11,7 @@ mod memory;
 #[global_allocator]
 static ALLOCATOR: memory::Meter = memory::Meter;
 
-use rars::codec::rar50::{self, DecodeMode, EncodeOptions, Unpack50Decoder};
+use rars::codec::rar50::{self, DecodeMode, EncodeOptions, Rar50Decoder};
 use rars::rar50::{CompressedEntry, EncryptedStoredEntry, Rar50Writer, StoredEntry, WriterOptions};
 use rars::{ArchiveReadOptions, ArchiveReader, ArchiveVersion, FeatureSet};
 use std::io::{Read, Write};
@@ -105,7 +105,7 @@ fn main() {
             );
         }
         if mode == "lz" || mode == "literal" {
-            let decoded = Unpack50Decoder::new()
+            let decoded = Rar50Decoder::new()
                 .decode_member(&encoded, 0, data.len(), false, DecodeMode::Lz)
                 .unwrap();
             assert_eq!(decoded, data);

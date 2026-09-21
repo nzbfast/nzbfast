@@ -1223,7 +1223,7 @@ impl Daemon {
     /// these handlers already reports as "index unavailable"; and
     /// `Err(IndexBusy)` is the mutex still held when the budget ran out
     /// - the edit did NOT happen and the honest reply is
-    /// [`IndexBusy::message`], so the UI can offer the click again.
+    /// `IndexBusy::message`, so the UI can offer the click again.
     ///
     /// What it must never become is a `try_`: the user's edit is not a
     /// sample to be dropped, and losing it silently is worse than a
@@ -1416,7 +1416,7 @@ impl Daemon {
     ///
     /// `None` when the index is off, when the read failed, and - since
     /// the 2 Aug wedge - when every read connection is busy and none
-    /// came free within [`INDEX_READ_WAIT`]. Callers already render an
+    /// came free within `INDEX_READ_WAIT`. Callers already render an
     /// absent index as an empty answer, which is the right shape for
     /// "ask again in a moment" too; what matters is that the worker goes
     /// back to the pool instead of queueing. Use
@@ -1441,7 +1441,7 @@ impl Daemon {
         self.index_read_checked(f).unwrap_or(None)
     }
 
-    /// Arm [`DEBUG_READ_BUDGET`]: `n` further pooled reads succeed, then
+    /// Arm `DEBUG_READ_BUDGET`: `n` further pooled reads succeed, then
     /// every read reports the pool busy. Reachable only through the
     /// NZBFAST_DEBUG_HOOKS-gated `mode=debug_index_read_busy`.
     #[cfg(feature = "indexer")]
@@ -1451,8 +1451,8 @@ impl Daemon {
 
     /// As [`Self::with_index_read`], with a read that could not produce a
     /// trustworthy answer reported rather than flattened into "nothing
-    /// found". [`IndexBusy::Saturated`] means every read connection was
-    /// busy; [`IndexBusy::SchemaChanged`] means the query itself failed
+    /// found". `IndexBusy::Saturated` means every read connection was
+    /// busy; `IndexBusy::SchemaChanged` means the query itself failed
     /// with SQLITE_SCHEMA and was still failing after nzbkit re-prepared
     /// it - a writer changed the schema under this reader (the first
     /// `ANALYZE` creating sqlite_stat1, a version upgrade's migrations)

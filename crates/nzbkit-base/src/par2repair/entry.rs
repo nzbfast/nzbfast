@@ -27,7 +27,20 @@ use super::*;
 /// verify each recovery-set file block-by-block from disk, reconstruct
 /// missing/corrupt blocks from recovery slices, and patch them in place.
 /// Files longer than declared are truncated; absent files are recreated.
-/// Success requires every touched file to pass its whole-file MD5.
+/// Success requires every touched file to pass a final proof, and
+/// WHICH proof depends on the fast-check tier ([`crate::par2::set_fast_check`],
+/// whose precedence is CLI flag, then setting, then
+/// `NZBFAST_VERIFY_IFSC_ONLY`). With the tier off - this crate's own
+/// default for a caller that never chooses - that proof is the
+/// whole-file MD5 from the FileDesc packet. With it on - which is what
+/// both shipped surfaces select, `parfast` unless `--slow` and the
+/// daemon's `fast_final_check`, on by default since 15 Sep 2026 - the
+/// proof is per block instead: exact length, the 16 KiB FileDesc head,
+/// and every block's IFSC MD5 and CRC32, with the whole-file MD5 used
+/// only where the IFSC does not span the file. The one spec-legal set
+/// on which the two tiers disagree is written up at
+/// `ifsc_only_attempt` in `crate::par2`'s verify module.
+///
 /// When the dir carries packets from more than one recovery set, the
 /// first set seen (sorted packet-file order) is the one repaired.
 ///
@@ -90,7 +103,7 @@ pub fn repair_dir_with_donors(dir: &Path, donors: &[PathBuf]) -> Result<RepairSt
 /// [`RepairError::NoMainPacket`] - the honest answer, which lets the
 /// caller reach its own backstop instead of accepting a green about
 /// somebody else's files. The donors are [`repair_dir_with_donors`]'s
-/// exactly; the catalog and the two [`DirContext`] name sets are not,
+/// exactly; the catalog and the two `DirContext` name sets are not,
 /// and deliberately - see [`repair_dir_set_with_donors_scoped`], which
 /// this forwards to, for why a set picked out of a shared directory has
 /// to be told what its neighbours declare.
@@ -137,7 +150,7 @@ pub fn repair_dir_set_with_donors_as(
 ///
 /// This is "one set out of a directory that may hold SEVERAL" by
 /// construction - `get::latesets` applies every non-activated set in
-/// turn through it - so it owes its caller both of [`DirContext`]'s
+/// turn through it - so it owes its caller both of `DirContext`'s
 /// protections, and neither survives a lazy catalog: a name is declared
 /// by a critical packet, and which files carry which set's criticals is
 /// not known until they have been read. The bytes are read either way
@@ -265,7 +278,7 @@ fn scoped_with_observer(
 /// from [`SurveyObserver::control`]. Everything about the catalog,
 /// `declared_and_contested`, `patch_existing` and the census label is
 /// the sibling's BY CONSTRUCTION: both entries are one call to
-/// [`scoped_with_observer`] differing in the observer argument alone,
+/// `scoped_with_observer` differing in the observer argument alone,
 /// so there is no second copy of that struct literal to drift. (The
 /// one thing an observer costs either way is named on that function.)
 ///
@@ -406,7 +419,7 @@ pub fn repair_present_sets_as(
 /// every time.
 ///
 /// Everything else is [`repair_present_sets_as`] BY CONSTRUCTION: both
-/// are one call to [`repair_sets_inner`] differing in the observer
+/// are one call to `repair_sets_inner` differing in the observer
 /// argument alone, so the `DirContext` literal and the present-name
 /// gate have no second copy to drift. A supplier returning
 /// `RepairControl::default()` is the uncontrolled call exactly, branch
@@ -418,7 +431,7 @@ pub fn repair_present_sets_as(
 /// to the next set with a sticky cancel raised, so a cancelled
 /// directory pass reports the sets it finished plus the one it was
 /// stopped in, and never a run of `Cancelled` verdicts that read like N
-/// broken sets. See [`repair_sets_catalog`].
+/// broken sets. See `repair_sets_catalog`.
 pub fn repair_present_sets_controlled_as(
     dir: &Path,
     caller: RetentionCaller,

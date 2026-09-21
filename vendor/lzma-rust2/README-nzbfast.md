@@ -199,3 +199,30 @@ Both from a 16 Sep 2026 adversarial read of the untrusted-input parsers.
 - **An empty pack stream no longer wedges.** With nothing dispatched,
   `saturating_sub(1)` named a unit nobody sent and the reader waited
   forever on a channel whose sender it owns.
+
+## 9. `src/lzma2_reader_mt.rs` - the declared-size accumulator is `u64`
+
+`current_work_unit_decoded`, the third field of `WorkUnit`, and
+`prealloc_for`'s argument were all `usize`. That quantity is a sum of
+sizes the LZMA2 stream declares ABOUT ITSELF, so its magnitude is set by
+untrusted input and not by the target: a compressed chunk costs six bytes
+on the wire and may declare 2 MiB, so ~12 KB of crafted stream sums past
+2^32.
+
+On 64-bit nothing showed. On 32-bit, with the pinned `overflow-checks`,
+it PANICKED - found by nightly `armv7-cross` run `35256109460`, which is
+the only PRODUCT defect that job has ever reported. In a release build,
+where overflow checks are off, the same input WRAPS instead: the
+dispatcher then hands a wrapped, far-too-small length on as the unit's
+decoded size, and that length is the bound the worker's `Read::take`
+holds the decode to and the figure its overrun check compares against.
+
+All three are `u64` now and both accumulation sites `saturating_add`.
+`u64` is what makes the figure target-independent, which is the property
+this class wants; the saturation is what makes the sum total rather than
+merely wide. Capping is harmless here because the only two consumers are
+a reservation already clamped to `PREALLOC_CAP` and an upper bound no
+`Vec` length can reach - so nothing downstream reads the accumulator as a
+true total. Refusing a large declaration outright was considered and
+REJECTED: a work unit is a whole 7-Zip solid block, which is legitimately
+unbounded, so any refusal threshold would refuse real archives.

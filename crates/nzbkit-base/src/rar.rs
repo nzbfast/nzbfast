@@ -20,6 +20,30 @@
 //! areas are skipped arithmetically), so mapping a volume needs only the
 //! bytes at its header positions - usually all inside article 1 for
 //! single-file volumes.
+//!
+//! Sniffing a decoded offset-0 article, which is where the one pass
+//! decides what it is looking at. A signature NAMES the dialect and
+//! proves nothing on its own: `Rar!` occurs as a constant inside
+//! ordinary programs, so the evidence is the CRC-checked main header
+//! behind it.
+//!
+//! ```
+//! use nzbkit_base::rar;
+//!
+//! let head = b"Rar!\x1a\x07\x01\x00 and then some bytes that are not a header";
+//! assert_eq!(rar::signature_version(head), Some(5));
+//! assert!(!rar::archive_starts_here(head));
+//!
+//! assert_eq!(rar::signature_version(b"Rar!\x1a\x07\x00"), Some(4));
+//! assert_eq!(rar::signature_version(b"PK\x03\x04"), None);
+//! ```
+//!
+//! Reading an actual archive has no example here: [`VolumeMapper`] is
+//! fed article spans as they arrive off the wire, and the other doors
+//! take a path to a volume on disk. Neither is something a doctest can
+//! build, because this crate publishes no RAR writer.
+
+#![warn(missing_docs)]
 
 use std::collections::{HashMap, HashSet};
 
@@ -28,7 +52,12 @@ use crate::rarcrypt;
 /// Compression method of an entry piece.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
+    /// Stored verbatim: the data area IS the file's bytes, so a piece
+    /// can be written straight to its place in the output and the
+    /// one-pass direct map applies.
     Store,
+    /// Any of RAR's compression methods. Direct mapping is off - the
+    /// volumes have to be materialized and handed to the decoder.
     Compressed,
 }
 
@@ -41,7 +70,12 @@ pub enum Method {
 pub struct Rar5Crypt {
     /// PBKDF2 iteration count exponent (iterations = 2^lg2_count).
     pub lg2_count: u8,
+    /// PBKDF2 salt, 16 bytes. Repeated identically in every volume of a
+    /// set, since the set is one continuous CBC stream per inner file.
     pub salt: [u8; 16],
+    /// AES-256-CBC initialisation vector for the entry's stream. Like
+    /// the salt, it describes the WHOLE inner file and is repeated in
+    /// each volume's copy of the header.
     pub iv: [u8; 16],
     /// Stored password check (8-byte value + 4-byte SHA-256 csum), when
     /// the archiver wrote one (WinRAR does by default).
@@ -64,6 +98,9 @@ pub struct Rar5Crypt {
 /// store mapper treat both the same way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rar4Crypt {
+    /// The 8-byte salt from file flag `FHD_SALT`, when the header
+    /// carried one. `None` means the archiver wrote no salt, and the
+    /// key schedule then runs over the password alone.
     pub salt: Option<[u8; 8]>,
 }
 
@@ -71,7 +108,12 @@ pub struct Rar4Crypt {
 /// archive uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryCrypt {
+    /// RAR5: AES-256, PBKDF2, and (usually) a stored password check, so
+    /// a candidate can be tested before any data is decrypted.
     Rar5(Rar5Crypt),
+    /// RAR4: AES-128 out of a SHA-1 key schedule, with no stored check
+    /// of any kind - a wrong password is only caught by a whole-file
+    /// checksum after decryption.
     Rar4(Rar4Crypt),
 }
 
@@ -147,10 +189,19 @@ impl EntryCrypt {
 /// One file piece described by a volume's headers.
 #[derive(Debug, Clone)]
 pub struct FileEntry {
+    /// The inner file's path as the archive stores it, with `/`
+    /// separators. The same string appears in every volume that carries
+    /// a piece of this file, which is what lets pieces be grouped.
     pub name: String,
     /// Total unpacked size of the inner file (repeated in every volume).
     pub unpacked_size: u64,
+    /// Whether this piece's data area is the file's bytes verbatim or
+    /// needs the decompressor. Only [`Method::Store`] is directly
+    /// mappable.
     pub method: Method,
+    /// The data area is encrypted. True for RAR4 as well as RAR5, where
+    /// `crypt` is `None` and the parameters live in the header's salt
+    /// flag instead.
     pub encrypted: bool,
     /// Decryption parameters for an encrypted entry (RAR5 only; a RAR4
     /// encrypted entry has `encrypted` set and no params).
@@ -178,6 +229,9 @@ pub struct FileEntry {
     /// `(hash_type, digest)`. hash_type 0 is BLAKE2sp (32-byte digest);
     /// carried so a CRC-less entry is not silently treated as verified.
     pub hash: Option<(u64, Vec<u8>)>,
+    /// The entry is a directory record and carries no data area. Skipped
+    /// by every mapping path: it contributes nothing to an inner file's
+    /// offsets.
     pub is_dir: bool,
     /// RAR5 "unpacked size unknown" file flag (0x08): `unpacked_size` is
     /// a placeholder, not a real length - nothing may derive offsets
@@ -193,9 +247,17 @@ pub struct FileEntry {
     pub data_len: u64,
 }
 
+/// Which RAR container format a volume turned out to be, decided by its
+/// signature. The two share this module's parser and differ in header
+/// framing, encryption and how a split piece's checksum is stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RarVersion {
+    /// RAR 1.5 through 4.x: fixed-width header intros, CRC16 header
+    /// checks, AES-128 encryption with no stored password check.
     V4,
+    /// RAR 5.0 and later: vint-framed headers, CRC32 header checks,
+    /// AES-256, extra records, and an explicit volume number in the main
+    /// header - the obfuscation-proof volume ordering.
     V5,
 }
 
@@ -237,8 +299,17 @@ enum ParseState {
 /// Incremental single-volume header parser. Feed it decoded spans in any
 /// order; it consumes bytes at the parse cursor and skips data areas.
 pub struct VolumeMapper {
+    /// Which container format the signature named, or `None` before the
+    /// signature has been fed.
     pub version: Option<RarVersion>,
+    /// Pieces parsed so far, in the order their headers appear in the
+    /// file. Complete only once `complete` is set: a mapper that is
+    /// still being fed has a prefix of the volume's entries, not all of
+    /// them.
     pub entries: Vec<FileEntry>,
+    /// Why mapping stopped, when it did. `Some` means the caller must
+    /// fall back to materializing the volume; the variant says whether
+    /// that fallback can succeed at all (see [`MapBlocker`]).
     pub blocker: Option<MapBlocker>,
     /// RAR5 main-header volume number (0-based; absent on the first
     /// volume and in RAR4) - the obfuscation-proof volume ordering.
@@ -319,8 +390,18 @@ pub struct VolumeMapper {
 /// extraction attempt, so those are not probeable here).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CryptProbe {
+    /// PBKDF2 iteration count exponent (iterations = 2^lg2_count). A
+    /// hostile archive can make this large enough that testing a
+    /// candidate is itself expensive, which is why
+    /// [`PwVerdict::Indeterminate`] covers it as well as a missing
+    /// check.
     pub lg2_count: u8,
+    /// The PBKDF2 salt the check value was computed against.
     pub salt: [u8; 16],
+    /// Stored password check: an 8-byte value plus a 4-byte SHA-256
+    /// checksum over it. `None` for a check-less set, which cannot be
+    /// probed - a wrong password is then only visible after a real
+    /// decryption attempt.
     pub check: Option<[u8; 12]>,
 }
 
@@ -710,6 +791,12 @@ pub fn archive_starts_here(bytes: &[u8]) -> bool {
 }
 
 impl VolumeMapper {
+    /// A mapper for a bare, unencrypted volume of `volume_size` bytes -
+    /// the yEnc total, which is what tells the parser where EOF is.
+    ///
+    /// `volume_size` is the DECLARED size and the file need not have
+    /// arrived: spans are fed in any order and the parser consumes what
+    /// it can reach.
     pub fn new(volume_size: u64) -> VolumeMapper {
         Self::with_password(volume_size, None)
     }
@@ -2041,6 +2128,7 @@ fn parse_block_v4_at(h: &[u8], base: u64, hdr_span: Option<u64>) -> BlockResult 
             let mut p = 11;
             let mut unp_size = rd_u32(&a[p..]) as u64;
             p += 4; // unp
+            let host_os = a[p];
             p += 1; // host
             // RAR4 stores a plain CRC32 of the unpacked data here - of the
             // PLAINTEXT even on an encrypted entry (unrar checks it after
@@ -2060,6 +2148,7 @@ fn parse_block_v4_at(h: &[u8], base: u64, hdr_span: Option<u64>) -> BlockResult 
             p += 1;
             let name_size = rd_u16(&a[p..]) as usize;
             p += 2;
+            let attr = rd_u32(&a[p..]);
             p += 4; // attr
             let mut data_len = add_size;
             if flags & 0x0100 != 0 {
@@ -2106,7 +2195,13 @@ fn parse_block_v4_at(h: &[u8], base: u64, hdr_span: Option<u64>) -> BlockResult 
             let crypt = (encrypted && unp_ver >= RAR4_AES_MIN_UNP_VER)
                 .then_some(EntryCrypt::Rar4(Rar4Crypt { salt }));
             let decryptable = crypt.is_some();
-            let is_dir = flags & 0x00E0 == 0x00E0;
+            // A genuine DOS RAR 1.55 sets no directory window bits: its
+            // directory headers carry flags 0x8000 only and mark the entry
+            // by the DOS directory attribute (0x10) alone, on a host that
+            // stores DOS attributes (0 MS-DOS, 1 OS/2, 2 Win32). The vendored
+            // reader applies the same rule (`FileHeader::is_directory`).
+            let is_dir =
+                flags & 0x00E0 == 0x00E0 || (unp_ver < 20 && host_os <= 2 && attr & 0x10 != 0);
             // The full 64-bit length, so this is the sum that can leave
             // the address space - `next` above only carried the low 32.
             let Some(data_end) = end_of(data_len) else {
@@ -3108,7 +3203,17 @@ pub enum ArithGate {
     /// `vols[i]`'s single entry. `closed` means the parsed volumes form
     /// the complete set 0..=last, ending in the declared final piece -
     /// the premise is proven, not just unrefuted.
-    Place { bases: Vec<u64>, closed: bool },
+    Place {
+        /// Inner-file base offset of each volume's single entry, indexed
+        /// by the same position as the `vols` slice that was resolved.
+        bases: Vec<u64>,
+        /// The parsed volumes are the complete set 0..=last and end in
+        /// the declared final piece, so the uniform single-file premise
+        /// is PROVEN rather than merely unrefuted. False means the
+        /// offsets are consistent with everything seen so far and a
+        /// later volume could still contradict them.
+        closed: bool,
+    },
     /// Not this shape at all - chain resolution territory.
     Shape,
     /// The shape matched but the numbers contradict the uniform
@@ -3136,6 +3241,12 @@ mod v4_header_tests;
 // know how to emit. Same child-module reason as v4_header_tests.
 #[cfg(test)]
 mod archiver_tests;
+
+// The ONE place this crate's tests build RAR fixtures through the
+// ENGINE's writer, named by shape (cutover plan P3). The hand-built
+// byte fixtures everything else uses are `fixtures` above.
+#[cfg(test)]
+mod rarfixtures;
 
 #[cfg(test)]
 mod tests;

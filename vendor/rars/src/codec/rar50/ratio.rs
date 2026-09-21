@@ -641,7 +641,7 @@ mod tests {
             ..Policy::default()
         };
         let mut encoder = Encoder::new(131072, policy);
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         for (data, solid) in [(&first, false), (&second, true), (&second, false)] {
             let packed = encoder.encode(data, solid).unwrap();
             let unpacked = decoder
@@ -666,7 +666,7 @@ mod tests {
             ..Policy::default()
         };
         let mut adaptive = Encoder::new(131072, policy);
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         for (input, solid) in [
             (data.as_slice(), false),
             (&[][..], true),
@@ -723,7 +723,7 @@ mod tests {
         let mut encoder = Encoder::new(131072, policy)
             .with_optimal_parse(true)
             .unwrap();
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         for (input, solid) in [
             (data.as_slice(), false),
             (&[][..], true),
@@ -829,7 +829,7 @@ mod tests {
         );
         for cap in [32, 64, 128, 256] {
             let mut encoder = make().with_tree_nice_length(cap).unwrap();
-            let mut decoder = Unpack50Decoder::new();
+            let mut decoder = Rar50Decoder::new();
             for (input, solid) in [
                 (data.as_slice(), false),
                 (&[][..], true),
@@ -870,7 +870,7 @@ mod tests {
                 let mut encoder = Encoder::new(131072, policy)
                     .with_tokenizer_block_size(size)
                     .unwrap();
-                let mut decoder = Unpack50Decoder::new();
+                let mut decoder = Rar50Decoder::new();
                 for (data, solid) in [
                     (first.as_slice(), false),
                     (&[][..], true),
@@ -911,7 +911,7 @@ mod tests {
             .with_optimal_parse(true)
             .unwrap()
             .with_tree_search(true);
-        let mut decoder = Unpack50Decoder::new();
+        let mut decoder = Rar50Decoder::new();
         for (input, solid) in [
             (data.as_slice(), false),
             (&[][..], true),
@@ -949,7 +949,7 @@ mod tests {
         let index = MatchIndex::<usize>::new(input.len(), 256);
         let state = EncoderMatchState {
             reps: [6, 0, 0, 0],
-            last_length: 2,
+            previous_match_length: 2,
         };
         let (candidate, _) = ratio_probe(
             input,

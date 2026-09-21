@@ -39,7 +39,7 @@ pub(super) fn rename_style(d: &Daemon) -> crate::wall::NameStyle {
 /// The quality suffix a job's files WOULD carry if it were filed right
 /// now: the auto-rename toggle gates it, and the tokens come from the
 /// job's own stem under the live NameStyle - exactly as
-/// [`finalize_names`](Daemon::finalize_names) computes it.
+/// `finalize_names` computes it.
 ///
 /// Guesswork, because all three inputs are live settings. A job filed
 /// weeks ago carries [`Job::filed_suffix`] instead, and only a record

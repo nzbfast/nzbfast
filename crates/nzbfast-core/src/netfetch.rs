@@ -307,28 +307,433 @@ pub fn deny_test_callout(_netloc: &str, _addrs: &[std::net::SocketAddr]) -> std:
     Ok(())
 }
 
+// ---- Refused answers, and the Retry-After they carry ---------------
+
+/// A call that did not come back with a body: either the server
+/// refused, or we never reached it.
+///
+/// **This type exists because ureq 3 threw the response away.** ureq 2
+/// raised `Error::Status(code, response)`, and eight call sites across
+/// this tree read `Retry-After` off that response to size a provider
+/// backoff. ureq 3 raises `Error::StatusCode(u16)` and carries nothing
+/// else, so the ureq 2 shape has no ureq 3 spelling: ported literally,
+/// every one of those sites would fall back to its hardcoded 30 s / 5 s
+/// forever, no test would fail, and the only symptom would be providers
+/// being hammered on a schedule they had explicitly asked us not to
+/// keep. So the refusal is caught BEFORE ureq turns it into an error.
+///
+/// The switch is per REQUEST and never per agent
+/// ([`call_keeping_refusal`] sets it on the one request it is running),
+/// which is the whole of why this is safe to add to a shared pool: the
+/// enrich agent is process-wide and most of its callers want a 4xx to
+/// be an `Err`, and they still get one.
+pub enum Refusal {
+    /// The server answered, with a 4xx or 5xx.
+    Status {
+        code: u16,
+        /// `Retry-After` in delta-seconds, when it sent one in that
+        /// form. An HTTP-date is legal and is not parsed - see
+        /// [`Refusal::wait_secs`] for what happens then.
+        retry_after: Option<u64>,
+        /// The refusal itself, body unread. Boxed because it is much
+        /// the largest thing here and most callers never look at it;
+        /// `notify` and `predb_seed` are the two that do, through
+        /// [`Refusal::body_text`]. `None` only for a refusal a test
+        /// minted with `refusal_for_test`, which has no wire behind
+        /// it to read a body from.
+        resp: Option<Box<ureq::http::Response<ureq::Body>>>,
+    },
+    /// No reply at all: DNS, connect, TLS, timeout, or a guard above
+    /// refusing to dial. Also the one a guard's own message arrives in.
+    Transport(ureq::Error),
+}
+
+impl std::fmt::Debug for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::Status {
+                code, retry_after, ..
+            } => f
+                .debug_struct("Refusal::Status")
+                .field("code", code)
+                .field("retry_after", retry_after)
+                .finish_non_exhaustive(),
+            Refusal::Transport(e) => f.debug_tuple("Refusal::Transport").field(e).finish(),
+        }
+    }
+}
+
+impl Refusal {
+    /// The status code, when the server answered at all.
+    pub fn code(&self) -> Option<u16> {
+        match self {
+            Refusal::Status { code, .. } => Some(*code),
+            Refusal::Transport(_) => None,
+        }
+    }
+
+    /// How long this refusal asks us to wait, in seconds.
+    ///
+    /// The header when it sent a usable one, and otherwise the same
+    /// fallback every call site picked independently before: a 429 is a
+    /// bucket we emptied, a 503 is usually a blip. A transport failure
+    /// asks for nothing and answers `None` - there is no service on the
+    /// other end saying anything.
+    pub fn wait_secs(&self) -> Option<u64> {
+        match self {
+            Refusal::Status {
+                code, retry_after, ..
+            } => Some(retry_after.unwrap_or(if *code == 429 { 30 } else { 5 })),
+            Refusal::Transport(_) => None,
+        }
+    }
+
+    /// The `Retry-After` the server sent, in seconds, when it sent a
+    /// usable one. Unlike [`Refusal::wait_secs`] this applies no
+    /// fallback - the callers with their own retry ladder supply
+    /// theirs.
+    pub fn retry_after(&self) -> Option<u64> {
+        match self {
+            Refusal::Status { retry_after, .. } => *retry_after,
+            Refusal::Transport(_) => None,
+        }
+    }
+
+    /// Is this the provider saying "not now" rather than "no"?
+    pub fn is_slow_down(&self) -> bool {
+        matches!(self.code(), Some(429 | 503))
+    }
+
+    /// What the server said in the refusal's body, for the two callers
+    /// that report it. Empty for a transport failure, and empty when
+    /// the body cannot be read - a refusal is being reported either
+    /// way, and a second failure reading it adds nothing.
+    pub fn body_text(self) -> String {
+        match self {
+            Refusal::Status { resp, .. } => resp
+                .and_then(|r| (*r).into_body().read_to_string().ok())
+                .unwrap_or_default(),
+            Refusal::Transport(_) => String::new(),
+        }
+    }
+}
+
+/// Safe to log anywhere, which is the point: [`error_brief`] is what
+/// the transport arm prints, so no `{refusal}` in this tree can name a
+/// request URL.
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::Status { code, .. } => write!(f, "http status: {code}"),
+            Refusal::Transport(e) => f.write_str(&error_brief(e)),
+        }
+    }
+}
+
+/// A one-line description of a ureq failure with no request URL in it.
+///
+/// A Discord/ntfy/Gotify webhook's PATH is its bearer token, a TMDB
+/// query string carries the user's api_key, and these strings are
+/// logged - logtee puts them in the dashboard ring and in the file
+/// people paste into support threads. So the rule is: report the
+/// failure, never the request.
+///
+/// ureq 2 made this a rebuild-from-parts job, because its `Transport`
+/// error LED with the whole URL. ureq 3 is the other way round -
+/// nearly every arm of its `Error` describes the failure and names
+/// nothing about the request - so the work here is the two arms that
+/// are NOT like that, and the rest pass through.
+///
+/// `ureq::Error` is `#[non_exhaustive]`, so the catch-all is doing
+/// real work: a ureq minor that adds a URL-carrying arm would start
+/// leaking through it. That is what
+/// `notify::tests::a_transport_error_never_names_the_url` is for, and
+/// why it asserts on the HOST and not just on the path.
+pub fn error_brief(e: &ureq::Error) -> String {
+    match e {
+        // Formats the whole `Uri` - scheme, host, path and query.
+        ureq::Error::BadUri(_) => "bad url".to_string(),
+        ureq::Error::RequireHttpsOnly(_) => "configured for https only".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// `Retry-After` as delta-seconds, or `None`.
+///
+/// Only the delta-seconds form is read. The HTTP-date form is legal and
+/// these services do not send it; a date parser here would be more code
+/// than the fallback it replaces, and getting it subtly wrong is worse
+/// than not having it - see [`Refusal::wait_secs`] for what a `None`
+/// costs.
+fn retry_after_of(headers: &ureq::http::HeaderMap) -> Option<u64> {
+    headers
+        .get("Retry-After")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+/// Run one request with its refusal still readable.
+///
+/// Status-as-error is turned off for THIS request, so a 4xx/5xx comes
+/// back as a response we can read the headers of, and is then
+/// classified into [`Refusal::Status`] with its `Retry-After` already
+/// parsed. Every other call on the same agent is untouched.
+///
+/// The response body of a refusal is NOT read here: `notify` and
+/// `predb_seed` want a few hundred bytes of it and the rest do not, so
+/// it stays the caller's to take. See [`call_body`] for the common
+/// case.
+pub fn call_keeping_refusal(
+    req: ureq::RequestBuilder<ureq::typestate::WithoutBody>,
+) -> Result<ureq::http::Response<ureq::Body>, Refusal> {
+    classify(req.config().http_status_as_error(false).build().call())
+}
+
+/// [`call_keeping_refusal`] for a request that carries a body.
+pub fn send_keeping_refusal(
+    req: ureq::RequestBuilder<ureq::typestate::WithBody>,
+    body: impl ureq::AsSendBody,
+) -> Result<ureq::http::Response<ureq::Body>, Refusal> {
+    classify(req.config().http_status_as_error(false).build().send(body))
+}
+
+/// As [`send_keeping_refusal`], for a POST with no body at all.
+pub fn send_empty_keeping_refusal(
+    req: ureq::RequestBuilder<ureq::typestate::WithBody>,
+) -> Result<ureq::http::Response<ureq::Body>, Refusal> {
+    classify(
+        req.config()
+            .http_status_as_error(false)
+            .build()
+            .send_empty(),
+    )
+}
+
+/// The three helpers above are `classify`'s only callers and every one
+/// of them turns status-as-error off, so a `ureq::Error::StatusCode`
+/// cannot arrive here - which is what lets the `Err` arm be a single
+/// catch-all without losing a code.
+fn classify(
+    r: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> Result<ureq::http::Response<ureq::Body>, Refusal> {
+    match r {
+        Ok(resp) if resp.status().is_client_error() || resp.status().is_server_error() => {
+            Err(Refusal::Status {
+                code: resp.status().as_u16(),
+                retry_after: retry_after_of(resp.headers()),
+                resp: Some(Box::new(resp)),
+            })
+        }
+        Ok(resp) => Ok(resp),
+        Err(e) => Err(Refusal::Transport(e)),
+    }
+}
+
+/// The common shape: run it, read the body as a string.
+///
+/// The 10 MB cap is ureq's own default and is the same one
+/// `into_string()` applied in ureq 2, so this is not a new limit.
+pub fn call_body(
+    req: ureq::RequestBuilder<ureq::typestate::WithoutBody>,
+) -> Result<String, Refusal> {
+    call_keeping_refusal(req)?
+        .into_body()
+        .read_to_string()
+        .map_err(Refusal::Transport)
+}
+
+// ---- The ureq 3 resolver shim -------------------------------------
+//
+// ureq 2's `Resolver` took the netloc STRING every rule in this module
+// is written in terms of and handed back a `Vec<SocketAddr>`. ureq 3's
+// lives in `unversioned::resolver`, takes a `Uri`, the agent `Config`
+// and a deadline, and answers with a fixed-capacity `ArrayVec` of at
+// most 16. These three helpers are that translation, in one place, so
+// the four guards below read the way they did and a future ureq bump
+// has one site to re-check. ureq holds `unversioned::` OUTSIDE semver
+// on purpose, so a bump is a reason to re-read it, and
+// `tools/ureq-unversioned-gate.py` makes that a refusal.
+
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::NextTimeout;
+
+/// `host:port`, port always explicit - the spelling ureq 2 handed the
+/// resolver, and the one [`url_netloc`] produces, so the two sides of
+/// the origin comparison still agree.
+///
+/// Empty for a URI with no scheme or authority. That is a shape ureq
+/// refuses before it dials, and an empty netloc fails every rule below
+/// closed rather than open: `deny_test_callout` sees no literal and no
+/// loopback, and `OriginBoundResolver` cannot match a non-empty origin.
+fn uri_netloc(uri: &ureq::http::Uri) -> String {
+    match (uri.scheme(), uri.authority()) {
+        (Some(sch), Some(auth)) => DefaultResolver::host_and_port(sch, auth).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// One refusal. ureq 3 has no permission-denied variant of its own, and
+/// `Error::Io` is the one its own docs tell a bespoke chain to map to -
+/// so the `ErrorKind` and the message survive, and every call site that
+/// formats the error with `{e}` still prints the reason.
+fn refused(msg: String) -> ureq::Error {
+    ureq::Error::Io(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        msg,
+    ))
+}
+
+/// The stock lookup each guard filters.
+///
+/// Delegating rather than calling `to_socket_addrs` directly is
+/// deliberate: ureq 3 puts the resolve TIMEOUT and the agent's
+/// `ip_family` setting inside `DefaultResolver`, so a hand-rolled
+/// lookup would silently drop both. The 16-address cap it applies is
+/// not a hole in the guard - ureq dials only what we hand back, so an
+/// address it dropped is an address nothing reaches.
+fn base_resolve(
+    uri: &ureq::http::Uri,
+    config: &ureq::config::Config,
+    timeout: NextTimeout,
+) -> Result<ResolvedSocketAddrs, ureq::Error> {
+    DefaultResolver::default().resolve(uri, config, timeout)
+}
+
+/// The config every agent in this module is built on.
+///
+/// Three settings, and each of them is holding ureq 3 to what ureq 2
+/// did rather than taking a new default:
+///
+/// - **`timeout_global`**, because ureq 2's `AgentBuilder::timeout` was
+///   the whole-call budget and every caller picks its number for that.
+///   ureq 3's per-phase timeouts would let a slow body run past it.
+/// - **`max_redirects_will_error(false)`**, because ureq 2 handed back
+///   the last response once the cap was reached and ureq 3 raises
+///   `TooManyRedirects` instead. That matters most at `redirects = 0`,
+///   which three callers here use to mean "do not follow, tell me what
+///   it said" - `notify` reports the status it got, and turning that
+///   into a transport error would relabel a working webhook as broken.
+/// - **`proxy(None)`**, which is the one that is not cosmetic. ureq 3's
+///   `Config::default()` calls `Proxy::try_from_env()`, where ureq 2
+///   proxied only when asked. With a proxy in the environment ureq
+///   resolves the PROXY's address, not the destination's - so every
+///   guard below would be checking the wrong host, and the SSRF rule
+///   this module exists for would be silently off for any daemon
+///   started with `HTTPS_PROXY` set. Supporting a proxy safely means
+///   deciding what the guard means when someone else does the dialling;
+///   that is a design question, not a port, so the port keeps ureq 2's
+///   answer.
+fn agent_config(redirects: u32, timeout_secs: u64) -> ureq::config::Config {
+    ureq::Agent::config_builder()
+        .max_redirects(redirects)
+        .max_redirects_will_error(false)
+        .proxy(None)
+        .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
+        .build()
+}
+
+/// One request header's value out of a raw HTTP request, found without
+/// caring how the client spelled the NAME.
+///
+/// HTTP/1.1 field names are case-insensitive (RFC 9110 5.1) and ureq 3
+/// writes them lowercased - the `http` crate normalises them - where
+/// ureq 2 wrote back whatever the caller typed. Every real receiver
+/// already handled both, so an assertion that pinned the CASE was
+/// pinning ureq's spelling rather than the contract. This is that
+/// assertion catching up: presence and exact VALUE still pinned, name
+/// matched the way the protocol matches it.
+///
+/// Shared rather than copied into each test module: `notify` and the
+/// daemon's `hooks` both capture a raw request off a scratch listener
+/// and both were asserting by exact case.
+#[cfg(any(test, feature = "test-support"))]
+pub fn raw_header_of<'a>(req: &'a str, name: &str) -> Option<&'a str> {
+    let head = req.split_once("\r\n\r\n").map(|(h, _)| h).unwrap_or(req);
+    head.lines().skip(1).find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
+    })
+}
+
+/// One refusal built from a raw HTTP header block, for the tests that
+/// pin the `Retry-After` path without a listener.
+///
+/// The header text goes through the SAME [`retry_after_of`] the wire
+/// path uses, so a parser that stops reading the header reds these
+/// tests rather than quietly falling back. It is the ureq 3 stand-in
+/// for what `wall/tests.rs` used to do by parsing a whole
+/// `ureq::Response` out of raw HTTP text.
+#[cfg(any(test, feature = "test-support"))]
+pub fn refusal_for_test(code: u16, headers: &str) -> Refusal {
+    let mut map = ureq::http::HeaderMap::new();
+    for line in headers.split("\r\n").filter(|l| !l.trim().is_empty()) {
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let (Ok(name), Ok(value)) = (
+            k.trim().parse::<ureq::http::HeaderName>(),
+            v.trim().parse::<ureq::http::HeaderValue>(),
+        ) else {
+            continue;
+        };
+        map.insert(name, value);
+    }
+    Refusal::Status {
+        code,
+        retry_after: retry_after_of(&map),
+        resp: None,
+    }
+}
+
+/// Resolve one `host:port` through `r`, for the SSRF tests.
+///
+/// The guards are all written in terms of a netloc and are tested with
+/// literals; this is the ureq 2 -> ureq 3 translation for the test
+/// side, and nothing else. It drives the REAL `resolve`, so a guard
+/// that stops firing still reds the tests that call it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn resolve_netloc<R: Resolver>(
+    r: &R,
+    netloc: &str,
+) -> Result<Vec<std::net::SocketAddr>, ureq::Error> {
+    let uri: ureq::http::Uri = format!("https://{netloc}/")
+        .parse()
+        .map_err(|_| ureq::Error::BadUri(netloc.to_string()))?;
+    let config = ureq::Agent::config_builder().build();
+    let timeout = NextTimeout {
+        after: ureq::unversioned::transport::time::Duration::NotHappening,
+        reason: ureq::Timeout::Global,
+    };
+    r.resolve(&uri, &config, timeout).map(|a| a.to_vec())
+}
+
 /// ureq resolver that refuses to hand back any internal address. Because
 /// ureq connects to exactly the SocketAddrs returned here (no second
 /// lookup), this closes the DNS-rebinding window AND re-checks on every
 /// redirect hop, since each hop resolves through it.
+#[derive(Debug, Default)]
 pub struct SsrfGuardResolver;
-impl ureq::Resolver for SsrfGuardResolver {
-    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
-        use std::net::ToSocketAddrs;
-        let addrs: Vec<std::net::SocketAddr> = netloc.to_socket_addrs()?.collect();
-        note_resolution(netloc, &addrs);
-        deny_test_callout(netloc, &addrs)?;
+impl Resolver for SsrfGuardResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let netloc = uri_netloc(uri);
+        let addrs = base_resolve(uri, config, timeout)?;
+        note_resolution(&netloc, &addrs);
+        deny_test_callout(&netloc, &addrs).map_err(ureq::Error::Io)?;
         if addrs.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no address",
-            ));
+            return Err(ureq::Error::HostNotFound);
         }
         if addrs.iter().any(|a| is_forbidden_fetch_ip(a.ip())) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!("refusing to fetch an internal address ({netloc})"),
-            ));
+            return Err(refused(format!(
+                "refusing to fetch an internal address ({netloc})"
+            )));
         }
         Ok(addrs)
     }
@@ -338,23 +743,25 @@ impl ureq::Resolver for SsrfGuardResolver {
 /// ([`is_forbidden_daemon_ip`]): link-local is reachable, its metadata
 /// endpoints are not. Only [`daemon_api_agent`] installs it - the
 /// enrich and user-URL agents keep the full guard.
+#[derive(Debug, Default)]
 pub(crate) struct DaemonApiResolver;
-impl ureq::Resolver for DaemonApiResolver {
-    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
-        use std::net::ToSocketAddrs;
-        let addrs: Vec<std::net::SocketAddr> = netloc.to_socket_addrs()?.collect();
-        deny_test_callout(netloc, &addrs)?;
+impl Resolver for DaemonApiResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let netloc = uri_netloc(uri);
+        let addrs = base_resolve(uri, config, timeout)?;
+        deny_test_callout(&netloc, &addrs).map_err(ureq::Error::Io)?;
         if addrs.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no address",
-            ));
+            return Err(ureq::Error::HostNotFound);
         }
         if addrs.iter().any(|a| is_forbidden_daemon_ip(a.ip())) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!("refusing to fetch an internal address ({netloc})"),
-            ));
+            return Err(refused(format!(
+                "refusing to fetch an internal address ({netloc})"
+            )));
         }
         Ok(addrs)
     }
@@ -364,11 +771,11 @@ impl ureq::Resolver for DaemonApiResolver {
 /// through the SSRF guard. Use for ANY fetch of a user/attacker-supplied
 /// URL. `redirects` is capped by the caller.
 pub fn ssrf_safe_agent(redirects: u32, timeout_secs: u64) -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .resolver(SsrfGuardResolver)
-        .redirects(redirects)
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .build()
+    ureq::Agent::with_parts(
+        agent_config(redirects, timeout_secs),
+        ureq::unversioned::transport::DefaultConnector::new(),
+        SsrfGuardResolver,
+    )
 }
 
 /// The SSRF guard PLUS the origin rule for links a configured source
@@ -382,7 +789,7 @@ pub fn ssrf_safe_agent(redirects: u32, timeout_secs: u64) -> ureq::Agent {
 /// compromised (or merely hostile) indexer could hand back
 /// `http://127.0.0.1:<other>/...` and make the daemon issue a blind GET
 /// against a different service on the user's own box. Binding the fetch
-/// to the origin is the same move [`failure_link_allowed`] already makes
+/// to the origin is the same move `failure_link_allowed` already makes
 /// for response-supplied failure links, for the same reason.
 ///
 /// Cross-origin is NOT refused outright: an indexer serving its NZBs
@@ -418,6 +825,7 @@ pub fn ssrf_safe_agent(redirects: u32, timeout_secs: u64) -> ureq::Agent {
 /// from the search that supplied the link, so the only way to arrive
 /// here empty is a public source (unaffected) or a genuine renumber
 /// between search and grab, which the next search re-witnesses.
+#[derive(Debug)]
 pub struct OriginBoundResolver {
     /// `host:port` of the configured source, lowercased, with the
     /// scheme's default port filled in - see [`url_netloc`]. Empty when
@@ -440,26 +848,28 @@ impl OriginBoundResolver {
     }
 }
 
-impl ureq::Resolver for OriginBoundResolver {
-    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
-        use std::net::ToSocketAddrs;
-        let addrs: Vec<std::net::SocketAddr> = netloc.to_socket_addrs()?.collect();
+impl Resolver for OriginBoundResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let netloc = uri_netloc(uri);
+        let netloc = netloc.as_str();
+        let addrs = base_resolve(uri, config, timeout)?;
         // Recorded here as well as in the plain guard so that
         // `Fetched.addrs` means the same thing whichever tier fetched
         // it: where the url we ASKED for resolved to.
         note_resolution(netloc, &addrs);
-        deny_test_callout(netloc, &addrs)?;
+        deny_test_callout(netloc, &addrs).map_err(ureq::Error::Io)?;
         if addrs.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no address",
-            ));
+            return Err(ureq::Error::HostNotFound);
         }
         if addrs.iter().any(|a| is_forbidden_fetch_ip(a.ip())) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!("refusing to fetch an internal address ({netloc})"),
-            ));
+            return Err(refused(format!(
+                "refusing to fetch an internal address ({netloc})"
+            )));
         }
         // ureq builds netloc as `host_str():port_or_known_default()`, so
         // both sides carry an explicit port and a bracketed IPv6 literal
@@ -471,18 +881,15 @@ impl ureq::Resolver for OriginBoundResolver {
             .filter(|ip| is_private_fetch_ip(*ip))
             .collect();
         if !private.is_empty() && !same_origin {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "refusing a link to {netloc}: it is inside this network \
-                     and is not the source that supplied it{}",
-                    if self.origin.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", self.origin)
-                    }
-                ),
-            ));
+            return Err(refused(format!(
+                "refusing a link to {netloc}: it is inside this network \
+                 and is not the source that supplied it{}",
+                if self.origin.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", self.origin)
+                }
+            )));
         }
         // Same netloc, private address: allowed only for an address the
         // source answered the search from. EVERY private address in the
@@ -490,14 +897,11 @@ impl ureq::Resolver for OriginBoundResolver {
         // to dial, so a resolver that returns the real public address
         // beside a loopback one would otherwise smuggle the loopback in.
         if let Some(bad) = private.iter().find(|ip| !self.witnessed.contains(ip)) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "refusing a link to {netloc}: it resolves to {bad} inside \
-                     this network, which is not an address it answered the \
-                     search from"
-                ),
-            ));
+            return Err(refused(format!(
+                "refusing a link to {netloc}: it resolves to {bad} inside \
+                 this network, which is not an address it answered the \
+                 search from"
+            )));
         }
         Ok(addrs)
     }
@@ -533,19 +937,23 @@ impl ureq::Resolver for OriginBoundResolver {
 /// daemon test that searches a mock newznab is untouched. The one
 /// caller that deliberately opts OUT of the enrich pool to escape this
 /// is `wall::omdb::omdb_signup`, which says why at the site.
+#[derive(Debug, Default)]
 pub struct EnrichResolver;
-impl ureq::Resolver for EnrichResolver {
-    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
-        let addrs = <SsrfGuardResolver as ureq::Resolver>::resolve(&SsrfGuardResolver, netloc)?;
+impl Resolver for EnrichResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let addrs = SsrfGuardResolver.resolve(uri, config, timeout)?;
         if !crate::identity::may_call_out() && !addrs.iter().all(|a| a.ip().is_loopback()) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "enrichment is switched off, so {netloc} was not contacted \
-                     (project invariant 5 - unset NZBFAST_NO_ENRICH \
-                     to allow it)"
-                ),
-            ));
+            let netloc = uri_netloc(uri);
+            return Err(refused(format!(
+                "enrichment is switched off, so {netloc} was not contacted \
+                 (project invariant 5 - unset NZBFAST_NO_ENRICH \
+                 to allow it)"
+            )));
         }
         Ok(addrs)
     }
@@ -555,11 +963,11 @@ impl ureq::Resolver for EnrichResolver {
 /// Every hop - the link itself and each redirect - goes through
 /// [`OriginBoundResolver`].
 pub fn origin_bound_agent(origin: &SourceOrigin, redirects: u32, timeout_secs: u64) -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .resolver(OriginBoundResolver::new(origin))
-        .redirects(redirects)
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .build()
+    ureq::Agent::with_parts(
+        agent_config(redirects, timeout_secs),
+        ureq::unversioned::transport::DefaultConnector::new(),
+        OriginBoundResolver::new(origin),
+    )
 }
 
 /// The ONE outbound HTTP agent the wall enricher shares (plan §4 C2).
@@ -589,13 +997,162 @@ pub fn shared_enrich_agent() -> ureq::Agent {
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     AGENT
         .get_or_init(|| {
-            ureq::AgentBuilder::new()
-                .resolver(EnrichResolver)
-                .redirects(4)
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
+            ureq::Agent::with_parts(
+                agent_config(4, 30),
+                ureq::unversioned::transport::DefaultConnector::new(),
+                EnrichResolver,
+            )
         })
         .clone()
+}
+
+/// The TLS link that hands ureq 3 nzbkit's own `rustls::ClientConfig`.
+///
+/// ureq 2 took one through `AgentBuilder::tls_config`. ureq 3 has no
+/// such hook at all: its `TlsConfig` offers roots and a
+/// `disable_verification()` that also waives the signature checks, and
+/// neither is "use this config". The way 3.x leaves open is a bespoke
+/// connector chained behind the plain TCP one, in place of
+/// `DefaultConnector`'s rustls link - which is what the tray port
+/// settled on first (`crates/nzbtray/src/main.rs`), and this is that
+/// shape with nzbkit's config in place of the tray's loopback one.
+///
+/// Everything here is ureq's own `RustlsConnector` / `RustlsTransport`
+/// restated, because the latter is private. Re-read `ureq/src/tls/
+/// rustls.rs` at every ureq minor: this rides `unversioned::transport`,
+/// which ureq explicitly does not hold to semver, and the handshake
+/// dance has to keep matching. `tools/ureq-unversioned-gate.py` refuses a
+/// ureq version this was not re-read against; its header has the rule.
+///
+/// Plain HTTP still works - a `--host http://...` never reaches the TLS
+/// half, exactly as in ureq's own chain.
+#[derive(Debug, Default)]
+struct SharedTlsConnector;
+
+impl<In: ureq::unversioned::transport::Transport> ureq::unversioned::transport::Connector<In>
+    for SharedTlsConnector
+{
+    type Out = ureq::unversioned::transport::Either<In, SharedTlsTransport>;
+
+    fn connect(
+        &self,
+        details: &ureq::unversioned::transport::ConnectionDetails,
+        chained: Option<In>,
+    ) -> Result<Option<Self::Out>, ureq::Error> {
+        use ureq::unversioned::transport::Either;
+        let Some(transport) = chained else {
+            // Same contract as ureq's own rustls link: only ever
+            // reached second in a chain.
+            return Ok(None);
+        };
+        if !details.needs_tls() || transport.is_tls() {
+            return Ok(Some(Either::A(transport)));
+        }
+        let name = tls_peer_name(details.uri)?;
+        let mut conn =
+            rustls::ClientConnection::new(nzbkit::nntp::shared_tls_client_config(), name)?;
+        let mut sock = ureq::unversioned::transport::TransportAdapter::new(transport.boxed());
+        sock.set_timeout(details.timeout);
+        conn.complete_io(&mut sock)?;
+        Ok(Some(Either::B(SharedTlsTransport {
+            buffers: ureq::unversioned::transport::LazyBuffers::new(
+                details.config.input_buffer_size(),
+                details.config.output_buffer_size(),
+            ),
+            stream: rustls::StreamOwned { conn, sock },
+        })))
+    }
+}
+
+/// The TLS peer name for a URI, derived the way ureq's own connector
+/// derives it.
+///
+/// ureq names the peer with its PRIVATE `AuthorityExt::host_bare()`
+/// (`ureq/src/util.rs`), which strips the RFC 3986 brackets an IPv6
+/// literal carries in a URI authority. `Authority::host()` keeps them,
+/// and `ServerName::try_from("[::1]")` is `InvalidDnsNameError` - so
+/// naming the peer with `host()` made `nzbfast stream --host
+/// https://[::1]:PORT` fail "invalid dns name" before a byte was sent,
+/// where ureq's own connector dials. Found by the re-read that
+/// `tools/ureq-unversioned-gate.py` exists to force.
+///
+/// Stripping is the WHOLE fix: `ServerName::try_from` tries the DNS
+/// grammar first and falls through to the IP-literal path, and an
+/// all-numeric last label is not a valid DNS name, so `::1` and
+/// `127.0.0.1` both come back as `ServerName::IpAddress` with no parse
+/// of our own. A name that is neither takes the DNS path unchanged.
+///
+/// `LoopbackTlsConnector` in `crates/nzbtray/src/main.rs` restates
+/// these three lines: the tray deliberately has no dependency edge to
+/// this crate (its `Cargo.toml` says why), so the two copies move
+/// together by hand. Same pairing as the connectors themselves.
+///
+/// ref-gate: `ureq/src/util.rs` is a file in the ureq CRATE, not in
+/// this tree - read it under the cargo registry checkout the
+/// `tools/ureq-unversioned-gate.py` digest arm already resolves.
+fn tls_peer_name(
+    uri: &ureq::http::Uri,
+) -> Result<rustls::pki_types::ServerName<'static>, ureq::Error> {
+    let host = uri
+        .authority()
+        .map(|a| a.host())
+        .ok_or(ureq::Error::Tls("no authority for tls"))?;
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    Ok(rustls::pki_types::ServerName::try_from(bare)
+        .map_err(|_| ureq::Error::Tls("invalid dns name"))?
+        .to_owned())
+}
+
+/// The TLS half of [`SharedTlsConnector`]'s connection. ureq's own
+/// `RustlsTransport` is private, so this is that type restated.
+struct SharedTlsTransport {
+    buffers: ureq::unversioned::transport::LazyBuffers,
+    stream: rustls::StreamOwned<
+        rustls::ClientConnection,
+        ureq::unversioned::transport::TransportAdapter,
+    >,
+}
+
+impl std::fmt::Debug for SharedTlsTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SharedTlsTransport")
+    }
+}
+
+impl ureq::unversioned::transport::Transport for SharedTlsTransport {
+    fn buffers(&mut self) -> &mut dyn ureq::unversioned::transport::Buffers {
+        &mut self.buffers
+    }
+
+    fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
+        use std::io::Write as _;
+        use ureq::unversioned::transport::Buffers as _;
+        self.stream.get_mut().set_timeout(timeout);
+        let output = &self.buffers.output()[..amount];
+        self.stream.write_all(output)?;
+        Ok(())
+    }
+
+    fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
+        use std::io::Read as _;
+        use ureq::unversioned::transport::Buffers as _;
+        self.stream.get_mut().set_timeout(timeout);
+        let input = self.buffers.input_append_buf();
+        let amount = self.stream.read(input)?;
+        self.buffers.input_appended(amount);
+        Ok(amount > 0)
+    }
+
+    fn is_open(&mut self) -> bool {
+        self.stream.get_mut().get_mut().is_open()
+    }
+
+    fn is_tls(&self) -> bool {
+        true
+    }
 }
 
 /// The agent the CLI uses to talk to a running nzbfast daemon
@@ -614,6 +1171,8 @@ pub fn shared_enrich_agent() -> ureq::Agent {
 ///   too. That matters more here than anywhere, because the pair the
 ///   `serve --tls-cert` help tells a user to make is SELF-SIGNED, and
 ///   without the extra anchor the very setup we document is unreachable.
+///   ureq 3 has no `tls_config` hook for a whole `rustls::ClientConfig`
+///   the way ureq 2 did, so it arrives through `SharedTlsConnector`.
 /// - **No redirects.** The request carries `X-Api-Key`, and ureq
 ///   forwards a custom header across a redirect - including one to
 ///   another host. A daemon has no reason to redirect its own `/api`, so
@@ -626,18 +1185,18 @@ pub fn shared_enrich_agent() -> ureq::Agent {
 ///   typically typed by a script, and this costs a legitimate one
 ///   nothing.
 pub fn daemon_api_agent(timeout_secs: u64) -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .resolver(DaemonApiResolver)
-        .redirects(0)
-        .tls_config(nzbkit::nntp::shared_tls_client_config())
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .build()
+    use ureq::unversioned::transport::Connector as _;
+    ureq::Agent::with_parts(
+        agent_config(0, timeout_secs),
+        ureq::unversioned::transport::TcpConnector::default().chain(SharedTlsConnector),
+        DaemonApiResolver,
+    )
 }
 
 /// Cut every URL in a message down to `scheme://host`, dropping userinfo,
 /// path and query.
 ///
-/// [`redact_apikey`] guards the SEARCH path, where we built the URL and
+/// `redact_apikey` guards the SEARCH path, where we built the URL and
 /// therefore know the credential is spelled `apikey=`. The GRAB path has
 /// no such guarantee: the NZB link comes out of the indexer's own XML,
 /// and sites spell their credential `apikey`, `api_key`, `r`, `i`, or
@@ -749,4 +1308,320 @@ pub fn urlenc(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod ureq3_tests {
+    use super::*;
+
+    /// One loopback listener that answers every request with `reply`
+    /// verbatim, once per connection. Returns its `host:port`.
+    ///
+    /// Raw bytes rather than a server crate on purpose: the thing under
+    /// test is how a REFUSAL's headers reach the caller, so the reply
+    /// has to be written exactly as an unhelpful provider would write
+    /// it.
+    fn one_shot(reply: &'static str, serves: usize) -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let addr = l.local_addr().expect("its address").to_string();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..serves {
+                let Ok((mut s, _)) = l.accept() else { return };
+                // Read whatever the request is, then answer. A read that
+                // stops at the headers is enough: nothing here sends a
+                // body worth waiting for.
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(reply.as_bytes());
+                let _ = s.flush();
+            }
+        });
+        addr
+    }
+
+    /// **The port's load-bearing assertion.** ureq 2 raised
+    /// `Error::Status(code, response)` and eight sites in this tree read
+    /// `Retry-After` off that response; ureq 3's `Error::StatusCode(u16)`
+    /// carries nothing, so a literal port would have every one of them
+    /// silently fall back to its hardcoded 30 s and hammer a provider on
+    /// a schedule it had asked us not to keep - with no test failing.
+    ///
+    /// This drives the REAL shared enrich agent against a real listener
+    /// that refuses with a real header, so it fails if any link in that
+    /// chain stops working: the per-request `http_status_as_error(false)`,
+    /// the 4xx/5xx classification, or the header parse.
+    #[test]
+    fn a_429_still_hands_back_the_retry_after_it_was_sent() {
+        let addr = one_shot(
+            "HTTP/1.1 429 Too Many Requests\r\n\
+             Retry-After: 900\r\n\
+             Content-Length: 4\r\n\
+             Connection: close\r\n\
+             \r\n\
+             slow",
+            1,
+        );
+        let e = call_body(shared_enrich_agent().get(format!("http://{addr}/x")))
+            .expect_err("a 429 is a refusal");
+        assert_eq!(e.code(), Some(429));
+        assert_eq!(
+            e.retry_after(),
+            Some(900),
+            "the header the provider sent was not read: {e}"
+        );
+        assert_eq!(e.wait_secs(), Some(900));
+        assert!(e.is_slow_down());
+    }
+
+    /// A refusal with no `Retry-After` falls back, and the fallback is
+    /// the one every call site used to spell for itself.
+    #[test]
+    fn a_bare_429_falls_back_and_a_503_falls_back_lower() {
+        for (code, want) in [(429u16, 30u64), (503, 5)] {
+            let addr = one_shot(
+                match code {
+                    429 => {
+                        "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    }
+                    _ => {
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    }
+                },
+                1,
+            );
+            let e = call_body(shared_enrich_agent().get(format!("http://{addr}/x")))
+                .expect_err("a refusal");
+            assert_eq!(e.code(), Some(code));
+            assert_eq!(e.retry_after(), None);
+            assert_eq!(e.wait_secs(), Some(want), "fallback for {code}");
+        }
+    }
+
+    /// The refusal's BODY survives too - `notify` reports up to 200
+    /// characters of it, and `predb_seed` reads the JSON error.
+    #[test]
+    fn a_refusals_body_is_still_readable() {
+        let addr = one_shot(
+            "HTTP/1.1 401 Unauthorized\r\n\
+             Content-Length: 11\r\n\
+             Connection: close\r\n\
+             \r\n\
+             bad api key",
+            1,
+        );
+        let e = call_keeping_refusal(shared_enrich_agent().get(format!("http://{addr}/x")))
+            .expect_err("a 401 is a refusal");
+        assert_eq!(e.code(), Some(401));
+        assert!(!e.is_slow_down());
+        assert_eq!(e.body_text(), "bad api key");
+    }
+
+    /// Turning status-as-error off is PER REQUEST. The enrich agent is
+    /// shared process-wide and most of its callers want a 4xx to be an
+    /// `Err`; a port that had set this on the agent would have changed
+    /// every one of them at once, silently.
+    #[test]
+    fn the_shared_agent_still_raises_a_plain_4xx_as_an_error() {
+        let addr = one_shot(
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            1,
+        );
+        let e = shared_enrich_agent()
+            .get(format!("http://{addr}/x"))
+            .call()
+            .expect_err("a bare .call() on the shared pool still errors on a 4xx");
+        assert!(
+            matches!(e, ureq::Error::StatusCode(404)),
+            "the agent's own default moved: {e}"
+        );
+    }
+
+    /// `error_brief` is what every `{refusal}` in this tree prints, and
+    /// the one ureq 3 arm that formats the whole request must not reach
+    /// a log. A webhook's PATH is its bearer token.
+    #[test]
+    fn a_bad_uri_error_never_names_the_request() {
+        let e = ureq::Error::BadUri(
+            "https://discord.example/api/webhooks/1/SUPERSECRET?k=alsosecret is missing scheme"
+                .into(),
+        );
+        let brief = error_brief(&e);
+        assert!(!brief.contains("SUPERSECRET"), "{brief}");
+        assert!(!brief.contains("alsosecret"), "{brief}");
+        assert!(!brief.contains("discord.example"), "{brief}");
+        // Still says something.
+        assert_eq!(brief, "bad url");
+    }
+
+    /// The guards' own refusals arrive as `Error::Io` with the kind and
+    /// the message intact, which is what `nettools` matches on to tell
+    /// "we refused this address" from "nothing is listening".
+    #[test]
+    fn a_guard_refusal_keeps_its_kind_and_its_words() {
+        let e = super::refused("refusing to fetch an internal address (x:1)".into());
+        let ureq::Error::Io(io) = &e else {
+            panic!("a guard refusal must stay an io error: {e}");
+        };
+        assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            e.to_string()
+                .contains("refusing to fetch an internal address")
+        );
+    }
+
+    /// ureq 3's `Config::default()` reads `HTTP_PROXY`/`HTTPS_PROXY`
+    /// from the environment where ureq 2 proxied only when asked. With
+    /// a proxy in play ureq resolves the PROXY's address rather than
+    /// the destination's, so every guard in this module would be
+    /// checking the wrong host - the SSRF rule silently off for any
+    /// daemon started with the variable set. Every agent built here
+    /// therefore pins it off, and this is the assertion that keeps it
+    /// pinned.
+    #[test]
+    fn no_agent_built_here_inherits_a_proxy_from_the_environment() {
+        for agent in [
+            ssrf_safe_agent(4, 30),
+            shared_enrich_agent(),
+            daemon_api_agent(10),
+            origin_bound_agent(&SourceOrigin::default(), 4, 30),
+        ] {
+            assert!(
+                agent.config().proxy().is_none(),
+                "an agent picked up a proxy, which moves what the SSRF guard checks"
+            );
+        }
+    }
+
+    /// **The IPv6 defect the `unversioned::` gate's baseline re-read
+    /// found.** ureq derives the TLS peer name with its private
+    /// `host_bare()`; both restated connectors used `Authority::host()`,
+    /// which keeps the RFC 3986 brackets, and `[::1]` is not a valid DNS
+    /// name - so a daemon on `https://[::1]:PORT` was refused "invalid
+    /// dns name" before a packet left the box.
+    ///
+    /// Both literals land on `ServerName::IpAddress` and neither needs a
+    /// parse of our own: `try_from` tries the DNS grammar first, and an
+    /// all-numeric last label fails it. That is the whole reason the fix
+    /// is a bracket strip rather than an `IpAddr::from_str` ladder, so
+    /// the variant is asserted rather than merely "it did not error".
+    #[test]
+    fn an_ipv6_literal_names_the_tls_peer_without_its_brackets() {
+        use rustls::pki_types::ServerName;
+        let name = |u: &str| tls_peer_name(&u.parse::<ureq::http::Uri>().expect("a uri"));
+
+        let v6 = name("https://[::1]:6789/api").expect("an ipv6 literal names a peer");
+        assert!(
+            matches!(&v6, ServerName::IpAddress(_)),
+            "an ipv6 literal must reach rustls as an address, not a name: {v6:?}"
+        );
+        assert!(
+            matches!(
+                name("https://[fe80::1000:ff:fe00:1234]:8443/").expect("a full literal"),
+                ServerName::IpAddress(_)
+            ),
+            "only the loopback spelling was handled"
+        );
+
+        let v4 = name("https://127.0.0.1:6789/api").expect("an ipv4 literal names a peer");
+        assert!(
+            matches!(&v4, ServerName::IpAddress(_)),
+            "an ipv4 literal must reach rustls as an address: {v4:?}"
+        );
+
+        // A real name still takes the DNS path, brackets or not.
+        let dns = name("https://daemon.example:6789/api").expect("a dns name");
+        assert!(matches!(&dns, ServerName::DnsName(_)), "{dns:?}");
+
+        // And a genuinely unusable authority is still refused here
+        // rather than reaching the handshake. Note that the brackets
+        // themselves do not make a host an address: `[not-an-address]`
+        // strips to a perfectly valid DNS name and takes the DNS path,
+        // which is why the invalid case has to fail the DNS grammar
+        // too (a leading hyphen does).
+        assert!(matches!(
+            name("https://[-bad-]/"),
+            Err(ureq::Error::Tls("invalid dns name"))
+        ));
+        assert!(matches!(
+            tls_peer_name(
+                &"/api?mode=version"
+                    .parse::<ureq::http::Uri>()
+                    .expect("a uri")
+            ),
+            Err(ureq::Error::Tls("no authority for tls"))
+        ));
+    }
+
+    /// The end-to-end half: the REAL `daemon_api_agent` chain against a
+    /// listener on IPv6 loopback. Before the bracket strip this died in
+    /// `SharedTlsConnector::connect` with no connection made at all;
+    /// the assertion is therefore that the listener saw a TLS
+    /// ClientHello (record type 0x16), which can only happen once the
+    /// peer name has been accepted and `complete_io` has run.
+    ///
+    /// The listener answers nothing, so the CALL always fails - a
+    /// trusted end-entity certificate for `::1` would need a CA minted
+    /// and `NZBFAST_EXTRA_CA` set, and that variable is read
+    /// process-wide by a shared config cache, so a `set_var` here would
+    /// reach every other test in this one-process crate. What is under
+    /// test is the name, and the ClientHello proves the name.
+    ///
+    /// Hermetic by construction (invariant 5a): the host is an IP
+    /// literal, so `deny_test_callout` permits it and nothing resolves.
+    #[test]
+    fn a_daemon_on_ipv6_loopback_gets_a_real_handshake_attempt() {
+        for bind in ["[::1]:0", "127.0.0.1:0"] {
+            let l = std::net::TcpListener::bind(bind)
+                .unwrap_or_else(|e| panic!("a loopback listener on {bind}: {e}"));
+            let addr = l.local_addr().expect("its address").to_string();
+            let seen = std::thread::spawn(move || {
+                use std::io::Read as _;
+                let Ok((mut s, _)) = l.accept() else {
+                    return Vec::new();
+                };
+                let mut buf = [0u8; 1024];
+                let n = s.read(&mut buf).unwrap_or(0);
+                buf[..n].to_vec()
+            });
+
+            let e = daemon_api_agent(10)
+                .get(format!("https://{addr}/api?mode=version"))
+                .call()
+                .expect_err("the listener never completes a handshake");
+            assert!(
+                !matches!(e, ureq::Error::Tls("invalid dns name")),
+                "{bind} was refused before it was dialled: {e}"
+            );
+
+            let hello = seen.join().expect("the listener thread");
+            assert_eq!(
+                hello.first(),
+                Some(&0x16u8),
+                "{bind} saw no TLS ClientHello - the handshake was never reached"
+            );
+        }
+    }
+
+    /// ureq 2 handed back the last response once the redirect cap was
+    /// reached; ureq 3 raises `TooManyRedirects` instead. Three callers
+    /// use `redirects = 0` to mean "do not follow, tell me what it
+    /// said" - `nzbfast stream` reports a 3xx as its own diagnostic and
+    /// `notify` reports the status it got.
+    #[test]
+    fn a_redirect_at_the_cap_is_still_the_response_and_not_an_error() {
+        let addr = one_shot(
+            "HTTP/1.1 302 Found\r\n\
+             Location: http://example.invalid/\r\n\
+             Content-Length: 0\r\n\
+             Connection: close\r\n\
+             \r\n",
+            1,
+        );
+        let resp = ssrf_safe_agent(0, 10)
+            .get(format!("http://{addr}/x"))
+            .call()
+            .expect("a 3xx at the cap comes back as a response");
+        assert_eq!(resp.status().as_u16(), 302);
+    }
 }

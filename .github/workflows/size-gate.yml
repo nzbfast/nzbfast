@@ -701,6 +701,7 @@ on:
       - 'tools/index-lock-gate.py'
       - 'tools/rate-format-gate.py'
       - 'tools/nav-destinations-gate.py'
+      - 'tools/manual-section-number-gate.py'
       - 'web/ui-manualnav.html'
       - 'macapp/**'
       - 'tools/payload-id-gate.py'
@@ -739,6 +740,15 @@ on:
       # `nzbfast-ci-gate-never-runs` memory topic exactly - check the
       # TRIGGER, not the job.
       - 'research/CLAIMS.jsonl'
+      # For `conformance table freshness`. The tables it reads are
+      # `tools/conformance/expected/*.json` and the inventories are
+      # `.txt`, and NEITHER matches another pattern in this list - so
+      # without this line a push that hand-edited a committed table, or
+      # deleted one, ran not one gate in this workflow. The row source
+      # itself (`run.py`) is already caught by `**/*.py`, which is the
+      # half the 21 Sep 2026 incident moved.
+      - 'tools/conformance/**'
+      - 'tools/conformance-table-freshness-gate.py'
       - 'tools/claims-drop-gate.py'
       - 'tools/workflow_scan.py'
       - 'tools/bench-report-selftests.py'
@@ -751,6 +761,16 @@ on:
       - 'tools/cpu-workers-gate.py'
       - 'tools/env-default-gate.py'
       - 'tools/env-inventory-gate.py'
+      # For `ureq-unversioned-gate`, and the lock is the point: its subject
+      # is the ureq version in `Cargo.lock`, which matches nothing else in
+      # this list (it is not .rs, .py, .sh or a manifest), so a dependabot
+      # bump that touches ONLY the lock - the exact commit the gate exists
+      # to stop - would otherwise run not one gate in this workflow. It
+      # also means a lock-only push now runs every job here; they are
+      # seconds each, which is the argument this file already makes for
+      # running on every branch.
+      - 'Cargo.lock'
+      - 'tools/ureq-unversioned-gate.py'
       # For `env-default-gate`, whose second subject is the Default column
       # of docs/ENVIRONMENT.md. `crates/**` and `**/*.rs` above cover the
       # code side; nothing in this list matches that one .md file, so
@@ -1152,6 +1172,19 @@ jobs:
       - name: env inventory gate
         if: ${{ !cancelled() }}
         run: tools/env-inventory-gate.py --selftest && tools/env-inventory-gate.py
+      # ---- ureq-unversioned-gate -----------------------------------
+      # Two places restate ureq's private rustls transport and four SSRF
+      # resolvers ride `ureq::unversioned::resolver`, a module ureq
+      # explicitly does not hold to semver. A bump that still compiles can
+      # leave that code out of step with the library it was copied from
+      # with every other job green. This refuses a `Cargo.lock` ureq that
+      # is not the version the code was last re-read against, and a new
+      # file that starts using `unversioned::` without being listed. The
+      # fix rule is in the script's header - never bump the pin without
+      # the re-read. Build-free, well under a second.
+      - name: ureq unversioned gate
+        if: ${{ !cancelled() }}
+        run: tools/ureq-unversioned-gate.py --selftest && tools/ureq-unversioned-gate.py
       # ---- host-config-gate ----------------------------------------
       # A test that hands the daemon a config path it never wrote.
       # `Config::load` answers a MISSING file by finding a SABnzbd
@@ -1874,6 +1907,29 @@ jobs:
         # step did.
         if: ${{ !cancelled() }}
         run: tools/leg-warn-gate.py --selftest && tools/leg-warn-gate.py
+      # ---- harness-rig-gate ----------------------------------------
+      # A round driver that banks a log without a HARNESS-RIG line leaves
+      # evidence nobody can attribute: jcross-position-audit's driver_label()
+      # answers `(unstamped)` and refuses to guess. bc8be513d wired 24 such
+      # drivers and added no ratchet, which is what this is. `--selftest`
+      # first, and here it is the whole gate - the note the 24 patched
+      # drivers carry names `pdrv.harness_facts` verbatim above the call, so
+      # a stamp test that read comments would pass a file that copied the
+      # note and not the call, and still print a green line.
+      # WIDENED 21 Sep 2026, once the second census had wired its 34: the
+      # scope is now the research tree less three named directories rather
+      # than one directory, so a round directory added tomorrow is covered
+      # with no edit. Shell joined it in the same commit - twelve of those
+      # 34 are `.sh`, a language with no stamp mechanism at all until then,
+      # and a gate blind to the extension reads them as a clean tree rather
+      # than as hits. The script header's SCOPE section carries the reasons.
+      - name: harness rig stamp gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/harness-rig-gate.py --selftest && tools/harness-rig-gate.py
       # ---- provenance-gate -----------------------------------------
       - name: driver provenance gate
         # Run even when an earlier gate in this group failed - a
@@ -2025,6 +2081,128 @@ jobs:
         # step did.
         if: ${{ !cancelled() }}
         run: tools/ps1-parse-gate.py --selftest && tools/ps1-parse-gate.py
+      # ---- coord-matcher-gate --------------------------------------
+      # "Reading a box's coordination file, who is holding it RIGHT NOW?"
+      # is ONE predicate, and by 18 Sep 2026 six lanes had each written
+      # their own copy of it into their own driver. Every copy got
+      # something different wrong, and the dangerous polarity is the OPEN
+      # side: a missed close keyword costs a wait, a missed open keyword
+      # reads a HELD box as FREE. `zrider-round.ps1`'s first cut had
+      # TAKEOVER - a fleet OPEN word - classified as a CLOSE, and was
+      # caught by that lane reading the roster rather than by any gate.
+      # `research/harness/plib.ps1` carries the canonical fold now, so a
+      # seventh copy is a choice rather than a gap, and this is what
+      # makes it a refused one.
+      #
+      # BANKED ROUND SCRIPTS ARE HISTORY and this gate never asks for one
+      # to be edited: all 25 pre-existing copies are frozen in its
+      # BASELINE, as a ratchet - a new file reds, an edited banked
+      # matcher reds, and a baseline entry that stops matching reds as
+      # stale. Scope is the whole tree rather than research/harness/ on
+      # purpose: the sixth copy landed in a brand-new research/rounds/
+      # directory, which a harness-only scope would have missed.
+      #
+      # Measured over 258 committed .ps1 at origin/main: 27 hits, all 27
+      # hand-confirmed genuine, 0 false positives, and 6 of the 6 known
+      # copies named. The wider one-keyword predicate was built, measured
+      # (50 hits, 4 plain false positives on shapes every future round
+      # driver has) and REFUSED; the script's header carries that funnel.
+      #
+      # A THIRD ARM SINCE 20 Sep 2026 covers the UNIX side, which until
+      # then nothing refused this copy on at all: both arms above are
+      # PowerShell-shaped. ARM 3 wants two or more roster words tested as
+      # TOKEN 0 of a line in a committed .py/.sh/.zsh, accumulated across
+      # the file. Measured over 1,904 of them: 5 hits, all 5 hand-read and
+      # confirmed, 0 false positives over the other 1,899.
+      #
+      # The split is by LANGUAGE and it is total - 0 hand-rolled matchers
+      # in Python, where the roster plus 3 readers all IMPORT the
+      # vocabulary, against 3 hand-rolled in shell, which has no
+      # in-language import. That is the same structural gap that produced
+      # the six PowerShell copies, not lanes being more careful. All three
+      # shell copies are wrong in a different way and one of them DIALS
+      # INTO A HELD BOX: launch250.zsh knows three words of twenty-five,
+      # so a box taken with TAKEOVER or LATE-CLAIM matches nothing and the
+      # last line it can see is the previous round's DONE.
+      #
+      # WHAT SHELL ACTUALLY DOES, over all 52 shell files that name a
+      # coordination file: ~44 post a marker and decide nothing, 4 post
+      # and DELEGATE the decision to python, 4 hand-roll the fold, and
+      # ZERO call bench-box-gate.py's CLI. Posting is not matching and
+      # this arm does not touch a poster. The zero is the weak point: the
+      # CLI is documented in that file's header and has no precedent in
+      # the tree, so the gate's message also names the shape 4 drivers
+      # already use - post from shell, delegate the free/held decision to
+      # riglock_state.py or mqueue.py. A fix rule with no precedent is the
+      # kind lanes waive around.
+      #
+      # Build-free and about a second for both populations. It needs no
+      # new `paths:` entry - `**/*.ps1`, `**/*.py`, `**/*.sh` and
+      # `**/*.zsh` above already reach everything all three arms read.
+      - name: coordination matcher gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/coord-matcher-gate.py --selftest && tools/coord-matcher-gate.py
+      # ---- coord-writer-gate ---------------------------------------
+      # The OTHER HALF of the gate above, and until 21 Sep 2026 nothing
+      # gated it. That one refuses a second hand-rolled READER of a box's
+      # coordination file; this one refuses a WRITER that posts a shape
+      # the readers cannot see. The polarity is the unrecoverable one: a
+      # driver posting `<ts> CLAIM <id>` (S2) or `CLAIM <tag> claim=<id>`
+      # (S3) instead of the documented `CLAIM <ts> <id>` (S1) reads as a
+      # FREE box while a lane is holding it. A read-only census of nine
+      # boxes on 20 Sep found 2,656 S1 lines, 64 S2, 111 S3 and three open
+      # holds - two of them LIVE - that every Python reader on the fleet
+      # was blind to. The readers were widened that day; these files are
+      # APPEND-ONLY, so every non-S1 line already posted stays wrong
+      # forever and only the writer side can stop the next one.
+      #
+      # Three arms: the Unix append sites (`>>`, `tee -a`, `open(...,
+      # "a")`, `append_coord`), the PowerShell ones (`Add-Content`,
+      # `Out-File -Append`), and the roster's OWN S2/S3 grammar applied to
+      # the marker literals inside any file those two prove is a writer -
+      # which is what reaches the one-line posting helper, the dominant
+      # PowerShell shape and 17 of its 189 sites. The classifier is
+      # POSITIONAL, because a writer's field 1 is `$(date -u +%FT%TZ)` or
+      # `{ts}` at rest, and the vocabulary, the stamp rule and the S2/S3
+      # grammar are all IMPORTED through bench-box-gate.py's
+      # _load_markers() rather than re-spelled - a private copy here would
+      # be the exact defect the gate above exists to refuse.
+      #
+      # Measured over 1,926 committed .py/.sh/.zsh and 264 .ps1: 186
+      # coordination writers, 307 append sites, and TWELVE non-S1 lines in
+      # SIX files, 0 false positives over the other 180 writers. The Unix
+      # side is clean, and its 52 S1 sites plus the 2 selftest fixtures a
+      # grep counts and this gate excludes are the hand census's own 54,
+      # reached by a different route. All twelve hits are BANKED round
+      # drivers for a retired Windows measurement rig, frozen in the
+      # script's BASELINE as a ratchet - a new file reds, an edited banked
+      # driver reds, a stale entry reds as stale - because editing a banked
+      # driver falsifies the record of what ran. The SIXTH file is why this gate exists rather than the
+      # census being repeated by hand: the dated, careful, grep-reproducible
+      # census named five, and a sixth driver two directories over posts a
+      # textbook S2 open and close that the census did not reach.
+      #
+      # WHAT IT CANNOT SEE: the one LIVE non-S1 writer known to the census
+      # lives in a DIFFERENT repository, so a clean report here says
+      # nothing about it - that is a stated limit rather than coverage,
+      # and the script's header carries it. The exact two lines that
+      # writer emits are `--selftest` cases, so the day it is copied in,
+      # this gate names it.
+      #
+      # Build-free, 0.9 CPU-s for the scan and 7.1 for the selftest. It
+      # needs no new `paths:` entry - `**/*.ps1`, `**/*.py`, `**/*.sh` and
+      # `**/*.zsh` above already reach everything all three arms read.
+      - name: coordination writer gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/coord-writer-gate.py --selftest && tools/coord-writer-gate.py
       # ---- script-parse-gate ---------------------------------------
       # The same argument as the gate above, applied to the two languages
       # that carry far more of this repository: 1,259 tracked Python files
@@ -2092,10 +2270,24 @@ jobs:
       # 28 Aug 2026, including one whose own text said the work had
       # shipped 285 lines below the heading, and a second lane landed the
       # identical class of fix on two other items the same day.
-      # Two arms, each scoped to where it MEASURED precise: a
+      # THREE arms, each scoped to where it MEASURED precise: a
       # self-contradiction arm (heading unmarked, body opens with a
-      # bolded whole-section closure) and a cross-section arm restricted
-      # to DISTINCTIVE milestone identifiers. The cross-section arm is
+      # bolded whole-section closure), a cross-section arm restricted
+      # to DISTINCTIVE milestone identifiers, and - added 20 Sep 2026 -
+      # a DEEP-CLOSURE arm over a closure at COLUMN 0 anywhere in a body
+      # of at most 250 lines. That third arm is the measured answer to a
+      # class the first two leave on the table and which had by then cost
+      # TWO more duplicated sessions: column 0 drops the indented
+      # continuations inside checkbox items that inflate a loose
+      # predicate to 42, and the length cutoff is what separates a
+      # section's closure from a roadmap phase's - 10 hits / 8 true at
+      # 250 lines, against 8 hits / 1 true above it. The cut is 250 and
+      # not 200 because the very item that commissioned the arm has a
+      # body of 201 lines, so the tighter cut would have missed the
+      # defect it was built for. Both items are named in the gate's own
+      # header, which is private; this job does not spell them, for the
+      # reason given below. The
+      # cross-section arm is
       # deliberately not run against bare section NUMBERS - measured, a
       # naive match reports 82 hits and the narrower house reference
       # forms still report 39, of which 7 of the first 9 read false,
@@ -2257,6 +2449,58 @@ jobs:
         # step did.
         if: ${{ !cancelled() }}
         run: tools/test-target-gate.py --selftest && tools/test-target-gate.py
+      # ---- package-escape-gate -------------------------------------
+      # `cargo package` includes only files BELOW the package root, so a
+      # PUBLISHABLE crate reaching outside its own directory ships a
+      # tarball that cannot build. TODO 84 blocker 2, 20 Sep 2026:
+      # `crates/nzbkit-base/build.rs` compiled `../../vendor/rapidyenc`,
+      # the packaged list was 265 files with NOT ONE of them from that
+      # tree, and a `.crate` built that day would have died at
+      # `cargo install` on every machine with `clang++: no such file or
+      # directory`. It passed preflight, the fourteen-package clippy
+      # gate, the whole nextest sweep, the Windows cross line and
+      # `cargo deny` - no gate in this repository could see it, and
+      # until this step the only thing standing between the next edit
+      # and the same tarball was a prose comment on one constant.
+      # TWO ARMS, because the blocker had two shapes and only one had
+      # been found: a build script climbing out of the package root
+      # (fatal - the crate does not compile for anyone who installs it),
+      # and an `include_str!`/`include_bytes!`/`include!` doing the same
+      # from the crate's own sources. A test-gated include is ONE TIER
+      # DOWN and the gate says so rather than flattening the two:
+      # measured, `cargo package`'s verify step does not compile
+      # `#[cfg(test)]` code or `tests/` targets, so such a crate
+      # packages, verifies, builds and installs and fails only when
+      # somebody unpacks the `.crate` and runs `cargo test`. Both tiers
+      # are red; the tier is in the message so a reader can price the
+      # fix, not so they can skip it.
+      # THE SUBJECT ROSTER IS DERIVED, never listed: a member is in when
+      # it declares `documentation = "https://docs.rs/..."` plus
+      # `keywords` plus `categories` and does not carry
+      # `publish = false`. That selects `nzbkit-base` and `nzbkit` today,
+      # which is exactly the pair TODO 84 names, and a crate that gains
+      # publish metadata tomorrow is gated the day it lands. The bin and
+      # daemon crates reach `../../packaging/` and `../../web/` on
+      # purpose and are NOT published, so reporting them would be the
+      # false-positive-prone gate that gets switched off in a week.
+      # Build-free and cargo-free, which is what lets it live in this
+      # checkout-only job: `cargo package --list` is the honest oracle
+      # and does work (0.3 s, unaffected by blocker 1), but this job has
+      # no toolchain and `tools/preflight.py` is build-free by design.
+      # The ESCAPE PREDICATE is exact either way - it is the same path
+      # arithmetic rustc does - and what the scan does not model is
+      # cargo's file SELECTION, an error that points at refusing rather
+      # than at waving through. `--cargo-crosscheck` is the opt-in arm a
+      # lane with cargo can run; the gate's header has the reasoning.
+      # Measured 0.26 s wall over 2 subjects and 430 files on a box at
+      # load 58 with three other lanes' test runs on it - an upper bound.
+      - name: package escape gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/package-escape-gate.py --selftest && tools/package-escape-gate.py
       # ---- detached-lock-gate --------------------------------------
       # A DETACHED cargo workspace commits its own Cargo.lock and reaches
       # first-party crates BY PATH, so an ordinary dependency change in
@@ -2605,6 +2849,39 @@ jobs:
         # step did.
         if: ${{ !cancelled() }}
         run: tools/wedge-gate.py --selftest && tools/wedge-gate.py
+      # ---- conformance table freshness ------------------------------
+      # Every committed `tools/conformance/expected/*.json` holds the
+      # pinned reference's answers for ONE matrix, and that matrix is
+      # SOURCE - `build_matrix()` composes it in run.py, `matrix_digest()`
+      # is a sha256 over the result, and each table carries the digest it
+      # was captured over. So a row added, removed or re-spelled makes
+      # every committed table stale at once, and `do_verify` then REFUSES
+      # each of them rather than comparing part of one.
+      #
+      # That refusal is correct. What was missing is WHEN you hear about
+      # it: ci-private's `changes` classifier forces `build=true` for any
+      # `tools/conformance/*` path, so `par2-conformance` AND
+      # `par2-conformance-macos` both run and both die at their FRESHNESS
+      # step - after a checkout, a toolchain and a parfast build, on jobs
+      # the lane that pushed the row is not watching. On 21 Sep 2026 a row
+      # landed as a definition only (`73e0f2cf8`, reverted `2f734a7d7`)
+      # and reddened both; preflight had run CLEAN over that exact diff,
+      # run.py's own selftest included, because that selftest is hermetic
+      # and says nothing about the committed tables.
+      #
+      # The recompute needs NO reference binary and NO build - it is the
+      # committed inventory plus the source rows - and takes 0.3 s for all
+      # nine tables, 1,157 rows. `shapes_digest` is deliberately NOT in it:
+      # those shapes are BUILT by the reference, so an arm over them would
+      # need a box that has one, or would skip. The gate's header carries
+      # the design, the incident and the limits at length.
+      - name: conformance table freshness
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/conformance-table-freshness-gate.py --selftest && tools/conformance-table-freshness-gate.py
   # One level BELOW `selftest-roster` in the roster-gates job, and the two
   # ask different questions. That gate asks whether a `--selftest` is RUN by
   # a workflow. This one asks whether the selftest covers its own gate's
@@ -2630,7 +2907,45 @@ jobs:
   selftest-exit-code-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 30 AND NOT 20, RAISED 18 Sep 2026, and the reason is not the crash arm
+    # that landed the same day. This job ran 12m41 and 12m14 against the old
+    # 20 BEFORE that arm existed: the batch A-E sweep gave 51 gates an
+    # exit-code selftest case that morning, and a job that used to take a few
+    # minutes - which is what 20 was set for, and why the sibling gate jobs
+    # here sit at 15 - became a twelve-minute one. The crash arm adds 227
+    # CPU-seconds on top (measured; two scripts carry 85% of it, see that
+    # gate's WHAT IT COSTS block), modelled at about four more minutes here.
+    # A cap kill concludes `cancelled`, which is the verdict tools/ci-verdict.py
+    # had to be taught to tell from a supersede, so a four-minute margin under
+    # a cap is not a saving - it is a red nobody can read. Raise this again
+    # rather than trimming the population: the arm is cheap and two selftests
+    # are slow, which are different problems with different owners.
+    #
+    # 45 AND NOT 30, RAISED 18 Sep 2026 (claim
+    # `red-selftest-exit-code-gate-c727086c`), and this one IS about the
+    # crash arm - the paragraph above took that on trust and the runner
+    # disagreed. claims.py came into the population with that arm and its
+    # baseline probe blew PROBE_TIMEOUT, which was 600: the job went red on
+    # 4 of 4 runs after the arm landed against 5 of 5 green before it, and
+    # was never green with it in. PROBE_TIMEOUT was 1200 after that, which
+    # was the real change; this cap moves with it so a probe that genuinely
+    # WEDGES reports as a red naming itself rather than as the cap kill the
+    # paragraph above says nobody can read. A cap costs nothing when green -
+    # billing is actual minutes - so the margin is the point. The reasoning
+    # and the run table are at PROBE_TIMEOUT in that gate.
+    #
+    # PROBE_TIMEOUT IS 1800 SINCE 21 Sep 2026 (claim
+    # `claims-selftest-probe-timeout`) and this cap STAYS 45, which is the
+    # one thing to check before raising that constant again. The margin the
+    # paragraph above is about is now 15 minutes rather than 25: one wedged
+    # probe burns 30 of the 45 while the rest of the pool drains in
+    # parallel, and the job's own green runs are 12-17 minutes. That still
+    # fits, and it is the reason this cap is quoted here rather than left
+    # to be re-derived - the NEXT raise of PROBE_TIMEOUT has to move this
+    # number too, or a wedge goes back to being an unreadable cancelled.
+    # claims.py itself got ~3x cheaper in that same commit; the measurement
+    # is research/CLAIMS-SELFTEST-PROBE-TIMEOUT-2026-09-21.md.
+    timeout-minutes: 45
     concurrency:
       group: selftest-exit-code-gate-${{ github.ref }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -2782,6 +3097,8 @@ jobs:
     concurrency:
       group: web-gates-${{ github.ref }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # ---- rate-format-gate ----------------------------------------
@@ -3026,6 +3343,14 @@ jobs:
     concurrency:
       group: site-i18n-gates-${{ github.ref }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    # The parfast-page-gate step below imports website/tools/ modules that
+    # reach into website/parfast-bench/, and an import writes a .pyc beside
+    # its source. This job's own `git diff --exit-code` only sees tracked
+    # files so it would not catch one, but the untracked cache file would
+    # still sit in the published tree for whatever runs next against this
+    # checkout. Same class as web-gates and tool-selftests carry this for.
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # ---- manual-gate ---------------------------------------------
@@ -3049,6 +3374,32 @@ jobs:
         # step did.
         if: ${{ !cancelled() }}
         run: python3 web/i18n/manual-check.py --selftest && python3 web/i18n/manual-check.py
+      # ---- manual-section-number-gate ------------------------------
+      # The gate directly above is the CROSS-FILE census and cannot see
+      # this: the sixteen manuals cross-reference each other 736 times as
+      # `<a href="#performance">§14</a>` - a STABLE anchor and an
+      # UNSTABLE number - and a chapter number is not an id, not a tag
+      # count and not a `<code>` body, so manual-check is clean whatever
+      # the number says. Insert a chapter and every number after it moves
+      # in all sixteen files while the anchors stay put. A wrong one is
+      # silent in the worst way: `#performance` is a real anchor, so the
+      # browser jumps there and the page is not broken - it just says
+      # "see §13" and lands the reader on a heading that reads 14.
+      # Found 21 Sep 2026 by the lane that added the Security chapter
+      # (`877653b93`), which renumbered six chapters across sixteen files
+      # with nothing able to check it
+      # (research/MANUAL-SECTION-NUMBER-HAS-NO-GATE-2026-09-21.md).
+      # `--selftest` first, and here it is load-bearing twice over: the
+      # gate resolves a reference by document POSITION so that the five
+      # links pointing at a SUB-anchor are checked too, and a matcher
+      # that quietly stopped matching would report a clean tree forever.
+      - name: manual section number gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/manual-section-number-gate.py --selftest && tools/manual-section-number-gate.py
       # ---- site-gate -----------------------------------------------
       # The third script in web/i18n/ and the last one that had nothing
       # turning it red. Two dimensions: structural parity of the 150
@@ -3411,6 +3762,8 @@ jobs:
     concurrency:
       group: tool-selftests-${{ github.ref }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The cross-machine work ledger. CONTRIBUTING.md item 1a: git is the only
@@ -3509,6 +3862,18 @@ jobs:
       # job, which is where a pin on rustc's own behaviour belongs anyway.
       - name: pollution bisect
         run: tools/pollution-bisect.py --selftest
+      # The RAR benchmark harness's own selftest, wired 19 Sep 2026 on claim
+      # `red-roster-gates-88b1d6d0`. It arrived in 9b11f704e with no `run:`
+      # step anywhere invoking it, which is exactly what the selftest roster
+      # refuses and what reddened `roster-gates` on main: a selftest nothing
+      # runs rots in silence, and the one failure a gate cannot report about
+      # itself is that it never ran. The arm pins the member-name spelling
+      # the harness passes on Windows (native separators for a one-of-many
+      # leg), which is the rule that is easy to get silently wrong and which
+      # no non-Windows run can otherwise check. No corpus, no tools, no
+      # network, ~0.1 s.
+      - name: rar benchmark harness
+        run: tools/rarbench.py --selftest
       # `python3` here and bare above, matching each file's mode: this one
       # carries a shebang but no executable bit, so a bare invocation is
       # exit 126 on any box. ci-private spells several of its gates this
@@ -3554,6 +3919,137 @@ jobs:
         run: |
           python3 research/rounds/wask-nibble-2026-09-16/waskred.py --selftest
           python3 website/parfast-bench/rounds/wask-nibble-2026-09-16/waskred.py --selftest
+      # The KNEE reducer, same shape and the same reason: it pins a PUBLISHED
+      # TABLE (the i5 nibble round's fold/force effective-parallelism cells) out
+      # of that round's banked log, and asserts the verdict each arm is supposed
+      # to carry - the -t12 arm reads as a knee and the no-SMT -t4 control does
+      # not. It exists because the knee question is being asked on two parts at
+      # once and a second implementation of the arithmetic would end the
+      # comparison; this step is what keeps the one copy honest. BOTH COPIES,
+      # for the scrubbed-mirror reason the step above gives.
+      - name: knee reducer, and its published copy
+        run: |
+          python3 research/harness/kneeratio.py --selftest
+          python3 website/parfast-bench/harness/kneeratio.py --selftest
+      # The THIRD-WINDOW reducer, same shape and the same two reasons as the
+      # two steps above: it pins published cells out of a banked log, and it
+      # is the one copy of that arithmetic. BOTH COPIES, for the
+      # scrubbed-mirror reason the windowed-ask step gives.
+      #
+      # WIRED 18 Sep 2026 because `selftest-roster` refused it - it shipped
+      # with a --selftest arm no workflow invoked, which is a gate nothing
+      # runs. Note what wiring it costs, because it is not nothing: this
+      # reducer IMPORTS `waskred` out of the neighbouring round directory,
+      # so under the published copy the import lands a `.pyc` in the tree
+      # that ships and `site leak scan` refuses it. That is why w3winred.py
+      # sets `sys.dont_write_bytecode` at its import, in the same commit as
+      # this step - the two gates pull against each other and only the pair
+      # is green. Do not wire a round reducer that imports a sibling
+      # without checking that half.
+      - name: third-window reducer, and its published copy
+        run: |
+          python3 research/rounds/w3win-nibble-2026-09-18/w3winred.py --selftest
+          python3 website/parfast-bench/rounds/w3win-nibble-2026-09-18/w3winred.py --selftest
+      # The COARSE-AGAINST-FINE bias reducer, same shape and the same two
+      # reasons again. It pins seven published crpin4m crossovers, the crband
+      # m=384 A/A floor the round's own refusal rests on, and the closed-form
+      # chord bias against a numeric interpolation - so a change to the shared
+      # arithmetic that moved any of them reds here rather than in a later
+      # lane's table. BOTH COPIES: it IMPORTS w3winred, which imports waskred,
+      # so it is the deepest import chain in this job and the mirror is the
+      # only place the scrubbed logs are reduced at all.
+      #
+      # It resolves the round tree from its OWN directory (`ROUNDS`) rather
+      # than from the repo root, which is what lets the second line work: under
+      # the mirror a repo-root path would resolve to `website/` and every log
+      # would go missing. Do not "tidy" that back to a repo-root constant.
+      - name: coarse-against-fine bias reducer, and its published copy
+        run: |
+          python3 research/rounds/crossover-bias-2026-09-18/crossbias.py --selftest
+          python3 website/parfast-bench/rounds/crossover-bias-2026-09-18/crossbias.py --selftest
+      # The SHORT-LINE probe (18 Sep 2026): its --selftest is a 40-case
+      # model of the guard spellings it follows, and a probe whose guard
+      # model rots reports every guarded site as unguarded, which is a
+      # census nobody reads. Same catch as the reducers above: a
+      # research/ script with a selftest arm is on this job or the roster
+      # gate refuses it.
+      - name: short-line probe guard model
+        run: python3 research/gate-short-line-probe.py --selftest
+      # The PINNED-BAND bracket-firmness reducer, wired 18 Sep 2026 for the
+      # same reason and with the same catch. It shipped with a --selftest arm
+      # no workflow invoked, which took `roster-gates` RED on main
+      # (run 35340227199) - and it imports `band-trade` out of the
+      # neighbouring crband round, so the published copy wrote
+      # `crband-2026-09-18/__pycache__/band-trade.cpython-*.pyc` into the tree
+      # that ships the moment it was run. It now sets
+      # `sys.dont_write_bytecode` before that import, in the same commit as
+      # this step. READ THE w3winred NOTE ABOVE before wiring the next one:
+      # this is the second round reducer to hit the identical pair, and the
+      # published-bytecode half is invisible until you actually run the
+      # mirrored copy.
+      - name: pinned-band bracket firmness, and its published copy
+        run: |
+          python3 research/rounds/crpin4m-2026-09-18/bracket-firmness.py --selftest
+          python3 website/parfast-bench/rounds/crpin4m-2026-09-18/bracket-firmness.py --selftest
+      # The RANDOM-DROP NULL over the campaign's filtered fits, wired 18 Sep
+      # 2026 with the rest. Its selftest is not decoration: it REFUSES unless
+      # its re-implementations still reproduce sections 8.17 and 8.21's
+      # published slopes, r2 values and crossings out of the banked legs, so
+      # it is what stops a null being run over a reduction that is no longer
+      # the published one.
+      #
+      # BOTH COPIES, and getting there cost a design choice worth reading
+      # before the next round reducer copies this one. Read the w3winred note
+      # above for the pair of gates that bite a round reducer, then note what
+      # is DIFFERENT here: this reducer imports no sibling, so the
+      # published-bytecode half cannot arm (it sets `sys.dont_write_bytecode`
+      # anyway) - but its INPUTS are two round directories under `research/`
+      # rather than under `research/rounds/`, which
+      # `export_parfast_evidence.py` does not mirror. A mirrored script with
+      # no inputs cannot run its own selftest, and `selftest-roster` requires
+      # the mirror to be wired too, so "skip when the legs are absent" would
+      # have been a green line over nothing. The fix is that the round
+      # directory is SELF-CONTAINED: `legs.json` beside the script carries the
+      # windows the four reductions consume, the research/ copy asserts it
+      # against the real legs leg for leg, and the mirror reduces the bank.
+      # Both copies therefore assert sections 8.17 and 8.21's published
+      # slopes, r2 values and crossings on every push.
+      - name: filtered-fit random-drop null, and its published copy
+        run: |
+          python3 research/rounds/filtered-fit-null-2026-09-18/fitnull.py --selftest
+          python3 website/parfast-bench/rounds/filtered-fit-null-2026-09-18/fitnull.py --selftest
+      # The same construction one reducer over: a random-drop null over
+      # `rowgate.py`'s A/A FLOOR rather than over a fitted location. This one
+      # needs no banked inputs of its own - its legs are
+      # research/rounds/rowgate-2026-09-15/ and its reducer is
+      # research/harness/rowgate.py, BOTH of which export_parfast_evidence.py
+      # already mirrors, and floornull.py resolves them relative to its own
+      # file so the mirrored copy reduces the mirrored legs. The selftest
+      # re-runs rowgate.py at both the unfiltered and the filtered setting and
+      # requires this file's floor and verdict to match every printed row, so
+      # a change to either side reds here; it REFUSES rather than skipping if
+      # it cannot find its subject or parses zero rows.
+      # 8.16.5's 4 MiB ladder has NO committed reducer - 8.16.11 says that
+      # round's per-cell reduction "was scratch and is described in 8.16.5
+      # rather than committed" - so this one re-derives median-of-four from
+      # the section's own prose and pins itself to 8.20.8's independently
+      # published finding: four of the seven `ntt syndromes` rows ARE exact
+      # medians of the banked legs, three are NOT, and two of those three sit
+      # below the cheapest leg at their rung. So a change to 8.16.5's table or
+      # to that round's legs reds here. Same bank-beside-the-script shape as
+      # fitnull above and for the same cause: its legs live in
+      # research/parfast-ntt-block-size-2026-09-17/, which is outside
+      # export_parfast_evidence.py's SOURCES, so the mirrored copy reduces the
+      # banked legs.json and the research copy checks the bank against the
+      # round leg for leg.
+      - name: 8.16.5 4 MiB ladder reproduction, and its published copy
+        run: |
+          python3 research/rounds/table-reproduction-2026-09-18/p4recheck.py --selftest
+          python3 website/parfast-bench/rounds/table-reproduction-2026-09-18/p4recheck.py --selftest
+      - name: row-gate A/A floor null, and its published copy
+        run: |
+          python3 research/rounds/rowgate-64k-floor-null-2026-09-18/floornull.py --selftest
+          python3 website/parfast-bench/rounds/rowgate-64k-floor-null-2026-09-18/floornull.py --selftest
       # And the ROSTER half: which drivers read that rule at all. The
       # selftest is what holds its renderer honest, and the case that
       # matters is the one pinned against the REAL tree - every file that
@@ -3775,6 +4271,31 @@ jobs:
       # --selftest here does not touch that pair.
       - name: bench2j gate argv guard
         run: tools/bench2j-gate.py --selftest
+      # A conformance row whose command SELECTED NOTHING, and compared
+      # equal for that reason. Member 1.1 of the class written up in
+      # research/CONFORMANCE-GREEN-MEANS-NOTHING-CLASS-2026-09-21.md: a
+      # mask spelled with forward slashes matches no member on windows,
+      # where the reference renders names backslash-separated, so both
+      # sides do the same nothing and the row goes green over a refusal
+      # it never reached. The divergence count is structurally blind to
+      # it - reference and candidate AGREE - so something outside the
+      # comparison has to look, and this is it.
+      # A REPORT, not a gate: it exits 0 on hits and 2 only when it
+      # REFUSES. Whether a hit should go red is an open question for the
+      # maintainer, the same way it is for `refusing-read-report`, and
+      # the script's header says why (the class file is explicit that
+      # nobody has swept for the legitimate case, so red would be a
+      # verdict from a population of one averted incident).
+      # What needs a runner is the SELFTEST - the answer on the tip is
+      # ZERO hits, so a matcher that had quietly stopped matching would
+      # print output byte-identical to a healthy run - and the bare run,
+      # whose refusal arm has teeth: no tables reached, or a committed
+      # table this cannot parse, reds on the author's own push. 0.14 s
+      # for all nine tables, no reference binary, no build.
+      - name: conformance selected-nothing report
+        run: |
+          tools/conformance-selected-nothing-report.py --selftest
+          tools/conformance-selected-nothing-report.py
   claims-drop-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest

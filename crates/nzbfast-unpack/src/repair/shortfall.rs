@@ -34,7 +34,7 @@ use super::VolumeYield;
 /// §282 incident), and an alternate source is the whole remedy.
 ///
 /// Both spellings carry "repair could not complete", so both classify
-/// [`crate::failkind::FailKind::Unrepairable`]: transient enough for
+/// `crate::failkind::FailKind::Unrepairable`: transient enough for
 /// the one automatic retry, and hinting `search` rather than `retry`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RepairShortfall {
@@ -130,7 +130,7 @@ impl RepairShortfall {
 
 /// Scope a shortfall's set tag to the POST it came out of.
 ///
-/// Every producer inside the [`fetch_and_repair`] ladder records the id
+/// Every producer inside the `fetch_and_repair` ladder records the id
 /// of the set it measured, because a producer holds one
 /// [`nzbkit::par2::Par2Set`] and cannot see how many siblings the post
 /// has. This is the frame that can: `sets_in_post` is the whole set
@@ -155,9 +155,9 @@ pub fn scope_to_post(
 /// many recovery sets the post carries.
 ///
 /// The disk-fallback arm in `get::settle` is the one producer outside
-/// the [`fetch_and_repair`] ladder, and it reads its sets straight off
+/// the `fetch_and_repair` ladder, and it reads its sets straight off
 /// the packets on disk, so it can answer "is there anything to
-/// disambiguate" itself and needs no [`RepairShortfall::forget_set`]
+/// disambiguate" itself and needs no `RepairShortfall::forget_set`
 /// pass afterwards. Out of line rather than inline because
 /// `get/settle.rs` was at 2,990 of the size gate's 3,000-line ceiling on
 /// 31 Aug 2026, which is also why the caller is one line.
@@ -316,6 +316,7 @@ mod skip_clause_tests {
             par2_name_demoted: Default::default(),
             par2_sniffed: AtomicBool::new(false),
             total_segments: 1,
+            posted_bytes: 0,
             remaining: AtomicUsize::new(0),
             missing: AtomicUsize::new(0),
             errors: AtomicUsize::new(0),

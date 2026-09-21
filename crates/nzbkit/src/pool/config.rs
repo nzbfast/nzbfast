@@ -17,6 +17,13 @@ use super::{
     RECHECK_430_MAX, RateLimit, handoff, linecap,
 };
 
+/// Every knob the pool is handed at spawn.
+///
+/// Pure configuration: nothing here changes while a run is going. The
+/// one number that DOES move mid-run - how many of the spawned slots
+/// may hold a connection - is [`super::ConnTarget`], and
+/// [`Self::connections`] is the ceiling it dials under rather than a
+/// figure anything rewrites.
 #[derive(Clone)]
 pub struct PoolConfig {
     /// Memory-floor gauge for bodies queued in this pool's outcome
@@ -26,6 +33,9 @@ pub struct PoolConfig {
     /// nettools probes) would leak the gauge upward monotonically. The
     /// get pipeline sets `Sub::Channel` and releases in its drain.
     pub channel_gauge: Option<crate::memgauge::Sub>,
+    /// How many connections to build, summed over servers - the
+    /// account fact the user typed. A ceiling, not a live figure: see
+    /// the type doc.
     pub connections: usize,
     /// Pipelined BODY commands in flight per connection.
     pub window: usize,
@@ -49,7 +59,7 @@ pub struct PoolConfig {
     /// Consecutive connect failures before a worker gives up.
     pub max_connect_attempts: u32,
     /// Paced dials the elected prober rides before declaring a parked
-    /// server dead (see [`CAP_PROBE_BOUNCES`], the shipped default).
+    /// server dead (see `CAP_PROBE_BOUNCES`, the shipped default).
     /// Configurable for tests only: the ladder is paced off
     /// `connect_backoff`, so a test that shrinks the backoff to keep
     /// the suite quick is left paying 75 REAL connect attempts, and
@@ -257,7 +267,7 @@ pub struct PoolConfig {
     /// the tail is where one wedged session is the wall. Tapering
     /// leaves that work in the QUEUE, where it can still be
     /// rebalanced, and costs only the round trip between a completion
-    /// and the next BODY at depth 1. See [`Shared::tail_window`].
+    /// and the next BODY at depth 1. See `Shared::tail_window`.
     pub tail_taper: bool,
     /// M7b.2 depth steering (dark, env NZBFAST_STEER_DEPTH=1): a server
     /// whose windowed per-conn rate falls below 1/4 of the best other
@@ -350,7 +360,7 @@ pub struct PoolConfig {
     /// Slow-connection recycle experiment (off by default, env
     /// NZBFAST_RECYCLE_SLOW=1): a connection whose articles keep LOSING
     /// dup races is a degraded TCP session - after
-    /// [`RECYCLE_RACE_LOSSES`] consecutive losses it sheds its pipeline
+    /// `RECYCLE_RACE_LOSSES` consecutive losses it sheds its pipeline
     /// and redials instead of continuing to lose. Racing fixes the
     /// symptom per article; this fixes the cause. Endgame losses never
     /// count: the tail fan-out races every straggler, and losing a
@@ -416,7 +426,7 @@ pub struct PoolConfig {
     /// than the segment asked for (split-brain; its CRC passes) - is
     /// requeued to a DIFFERENT server exactly once instead of riding
     /// to PAR2 repair. Detection is the decode consumer's EXISTING
-    /// pass, reported back through [`QueueControl::note_decoded`]: a
+    /// pass, reported back through `QueueControl::note_decoded`: a
     /// Done outcome defers its `complete_one` and parks its Work in
     /// `Shared::handed` until the verdict, and a bad body is requeued
     /// after claim, the clean refetch re-claiming through the normal
@@ -431,7 +441,7 @@ pub struct PoolConfig {
     /// §129 3g: follow every BODY to a provider that has answered a
     /// refusal with no message-id with an alignment fence - a DATE,
     /// pipelined behind it, whose answer cannot be mistaken for a
-    /// BODY's ([`Connection::send_fence`]). It is what makes positional
+    /// BODY's (`Connection::send_fence`). It is what makes positional
     /// attribution CHECKABLE on a provider that gives us nothing to
     /// check: without it a response dropped upstream is invisible, and
     /// a present article silently collects the refusal meant for the
@@ -452,22 +462,22 @@ pub struct PoolConfig {
     /// backbone answer once more before the Missing verdict is emitted;
     /// on by default, off with `NZBFAST_RECHECK_430=0`. The measurement
     /// that says an echoed refusal is not proof it is gone, and every
-    /// design decision behind this, are at [`Shared::take_recheck`].
+    /// design decision behind this, are at `Shared::take_recheck`.
     ///
     /// It said BACK until 29 Aug 2026 and the doc said so until 30 Aug;
     /// the back is not a delay, it is the end of the run, and the two
-    /// e2e tests that caught it are at [`recheck_slot`].
+    /// e2e tests that caught it are at `recheck_slot`.
     pub recheck_430: bool,
     /// TODO 315: ceiling on articles holding a late re-ask at one time.
     /// `NZBFAST_RECHECK_430_MAX` overrides it; what it bounds, and why
-    /// it is not simply large, is at [`RECHECK_430_MAX`].
+    /// it is not simply large, is at `RECHECK_430_MAX`.
     pub recheck_430_max: usize,
     /// TODO 315: how long one late re-ask may keep an article out of a
     /// terminal verdict. `NZBFAST_RECHECK_430_HOLD_SECS` overrides it
     /// (0 disables the bound, which is what the tests that want the old
     /// unbounded shape ask for); what it bounds, why the bound has to
     /// exist at all, and why it deliberately does NOT inherit
-    /// [`PoolConfig::outage_budget`], are at [`RECHECK_430_HOLD`].
+    /// [`PoolConfig::outage_budget`], are at `RECHECK_430_HOLD`.
     pub recheck_430_hold: std::time::Duration,
     /// How long a server may hold no session at all before it stops
     /// blocking a terminal verdict for articles it has never refused,
@@ -476,7 +486,7 @@ pub struct PoolConfig {
     /// which is what the tests that want the pre-30-Aug-2026 shape ask
     /// for); what it bounds, why the bound has to exist at all, why two
     /// minutes, and why it deliberately does NOT inherit
-    /// [`PoolConfig::outage_budget`], are at [`CONN_DARK`].
+    /// [`PoolConfig::outage_budget`], are at `CONN_DARK`.
     pub conn_dark: std::time::Duration,
     /// TODO 121.4: the consumer acks every Done id (`note_settled`, or
     /// `note_decoded` under `crc_steer`), so the pool keeps the

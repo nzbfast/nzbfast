@@ -14,6 +14,8 @@
 //!
 //! Do not treat leftover grouping as a dehasher. Glue is not a title.
 
+#![warn(missing_docs)]
+
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -27,8 +29,16 @@ use ingest::{quoted_name, session_tag, split_subject, stem_obfuscated};
 /// still get a collection (`part_total = 0`), matching nZEDb.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CollectionKey {
+    /// The subject's leftover token, from [`leftover_token`]: a quoted
+    /// yEnc filename when there is one, else the first non-furniture
+    /// token. This is GLUE, never a title.
     pub leftover: String,
+    /// The newsgroup the articles were seen in. Part of the key because
+    /// the same leftover token in two groups is two collections.
     pub group: String,
+    /// The `(part/total)` denominator. `0` when the subject carried no
+    /// counter at all, matching nZEDb, so counter-less articles still
+    /// group rather than being dropped.
     pub part_total: u32,
 }
 
@@ -94,10 +104,22 @@ pub const HUNT_SIZE_SLACK_DIV: u64 = 20;
 /// This type does not change `SearchQuery`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HuntQuery {
+    /// Free-text term, or EMPTY for a pure size+date hunt - the
+    /// quota-expensive path taken when a dark row offers no token worth
+    /// searching. Never sent as an empty `q=` parameter: a browse has to
+    /// OMIT the key entirely.
     pub q: String,
+    /// Smallest payload a hit may have, in bytes. Built as the dark
+    /// row's total less slack, so the window survives a repack that
+    /// differs by a few MB.
     pub min_bytes: u64,
+    /// Largest payload a hit may have, in bytes.
     pub max_bytes: u64,
+    /// Earliest posting time a hit may have, unix seconds.
     pub posted_from: i64,
+    /// Latest posting time a hit may have, unix seconds. Newznab speaks
+    /// `minage`/`maxage` in DAYS, so a production mapper coarsens this
+    /// pair rather than sending it as-is - see [`coarsen_age_days`].
     pub posted_to: i64,
     /// Empty means unconstrained. Newznab listings often carry
     /// `<poster>`; a size+date window of identical scene titles still
@@ -548,10 +570,21 @@ pub fn hunt_next_episode_sized(named_title: &str, named_bytes: u64) -> Option<Hu
 /// enclosures; tests carry the XML on the row so the join stays in-process.
 #[derive(Debug, Clone)]
 pub struct CatalogRow {
+    /// The human title the indexer publishes for this release.
     pub title: String,
+    /// The name the release was POSTED under, which on an obfuscated
+    /// post is the hash filename a leftover token has to match. Searched
+    /// alongside `title` so a leftover hits the filename column and a
+    /// scene term hits the title column.
     pub posted_name: String,
+    /// Payload size the listing claims, for the size window.
     pub bytes: u64,
+    /// Posting time the listing claims, unix seconds, for the date
+    /// window.
     pub posted: i64,
+    /// The release's NZB. Production fetches this from the listing's
+    /// enclosure; a test carries the XML on the row so the msgid-set
+    /// join runs in-process with no daemon and no live indexer.
     pub nzb: Vec<u8>,
     /// Empty means the listing did not carry a poster. An empty hunt
     /// poster matches every row, including these.
@@ -602,7 +635,9 @@ pub fn hunt_catalog<'a>(q: &HuntQuery, catalog: &'a [CatalogRow]) -> Vec<&'a Cat
 pub enum HitRank {
     /// Keep indexer listing order.
     Catalog,
+    /// Nearest payload size to the dark row's own byte total first.
     ClosestSize,
+    /// Nearest posting time to the dark row's own first-posted first.
     ClosestTime,
     /// Size first, then time. The default for a size+date fallback
     /// whose listing is full of similar payloads.
@@ -755,7 +790,7 @@ pub fn rank_hits_exact_then_poster<'a>(
     hits
 }
 
-/// Byte-prefix length of leftover vs `posted_name` after [`catalog_norm`].
+/// Byte-prefix length of leftover vs `posted_name` after `catalog_norm`.
 /// A dump that truncates the filename column still shares a long prefix
 /// with a hash leftover; a Geek scene name shares none.
 pub fn leftover_posted_lcp(leftover: &str, posted_name: &str) -> usize {
@@ -765,7 +800,7 @@ pub fn leftover_posted_lcp(leftover: &str, posted_name: &str) -> usize {
 }
 
 /// Longest common substring of leftover vs `posted_name` after
-/// [`catalog_norm`]. A dump that keeps only a tail of the hash still
+/// `catalog_norm`. A dump that keeps only a tail of the hash still
 /// shares a long run with the leftover; a prefix LCP of those two is
 /// zero. Contiguous on purpose: token Jaccard shares no whole tokens
 /// with a truncated hash, and LCP is already the prefix arm.
@@ -1017,15 +1052,28 @@ where
 /// did with that claim.
 #[derive(Debug, Clone)]
 pub struct IndexerJoin {
+    /// The dark scan row the NZB's message-ids landed on.
     pub release_id: i64,
+    /// How many of the NZB's lead message-ids this release matched.
+    /// Always at least `MIN_MSGID_QUORUM` - a release below the quorum
+    /// is skipped rather than reported as a weak join.
     pub matched: usize,
+    /// What `apply_proven_name` did with the claim: took it, found the
+    /// row already named, or declined it.
     pub outcome: ProvenOutcome,
 }
 
+/// Why naming a release from a commercial indexer's NZB failed before
+/// any claim was applied.
 #[derive(Debug, thiserror::Error)]
 pub enum NameFromNzbError {
+    /// The NZB itself would not parse, so there are no message-ids to
+    /// join on.
     #[error("NZB parse: {0}")]
     Nzb(#[from] crate::nzb::NzbError),
+    /// The index rejected the read or the write. The claim may have
+    /// been applied to some releases before this - the joins already
+    /// returned are the ones that landed.
     #[error("index: {0}")]
     Db(#[from] rusqlite::Error),
 }

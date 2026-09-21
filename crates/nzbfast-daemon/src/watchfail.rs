@@ -57,7 +57,7 @@ pub fn watch_fail_id(path: &std::path::Path) -> String {
     hex::encode(h.finalize())[..16].to_string()
 }
 
-/// Which of the six [`watchfail`] states a listed file is in, as a token
+/// Which of the six `watchfail` states a listed file is in, as a token
 /// the dashboard switches on. `"rejected"` is the sixth: an `enqueue`
 /// error, i.e. the only case besides `truncated` where the file really
 /// could not be used.

@@ -2652,6 +2652,145 @@ fn an_under_declared_size_still_claims_the_descriptor_its_name_gives() {
     );
 }
 
+/// TODO 118.2: the set's length reaches the RAR mapper by SLOT, and only
+/// once the binding is confirmed. A tail-first arrival binds the name
+/// tentatively (no head to judge it) and the accessor says nothing; the
+/// head completing and confirming it answers the FileDesc's length; a
+/// slot the set never claimed, and a verifier with no active set,
+/// answer nothing at all.
+#[test]
+fn a_confirmed_binding_answers_the_descriptor_length_a_tentative_one_does_not() {
+    let real = data_of(40_000, 106);
+    let (v, _set) = active_verifier(&[("movie.mkv", &real), ("other.bin", &real[..9_000])], 1024);
+    // A tail that verifies NO block, or the first Ok block would promote
+    // the nomination before the head has said anything.
+    let damaged = data_of(40_000, 107);
+    v.on_data(0, "movie.mkv", 40_000, 20_000, &damaged[20_000..]);
+    assert!(v.slot_in_set(0) && !v.slots[0].lock_ok().confirmed);
+    assert_eq!(
+        v.slot_confirmed_length(0),
+        None,
+        "a nomination the head has not judged must not bound a volume"
+    );
+    v.on_data(0, "movie.mkv", 40_000, 0, &real[..20_000]);
+    assert!(v.slots[0].lock_ok().confirmed);
+    assert_eq!(v.slot_confirmed_length(0), Some(40_000));
+    assert_eq!(v.slot_confirmed_length(1), None, "never claimed");
+
+    let idle = LiveVerifier::new(1);
+    idle.on_data(0, "movie.mkv", 40_000, 0, &real[..20_000]);
+    assert_eq!(idle.slot_confirmed_length(0), None, "no active set");
+}
+
+/// TODO 118.2d: the obfuscated shape the witness above was silent on.
+/// Every yEnc name and `size=` is a fresh random value per article
+/// (research/RANDOM-YENC-SIZE-POSTER-2026-09-20.md), so the name tier
+/// never nominates, the `md5_16k` tier NOMINATES on the article that
+/// completes the first 16 KiB, an Ok block does not promote that
+/// nomination (M4-103), and finish settles it. The accessor answers the
+/// nomination: it is the slot's own content naming a unique unclaimed
+/// descriptor, and a wrong answer can only refuse or overstate the
+/// mapper's bound (the doc on `slot_confirmed_length` says why that is
+/// enough). The random `size=` of the first article is the poster's
+/// real figure, larger than the file, and does not enter it.
+#[test]
+fn a_unique_head_nomination_answers_the_descriptor_length_on_an_obfuscated_post() {
+    let vol1 = data_of(40_000, 118);
+    let vol2 = data_of(30_000, 119);
+    let (v, _set) = active_verifier(
+        &[
+            ("16vX1g4Kliq4S87V221bCgOs4h08mv.part001.rar", &vol1),
+            ("16vX1g4Kliq4S87V221bCgOs4h08mv.part002.rar", &vol2),
+        ],
+        1024,
+    );
+    v.on_data(
+        0,
+        "tqJO113Fu4igpGKfm4h6217xWB1xU",
+        14_733_359,
+        0,
+        &vol1[..20_000],
+    );
+    {
+        let s = v.slots[0].lock_ok();
+        assert!(
+            s.head_nominated && !s.confirmed,
+            "the head nominates and nothing before finish confirms it"
+        );
+    }
+    assert_eq!(
+        v.slot_confirmed_length(0),
+        Some(40_000),
+        "a unique unclaimed 16k head match bounds the mapper mid-stream"
+    );
+    assert_eq!(v.slot_confirmed_length(1), None, "never claimed");
+    // The rest of the file verifies Ok in-stream, which promotes a NAME
+    // nomination and must not promote a head's - and the answer stands
+    // either way.
+    v.on_data(
+        0,
+        "925d46f7edeaad61b034d99d241c469e",
+        10_406_551,
+        20_000,
+        &vol1[20_000..],
+    );
+    assert!(
+        !v.slots[0].lock_ok().confirmed,
+        "M4-103: an Ok block does not promote a head nomination"
+    );
+    assert_eq!(v.slot_confirmed_length(0), Some(40_000));
+    let r = finish_from(&v, 0, &vol1).expect("the nomination holds on its blocks");
+    assert!(r.all_ok(), "{r:?}");
+    assert_eq!(r.length, 40_000);
+    assert!(v.slots[0].lock_ok().confirmed);
+    assert_eq!(v.slot_confirmed_length(0), Some(40_000));
+}
+
+/// TODO 118.2d, the shape a head match is NOT unique on: two set members
+/// sharing their first 16 KiB and differing in length. The tier declines
+/// as ambiguous, so no nomination is made and nothing bounds either
+/// volume by the other's length - the last-segment witness carries them.
+#[test]
+fn identical_head_twins_nominate_nothing_and_answer_no_length() {
+    let mut twin_a = vec![0u8; 40_000];
+    twin_a[16_384..].copy_from_slice(&data_of(23_616, 120));
+    let mut twin_b = vec![0u8; 30_000];
+    twin_b[16_384..].copy_from_slice(&data_of(13_616, 121));
+    let (v, _set) = active_verifier(&[("a.vob", &twin_a), ("b.vob", &twin_b)], 1024);
+    v.on_data(0, "Wp3jibber", 40_000, 0, &twin_a[..20_000]);
+    assert!(!v.slot_in_set(0), "two candidates: the head tier declines");
+    assert_eq!(v.slot_confirmed_length(0), None);
+}
+
+/// TODO 118.2d's stated limit, pinned: an uncovered payload sharing a
+/// member's first 16 KiB takes the member's nomination in-stream, so the
+/// accessor answers the MEMBER's length for a slot that is not the
+/// member. The verifier takes it back at finish (M4-103) and the accessor
+/// goes with it; the extractor's copy is irrevocable, and that is
+/// tolerable because it reaches only the mapper's bound - here the
+/// payload is longer than the member, so the bound understates, the
+/// mapper refuses and the slot demotes, which is correct output at
+/// one-pass cost. A non-RAR payload like this one never has a mapper.
+#[test]
+fn an_impostors_head_nomination_answers_the_members_length_until_finish_takes_it_back() {
+    let mut member = vec![0u8; 20_000];
+    member[16_384..].copy_from_slice(&data_of(3_616, 71));
+    let (v, _set) = active_verifier(&[("member.vob", &member)], 1024);
+    let mut uncovered = vec![0u8; 40_000];
+    uncovered[16_384..].copy_from_slice(&data_of(23_616, 99));
+    v.on_data(0, "Wp3jibber", 40_000, 0, &uncovered);
+    assert_eq!(
+        v.slot_confirmed_length(0),
+        Some(20_000),
+        "the nomination is the member's, and so is the length"
+    );
+    assert!(
+        finish_from(&v, 0, &uncovered).is_none(),
+        "settle takes the nomination back"
+    );
+    assert_eq!(v.slot_confirmed_length(0), None, "and the answer with it");
+}
+
 /// The regression guard the whole nomination rule is priced against: a
 /// TRUTHFULLY named member damaged inside its own first 16 KiB denies
 /// its descriptor's `md5_16k` exactly as an impostor does, and must

@@ -38,6 +38,8 @@
 //! thread an Arc through every FrontierBuffer, the ChildGate and the
 //! worker for a number no production path reads.
 
+#![warn(missing_docs)]
+
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
@@ -75,9 +77,14 @@ counters!(
     TRIM_DROPS,
     TRIM_PARKED,
     TRIM_VETO_LOSS,
+    TRIM_VETO_NESTED,
+    TRIM_VETO_OFF,
     TRIM_VETO_PACE,
     TRIM_VETO_SIZE,
     TRIM_VOUCH_SPILL,
+    PROGRESS_PASSES,
+    TRIM_WM_PEAK,
+    TRIM_WM_ZERO,
     NO_PARITY,
 );
 /// High-water RAM retained by any ONE frontier buffer. The chain-wide
@@ -146,14 +153,34 @@ pub(crate) fn buf_retained(bytes: usize) {
 /// and correct; a PACE veto is a rate test, and a rate test set against
 /// the old decoder is exactly what this round exists to re-read; a SIZE
 /// veto is the set being too big for the cap, which no threshold change
-/// can help.
+/// can help; and the two CONFIGURATION arms below are neither a verdict
+/// nor a threshold and nothing about the job can move them.
+///
+/// **NESTED and OFF were reported as LOSS until 20 Sep 2026**, because
+/// the classifier asked `!healthy` and `healthy` is one expression over
+/// four conditions. The cost was a counter that lies in exactly the case
+/// a reader is most likely to hit: every over-cap leg of the nested
+/// holds round (`research/NESTED-CHASE-HOLDS-2026-09-20.md` section 4.5)
+/// reported `1 vetoed by loss` on a clean job with no lost article and
+/// no refusal anywhere in it. It changed no outcome there - the drop arm
+/// is depth-gated shut regardless - but a LOSS reading sends the next
+/// reader hunting a refusal that does not exist (memory topic
+/// `nzbfast-retry-propagation-trap` is the same trap one layer down).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TrimVeto {
     /// Dropped - no veto.
     None,
-    /// A lost article, or doubt about one (and the nested and
-    /// drop-switched-off arms, which are configuration, not a verdict).
+    /// A lost article, or doubt about one. The job's own damage, and
+    /// the only one of these five that is a VERDICT.
     Loss,
+    /// The chase is nested (`depth > 0`), so its volumes are inner
+    /// members of an outer archive and are refetchable by nobody. By
+    /// design and permanent for the run: see `rar_trim_set`'s depth
+    /// condition. Expect exactly this on every nested chase.
+    Nested,
+    /// The drop arm is switched off for the run (`rar_drop_on`, from
+    /// `rar_drop_env_off`). An operator's choice, not a finding.
+    Off,
     /// Not parked, and the engine is not keeping pace with arrivals.
     Pace,
     /// Not parked, keeping pace, but the set cannot finish inside the cap.
@@ -174,9 +201,44 @@ pub(crate) fn trim_pass(veto: TrimVeto, parked: bool) {
     match veto {
         TrimVeto::None => TRIM_DROPS.fetch_add(1, Relaxed),
         TrimVeto::Loss => TRIM_VETO_LOSS.fetch_add(1, Relaxed),
+        TrimVeto::Nested => TRIM_VETO_NESTED.fetch_add(1, Relaxed),
+        TrimVeto::Off => TRIM_VETO_OFF.fetch_add(1, Relaxed),
         TrimVeto::Pace => TRIM_VETO_PACE.fetch_add(1, Relaxed),
         TrimVeto::Size => TRIM_VETO_SIZE.fetch_add(1, Relaxed),
     };
+}
+
+/// The set-wide ENGINE WATERMARK one drop-eligible trim pass saw, in
+/// bytes, clamped per volume to that volume's size.
+///
+/// The one quantity that separates the two readings of a `chase trimmed
+/// 0` leg, which nothing in the tree could tell apart before 20 Sep 2026
+/// (`research/NESTED-CHASE-HOLDS-2026-09-20.md` section 4.5). A trim
+/// releases nothing for two unrelated reasons and the `[mem]` line said
+/// the same `0` for both:
+///
+/// - **no watermark**: `rar_trim_volume` returns at its first line when
+///   a volume's watermark is 0, so a chase whose engine has not
+///   consumed a byte yet trims nothing however healthy it is. On an
+///   unthrottled loopback rig a 64 MB cap breaches in well under a
+///   second, which is not obviously long enough for the engine to have
+///   started - so "not yet" and "this shape never will" both print 0.
+/// - **below the bar**: a partially-consumed volume must release at
+///   least `rar_trim_min_release` - half the cap - so a watermark that
+///   HAS moved still trims nothing until it passes that bar.
+///
+/// `peak` is the high-water of the sum and `zero_passes` counts the
+/// passes that saw nothing at all, so the three cases read apart:
+/// `peak 0` over N passes is an engine that never published; a non-zero
+/// peak under half the cap is the release bar; and a peak above it with
+/// `chase trimmed 0` is neither, and is a finding.
+pub(crate) fn trim_watermark(sum: u64) {
+    if on() {
+        TRIM_WM_PEAK.fetch_max(sum, Relaxed);
+        if sum == 0 {
+            TRIM_WM_ZERO.fetch_add(1, Relaxed);
+        }
+    }
 }
 
 /// One volume-level trim pass that the DROP-BEHIND decided to drop and
@@ -189,6 +251,21 @@ pub(crate) fn trim_pass(veto: TrimVeto, parked: bool) {
 pub(crate) fn trim_vouch_spill() {
     if on() {
         TRIM_VOUCH_SPILL.fetch_add(1, Relaxed);
+    }
+}
+
+/// One PROGRESS trim pass: the nested chase's resident bytes were over
+/// the margin and the third call site asked the trim to release what
+/// the engine had read past (`Extractor::rar_trim_set_on_progress`).
+/// Counted separately from `trim_pass` above because the two answer
+/// different questions - that one is "the budget was breached, what did
+/// the drop-behind decide", this one is "the arm stage 2 added actually
+/// engaged". A leg reporting zero of these is an arm that never fired,
+/// which reads identically to the arm being off and is the first thing
+/// an A/B has to rule out.
+pub(crate) fn progress_pass() {
+    if on() {
+        PROGRESS_PASSES.fetch_add(1, Relaxed);
     }
 }
 
@@ -207,28 +284,93 @@ pub(crate) fn note_no_parity() {
 /// instrument was switched on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ChaseStat {
+    /// Chase workers that ran to completion, engine call to engine
+    /// return. A nested chain runs more than one, which is why the
+    /// nanosecond totals below can exceed any single worker's wall.
     pub workers: u64,
+    /// Summed wall of those workers. The denominator every park total
+    /// below is a fraction of.
     pub worker_ns: u64,
+    /// Blocking reads entered, whether or not they then parked. Parks
+    /// per read is the ratio that separates "the decode is starving"
+    /// from "the decode is merely being fed".
     pub read_calls: u64,
+    /// Reads that parked at a hole in the frontier: the arrivals had
+    /// not reached the decode yet.
     pub hole_parks: u64,
+    /// Nanoseconds spent in those hole parks. The arrival-bound share.
     pub hole_ns: u64,
+    /// Reads that parked on the §94 B verify gate: the bytes were
+    /// here, the PAR2 vouching was not.
     pub gate_parks: u64,
+    /// Nanoseconds spent on the verify gate. Small at the root, where
+    /// `VerifyGate::advance` notifies (0 or 1 park of 11-15 ms per
+    /// one-pass job when these counters were added); larger for a
+    /// routed child, whose watermark can move with nothing to notify
+    /// it, so its 100 ms bound behaves as a poll period.
     pub gate_ns: u64,
+    /// Reads that parked on a repair pause: a mapped repair was
+    /// rewriting this volume.
     pub pause_parks: u64,
+    /// Nanoseconds spent parked on repair pauses.
     pub pause_ns: u64,
+    /// Times a worker waited for the router to register a volume - the
+    /// chase asked for volume N+1 before any article of it classified.
     pub vol_parks: u64,
+    /// Nanoseconds spent waiting for routing to register a volume.
     pub vol_ns: u64,
+    /// High-water RAM retained by any ONE frontier buffer. The
+    /// chain-wide figure is the holds budget's own peak
+    /// (`Extractor::holds_peak`); this says how much of it a single
+    /// volume's buffer accounted for.
     pub buf_peak: usize,
     /// Drop-eligible drop-behind trim passes, and how they went.
     pub trim_passes: u64,
+    /// Passes that dropped - no veto. Per SET, so this is the
+    /// drop-behind's own verdict and not what reached the disk; a drop
+    /// the §94 B vouch overruled is counted in `trim_vouch_spills`.
     pub trim_drops: u64,
     /// Passes that saw the held-bytes backpressure engaged.
     pub trim_parked: u64,
+    /// Passes vetoed by `TrimVeto::Loss`: a lost article or doubt about
+    /// one. The job's own damage, and the only one of the five that is
+    /// a VERDICT.
     pub trim_veto_loss: u64,
+    /// Vetoed by configuration rather than by anything the job did: the
+    /// depth gate, and the drop switch. Counted apart from
+    /// `trim_veto_loss` since 20 Sep 2026 - see `TrimVeto`.
+    ///
+    /// This one is `TrimVeto::Nested`: the chase runs at `depth > 0`,
+    /// so its volumes are inner members nobody can refetch. By design
+    /// and permanent for the run, so expect exactly this on every
+    /// nested chase rather than reading it as a finding.
+    pub trim_veto_nested: u64,
+    /// Vetoed by `TrimVeto::Off`: the drop arm is switched off for the
+    /// run. An operator's choice, so it says nothing about the shape.
+    pub trim_veto_off: u64,
+    /// Passes vetoed by `TrimVeto::Pace`: the engine is not keeping up
+    /// with arrivals. A rate test, so the one of the five whose
+    /// threshold is worth re-reading against the faster Sep 2026
+    /// decoder.
     pub trim_veto_pace: u64,
+    /// Passes vetoed by `TrimVeto::Size`: the set cannot finish inside
+    /// the holds cap. No threshold change helps this one.
     pub trim_veto_size: u64,
     /// Per-VOLUME drops the §94 B vouch turned into spills.
     pub trim_vouch_spills: u64,
+    /// Progress-trim passes (TODO 13 stage 2): the nested chase was
+    /// over its margin and asked the trim to release consumed bytes.
+    pub progress_passes: u64,
+    /// The highest set-wide engine watermark any drop-eligible pass
+    /// saw, and how many of them saw none at all. See `trim_watermark`
+    /// for the reading.
+    pub trim_wm_peak: u64,
+    /// Drop-eligible passes that saw a set-wide watermark of ZERO - the
+    /// engine had published nothing for this set at all. Counted apart
+    /// from the peak because a peak of 0 over N passes and a non-zero
+    /// peak under the release bar are different findings that
+    /// `chase trimmed 0` cannot tell apart on its own.
+    pub trim_wm_zero: u64,
     /// The run ruled parity out and stopped asking for a vouch.
     pub no_parity: bool,
 }
@@ -266,12 +408,17 @@ pub fn chase_stat() -> ChaseStat {
         vol_parks: VOL_PARKS.load(Relaxed),
         vol_ns: VOL_NS.load(Relaxed),
         buf_peak: BUF_PEAK.load(Relaxed),
+        progress_passes: PROGRESS_PASSES.load(Relaxed),
         trim_passes: TRIM_PASSES.load(Relaxed),
         trim_drops: TRIM_DROPS.load(Relaxed),
         trim_vouch_spills: TRIM_VOUCH_SPILL.load(Relaxed),
+        trim_wm_peak: TRIM_WM_PEAK.load(Relaxed),
+        trim_wm_zero: TRIM_WM_ZERO.load(Relaxed),
         no_parity: NO_PARITY.load(Relaxed) != 0,
         trim_parked: TRIM_PARKED.load(Relaxed),
         trim_veto_loss: TRIM_VETO_LOSS.load(Relaxed),
+        trim_veto_nested: TRIM_VETO_NESTED.load(Relaxed),
+        trim_veto_off: TRIM_VETO_OFF.load(Relaxed),
         trim_veto_pace: TRIM_VETO_PACE.load(Relaxed),
         trim_veto_size: TRIM_VETO_SIZE.load(Relaxed),
     }

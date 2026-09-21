@@ -1,20 +1,42 @@
 //! Local configuration (`config.local.json`, gitignored - holds credentials).
 
+#![warn(missing_docs)]
+
 use std::path::Path;
 use tracing::warn;
 
 use serde::{Deserialize, Serialize};
 
+/// Why a config file could not be turned into a usable server list.
+///
+/// Every variant is reported to the operator verbatim, so the messages
+/// are written for somebody who has just been told their download will
+/// not start.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    /// The file could not be read at all - missing, unreadable, or a
+    /// directory. A missing path is the one shape `Config::load` may
+    /// answer by searching for a SABnzbd ini instead.
     #[error("reading config: {0}")]
     Io(#[from] std::io::Error),
+    /// The file is our JSON format and does not parse, or parses into
+    /// something that is not a `Config`.
     #[error("parsing config: {0}")]
     Json(#[from] serde_json::Error),
+    /// The file is SABnzbd's ini format and could not be read as one.
+    /// Carries the detail, because the file is usually one nzbfast
+    /// adopted rather than one the operator wrote.
     #[error("parsing sabnzbd.ini: {0}")]
     Ini(String),
+    /// The file parsed and named no usable server. From a SABnzbd ini
+    /// this also covers "every server in it is disabled", which is why
+    /// `load_or_sab` warns with the path it actually read.
     #[error("config has no servers")]
     NoServers,
+    /// More servers than the routing bitmasks can represent. Refused
+    /// rather than truncated or aliased: past `MAX_SERVERS` a provider
+    /// would never be asked for articles it holds, and nothing would
+    /// say so.
     #[error(
         "config has {0} servers; the maximum is {max}. Routing state (which \
          servers have 430'd an article, which are live, retention windows) is \
@@ -25,8 +47,16 @@ pub enum ConfigError {
     TooManyServers(usize),
 }
 
+/// Everything read out of `config.local.json` (or an adopted
+/// `sabnzbd.ini`). Credentials live here, so this type is never
+/// serialized into an API body without going through the obfuscating
+/// serde hooks on [`ServerConfig::password`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
+    /// The providers to download from, in the operator's own order.
+    /// Never empty and never longer than [`MAX_SERVERS`] - `Config::parse`
+    /// refuses both - and the INDEX into this vector is the server's
+    /// identity in every routing bitmask.
     pub servers: Vec<ServerConfig>,
     /// M13: TMDB API key for poster-wall metadata/artwork. Absent =
     /// wall runs text-only. (TMDB_API_KEY env var also works.)
@@ -34,13 +64,33 @@ pub struct Config {
     pub tmdb_key: Option<String>,
 }
 
+/// One provider, as the operator configured it.
+///
+/// Its INDEX in [`Config::servers`] is its identity in every routing
+/// bitmask, so the order of that vector is not cosmetic. Its
+/// [`account_key`](Self::account_key) - host plus a digest of the
+/// username - is its BILLING identity, which is a different quantity:
+/// two rows on one host with one username are two socket pools and one
+/// bill.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerConfig {
+    /// The hostname to dial. Also what the TLS certificate is checked
+    /// against unless [`tls_hostname`](Self::tls_hostname) overrides it,
+    /// and the host half of [`account_key`](Self::account_key), so it is
+    /// billing identity as well as an address.
     pub host: String,
+    /// TCP port. Defaults to 563, the TLS NNTP port, matching `tls`
+    /// defaulting to true.
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Dial over TLS. Defaults ON: the NNTP credentials ride this
+    /// connection, and every provider worth using offers it.
     #[serde(default = "default_true")]
     pub tls: bool,
+    /// AUTHINFO USER name, absent on a server that wants no
+    /// authentication. THE USERNAME IS THE ACCOUNT - two rows agreeing
+    /// on host and username share one bill, which is what
+    /// [`account_key`](Self::account_key) digests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     /// Stored obfuscated (`obf1:…`), read as either that or cleartext. See
@@ -452,7 +502,16 @@ pub fn caps_source_ips(host: &str) -> bool {
 /// them survive the release. `None` = never release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReleasePolicy {
+    /// Idle time before the pool releases down to `keep`. `None` means
+    /// never release, which is what `idle_release_secs: Some(0)` asks
+    /// for - right when this install is the account's only consumer.
+    /// Already floored to [`MIN_IDLE_RELEASE_SECS`], so a caller may
+    /// obey it as given.
     pub after: Option<std::time::Duration>,
+    /// Connections held through that release, so the next job still
+    /// starts warm. Already clamped to [`MAX_PER_SERVER`], and zero
+    /// against an address-capped provider, where one held socket
+    /// occupies as much of the cap as sixty.
     pub keep: usize,
 }
 
@@ -473,7 +532,7 @@ pub struct ReleasePolicy {
 /// Every routing decision - `tried_430`, retention, live/fail/required/group -
 /// is a `u32` keyed by server index, so there is no bit for index 32 and
 /// beyond. Enforced at config load (`Config::load`), which is what makes
-/// [`server_bit`] total in practice.
+/// `server_bit` total in practice.
 pub const MAX_SERVERS: usize = 32;
 
 /// Release the pool down to its floor after this long with no job
@@ -638,7 +697,7 @@ impl ServerConfig {
     /// A provider cannot issue two accounts under one username, so two
     /// rows agreeing on host and username are the same account at the
     /// provider and SHARE one bill - which is why this is allowed to
-    /// alias them where [`crate::pool::row_keys`] must not. That
+    /// alias them where `crate::pool::row_keys` must not. That
     /// header rejected `host:port:username` as the FLEET identity
     /// because two verbatim-duplicate rows collapse to one key; they
     /// are two socket pools whatever their credentials say, so
@@ -782,6 +841,8 @@ fn default_port() -> u16 {
 fn default_true() -> bool {
     true
 }
+/// The per-server connection allowance assumed when a config does not
+/// say. serde's default for [`ServerConfig::connections`].
 pub fn default_connections() -> u32 {
     // The allowance most providers sell. Jobs use min(global setting,
     // this cap, measured knee), so a big default costs nothing on a
@@ -1054,7 +1115,7 @@ impl Config {
     /// `load_or_sab` was one INFO line, and INFO goes to stdout, so a
     /// download's own output buried it; it is now a WARN on stderr that
     /// names the hosts it adopted, which is the link between "some other
-    /// application's config" and the "no usable connection to <host>"
+    /// application's config" and the `"no usable connection to <host>"`
     /// the run dies of minutes later. The one shape now refused outright
     /// is inline JSON in `--config`, caught at parse time by
     /// `config_path` in `crates/nzbfast/src/main.rs` - it is never a
@@ -2336,6 +2397,9 @@ pub struct ImportedCategory {
 /// found, and what it could not carry.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ImportedCategories {
+    /// The categories that came over, in the source file's own order -
+    /// neither parser can honour SABnzbd's `order` field, so file order
+    /// is the nearest honest thing to it.
     pub cats: Vec<ImportedCategory>,
     /// Human-readable notes about fields that were present in the file
     /// and deliberately not imported. Surfaced to the user rather than
@@ -2546,7 +2610,7 @@ pub fn parse_sabnzbd_categories(text: &str) -> ImportedCategories {
 /// NZBGet builds `DestDir`, and a category's own `DestDir`, out of
 /// `${MainDir}` / `${DestDir}` substitution (e.g. `DestDir=${MainDir}/dst`)
 /// - resolved here so a category lands on the same absolute path NZBGet
-/// itself would use. `~` expands the way [`resolve_sab_dir`] expands one
+/// itself would use. `~` expands the way `resolve_sab_dir` expands one
 /// out of a sabnzbd.ini.
 pub fn parse_nzbget_categories(text: &str) -> ImportedCategories {
     use std::collections::{BTreeMap, HashMap};

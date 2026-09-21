@@ -322,7 +322,7 @@ pub fn mkv_seekhead_same_target_twice() -> Vec<u8> {
     )
 }
 
-/// A tail of [Tags][Chapters] with both indexed in that order - the
+/// A tail of `Tags` then `Chapters` with both indexed in that order - the
 /// honest-mux shape. Nothing here is malformed: the chase simply has
 /// two targets, and the first one physically precedes the second.
 pub fn mkv_seekhead_tags_before_chapters() -> Vec<u8> {

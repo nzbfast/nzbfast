@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Engine library for nzbfast: NZB parsing, yEnc codec, NNTP pool, scheduler"
+readme = "README.md"
+homepage = "https://nzbfast.github.io/nzbfast/"
+documentation = "https://docs.rs/nzbkit"
+keywords = ["usenet", "nntp", "nzb", "par2", "rar"]
+categories = ["network-programming", "parser-implementations", "compression", "multimedia"]
 
 [lints]
 workspace = true
@@ -19,7 +24,7 @@ workspace = true
 # `default-features = false` is load-bearing: base's own default turns
 # `indexer` on, and a slim build of this crate must not get it back
 # through the dependency. The feature forwards explicitly below.
-nzbkit-base = { path = "../nzbkit-base", default-features = false }
+nzbkit-base = { version = "1.0.0", path = "../nzbkit-base", default-features = false }
 # Events only - nzbkit is a library and installs no subscriber. The
 # binary does that (nzbfast::logging), so nzbkit's [pool] / [par2] lines
 # reach the same log pane as everything else, stamped the same way. No
@@ -214,7 +219,16 @@ test-support = ["nzbkit-base/test-support"]
 # invisible from another crate whatever its visibility. Through a DEV
 # dependency, so `cargo build -p nzbkit` never sees it - the same
 # arrangement nzbfast-core's and nzbfast-unpack's `test-support` use.
-nzbkit-base = { path = "../nzbkit-base", default-features = false, features = ["test-support"] }
+# `version` beside the `path`, for the same reason the normal dependency
+# above carries one and for one more: cargo STRIPS a path-only dev
+# dependency from the manifest it publishes (measured 21 Sep 2026 - a probe
+# crate with exactly this shape packaged with an EMPTY `[dev-dependencies]`
+# table). Without it a published `nzbkit` loses this edge, `test-support`
+# resolves OFF, and `journal`'s tests lose `renameclaim` - so the tests in
+# the `.crate` cannot compile whatever else is fixed. That was the second
+# of the two causes found while closing the `include_bytes!` escapes; the
+# first is `nzbkit_base::testdata` (tools/package-escape-gate.py).
+nzbkit-base = { version = "1.0.0", path = "../nzbkit-base", default-features = false, features = ["test-support"] }
 # `hooks` is what gives the compact-abort test `progress_handler`, the
 # only way to fire an interrupt from inside the rewrite's own VM loop
 # rather than betting on a timer. It is a code gate (`hooks = []`

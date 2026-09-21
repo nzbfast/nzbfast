@@ -1,4 +1,5 @@
 use super::*;
+use crate::rarfixtures::{self as rf, Member};
 use nzbkit::par2::{Par2File, Par2Set};
 
 fn tdir(tag: &str) -> PathBuf {
@@ -689,19 +690,7 @@ fn furniture_does_not_count_as_payload() {
 
 /// Build a store-only RAR5 holding one entry.
 fn rar_of(name: &'static [u8], data: &[u8]) -> Vec<u8> {
-    rars::rar50::Rar50Writer::new(rars::rar50::WriterOptions::new(
-        rars::ArchiveVersion::Rar50,
-        rars::FeatureSet::store_only(),
-    ))
-    .stored_entries(&[rars::rar50::StoredEntry {
-        name,
-        data,
-        mtime: None,
-        attributes: 0,
-        host_os: 0,
-    }])
-    .finish()
-    .unwrap()
+    rf::stored_archive(&[Member::bare(name, data)])
 }
 
 /// EVERY archive family in a directory is unpacked, not just the
@@ -771,19 +760,7 @@ fn extract_nested_seeds_preexisting_subdir_archives() {
     // the pre-existing-subdir seeding reaches them.
     let dir = reex_dir("presub");
     let store = |name: &'static [u8], data: &[u8]| -> Vec<u8> {
-        rars::rar50::Rar50Writer::new(rars::rar50::WriterOptions::new(
-            rars::ArchiveVersion::Rar50,
-            rars::FeatureSet::store_only(),
-        ))
-        .stored_entries(&[rars::rar50::StoredEntry {
-            name,
-            data,
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-        }])
-        .finish()
-        .unwrap()
+        rf::stored_archive(&[Member::bare(name, data)])
     };
     let d1: Vec<u8> = (0..80_000u32).map(|i| (i as u8).wrapping_mul(31)).collect();
     let d2: Vec<u8> = (0..60_000u32)
@@ -890,7 +867,6 @@ fn reextract_dir_armed_eats_volumes_as_it_goes() {
 /// beside a 58.76 GB extracted movie).
 #[test]
 fn reextract_dir_demoted_set_removes_spent_volumes() {
-    use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
     let dir = reex_dir("spent-demoted");
     let a: Vec<u8> = (0..150_000u32)
         .map(|i| (i as u8).wrapping_mul(31).wrapping_add(1))
@@ -898,25 +874,7 @@ fn reextract_dir_demoted_set_removes_spent_volumes() {
     let b: Vec<u8> = (0..120_000u32)
         .map(|i| (i as u8).wrapping_mul(19).wrapping_add(5))
         .collect();
-    let archive = Rar50Writer::new(WriterOptions::default())
-        .compressed_entries(&[
-            CompressedEntry {
-                name: b"a.bin",
-                data: &a,
-                mtime: None,
-                attributes: 0,
-                host_os: 0,
-            },
-            CompressedEntry {
-                name: b"b.bin",
-                data: &b,
-                mtime: None,
-                attributes: 0,
-                host_os: 0,
-            },
-        ])
-        .finish()
-        .unwrap();
+    let archive = rf::compressed_archive(&[Member::bare(b"a.bin", &a), Member::bare(b"b.bin", &b)]);
     std::fs::write(dir.join("set.rar"), &archive).unwrap();
     assert!(
         reextract_dir(&dir, None).unwrap(),
@@ -1024,21 +982,11 @@ fn reextract_dir_rescues_a_split_container_after_repair() {
 /// `nzbkit::extract::ResumeOutput`.)
 #[test]
 fn a_resumed_member_keeps_its_prefix_and_gets_only_the_tail_appended() {
-    use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
     let dir = reex_dir("resume-append");
     let a: Vec<u8> = (0..200_000u32)
         .map(|i| (i as u8).wrapping_mul(37).wrapping_add(11))
         .collect();
-    let archive = Rar50Writer::new(WriterOptions::default())
-        .compressed_entries(&[CompressedEntry {
-            name: b"a.bin",
-            data: &a,
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-        }])
-        .finish()
-        .unwrap();
+    let archive = rf::compressed_archive(&[Member::bare(b"a.bin", &a)]);
     std::fs::write(dir.join("set.rar"), &archive).unwrap();
 
     const MARK: u64 = 80_000;
@@ -1095,21 +1043,11 @@ fn a_resumed_member_keeps_its_prefix_and_gets_only_the_tail_appended() {
 /// a corrupt `a.bin`.
 #[test]
 fn a_stale_prefix_fails_its_checksum_and_the_pass_rewinds_to_byte_zero() {
-    use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
     let dir = reex_dir("resume-mismatch");
     let a: Vec<u8> = (0..200_000u32)
         .map(|i| (i as u8).wrapping_mul(37).wrapping_add(11))
         .collect();
-    let archive = Rar50Writer::new(WriterOptions::default())
-        .compressed_entries(&[CompressedEntry {
-            name: b"a.bin",
-            data: &a,
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-        }])
-        .finish()
-        .unwrap();
+    let archive = rf::compressed_archive(&[Member::bare(b"a.bin", &a)]);
     std::fs::write(dir.join("set.rar"), &archive).unwrap();
 
     const MARK: u64 = 80_000;
@@ -1153,7 +1091,6 @@ fn a_stale_prefix_fails_its_checksum_and_the_pass_rewinds_to_byte_zero() {
 /// success (review finding F-02). A name the batch carries twice is not resumed.
 #[test]
 fn duplicate_member_names_are_never_resumed() {
-    use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
     let dir = reex_dir("resume-dupe-names");
     let a: Vec<u8> = (0..120_000u32)
         .map(|i| (i as u8).wrapping_mul(19).wrapping_add(3))
@@ -1161,21 +1098,14 @@ fn duplicate_member_names_are_never_resumed() {
     let b: Vec<u8> = (0..120_000u32)
         .map(|i| (i as u8).wrapping_mul(5).wrapping_add(7))
         .collect();
-    let entry = |data: &'static [u8]| CompressedEntry {
-        name: b"a.bin",
-        data,
-        mtime: None,
-        attributes: 0,
-        host_os: 0,
-    };
     let (a_static, b_static): (&'static [u8], &'static [u8]) = (
         Box::leak(a.clone().into_boxed_slice()),
         Box::leak(b.clone().into_boxed_slice()),
     );
-    let archive = Rar50Writer::new(WriterOptions::default())
-        .compressed_entries(&[entry(a_static), entry(b_static)])
-        .finish()
-        .unwrap();
+    let archive = rf::compressed_archive(&[
+        Member::bare(b"a.bin", a_static),
+        Member::bare(b"a.bin", b_static),
+    ]);
     std::fs::write(dir.join("set.rar"), &archive).unwrap();
 
     const MARK: u64 = 40_000;
@@ -1206,20 +1136,10 @@ fn duplicate_member_names_are_never_resumed() {
 /// poisoned prefix proves by being overwritten.
 #[test]
 fn a_partial_that_moved_or_was_renamed_is_extracted_from_byte_zero() {
-    use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
     let a: Vec<u8> = (0..120_000u32)
         .map(|i| (i as u8).wrapping_mul(23).wrapping_add(5))
         .collect();
-    let archive = Rar50Writer::new(WriterOptions::default())
-        .compressed_entries(&[CompressedEntry {
-            name: b"a.bin",
-            data: &a,
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-        }])
-        .finish()
-        .unwrap();
+    let archive = rf::compressed_archive(&[Member::bare(b"a.bin", &a)]);
 
     // Guard 1: the file grew after the mark was taken.
     {
@@ -1388,19 +1308,7 @@ fn nested_prevalence_classifies_and_counts_disk_layer() {
 
     // Compressed inner classifies distinctly (no extraction, no count).
     let cdir = reex_dir("nestprev-comp");
-    let comp = {
-        use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
-        Rar50Writer::new(WriterOptions::default())
-            .compressed_entries(&[CompressedEntry {
-                name: b"c.bin",
-                data: &data,
-                mtime: None,
-                attributes: 0,
-                host_os: 0,
-            }])
-            .finish()
-            .unwrap()
-    };
+    let comp = rf::compressed_archive(&[Member::bare(b"c.bin", &data)]);
     std::fs::write(cdir.join("c.rar"), &comp).unwrap();
     assert_eq!(nested_inner_kind(&cdir), Some("rar-compressed"));
     std::fs::remove_dir_all(&cdir).unwrap();
@@ -1838,27 +1746,13 @@ fn boundary_between_members_set(tag: &str, seed: u8) -> (Vec<Vec<u8>>, Vec<u8>, 
     let spilled = bytes_of(30_000, 29, seed.wrapping_add(7));
     let whole_name = format!("{tag}0.bin");
     let spill_name = format!("{tag}1.bin");
-    let entries = [
-        rars::rar50::StoredEntry {
-            name: whole_name.as_bytes(),
-            data: &whole,
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-        },
-        rars::rar50::StoredEntry {
-            name: spill_name.as_bytes(),
-            data: &spilled,
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-        },
-    ];
-    let volumes = rars::rar50::Rar50VolumeWriter::new(rars::rar50::WriterOptions::default())
-        .stored_entries(&entries)
-        .max_payload_per_volume(PAYLOAD)
-        .finish()
-        .expect("rars writes the volume set");
+    let volumes = rf::stored_volume_set(
+        &[
+            Member::bare(whole_name.as_bytes(), &whole),
+            Member::bare(spill_name.as_bytes(), &spilled),
+        ],
+        PAYLOAD,
+    );
     assert_eq!(volumes.len(), 3, "the writer changed shape under this test");
     (volumes, whole, spilled)
 }
@@ -2023,18 +1917,7 @@ fn two_member_aligned_sets_are_not_cross_wired() {
 #[test]
 fn an_obfuscated_set_whose_head_numbers_itself_zero_still_groups() {
     let data = bytes_of(60_000, 13, 5);
-    let entry = rars::rar50::StoredEntry {
-        name: b"film.mkv",
-        data: &data,
-        mtime: None,
-        attributes: 0,
-        host_os: 0,
-    };
-    let vols = rars::rar50::Rar50VolumeWriter::new(rars::rar50::WriterOptions::default())
-        .stored_entry(entry)
-        .max_payload_per_volume(20_000)
-        .finish()
-        .expect("rars writes the volume set");
+    let vols = rf::stored_volume_set(&[Member::bare(b"film.mkv", &data)], 20_000);
     assert_eq!(vols.len(), 3, "the writer changed shape under this test");
 
     let dir = reex_dir("obf-zero-numbered-head");
@@ -2058,20 +1941,7 @@ fn an_obfuscated_set_whose_head_numbers_itself_zero_still_groups() {
 /// One four-volume RAR4 stored set, written twice: once under names
 /// that order it and once under hash names that do not.
 fn rar4_vols(total: &[u8], per_volume: usize) -> Vec<Vec<u8>> {
-    rars::rar15_40::write_stored_volumes(
-        rars::rar15_40::StoredEntry {
-            name: b"film.mkv",
-            data: total,
-            file_time: 0,
-            file_attr: 0,
-            host_os: 0,
-            password: None,
-            file_comment: None,
-        },
-        rars::rar15_40::WriterOptions::default(),
-        per_volume,
-    )
-    .unwrap()
+    rf::rar4_stored_volume_set(b"film.mkv", total, per_volume)
 }
 
 /// The obfuscated collector cannot order a RAR4 volume set, and the

@@ -15,6 +15,9 @@ pub struct BufPool {
 }
 
 impl BufPool {
+    /// An empty pool that will retain at most `max_held` buffers.
+    /// Unattributed: charges nothing to the memory gauges, which is
+    /// what a pool nobody is measuring wants.
     pub fn new(max_held: usize) -> Arc<BufPool> {
         Arc::new(BufPool {
             bufs: std::sync::Mutex::new(Vec::new()),

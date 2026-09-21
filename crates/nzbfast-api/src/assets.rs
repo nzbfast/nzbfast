@@ -359,16 +359,42 @@ pub(super) const UI_SOUND_HTML: &str = include_str!(concat!(
     "/../../web/ui-sound.html"
 ));
 
-/// Inline the shared design tokens and sound engine into a page.
+/// TODO 19: the one sign-out control, shared by the dashboard and the
+/// wall - the action (`POST /logout`, then `/`) and the reveal that
+/// decides whether the pill exists for this visitor at all. Each shell
+/// page carries a `__NZBFAST_UI_SIGNOUT__` placeholder in its `<head>`;
+/// `ui_themed()` substitutes this in.
+///
+/// A partial from the start rather than the wall growing a hand copy of
+/// the dashboard's, because this repo already has the register for what
+/// that costs: `UI_SOUND_HTML` above exists because the wall DID carry
+/// one, and it agreed with the original until it did not. The three
+/// facts here are daemon decisions (`route_logout`) that the pages only
+/// mirror, so there is no version of this the two should disagree
+/// about.
+///
+/// The MARKUP is not here - each page keeps the pill in its own nav,
+/// and holding the navs to one set of destinations is
+/// `tools/nav-destinations-gate.py`'s job.
+#[cfg(feature = "dashboard")]
+pub(super) const UI_SIGNOUT_HTML: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../web/ui-signout.html"
+));
+
+/// Inline the shared design tokens, sound engine and sign-out control
+/// into a page.
 ///
 /// Only the two shell pages come through here now: the manuals carry the
 /// tokens substitution, but build.rs folds it in for them (R10 / C9), so
-/// nothing re-does it per request - and they carry no sound placeholder
-/// at all, which is why that half is only here.
+/// nothing re-does it per request - and they carry neither the sound nor
+/// the sign-out placeholder at all, which is why those two are only
+/// here.
 ///
-/// Both halves go through `devweb` so a token or a sound-recipe edit
-/// reloads like the pages do; unset - which is every install - each is
-/// the borrowed `&'static str` above and nothing is copied.
+/// All three go through `devweb` so a token, a sound-recipe or a
+/// sign-out edit reloads like the pages do; unset - which is every
+/// install - each is the borrowed `&'static str` above and nothing is
+/// copied.
 #[cfg(feature = "dashboard")]
 pub(super) fn ui_themed(page: &str) -> String {
     page.replace(
@@ -379,11 +405,24 @@ pub(super) fn ui_themed(page: &str) -> String {
         "__NZBFAST_UI_SOUND__",
         &devweb::text_or("ui-sound.html", UI_SOUND_HTML),
     )
+    .replace(
+        "__NZBFAST_UI_SIGNOUT__",
+        &devweb::text_or("ui-signout.html", UI_SIGNOUT_HTML),
+    )
 }
 
 #[cfg(feature = "indexer")]
 pub(super) const WALL_HTML: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/wall.html"));
+
+/// TODO 19 (public request #4): the sign-in page, embedded like the
+/// other two. Deliberately its OWN page and not a view inside the
+/// dashboard: the dashboard is 1.2 MB of application, and handing all of
+/// it to somebody who has not signed in is both slower and more than
+/// they are owed.
+#[cfg(feature = "dashboard")]
+pub(super) const LOGIN_HTML: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/login.html"));
 
 #[cfg(all(test, feature = "dashboard"))]
 mod tests {

@@ -161,7 +161,27 @@ impl Daemon {
         // a store can be present and still not be the record, which is
         // exactly the rollback case below.
         let store_exists = self.queue_store_path().exists();
-        let store_wins_on_mtime = store_exists && !self.legacy_snapshot_outlives_store();
+        // A store that is there and will not OPEN is latched before
+        // anything below decides on the strength of its existence: the
+        // sweep two lines down removes the migration's leftovers, which
+        // are the only other copies of a queue this process is about to
+        // fail to read. `queue_replay` latches the same flag on a read
+        // that fails after the open (an I/O fault); the two are the one
+        // condition `Daemon::queue_store_unreadable` describes.
+        if let Some(e) = crate::histstore::store_open_error(&self.queue_store_path()) {
+            error!(
+                target: "queue",
+                "{}: the queue store exists but could not be opened ({e}) - \
+                 starting with an empty queue and refusing to rewrite the store; \
+                 fix the file's permissions and restart nzbfast",
+                self.queue_store_path().display()
+            );
+            self.queue_store_unreadable.store(true, Ordering::Relaxed);
+        }
+        let store_wins_on_mtime = store_exists
+            && !self.queue_store_unreadable.load(Ordering::Relaxed)
+            && !self.legacy_snapshot_outlives_store();
+        let store_unreadable = store_exists && self.queue_store_unreadable.load(Ordering::Relaxed);
         if store_wins_on_mtime {
             // The migration's two leftovers, taken once they are old
             // enough to cost more than they can buy back - the reasoning,
@@ -223,7 +243,7 @@ impl Daemon {
         // `queue.json.corrupt` on the way out, and the sweep above is
         // held off this boot.
         let store_is_authority = store_wins_on_mtime || (store_exists && v.is_none());
-        if store_is_authority && !store_wins_on_mtime {
+        if store_is_authority && !store_wins_on_mtime && !store_unreadable {
             // Never silent. This is a user whose queue.json has just been
             // lost, and the queue they get back is a record an older
             // build had already moved on from.
@@ -323,6 +343,7 @@ impl Daemon {
             })
             .collect();
         let routed_any = !routed.is_empty();
+        let routed_ids: Vec<String> = routed.iter().map(|j| j.nzo_id.clone()).collect();
         let mut history = legacy_part;
         history.extend(
             stored_hist
@@ -426,6 +447,17 @@ impl Daemon {
             let cur = self.next_id.load(Ordering::Relaxed);
             self.next_id
                 .store(n.max(cur).max(Self::id_floor()), Ordering::Relaxed);
+        } else if self.queue_store_unreadable.load(Ordering::Relaxed)
+            || self.history_store_unreadable.load(Ordering::Relaxed)
+        {
+            // A store this process could not read holds ids it cannot
+            // see, every one carrying a permanent stream token. The
+            // allocator was not restored, so floor it as a restore would
+            // have, or the small ids a fresh daemon hands out re-mint
+            // them.
+            let cur = self.next_id.load(Ordering::Relaxed);
+            self.next_id
+                .store(cur.max(Self::id_floor()), Ordering::Relaxed);
         }
         // The one-time split, and the store's own housekeeping. Compact
         // FIRST (it writes every live record, so migrated and routed
@@ -433,8 +465,50 @@ impl Daemon {
         // its history array - in that order, so a crash between the two
         // duplicates records into both files (deduped above on the next
         // boot) rather than losing them from both.
-        if migrating || routed_any || wants_compaction {
-            self.history_compact();
+        //
+        // AND READ THE ANSWER. The 8 Aug 2026 sweep's H4 was that this
+        // call's failure went unread: the queue half below then retired
+        // `queue.json` (the only copy of the legacy history array) or
+        // tombstoned the routed rows out of `queue.jsonl` (their only
+        // copy), and the next start had them in neither store. A
+        // history-specific refusal is real - the rewrite is the larger
+        // write, so a nearly full disk takes the queue's update and not
+        // this one. So when it fails, every record that was owed to
+        // history in THIS pass is registered in `hist_owed`, and the
+        // queue writes below carry them as terminal rows instead of
+        // dropping them: the next start routes them here again and
+        // retries. Records that were already in history.jsonl are not
+        // owed - they are durable where they are.
+        let hist_ok = if migrating || routed_any || wants_compaction {
+            self.history_compact()
+        } else {
+            true
+        };
+        if !hist_ok && (migrating || routed_any) {
+            let owed_ids: std::collections::HashSet<&str> = legacy_ids
+                .iter()
+                .chain(routed_ids.iter())
+                .map(String::as_str)
+                .collect();
+            // Collected under `history`, owed after it is released:
+            // `hist_owed` is never taken while `history` is held.
+            let owed: Vec<Arc<Mutex<Job>>> = self
+                .history
+                .lock_ok()
+                .iter()
+                .filter(|j| owed_ids.contains(j.lock_ok().nzo_id.as_str()))
+                .cloned()
+                .collect();
+            for j in &owed {
+                self.hist_owe(j);
+            }
+            error!(
+                target: "queue",
+                "the history store could not be written at start, so {} record(s) \
+                 moving into it are carried in the queue store until it can be - \
+                 they show in history now and the next start retries the move",
+                owed.len()
+            );
         }
         // ...and the queue half of the resolution above, here because the
         // id allocator is restored by now. `routed_any` belongs in this
@@ -451,6 +525,10 @@ impl Daemon {
         // only copy a hand rollback to an older binary could read, and a
         // crash between the two leaves a queue.json beside a queue.jsonl,
         // which the load above already resolves in the store's favour.
+        // Retiring it is safe even when the history half above FAILED:
+        // `queue_compact` publishes `queue_rows`, which carries every
+        // owed record as a terminal row, so the store this write creates
+        // holds the legacy history array's records itself.
         if migrating_queue {
             if self.queue_compact() {
                 let aside = self.spool.join("queue.json.premigrate");
@@ -539,7 +617,7 @@ impl Daemon {
     /// under one. The category the job was ACCEPTED under is recovered
     /// with it since 25 Aug 2026 - `enqueue` records it in a sidecar
     /// beside the spool copy, which is the only copy of it that outlives
-    /// a run whose saves never landed (see [`spool_category`]). §218's
+    /// a run whose saves never landed (see `spool_category`). §218's
     /// inference is the fallback for an orphan with no sidecar: a copy
     /// written before this existed, an add that chose no category, or a
     /// sidecar write the same failing disk refused. The duplicate hold
@@ -549,6 +627,23 @@ impl Daemon {
     /// were adopted.
     pub fn recover_orphaned_spool(&self) -> usize {
         use std::collections::HashSet;
+        // A spool copy is an orphan only if NO record names it, and a
+        // store this process could not read may name any of them. Adopting
+        // one re-adds it under reconstructed defaults - priority, paused
+        // state, category override, retries and the heal stamps all
+        // dropped - and the append then overrides the unread row at the
+        // next readable start, last line wins. So nothing is adopted until
+        // both stores can be read (21 Sep 2026 codex sweep, P2-2).
+        if self.queue_store_unreadable.load(Ordering::Relaxed)
+            || self.history_store_unreadable.load(Ordering::Relaxed)
+        {
+            error!(
+                target: "queue",
+                "spool recovery skipped: a store could not be read at start, so a \
+                 spool copy no loaded record names may still be a live job's"
+            );
+            return 0;
+        }
         let Ok(rd) = std::fs::read_dir(&self.spool) else {
             return 0;
         };

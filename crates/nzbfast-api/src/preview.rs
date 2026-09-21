@@ -18,7 +18,7 @@
 //! they are produced and their length is not knowable in advance. So
 //! this is a different contract on purpose - one chunked response, no
 //! ranges, and a seek is a NEW request with `start_ms`. The two paths
-//! share the byte machinery underneath ([`LiveSource`] promotes exactly
+//! share the byte machinery underneath (`LiveSource` promotes exactly
 //! the way `LiveRangeReader` does) and nothing above it.
 //!
 //! Three things it deliberately does NOT inherit from `/stream`:

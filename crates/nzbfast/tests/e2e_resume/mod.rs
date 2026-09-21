@@ -66,6 +66,26 @@ async fn kill9_run1(
     .await
 }
 
+/// Bytes the journal records as restorable: the summed `len` fields of
+/// its `R`/`D` placement lines (`R <slot> <fidx>:<off>:<off>:<len>[,..]
+/// <id>`). A `kill9_run1_until` predicate reads this to wait on run 1's
+/// OWN progress rather than on the server's served count - see the call
+/// in `a_resumed_run_places_its_replay_instead_of_holding_it` for why
+/// those two differ under box load. Unreadable or half-written journal:
+/// 0, so the caller simply keeps waiting.
+fn restorable_bytes(journal: &Path) -> u64 {
+    let Ok(text) = std::fs::read_to_string(journal) else {
+        return 0;
+    };
+    text.lines()
+        .filter_map(|l| l.strip_prefix("R ").or_else(|| l.strip_prefix("D ")))
+        .filter_map(|rest| rest.split(' ').nth(1))
+        .flat_map(|list| list.split(','))
+        .filter_map(|span| span.rsplit(':').next())
+        .filter_map(|len| len.parse::<u64>().ok())
+        .sum()
+}
+
 /// `kill9_run1` with the journal half of the wait stated as a predicate
 /// over the journal's path, for a test whose premise needs more of the
 /// journal than one line of a given shape (see
@@ -681,15 +701,35 @@ async fn a_resumed_run_places_its_replay_instead_of_holding_it() {
     let nzb = fx.write_nzb();
     let out = fx.dir.join("out");
 
-    kill9_run1(
+    // The kill waits on the JOURNAL's restorable bytes, not just on a
+    // first `R ` line, and that is what makes the assertion below stable
+    // under load. `served` is the MockServer's own count, paced by a
+    // wall-clock `delay_ms` that box load does not slow; everything run 1
+    // does with those bytes (decode, place, journal) is CPU work that box
+    // load does slow. So a served-fraction trigger fires at a point that
+    // moves with load: measured 20 Sep 2026 over 60 legs at load 101 to
+    // 214, the replayed figure this run reads back swung 1.9 to 5.6 MB
+    // under the old trigger, and every leg that held anything at all was
+    // one whose replay came in at 4.6 MB or less. Waiting for 5 MB of
+    // recorded spans pins run 1 to the same place on a busy box as on an
+    // idle one - and the resume leg then has the same set of fresh
+    // articles to fetch, which is what actually sets the wire holds.
+    // Stated limit: `kill9_run1_until` gives the wait a 30 s deadline
+    // and kills anyway when it expires, so a box slow enough to miss
+    // this floor inside 30 s falls back to the old, load-dependent kill
+    // point rather than hanging. The legs below ran 7 to 11 s whole, so
+    // that is ~35x of headroom; if it is ever reached, the symptom is
+    // the flake this comment describes coming back, not a new one.
+    const REPLAY_FLOOR: u64 = 5_000_000;
+    kill9_run1_until(
         &cfg,
         &nzb,
         &out,
         &served,
         total_articles,
         (1, 2),
-        Some("R "),
         &[],
+        |journal| restorable_bytes(journal) >= REPLAY_FLOOR,
     )
     .await;
 
@@ -721,9 +761,39 @@ async fn a_resumed_run_places_its_replay_instead_of_holding_it() {
     // not a byte-exact ceiling. Unsorted, this ran to ~100%.
     //
     // SOAKED 31 Aug 2026, 150 consecutive legs at this dial over a box
-    // load range of 14.6 to 52.1: every one at 0 MB held. It does not
-    // flake, and the threshold is not the fragile part - the fixture's
-    // `delay_ms` above is. Read that comment before touching either.
+    // load range of 14.6 to 52.1: every one at 0 MB held.
+    //
+    // THAT SOAK IS BOUNDED BY ITS LOAD RANGE, and 20 Sep 2026 went past
+    // it. Re-measured with `--retries 0` at box load 101 to 214 (this
+    // box now sits at 4x to 6x oversubscription routinely, where the
+    // soak's top was 52.1): 3 of 30 legs breached. The conclusion
+    // "it does not flake" held only inside the range it was taken in,
+    // and the sentence that followed it - that the threshold is sound
+    // and `delay_ms` is the fragile part - was reading the right dial
+    // for the wrong reason. What breaks above the soaked range is
+    // neither of those: it is the KILL POINT. `served` is the
+    // MockServer's count under a wall-clock `delay_ms` that box load
+    // does not slow, while run 1's decode, placement and journal writes
+    // are CPU work that it does, so a served-fraction trigger cut run 1
+    // off earlier and earlier as the box filled. Over those 30 legs the
+    // replayed figure swung 1.9 to 5.6 MB, and the split is clean:
+    // every leg that replayed 4.7 MB or more held 0, and every leg that
+    // held anything replayed 4.6 MB or less - because a run 1 that
+    // placed less leaves more fresh articles for the resume leg to
+    // fetch, and those arrivals are what the holds absorb. The ratio
+    // below is the wrong shape for that: its numerator rises exactly
+    // when its denominator falls.
+    //
+    // So the fix is at the trigger, not here and not at `delay_ms` -
+    // the kill now waits on the journal's own restorable bytes
+    // (`restorable_bytes`, the call above). Raising `delay_ms` to 40 ms
+    // was measured first and is NOT the answer: it took the rate to
+    // 1 of 30 over the same load range without removing the class, and
+    // the 31 Aug ladder's 40 ms row was itself taken under load 52.1 at
+    // most. With the trigger pinned, RE-SOAKED 20 Sep 2026: 30 of 30
+    // legs at 0 MB held over a box load range of 136 to 281, with the
+    // replayed figure back to a flat 5.2-6.0 MB - a wider range than the
+    // 31 Aug soak and 5.4x its top. Nothing above 281 is claimed.
     //
     // `holds peak` is the extractor's TOTAL holds high-water and takes
     // in pre-sniff WIRE holds as well as anything the replay parked, so

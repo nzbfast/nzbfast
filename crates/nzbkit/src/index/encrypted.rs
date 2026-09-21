@@ -75,6 +75,9 @@ pub enum EncKind {
 }
 
 impl EncKind {
+    /// The stable stored tag for this kind, as it is written to the
+    /// index and shown in diagnostics. Parsed back elsewhere, so a
+    /// rename is a data break.
     pub fn tag(self) -> &'static str {
         match self {
             EncKind::Rar5HeadCrypt => "rar5/head-crypt",

@@ -15,7 +15,7 @@
 //! thousands of entries - so the remuxer runs its own walk, gathering
 //! exactly the structures it will index, and the probe's contract stays
 //! the size it is. What the two share is the codec table
-//! ([`super::codec`]), so a container id that means H.264 to one means
+//! (`super::codec`), so a container id that means H.264 to one means
 //! it to the other.
 //!
 //! ## Ticks, not nanoseconds
@@ -70,9 +70,13 @@ pub struct Sample {
     pub(crate) dts_ns: u64,
 }
 
+/// Which kind of track a [`SelectedTrack`] carries. Only these two are
+/// remuxed; a container's other track types are dropped at selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackKind {
+    /// A video track.
     Video,
+    /// An audio track.
     Audio,
 }
 
@@ -103,7 +107,13 @@ pub enum TrackConfig {
     /// into `dfLa`.
     Flac(Vec<u8>),
     /// An MP4 source: the whole `stsd` entry, copied through unchanged.
-    Mp4Entry { fourcc: [u8; 4], entry: Vec<u8> },
+    Mp4Entry {
+        /// The entry's own four-character code, which decides the
+        /// SampleEntry box name in the output.
+        fourcc: [u8; 4],
+        /// The whole `stsd` entry, copied through unchanged.
+        entry: Vec<u8>,
+    },
 }
 
 /// A track the session will carry into the output file.
@@ -133,16 +143,24 @@ pub struct SelectedTrack {
 /// normal outcome, and this one is always the end of an attempt.
 #[derive(Debug, thiserror::Error)]
 pub enum RemuxError {
+    /// Nothing in the container is a video or audio track this remuxer
+    /// knows how to carry.
     #[error("no track this remuxer can carry")]
     NoUsableTrack,
     /// The container has no keyframe index, so an arbitrary seek cannot
     /// be answered. Forward playback from the start still works.
     #[error("no seek index in this file")]
     NoIndex,
+    /// The container is well formed but uses something this remuxer
+    /// does not implement. Carries the container name and what it was.
     #[error("{0} is not remuxable: {1}")]
     Unsupported(&'static str, String),
+    /// The container contradicted itself. Carries the container name
+    /// and what did not hold.
     #[error("malformed {0}: {1}")]
     Malformed(&'static str, String),
+    /// A read failed. A `WouldBlock` kind is the gap convention -
+    /// bytes have not landed - and never the end of the stream.
     #[error("i/o: {0}")]
     Io(#[from] io::Error),
 }
@@ -367,6 +385,7 @@ fn is_segment_level(id: u32) -> bool {
 // Matroska layout
 // ---------------------------------------------------------------------------
 
+/// One Matroska track, as its header describes it.
 #[derive(Debug, Clone)]
 pub struct MkvTrack {
     pub(crate) number: u64,
@@ -383,6 +402,9 @@ pub struct MkvTrack {
     pub(crate) default: bool,
 }
 
+/// Everything the remuxer needs from a Matroska header: where the
+/// Segment's data begins, the timestamp scale every timing is in, and
+/// the tracks themselves.
 #[derive(Debug, Clone)]
 pub struct MkvLayout {
     /// First byte AFTER the Segment's own header - every SeekHead and
@@ -391,6 +413,9 @@ pub struct MkvLayout {
     pub(crate) segment_end: u64,
     pub(crate) timestamp_scale_ns: u64,
     pub(crate) first_cluster_off: Option<u64>,
+    /// Where the Cues element starts, when the file has one. `None`
+    /// means no keyframe index, so an arbitrary seek cannot be
+    /// answered and forward playback from the start is all there is.
     pub cues_off: Option<u64>,
     pub(crate) duration_ns: Option<u64>,
     pub(crate) tracks: Vec<MkvTrack>,
@@ -921,6 +946,10 @@ pub struct MkvSampleIter {
 }
 
 impl MkvSampleIter {
+    /// A sample iterator over `lay`, carrying only `tracks`.
+    ///
+    /// Positioned at the first cluster; nothing is read from the source
+    /// until `next` is called.
     pub fn new(lay: &MkvLayout, tracks: &[SelectedTrack]) -> Result<Self, RemuxError> {
         let (_, tick_mul) = mkv_timescale(lay.timestamp_scale_ns);
         let map = tracks
@@ -1250,19 +1279,29 @@ impl SampleIter for MkvSampleIter {
 // MP4 layout
 // ---------------------------------------------------------------------------
 
+/// An MP4 `stsz` sample-size table, in whichever of its two forms the
+/// file used.
 #[derive(Debug, Clone)]
 pub enum Stsz {
+    /// Every sample is this many bytes. The form `stsz` uses when its
+    /// sample_size field is non-zero, and the table is then absent.
     Uniform(u32),
+    /// One size per sample.
     Table(Vec<u32>),
 }
 
 impl Stsz {
+    /// Size of sample `i`, or `None` when the table does not reach it.
+    /// The uniform form answers for every index, by construction.
     pub fn get(&self, i: u64) -> Option<u32> {
         match self {
             Stsz::Uniform(n) => Some(*n),
             Stsz::Table(v) => v.get(usize::try_from(i).ok()?).copied(),
         }
     }
+    /// How many samples this table describes. The uniform form cannot
+    /// say on its own, so it returns the `total` the caller already
+    /// knows from the chunk tables.
     pub fn count(&self, total: u64) -> u64 {
         match self {
             Stsz::Uniform(_) => total,
@@ -1271,6 +1310,7 @@ impl Stsz {
     }
 }
 
+/// One MP4 track, as its `trak` box describes it.
 #[derive(Debug, Clone)]
 pub struct Mp4Track {
     pub(crate) track_id: u64,
@@ -1303,7 +1343,7 @@ pub struct Mp4Track {
 impl Mp4Track {
     /// Total samples, from whichever table states it.
     ///
-    /// Capped at [`MAX_TABLE_ENTRIES`], which is the one bound every
+    /// Capped at `MAX_TABLE_ENTRIES`, which is the one bound every
     /// cursor walk in this file inherits (`step` stops at `total`). A
     /// physical stts entry count is already clipped to what its box can
     /// hold, but each entry's RUN count is an untrusted u32: two entries
@@ -1325,14 +1365,20 @@ impl Mp4Track {
     }
 }
 
+/// Everything the remuxer needs from an MP4 `moov`: the movie
+/// timescale and duration, and the tracks themselves.
 #[derive(Debug, Clone)]
 pub struct Mp4Layout {
     pub(crate) timescale: u32,
     pub(crate) duration: u64,
+    /// Every track the `moov` declared, in file order.
     pub tracks: Vec<Mp4Track>,
 }
 
 impl Mp4Layout {
+    /// Movie duration in nanoseconds. `None` when the `moov` stated
+    /// neither a usable timescale nor a duration, which is what an
+    /// unfinished or fragmented file looks like here.
     pub fn duration_ns(&self) -> Option<u64> {
         (self.timescale > 0 && self.duration > 0).then(|| {
             (u128::from(self.duration) * 1_000_000_000 / u128::from(self.timescale)) as u64
@@ -1836,9 +1882,13 @@ struct Mp4Cursor {
     done: bool,
 }
 
+/// Walks an MP4's sample tables, yielding samples in decode order
+/// across the selected tracks.
 pub struct Mp4SampleIter {
     tracks: Vec<Mp4Track>,
     cursors: Vec<Mp4Cursor>,
+    /// English wire strings raised while walking; the UI translates at
+    /// the edge.
     pub warnings: Vec<String>,
 }
 
@@ -1969,6 +2019,10 @@ impl Mp4Cursor {
 }
 
 impl Mp4SampleIter {
+    /// A sample iterator over `lay`, carrying only `tracks`.
+    ///
+    /// The sample tables are read here; nothing of the media payload is
+    /// touched until `next` is called.
     pub fn new(lay: &Mp4Layout, tracks: &[SelectedTrack]) -> Result<Self, RemuxError> {
         let mut picked = Vec::new();
         let mut cursors = Vec::new();
@@ -2133,6 +2187,13 @@ pub fn mp4_sync_before(t: &Mp4Track, t_ticks: u64) -> Option<u64> {
 // The iterator contract
 // ---------------------------------------------------------------------------
 
+/// The seam the session drives: a cursor over one container's samples,
+/// in decode order across every selected track.
+///
+/// Implemented once per container. Neither method blocks: bytes that
+/// have not landed come back as a `WouldBlock` inside
+/// [`RemuxError::Io`], which is always retryable and never the end of
+/// the stream.
 pub trait SampleIter: Send {
     /// Next sample in decode order across the selected tracks.
     /// `Ok(None)` is the end of the stream; a `WouldBlock` inside the

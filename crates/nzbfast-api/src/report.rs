@@ -15,7 +15,7 @@
 //! The report exists to be shared, so it is assembled from a fixed list
 //! of fields rather than by dumping the record: nothing new that lands
 //! on `Job` can leak through it by default. On top of that,
-//! [`scrub`] rewrites the two things that DO travel with paths and log
+//! `scrub` rewrites the two things that DO travel with paths and log
 //! lines - the user's home directory, and anything shaped like a
 //! credential in a URL - and the NZB is summarised rather than quoted,
 //! with its `password` meta redacted.
@@ -95,6 +95,74 @@ fn layer_said(layer: &str) -> &'static str {
         "missing" => "much of the post is not there, so requests come back empty",
         _ => "no verdict yet",
     }
+}
+
+/// TODO 101: the volume-eating unpack, when this download used it.
+///
+/// The one cost in the engine the user DID choose, and the only one
+/// whose consequence outlives the run: eating forfeits the
+/// retry-without-refetch property, so a job that failed after its parts
+/// went has to fetch the whole download again. Until this section the
+/// choice was visible only while it was being MADE - the disk-full
+/// drawer that asked, its confirm, and a toast - and a user looking at
+/// a retry that re-downloaded 13 GB had no artefact saying why. The
+/// report is exactly the artefact they paste when they ask.
+///
+/// Two sources, resolved the way [`report_resume`] resolves its own.
+/// The LIVE unpack cell wins where it exists: it carries what this
+/// ladder has really freed so far, per delete, so a run that failed
+/// half way reports the bytes it actually took rather than the set's
+/// size. Off the record otherwise - `eat_volumes_ok` is this
+/// download's own durable yes, so the section still answers after a
+/// restart, with the choice but no figures.
+///
+/// Nothing at all when the mode is `off`, or when `low_disk` never got
+/// this download's consent: no volume was ever eaten, and a section
+/// explaining a mode nobody used is noise in a report meant to be read.
+///
+/// English, like the rest of this file.
+fn report_eat(mode: &str, consented: bool, live: Option<(bool, u64, u64)>) -> String {
+    let armed = live.map(|(a, _, _)| a).unwrap_or(false);
+    // `always` is its own consent (see `eatvol::decide`); `low_disk`
+    // needs this download's yes; `off` cannot be talked into it. A live
+    // ladder that says it is eating is believed whatever the setting
+    // reads now - the setting can be changed mid-job, the arming cannot.
+    let used = armed || mode == "always" || (mode == "low_disk" && consented);
+    if !used {
+        return String::new();
+    }
+    let mut o = String::from("\n== the archive parts ==\n");
+    line(
+        &mut o,
+        "mode",
+        match mode {
+            "always" => "every on-disk unpack deletes its parts as it uses them (always)",
+            _ => {
+                "deleted as they were used, for this download (low_disk, you agreed in the disk-full drawer)"
+            }
+        },
+    );
+    line(
+        &mut o,
+        "deleted",
+        "permanently, not to the Trash - a Trash on the same disk gives no space back",
+    );
+    // Only from the live cell. The record knows the choice and not the
+    // outcome, and a figure derived from the set size would claim bytes
+    // a half-way failure never freed.
+    if let Some((_, eaten, bytes)) = live.filter(|(_, n, _)| *n > 0) {
+        line(
+            &mut o,
+            "freed so far",
+            format!("{} part(s), {:.1} GB", eaten, bytes as f64 / 1e9),
+        );
+    }
+    line(
+        &mut o,
+        "what it costs",
+        "a retry cannot reuse the archive parts, so this download is fetched again",
+    );
+    o
 }
 
 /// TODO 309: which route a RESUMED run took, and what the gate weighed.
@@ -248,6 +316,14 @@ fn render_report(d: &Daemon, nzo_id: &str, job: &Arc<Mutex<Job>>) -> String {
     // deadlocks in. Owner-tagged, so a job that does not own the hub
     // gets None here and falls back to its own record below.
     let live_route = d.hub.resume_route_for(nzo_id);
+    // TODO 101: and this job's live unpack ladder, read in the same
+    // window and for the same reason - the eating figures are on it,
+    // and it is gone the moment the ladder ends.
+    let live_eat = d.hub.unpack.lock_ok().get(nzo_id).map(|p| {
+        let (n, b) = p.eaten();
+        (p.eating(), n, b)
+    });
+    let eat_mode = d.unpack_eat_volumes.lock_ok().clone();
     let j = job.lock_ok();
 
     o.push_str("nzbfast download report\n");
@@ -347,6 +423,7 @@ fn render_report(d: &Daemon, nzo_id: &str, job: &Arc<Mutex<Job>>) -> String {
     o.push_str(&report_resume(
         live_route.as_ref().or(j.resume_route.as_ref()),
     ));
+    o.push_str(&report_eat(&eat_mode, j.eat_volumes_ok, live_eat));
     o.push_str(&slow);
 
     if !j.fail_message.is_empty() {
@@ -987,5 +1064,79 @@ mod tests {
         assert!(!META_SHOWN.contains(&"password"), "never the password");
         // The real one from the reported NZB: NZBgeek's own key.
         assert!(!META_SHOWN.contains(&"qxv4i"), "nor an unknown token");
+    }
+
+    /// TODO 101: the volume-eating section, including the silence that
+    /// is most of its job.
+    ///
+    /// The mode deletes the downloaded archive parts permanently, and
+    /// the cost lands on the RETRY rather than on the run the user
+    /// watched - so the report is where somebody looking at a job that
+    /// re-fetched 13 GB finds out why. It has to appear for every way
+    /// in (a consented `low_disk` job, an `always` machine, a ladder
+    /// caught mid-eat) and for no other job at all.
+    #[test]
+    fn the_report_names_an_eaten_set_and_is_silent_when_nothing_was_eaten() {
+        // Nothing was eaten: three ways to be silent, and all three are
+        // the common case, so a section here would be noise in every
+        // ordinary report.
+        assert_eq!(report_eat("off", false, None), "");
+        assert_eq!(
+            report_eat("off", true, None),
+            "",
+            "off cannot be talked into it by a stale consent flag"
+        );
+        assert_eq!(
+            report_eat("low_disk", false, None),
+            "",
+            "low_disk without this download's own yes never ate anything"
+        );
+        assert_eq!(
+            report_eat("always", false, Some((false, 0, 0))),
+            "\n== the archive parts ==\nmode: every on-disk unpack deletes its \
+             parts as it uses them (always)\ndeleted: permanently, not to the \
+             Trash - a Trash on the same disk gives no space back\nwhat it \
+             costs: a retry cannot reuse the archive parts, so this download is \
+             fetched again\n",
+            "always is its own consent"
+        );
+
+        // The consented low_disk job, with no ladder running any more:
+        // the choice survives on the record, the figures do not.
+        let done = report_eat("low_disk", true, None);
+        assert!(done.contains("== the archive parts =="), "{done}");
+        assert!(
+            done.contains("you agreed in the disk-full drawer"),
+            "{done}"
+        );
+        assert!(
+            done.contains("this download is fetched again"),
+            "the forfeited retry-without-refetch property is the point: {done}"
+        );
+        assert!(
+            !done.contains("freed so far"),
+            "the record knows the choice and not the outcome: {done}"
+        );
+
+        // A live ladder that has eaten four parts reports what it really
+        // took, not what the set weighs - the failure half way is
+        // exactly the run this section has to explain.
+        let live = report_eat("low_disk", true, Some((true, 4, 3_200_000_000)));
+        assert!(live.contains("freed so far: 4 part(s), 3.2 GB"), "{live}");
+
+        // Armed but not yet past a volume boundary: it says what is
+        // happening and claims no figure.
+        let early = report_eat("low_disk", true, Some((true, 0, 0)));
+        assert!(early.contains("== the archive parts =="), "{early}");
+        assert!(!early.contains("freed so far"), "{early}");
+
+        // The setting can be changed while a job runs; the arming
+        // cannot. A ladder that says it is eating is believed over a
+        // setting that now reads off.
+        let flipped = report_eat("off", false, Some((true, 2, 1_000_000_000)));
+        assert!(
+            flipped.contains("== the archive parts =="),
+            "a live eat outranks a setting changed under it: {flipped}"
+        );
     }
 }

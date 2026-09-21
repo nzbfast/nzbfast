@@ -12,21 +12,93 @@
 //! wire, NNTP dot-stuffs lines starting with `.` (doubles the dot); we undo
 //! that by stripping exactly one leading dot from any line that starts with
 //! one, which is what the production SIMD path does too.
+//!
+//! One article of a multi-part post, out to the wire and back. The
+//! decoded bytes belong at [`Decoded::offset`] in the named file, which
+//! is what makes the one-pass write possible: nothing has to be
+//! reassembled in order.
+//!
+//! ```
+//! use nzbkit_base::yenc;
+//!
+//! // Part 2 of 3: bytes 1001..=1008 of a 3000-byte file.
+//! let payload = b"raw bytes";
+//! let body = yenc::encode("demo.bin", 3000, Some((2, 3)), 1001, payload);
+//! assert!(body.starts_with(b"=ybegin part=2 total=3 "));
+//!
+//! let article = yenc::decode(&body).expect("our own encoder round-trips");
+//! assert_eq!(article.name, "demo.bin");
+//! assert_eq!(article.data, payload);
+//! assert_eq!(article.file_size, 3000); // the WHOLE file, not this part
+//! assert_eq!(article.offset(), 1000); // zero-based: feed straight to pwrite
+//! ```
+
+#![warn(missing_docs)]
 
 use std::collections::HashMap;
 
+/// Why an article body was refused.
+///
+/// Every variant is a REFUSAL, not a warning: the decoder returns no
+/// payload at all rather than a partial or unvouched one, because a
+/// caller that gets bytes back writes them to the file slot the header
+/// named. An article refused here is an article PAR2 has to repair,
+/// which is the same price a dropped article already pays.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum YencError {
+    /// No `=ybegin ` line anywhere in the body, so nothing declares what
+    /// file these bytes belong to. Also what a body framed with bare CR
+    /// produces on the first pass, before the reframing retry.
     #[error("no =ybegin header found")]
     MissingBegin,
+    /// The `=yend size=` field and the number of bytes that actually
+    /// decoded disagree.
+    ///
+    /// The field NAMES are the wrong way round and the `#[error]` string
+    /// above compensates: `expected` carries the decoded length and
+    /// `actual` carries the figure the trailer declared. Read them by
+    /// that description, not by their names.
     #[error("=yend size {actual} does not match decoded length {expected}")]
-    LengthMismatch { expected: u64, actual: u64 },
+    LengthMismatch {
+        /// Bytes that actually decoded out of the body.
+        expected: u64,
+        /// The figure `=yend size=` declared.
+        actual: u64,
+    },
+    /// The CRC32 gate the trailer declared did not match the payload.
+    /// Only raised for a CRC that GOVERNS these bytes (`pcrc32` on a
+    /// part, `crc32` on a single-part post); an advisory whole-file
+    /// `crc32` on a part trailer can vouch but never refuse.
     #[error("CRC32 mismatch: decoded {computed:08x}, header says {header:08x}")]
-    CrcMismatch { computed: u32, header: u32 },
+    CrcMismatch {
+        /// CRC32 of the bytes this decoder produced.
+        computed: u32,
+        /// CRC32 the `=yend` trailer declared.
+        header: u32,
+    },
+    /// The body ran out before any `=yend` line, so the article was cut
+    /// short on the wire. Refused rather than returned short: the
+    /// destination file is preallocated to the declared size, so a
+    /// missing tail would stay as sparse zero bytes and a job with no
+    /// PAR2 set would complete with silently corrupt output.
     #[error("article ended without a =yend trailer (truncated)")]
     Truncated,
+    /// The `=ypart` range and the payload length contradict each other:
+    /// `begin > end`, or the inclusive range `end - begin + 1` is not
+    /// the number of bytes that decoded, or a non-empty part claimed a
+    /// nonzero offset while declining to declare `end=` at all. The
+    /// range is what positions the write, so an inconsistent one is a
+    /// write-anywhere primitive driven by untrusted input.
     #[error("=ypart begin={begin} end={end} cannot hold {len} decoded bytes")]
-    PartGeometry { begin: u64, end: u64, len: u64 },
+    PartGeometry {
+        /// 1-based inclusive first byte from `=ypart begin=`.
+        begin: u64,
+        /// 1-based inclusive last byte from `=ypart end=`, or 0 when the
+        /// line carried no `end=` field.
+        end: u64,
+        /// Bytes that actually decoded out of the body.
+        len: u64,
+    },
     /// `=ybegin part=` and `=yend part=` disagree about which part this is.
     /// Found by the round-4 torture set advZA (TODO 159): the article decoded
     /// and placed correctly, because placement comes from `=ypart` alone, so
@@ -35,7 +107,12 @@ pub enum YencError {
     /// healthy one. Cheap to check, and an inconsistent trailer is evidence
     /// the article is not what it claims to be.
     #[error("=ybegin part={begin} but =yend part={end} - inconsistent trailer")]
-    PartNumberMismatch { begin: u32, end: u32 },
+    PartNumberMismatch {
+        /// Part number the `=ybegin` header declared.
+        begin: u32,
+        /// Part number the `=yend` trailer declared.
+        end: u32,
+    },
     /// A second `=ybegin` line in one article body. Found by the wave-4
     /// matrix read (M4-63, 30 Aug 2026): every `=ybegin ` line was taken
     /// as a header, so the LAST one won and silently overwrote `name`,
@@ -85,16 +162,27 @@ pub enum YencError {
 /// A decoded yEnc article (one part of a file, or a whole small file).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decoded {
-    /// Filename from `=ybegin name=`.
+    /// Filename from `=ybegin name=`. Untrusted poster-supplied text:
+    /// it may be obfuscated, may disagree with the NZB subject, and is
+    /// not safe to join to a path without the callers' own sanitising.
     pub name: String,
-    /// Total file size from `=ybegin size=`.
+    /// Total size of the WHOLE file from `=ybegin size=`, not of this
+    /// part. Declared by the poster and gated by nothing, so treat it as
+    /// a hint for preallocation rather than a fact.
     pub file_size: u64,
     /// Part number from `=ybegin part=` (None for single-part posts).
     pub(crate) part: Option<u32>,
     /// 1-based inclusive byte range from `=ypart begin=`/`end=`.
     /// For single-part posts this covers the whole file.
     pub begin: u64,
+    /// Last byte of the range, 1-based and inclusive - so this part is
+    /// `end - begin + 1` bytes long, which the decoder has already
+    /// checked against `data`. For a single-part post with no `=ypart`
+    /// line this is the `=ybegin size=` figure.
     pub end: u64,
+    /// The decoded payload, exactly the bytes belonging at
+    /// [`Decoded::offset`] in the named file. Ciphertext rather than
+    /// plaintext when `encryption` is set.
     pub data: Vec<u8>,
     /// The `=yencryption` control line, captured only under
     /// `NZBFAST_YENC_CRYPT=1` (with the flag off the line decodes as
@@ -117,13 +205,30 @@ impl Decoded {
 /// [`crate::yenc_simd::decode_into`] writes into a caller-owned (pooled)
 /// buffer instead of a fresh per-article `Vec` - the hot download path
 /// recycles that buffer, killing the per-article ~800 KB alloc/free the
-/// [`crate::pool::BufPool`] already removed on the network side.
+/// `crate::pool::BufPool` already removed on the network side.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Meta {
+    /// Filename from `=ybegin name=`. Untrusted poster-supplied text: it
+    /// may be obfuscated, may disagree with the NZB subject, and is not
+    /// safe to join to a path without the callers' own sanitising.
     pub name: String,
+    /// Total size of the WHOLE file from `=ybegin size=`, not of this
+    /// part. Declared by the poster and gated by nothing, so treat it as
+    /// a hint for preallocation rather than a fact.
     pub file_size: u64,
+    /// Part number from `=ybegin part=`, 1-based, or `None` for a
+    /// single-part post. Reported only; placement comes from
+    /// `begin`/`end` alone.
     pub part: Option<u32>,
+    /// First byte of this part in the file, 1-based and inclusive, from
+    /// `=ypart begin=`. Normalized to at least 1 at parse time, so
+    /// [`Meta::offset`] cannot underflow. A single-part post with no
+    /// `=ypart` line gets 1.
     pub begin: u64,
+    /// Last byte of this part in the file, 1-based and inclusive, from
+    /// `=ypart end=`. The decoder has already checked that
+    /// `end - begin + 1` equals `len`. A single-part post with no
+    /// `=ypart` line gets the `=ybegin size=` figure.
     pub end: u64,
     /// Length of the decoded payload now in the caller's buffer.
     pub len: usize,
@@ -141,6 +246,25 @@ impl Meta {
 
 /// Decode a full article body (the lines between the NNTP BODY response and
 /// the terminating `.`), verifying part length and CRC32 when present.
+///
+/// ```
+/// use nzbkit_base::yenc;
+///
+/// // A whole small file in one article. `*+,-` is 0x2a..0x2d on the
+/// // wire, which is 0, 1, 2, 3 once 42 comes back off.
+/// let body = b"=ybegin line=128 size=4 name=demo.bin\r\n*+,-\r\n=yend size=4\r\n";
+///
+/// let article = yenc::decode(body).expect("a well-formed article body");
+/// assert_eq!(article.data, [0, 1, 2, 3]);
+/// assert_eq!(article.name, "demo.bin");
+/// // No `=ypart` line, so the part covers the whole declared file.
+/// assert_eq!((article.begin, article.end), (1, 4));
+/// assert_eq!(article.offset(), 0);
+/// ```
+///
+/// The name is poster-supplied and may be obfuscated or disagree with
+/// the NZB subject, so it is a claim rather than a filename - see
+/// [`Decoded::name`].
 pub fn decode(body: &[u8]) -> Result<Decoded, YencError> {
     decode_checked(body).map(|(d, _)| d)
 }

@@ -1,6 +1,6 @@
 [package]
 name = "nzbfast-meta"
-version = "1.6.0"
+version = "1.7.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -33,7 +33,7 @@ hex = "0.4"
 # pages). Every one of them goes out through `nzbfast_core::netfetch`,
 # which is where the SSRF guard and project invariant 5a live; this is
 # the transport those agents are built on.
-ureq = "2"
+ureq = "3"
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 
 [features]

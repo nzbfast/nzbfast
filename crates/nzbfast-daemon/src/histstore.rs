@@ -86,6 +86,31 @@ pub enum HistWrite {
     Refused,
 }
 
+/// Read a store's bytes, telling a MISSING store (`Ok(None)`, a fresh
+/// install or a pre-split spool) from one that is there and cannot be
+/// read (`Err`). Both stores' replays and `load_queue`'s probe use it;
+/// the distinction is what `Daemon::queue_store_unreadable` and its
+/// history twin are latched on.
+pub(crate) fn read_store(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// `read_store`'s question without the bytes: can this process OPEN the
+/// store? `None` for absent or openable, the error otherwise. An open
+/// is what a permission fault refuses; an I/O fault surfaces at the
+/// read, which the replay latches on itself.
+pub(crate) fn store_open_error(path: &Path) -> Option<std::io::Error> {
+    match std::fs::File::open(path) {
+        Ok(_) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(e),
+    }
+}
+
 impl Daemon {
     pub fn history_store_path(&self) -> PathBuf {
         self.spool.join("history.jsonl")
@@ -229,11 +254,28 @@ impl Daemon {
         if !self.history.lock_ok().iter().any(|j| Arc::ptr_eq(j, job)) {
             return HistWrite::Absent;
         }
-        let line = job_json(&job.lock_ok()).to_string();
+        let (id, line) = {
+            let g = job.lock_ok();
+            (g.nzo_id.clone(), job_json(&g).to_string())
+        };
         match self.history_write_locked(&[line]) {
-            true => HistWrite::Wrote,
+            true => {
+                // The record is in its own store now, so the queue store
+                // no longer has to carry it - see `Daemon::hist_owed`.
+                self.hist_owed.lock_ok().remove(&id);
+                HistWrite::Wrote
+            }
             false => HistWrite::Refused,
         }
+    }
+
+    /// Carry a terminal record in the QUEUE store until the history
+    /// store takes it - see [`Daemon::hist_owed`] for the two paths that
+    /// need this and why. Idempotent: a second refusal for the same id
+    /// replaces the entry. Must not be called with `history` held.
+    pub(crate) fn hist_owe(&self, job: &Arc<Mutex<Job>>) {
+        let id = job.lock_ok().nzo_id.clone();
+        self.hist_owed.lock_ok().insert(id, job.clone());
     }
 
     /// Persist a history record the caller has just mutated, and say
@@ -309,7 +351,7 @@ impl Daemon {
         }
     }
 
-    /// [`Daemon::history_publish`] with the ordinary cost sentence, for
+    /// `Daemon::history_publish` with the ordinary cost sentence, for
     /// the callers whose whole loss is "this change goes back to the
     /// line already in the store at the next start" - a media chip, a
     /// verdict a later pass will reach again, a password.
@@ -482,14 +524,19 @@ impl Daemon {
     /// M5 delete arm's `already` path writes nothing either.
     ///
     /// WHAT A `Refused` MEANS ON A REAL BOX, and why park does not stop
-    /// on it: the rewrite and `save_queue` both go through
-    /// `persist::write_atomic` on the same directory, so a directory that
-    /// refuses one refuses the other. A refusal here is therefore a
-    /// daemon whose queue store has stopped landing too - which
-    /// `save_failed_at` already surfaces through `sab_warnings`. The
-    /// download has happened and the bytes are on disk; there is no
-    /// caller waiting on an answer the way a delete verb's is, so the
-    /// park carries on and says what the next start loses.
+    /// on it: until §7a the rewrite and `save_queue` both went through
+    /// `persist::write_atomic` on the same directory, so a directory
+    /// that refused one refused the other and the queue row could not
+    /// be tombstoned either. That is no longer so - the queue's write is
+    /// an APPEND that needs the file, this rescue needs the directory,
+    /// and a spool with a writable `queue.jsonl` beside an unwritable
+    /// `history.jsonl` refuses this and lands the tombstone (21 Sep 2026
+    /// codex sweep, P2-3). So park still carries on - the download has
+    /// happened and the bytes are on disk, and no caller is waiting on
+    /// an answer the way a delete verb's is - but a `Refused` from the
+    /// FINAL filing in `park_file_terminal` registers the record in
+    /// `Daemon::hist_owed`, and the queue store then keeps its terminal
+    /// row instead of a tombstone until history takes it.
     ///
     /// Serialized BEFORE [`HIST_IO`] is taken, the way `delete_prewrite`
     /// does it: the rescue path underneath takes the history lock and
@@ -574,7 +621,7 @@ impl Daemon {
     /// the row anyway has lost it from both stores - which is what the
     /// answer being a `()` cost until 26 Aug 2026 (P2-1). A refused
     /// append is retried as the atomic rewrite WITH this line carried
-    /// into it, for the reason [`Daemon::history_rescue_locked`] gives;
+    /// into it, for the reason `Daemon::history_rescue_locked` gives;
     /// `false` therefore means the whole spool folder is unwritable, not
     /// merely the file.
     ///
@@ -675,7 +722,7 @@ impl Daemon {
     /// A refused append is retried as the atomic rewrite, which OMITS
     /// these ids: a rewrite that does not name a record is that record's
     /// tombstone, because replay reads the file as the whole truth. See
-    /// [`Daemon::history_rescue_locked`] for why that second chance
+    /// `Daemon::history_rescue_locked` for why that second chance
     /// exists at all and for why it takes the lock rather than dropping
     /// it. `false` therefore means the whole spool folder is unwritable,
     /// not merely the file.
@@ -768,7 +815,7 @@ impl Daemon {
     /// appenders running. Returns whether the rewrite landed: the remedy
     /// has to be able to report that it did not.
     ///
-    /// Snapshot and publish both happen under [`HIST_IO`]; see the lock's
+    /// Snapshot and publish both happen under `HIST_IO`; see the lock's
     /// own note for what an unsynchronised rewrite cost.
     pub fn history_compact(&self) -> bool {
         let _g = HIST_IO.lock_ok();
@@ -807,6 +854,21 @@ impl Daemon {
             return false;
         }
         let path = self.history_store_path();
+        // The rewrite publishes memory as the whole truth, and memory
+        // started EMPTY over a file this process could not read - so
+        // landing it would replace every row in that file with the few
+        // this run has seen. Refused for the life of the process; see
+        // `Daemon::history_store_unreadable`.
+        if self.history_store_unreadable.load(Ordering::Relaxed) {
+            error!(
+                target: "queue",
+                "history compact {}: refused - the store could not be read at start, \
+                 and a rewrite would replace the rows it holds with the ones this run \
+                 has seen; fix the file and restart",
+                path.display()
+            );
+            return false;
+        }
         let doomed = |id: &str| drop_ids.iter().any(|d| d == id);
         let mut snap_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         let lines: Vec<String> = self
@@ -892,7 +954,14 @@ impl Daemon {
             }
         }
         let ok = match crate::persist::write_atomic(&path, buf.as_bytes()) {
-            Ok(()) => true,
+            Ok(()) => {
+                // Every live record is in its own store now, so none of
+                // them needs carrying in the queue store any longer - and
+                // a record in `drop_ids` is being removed, which is the
+                // other way an entry stops being owed.
+                self.hist_owed.lock_ok().clear();
+                true
+            }
             Err(e) => {
                 error!(target: "queue", "history compact {}: {e}", path.display());
                 false
@@ -921,8 +990,28 @@ impl Daemon {
         // empty", permanently: nothing rewrites the bad byte, so every
         // later start read empty too, and the per-line tolerance below -
         // which exists for exactly this - never got to run.
-        let Ok(raw) = std::fs::read(&path) else {
-            return (Vec::new(), false);
+        let raw = match read_store(&path) {
+            Ok(Some(raw)) => raw,
+            Ok(None) => return (Vec::new(), false),
+            Err(e) => {
+                // A MISSING store is a fresh install; a store that is
+                // there and will not open is somebody else's file (one
+                // `sudo nzbfast` is enough) or a failing volume, and the
+                // two used to be one `else` arm. Loading empty is still
+                // what happens - the daemon has a queue to run - but the
+                // rewrite that would replace the unread rows with the
+                // empty answer is refused from here, and the warnings
+                // pane says why (21 Sep 2026 codex sweep, P2-2).
+                error!(
+                    target: "queue",
+                    "{}: the history store exists but could not be read ({e}) - \
+                     starting with an empty history and refusing to rewrite the \
+                     store; fix the file's permissions and restart nzbfast",
+                    path.display()
+                );
+                self.history_store_unreadable.store(true, Ordering::Relaxed);
+                return (Vec::new(), false);
+            }
         };
         // Append order as SLOTS, and every live record carrying the index
         // of its own slot. A tombstone used to `retain` the id out of a

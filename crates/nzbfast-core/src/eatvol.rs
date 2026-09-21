@@ -30,8 +30,8 @@
 //!    not sure of is the one trade with no upside.
 //! 2. **Spent, precisely.** A volume goes only once the reader has
 //!    advanced past its last byte and no back-reference can reach into
-//!    it. rars is ours, so that is knowable rather than guessable:
-//!    `rars::extract_volumes_to_with_progress` reports each volume as the
+//!    it. rars is ours, so that is knowable rather than guessable: its
+//!    `extract_volumes_to_with_progress` reports each volume as the
 //!    walk leaves it - including, since the H1 residual closed, each
 //!    volume of a SPLIT member as its chain reads the fragment out, so
 //!    the one-film-across-every-volume shape frees space progressively

@@ -4143,3 +4143,53 @@ fn the_open_path_purge_is_one_shot_and_clears_the_replay_residue() {
     );
     teardown(&dir, ix);
 }
+
+#[test]
+fn a_failed_schema_release_does_not_strand_the_writer_in_a_transaction() {
+    use rusqlite::hooks::{AuthAction, Authorization, TransactionOperation};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (dir, ix) = open("schema-release-failure");
+    // Give `ensure_nzb_seed_schema` real work to do, so it opens its
+    // savepoint rather than taking the early return.
+    Index::drop_nzb_seed_file_cleanup_triggers_on(&ix.db).unwrap();
+
+    // Refuse the FIRST `RELEASE nzb_seed_schema` and nothing else. The
+    // statement fails while being prepared, so the savepoint is still live
+    // and the connection still owns a transaction - the shape a commit-time
+    // SQLITE_FULL/IOERR/BUSY leaves behind. The guard's own cleanup RELEASE
+    // is the second one and is allowed through.
+    let denials = std::sync::Arc::new(AtomicUsize::new(0));
+    let seen = std::sync::Arc::clone(&denials);
+    ix.db
+        .authorizer(Some(move |ctx: rusqlite::hooks::AuthContext<'_>| {
+            if let AuthAction::Savepoint {
+                operation: TransactionOperation::Release,
+                savepoint_name: "nzb_seed_schema",
+            } = ctx.action
+                && seen.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                return Authorization::Deny;
+            }
+            Authorization::Allow
+        }))
+        .unwrap();
+    let error = ix.ensure_nzb_seed_schema().unwrap_err();
+    ix.db
+        .authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> Authorization>)
+        .unwrap();
+
+    assert!(
+        matches!(error, rusqlite::Error::SqliteFailure(_, _)),
+        "{error:?}"
+    );
+    assert_eq!(denials.load(Ordering::SeqCst), 2, "the guard retried");
+    assert!(
+        ix.db.is_autocommit(),
+        "a failed RELEASE left the schema savepoint live"
+    );
+    // The stranded-transaction consequence: the next writer would fail with
+    // "cannot start a transaction within a transaction".
+    ix.db.unchecked_transaction().unwrap().rollback().unwrap();
+    teardown(&dir, ix);
+}

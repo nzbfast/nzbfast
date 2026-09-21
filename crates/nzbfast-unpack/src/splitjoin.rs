@@ -7,12 +7,12 @@
 //! `Movie.mkv.002`, … posts something no archive arm on the ladder can
 //! open, because there is no archive: every part is payload bytes. The
 //! `.partNN` spelling is the same post typed by a different splitter -
-//! see [`numeric_tail`], which reads both, and rule 3 in
-//! [`collect_split_sets`], which refuses one set that mixes them. SABnzbd
+//! see `numeric_tail`, which reads both, and rule 3 in
+//! `collect_split_sets`, which refuses one set that mixes them. SABnzbd
 //! joins these in its post-processing joiner; we used to land the parts
 //! loose and leave the user to `cat` them by hand. This module is the
 //! missing arm, and it is deliberately the LAST one - see
-//! [`collect_split_sets`] for why the detector refuses far more than it
+//! `collect_split_sets` for why the detector refuses far more than it
 //! accepts.
 //!
 //! This is emphatically NOT the numeric-volume handling in `rarfix.rs`
@@ -23,7 +23,7 @@
 //! a part carrying any archive head belongs to whichever arm owns that
 //! head, never to this one.
 //!
-//! ...with ONE exception, [`SplitScan::Container`], and it earns its place
+//! ...with ONE exception, `SplitScan::Container`, and it earns its place
 //! by a measured failure (TODO 211): an HJSplit of a single store
 //! `stage.rar` into `stage.rar.001`..`.062` is a byte split like any other,
 //! but part 1 carries the archive's own head, so the rule above refused it
@@ -32,7 +32,7 @@
 //! and nothing delivered. That set belongs to nobody: the arm that owns the
 //! head cannot open it. So the head is forgiven on part 1 ALONE, and only
 //! once that arm has already failed on this directory - see
-//! [`rescue_split_of_container`].
+//! `rescue_split_of_container`.
 
 use crate::*;
 use tracing::{info, warn};
@@ -817,7 +817,7 @@ fn rescue_verdict(
     out
 }
 
-/// [`rescue_split_of_container`] for the callers that have just watched
+/// `rescue_split_of_container` for the callers that have just watched
 /// their own disk unpack fail on the DOWNLOADED files - the get tail's
 /// demoted-volume ladder, which unpacks through `try_unrar_spent` rather
 /// than through the extraction ladder and so never reaches step 8.

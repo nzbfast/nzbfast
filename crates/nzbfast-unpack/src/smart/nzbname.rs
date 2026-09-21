@@ -33,7 +33,7 @@ use super::*;
 
 /// Put the .nzb file's own name on the finished folder and its main
 /// file. Returns the new out_dir when the folder moved, else None -
-/// same contract as [`rename_movie`](super::rename_movie).
+/// same contract as [`rename_movie`].
 ///
 /// `nzb_name` is the job's name as added: `enqueue` takes it from the
 /// .nzb filename (or from `nzbname=`, when an *arr sent one - that is
@@ -132,7 +132,7 @@ pub fn rename_from_nzb(parent: &Path, out_dir: &Path, nzb_name: &str) -> Option<
 /// That is the relpath-preserve rule - a DVD or Blu-ray has to have
 /// its directory structure intact to play at all - broken by the
 /// NAMING door rather than by the flatten cap M4-71 covered. The
-/// test is [`feature::disc_structure`], which walks with the same
+/// test is `feature::disc_structure`, which walks with the same
 /// bounds `largest_video` does; the reasoning for asking the shape
 /// question rather than picking a safer file is there.
 ///

@@ -409,6 +409,32 @@ pub fn config_hash(cats: &[CustomCategory]) -> String {
 /// - everything else:  `c:<slug>:<title>[:<year>][:<extra…>]` where
 ///   `extra` is the identity tail after the year ("round11 hungary
 ///   qualifying"), so two sessions never share a key.
+/// ```
+/// use nzbkit_base::categories::{self, BaseBehavior, CustomCategory};
+/// use nzbkit_base::release::Kind;
+///
+/// let cats = vec![CustomCategory {
+///     slug: "formula-1".to_string(),
+///     name: "Formula 1".to_string(),
+///     pattern: "formula.?1".to_string(), // regex, case-insensitive
+///     not_match: String::new(),
+///     base: BaseBehavior::None, // leave the files exactly as posted
+/// }];
+///
+/// let p = categories::classify("Formula1.2026.Round11.Hungary.Race.1080p", &cats);
+/// assert_eq!(p.kind, Kind::Custom("formula-1".to_string()));
+/// // Every session of the weekend gets its own identity, so a
+/// // watchlist does not grab one race per season.
+/// assert!(p.key.starts_with("c:formula-1:"), "{}", p.key);
+///
+/// // Nothing else is touched: a film still parses as a film.
+/// let f = categories::classify("Max.Payne.2008.1080p.BluRay.x264-GRP", &cats);
+/// assert_eq!(f.kind, Kind::Movie);
+///
+/// // Completion behavior comes from the category, never from the kind.
+/// assert_eq!(categories::base_of(&p.kind, &cats), BaseBehavior::None);
+/// assert_eq!(categories::base_of(&f.kind, &cats), BaseBehavior::Movie);
+/// ```
 pub fn classify(stem: &str, cats: &[CustomCategory]) -> Parsed {
     let mut p = release::parse_release(stem);
     apply_custom(&mut p, stem, cats);

@@ -78,6 +78,12 @@ mod owned_cache_tests;
 #[path = "daemon_tests/spare_tests.rs"]
 mod spare_tests;
 
+// 21 Sep 2026: a held duplicate that is the same POST as its original
+// never downloads beside it, whatever released the hold. Out for the
+// ceiling and carrying the same #[path] requirement.
+#[path = "daemon_tests/twin_tests.rs"]
+mod twin_tests;
+
 // F5: what a size-gated Smart Folder rule does with a job whose declared
 // bytes are unknown, end to end. Out for the ceiling and carrying the
 // same #[path] requirement as its siblings above.

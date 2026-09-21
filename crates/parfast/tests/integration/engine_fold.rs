@@ -107,8 +107,13 @@ fn an_engine_fold_before_the_survey_is_an_exit_code_not_a_panic() {
         code, 5,
         "an engine fold is EXIT_REPAIR_FAILED, not an abort; stderr: {err}"
     );
+    // `Repair Failed.` and not the older `Repair failed:`: both of
+    // repair.rs's failure arms went through `repair_failed_line` on
+    // 20 Sep 2026, so that SABnzbd's `startswith("Repair Failed.")`
+    // branch fires and the reason reaches the user. The divergence from
+    // par2cmdline 1.2.0 is deliberate and argued at that function.
     assert!(
-        err.contains("Repair failed:"),
+        err.contains("Repair Failed."),
         "the fold's own error is the whole verdict and must be printed: {err}"
     );
 

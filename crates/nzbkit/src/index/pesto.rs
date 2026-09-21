@@ -90,13 +90,19 @@ fn pesto_pick_sql_with(pin: &str) -> String {
 pub struct PestoSetRow {
     /// Recovery Set ID, lowercase hex - the dedupe and claim key.
     pub set_id: String,
+    /// The newsgroup the set's sidecar objects were seen in.
     pub grp: String,
     /// Smallest message-id counter among the set's sidecar objects:
     /// the backward-link key C (the payload's last article is C-1).
     pub base_ctr: i64,
     /// sum(FileDesc.length) - the decoded payload size.
     pub sum_len: i64,
+    /// The set's FileDesc entries, as parsed. What a successful
+    /// backward link then names.
     pub files: Vec<PestoDesc>,
+    /// How many times a link has been attempted for this set.
+    /// Persisted so a set that keeps failing is backed off rather than
+    /// retried on every pass.
     pub tries: i64,
 }
 

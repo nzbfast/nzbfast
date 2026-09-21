@@ -52,6 +52,9 @@ mod adoptguard;
 // The shared daemon launcher (free_port / KillOnDrop / DaemonLog /
 // serve / wait_ready), one copy for every suite that spawns a daemon.
 mod harness;
+// The shared RAR fixture builders (sibling dir, the `harness`/`scratch`
+// pattern) - see `rarfixtures/mod.rs` for why they are named by shape.
+mod rarfixtures;
 mod scratch;
 
 use std::collections::HashMap;
@@ -636,17 +639,10 @@ async fn mixed_queue_soak_holds_resources_flat() {
     // 2. rar5: a COMPRESSED multi-volume RAR5, chased in-stream.
     {
         let doc = half_entropy(6_000_000, 0x9e3779b97f4a7c15);
-        let vols = rars::rar50::Rar50VolumeWriter::new(rars::rar50::WriterOptions::default())
-            .compressed_entries(&[rars::rar50::CompressedEntry {
-                name: b"rar5.bin",
-                data: &doc,
-                mtime: None,
-                attributes: 0,
-                host_os: 0,
-            }])
-            .max_payload_per_volume(1_500_000)
-            .finish()
-            .unwrap();
+        let vols = rarfixtures::compressed_volume_set(
+            &[rarfixtures::Member::bare(b"rar5.bin", &doc)],
+            1_500_000,
+        );
         assert!(
             vols.len() >= 3,
             "want a real volume set, got {}",

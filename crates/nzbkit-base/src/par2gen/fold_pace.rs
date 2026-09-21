@@ -113,7 +113,7 @@ pub(super) fn paced_width(
     want.clamp(PACED_WIDTH_FLOOR.min(max), max).min(width)
 }
 
-/// The fewest fold workers [`paced_width`] ever narrows a create to. Public
+/// The fewest fold workers `paced_width` ever narrows a create to. Public
 /// because a queue deciding whether a box has the cores for a second create
 /// (apps/parfast `parfast-session`'s `pairing`) needs the same floor rather
 /// than a second literal of it.

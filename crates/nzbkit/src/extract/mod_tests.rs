@@ -585,23 +585,31 @@ fn oversized_data_area_never_ships_a_sparse_file() {
 }
 
 /// TODO 118 item 2, reproduced at the layer the field report came from:
-/// a set that is not damaged in any way demotes on EVERY volume because
-/// the length the POST declared is short.
+/// a set that is not damaged in any way, whose POST declares a length
+/// short of every volume - one poster's `=ybegin size=` wrong the same
+/// way on every article of every volume, which is the shape of the
+/// 60-of-60 report: not one odd volume, the whole set at once.
 ///
-/// The reason `advance_to` refuses on is `volume_size`, and the
-/// extractor's `volume_size` is the `size` argument to `write*` - which
-/// in `nzbfast`'s download path is `yenc::Decoded::file_size`, i.e.
-/// `=ybegin size=`, a poster-written field `check_part_geometry`
-/// explicitly declines to verify. Feed the identical bytes twice, once
-/// at the length they really are and once 64 bytes short, and the
-/// second run demotes all three volumes with "data area exceeds
-/// volume". That is the shape of the 60-of-60 report: not one odd
-/// volume, but the whole set at once, because one poster's field is
-/// wrong the same way on every article of every volume.
+/// What it used to pin: every volume demoting with "data area exceeds
+/// volume", because the extractor's `volume_size` was the `size`
+/// argument to `write*` - `yenc::Decoded::file_size`, a poster-written
+/// field `check_part_geometry` explicitly declines to verify - and the
+/// mapper turned it into a hard refusal. Then (20 Sep 2026, `SizeTrust`)
+/// the bound closed only once a SECOND article agreed, which this shape
+/// does on its second article, so it still demoted - just one article
+/// later. What it pins NOW: an agreed claim closes NOTHING mid-stream
+/// (a poster agrees with itself), and a RAR5 volume carries its own
+/// end-of-archive block, which completes the parse open-ended - so the
+/// same bytes with the same lie on every article map one-pass with no
+/// witness at all. The end block IS the corroboration: it parsed at the
+/// offset the data area implies, past the claim, and a claim the archive
+/// itself contradicts is not the bound. The finish-time demote this
+/// shape still owes where nothing can complete the parse is
+/// `an_understated_claim_still_demotes_at_finish_where_no_end_block_can_complete_it`.
 ///
-/// It stays SAFE, which is the other half of the report: the volumes
-/// materialize byte-exact for the disk path and no sparse member ships.
-/// The cost is the one-pass property, and it is real.
+/// The control feeds the identical bytes at their true declared length
+/// first, so anything the short run does is the declaration's doing
+/// and not the fixture's.
 #[test]
 fn an_understated_posted_size_demotes_a_healthy_set_on_every_volume() {
     let total = payload(250_000, 11);
@@ -612,9 +620,6 @@ fn an_understated_posted_size_demotes_a_healthy_set_on_every_volume() {
     ]);
     let names = ["v.part1.rar", "v.part2.rar", "v.part3.rar"];
 
-    // Control: the same bytes at their true declared length extract
-    // one-pass, so anything the short run does is the declaration's
-    // doing and not the fixture's.
     let dir = tmpdir("declared-true");
     let ex = Extractor::new(&dir, 3, true);
     for (i, v) in vols.iter().enumerate() {
@@ -629,7 +634,8 @@ fn an_understated_posted_size_demotes_a_healthy_set_on_every_volume() {
     assert_eq!(std::fs::read(dir.join("film.mkv")).unwrap(), total);
     std::fs::remove_dir_all(&dir).unwrap();
 
-    // The same feed with a declaration 64 bytes short on every volume.
+    // The same feed with a declaration 64 bytes short on every article
+    // of every volume, and no exact witness ever.
     let dir = tmpdir("declared-short");
     let ex = Extractor::new(&dir, 3, true);
     for (i, v) in vols.iter().enumerate() {
@@ -641,21 +647,303 @@ fn an_understated_posted_size_demotes_a_healthy_set_on_every_volume() {
     }
     let rep = ex.finish().unwrap();
     assert!(
+        rep.fallbacks.is_empty(),
+        "an agreed claim must not bound a volume its own end block completes: {:?}",
+        rep.fallbacks
+    );
+    assert_eq!(std::fs::read(dir.join("film.mkv")).unwrap(), total);
+    for n in names {
+        assert!(!dir.join(n).exists(), "{n} materialized");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A RAR4 volume without an end-of-archive block, which is the one shape
+/// whose parse only the volume BOUND can complete (the EOF rule). Every
+/// article carries the same short claim - the #24 shape again - and
+/// three things are pinned on the one fixture:
+///
+/// - with no exact witness, the guard's purpose survives the rule
+///   change: the agreed claim closes the bound at FINISH
+///   (`size_settle`), the parse cursor sits past it, and the volume
+///   demotes with "data area exceeds volume" - materialized byte-exact,
+///   no member shipped. Later than it used to, never skipped.
+/// - an exact witness AFTER the second article rescues it. Under the
+///   old rule the second article closed the bound short and demoted on
+///   the spot, and the witness, which is usually the LAST segment,
+///   arrived to a slot that could not be un-demoted; here it closes the
+///   still-open bound at the true length and the EOF rule completes
+///   the parse.
+/// - and the balloon guard is untouched by either: an exact witness
+///   short of the data area refuses at once, which
+///   `a_balloon_volume_with_contested_claims_still_demotes` pins.
+#[test]
+fn an_understated_claim_still_demotes_at_finish_where_no_end_block_can_complete_it() {
+    let data = payload(90_000, 17);
+    let mut vol = fixtures::rar4_volume(&[("movie.mkv", 90_000, &data, false, false)]);
+    // Strip the 7-byte end block the fixture writes: nothing but the
+    // bound can complete this parse now.
+    vol.truncate(vol.len() - 7);
+    let short = vol.len() as u64 - 64;
+
+    // No witness: demotes at finish, on the claim.
+    let dir = tmpdir("rar4-noend-agreed");
+    let ex = Extractor::new(&dir, 1, true);
+    for s in (0..vol.len()).step_by(700) {
+        let e = (s + 700).min(vol.len());
+        ex.write(0, "v.rar", short, s as u64, &vol[s..e]).unwrap();
+    }
+    let rep = ex.finish().unwrap();
+    assert!(
         !rep.fallbacks.is_empty()
             && rep
                 .fallbacks
                 .iter()
                 .all(|(_, why)| why.contains("data area exceeds volume")),
-        "every volume must demote on the bound, got {:?}",
+        "the agreed claim must still refuse at finish: {:?}",
         rep.fallbacks
     );
-    // Safe, just slower: the volumes are on disk byte-exact and no
-    // half-mapped member was written.
-    for (i, v) in vols.iter().enumerate() {
-        assert_eq!(&std::fs::read(dir.join(names[i])).unwrap(), v);
-    }
-    assert!(!dir.join("film.mkv").exists());
+    assert_eq!(std::fs::read(dir.join("v.rar")).unwrap(), vol);
+    assert!(!dir.join("movie.mkv").exists());
     std::fs::remove_dir_all(&dir).unwrap();
+
+    // The witness lands on the LAST article, long after the second
+    // agreed with the first: one-pass.
+    let dir = tmpdir("rar4-noend-rescued");
+    let ex = Extractor::new(&dir, 1, true);
+    let chunks: Vec<usize> = (0..vol.len()).step_by(700).collect();
+    for (k, &s) in chunks.iter().enumerate() {
+        let e = (s + 700).min(vol.len());
+        if k + 1 == chunks.len() {
+            ex.corroborate_size(0, vol.len() as u64).unwrap();
+        }
+        ex.write(0, "v.rar", short, s as u64, &vol[s..e]).unwrap();
+    }
+    let rep = ex.finish().unwrap();
+    assert!(
+        rep.fallbacks.is_empty(),
+        "a witness after the second article must rescue the set: {:?}",
+        rep.fallbacks
+    );
+    assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), data);
+    assert!(!dir.join("v.rar").exists(), "the volume materialized");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// TODO 118.2, the shape the evidence finally took (20 Sep 2026): a
+/// poster that writes a fresh RANDOM `=ybegin size=` on every article of
+/// the same file, `=ypart` and the payload exact. Every write below
+/// carries a different false declaration - all well short of the
+/// volume, as the live post's were (4.8 MB to 15.6 MB against 200 MB) -
+/// and the set still maps one-pass: a second article contesting the
+/// first leaves the mapper open-ended instead of bounding it by a lie,
+/// and the exact length the engine corroborates (here, the last
+/// segment's `=ypart end`) closes it. The inverse of
+/// `an_understated_posted_size_demotes_a_healthy_set_on_every_volume`
+/// above, on the same fixture.
+#[test]
+fn per_article_random_false_sizes_still_map_one_pass_once_corroborated() {
+    let total = payload(250_000, 11);
+    let vols = fixtures::rar5_volume_set(&[
+        &[("film.mkv", 250_000, &total[..100_000], false, true)],
+        &[("film.mkv", 250_000, &total[100_000..200_000], true, true)],
+        &[("film.mkv", 250_000, &total[200_000..], true, false)],
+    ]);
+    let names = ["v.part1.rar", "v.part2.rar", "v.part3.rar"];
+    let dir = tmpdir("random-size-corroborated");
+    let ex = Extractor::new(&dir, 3, true);
+    for (i, v) in vols.iter().enumerate() {
+        let chunks: Vec<usize> = (0..v.len()).step_by(700).collect();
+        for (k, &s) in chunks.iter().enumerate() {
+            let e = (s + 700).min(v.len());
+            // A different false claim on every article, none of them
+            // the truth and none of them repeated.
+            let lie = 4_000 + ((k * 7_919 + i * 13) % 20_000) as u64;
+            assert_ne!(lie, v.len() as u64);
+            if k + 1 == chunks.len() {
+                // The last segment's `=ypart end` is the engine's exact
+                // witness; it reaches the extractor before the span.
+                ex.corroborate_size(i, v.len() as u64).unwrap();
+            }
+            ex.write(i, names[i], lie, s as u64, &v[s..e]).unwrap();
+        }
+    }
+    let rep = ex.finish().unwrap();
+    assert!(
+        rep.fallbacks.is_empty(),
+        "contested claims must not bound the volume: {:?}",
+        rep.fallbacks
+    );
+    assert_eq!(std::fs::read(dir.join("film.mkv")).unwrap(), total);
+    for n in names {
+        assert!(!dir.join(n).exists(), "{n} materialized");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The same random claims with NO exact witness ever arriving. A
+/// contested claim never becomes the bound, not even at finish - a
+/// known-false bound is worse than none - so a RAR5 set, which carries
+/// its own end-of-archive block, still completes and maps one-pass. The
+/// settle's tiling and coverage checks are what judge it then, which the
+/// balloon test below is the other half of.
+#[test]
+fn per_article_random_false_sizes_map_one_pass_on_the_end_block_alone() {
+    let total = payload(250_000, 12);
+    let vols = fixtures::rar5_volume_set(&[
+        &[("film.mkv", 250_000, &total[..100_000], false, true)],
+        &[("film.mkv", 250_000, &total[100_000..200_000], true, true)],
+        &[("film.mkv", 250_000, &total[200_000..], true, false)],
+    ]);
+    let names = ["v.part1.rar", "v.part2.rar", "v.part3.rar"];
+    let dir = tmpdir("random-size-uncorroborated");
+    let ex = Extractor::new(&dir, 3, true);
+    for (i, v) in vols.iter().enumerate() {
+        for (k, s) in (0..v.len()).step_by(700).enumerate() {
+            let e = (s + 700).min(v.len());
+            let lie = 4_000 + ((k * 7_919 + i * 13) % 20_000) as u64;
+            ex.write(i, names[i], lie, s as u64, &v[s..e]).unwrap();
+        }
+    }
+    let rep = ex.finish().unwrap();
+    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    assert_eq!(std::fs::read(dir.join("film.mkv")).unwrap(), total);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The #24 shape - the SAME short declaration on every article - with
+/// the exact witness landing BEFORE the second article. It used to be
+/// the only ordering that rescued the set, the second article closing
+/// the bound short otherwise; now the ordering is immaterial (the RAR4
+/// test above has the witness last) and this pins the early arrival.
+#[test]
+fn an_exact_size_before_the_second_article_rescues_an_understated_set() {
+    let total = payload(250_000, 13);
+    let vols = fixtures::rar5_volume_set(&[
+        &[("film.mkv", 250_000, &total[..100_000], false, true)],
+        &[("film.mkv", 250_000, &total[100_000..200_000], true, true)],
+        &[("film.mkv", 250_000, &total[200_000..], true, false)],
+    ]);
+    let names = ["v.part1.rar", "v.part2.rar", "v.part3.rar"];
+    let dir = tmpdir("understated-rescued");
+    let ex = Extractor::new(&dir, 3, true);
+    for (i, v) in vols.iter().enumerate() {
+        let short = v.len() as u64 - 64;
+        for (k, s) in (0..v.len()).step_by(700).enumerate() {
+            let e = (s + 700).min(v.len());
+            if k == 1 {
+                ex.corroborate_size(i, v.len() as u64).unwrap();
+            }
+            ex.write(i, names[i], short, s as u64, &v[s..e]).unwrap();
+        }
+    }
+    let rep = ex.finish().unwrap();
+    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    assert_eq!(std::fs::read(dir.join("film.mkv")).unwrap(), total);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The guard's reason for existing, under the new trust ladder: a
+/// volume whose header declares an 8 MB data area over 4 KB of real
+/// bytes must still demote and ship no sparse output - whether its
+/// articles contest each other (the bound stays open, the mapper never
+/// completes, the settle refuses it) or an exact witness closes the
+/// bound under the data area (`data area exceeds volume`, as before).
+#[test]
+fn a_balloon_volume_with_contested_claims_still_demotes() {
+    let data = payload(4_000, 5);
+    let vol = fixtures::rar5_volume_oversized("movie.mkv", 8 << 20, &data, 8 << 20);
+
+    for (tag, corroborate) in [("balloon-contested", false), ("balloon-exact", true)] {
+        let dir = tmpdir(tag);
+        let ex = Extractor::new(&dir, 1, true);
+        for (k, s) in (0..vol.len()).step_by(700).enumerate() {
+            let e = (s + 700).min(vol.len());
+            let lie = 2_000 + (k * 977 % 3_000) as u64;
+            if corroborate && k == 2 {
+                ex.corroborate_size(0, vol.len() as u64).unwrap();
+            }
+            ex.write(0, "v.rar", lie, s as u64, &vol[s..e]).unwrap();
+        }
+        let rep = ex.finish().unwrap();
+        assert!(
+            !rep.fallbacks.is_empty(),
+            "{tag}: must demote, got {:?}",
+            rep.fallbacks
+        );
+        if corroborate {
+            assert!(
+                rep.fallbacks
+                    .iter()
+                    .all(|(_, why)| why.contains("data area exceeds volume")),
+                "{tag}: {:?}",
+                rep.fallbacks
+            );
+        }
+        assert!(
+            !dir.join("movie.mkv").exists(),
+            "{tag}: no sparse output may survive"
+        );
+        assert!(
+            rep.extracted.iter().all(|(n, _)| n != "movie.mkv"),
+            "{tag}: {:?}",
+            rep.extracted
+        );
+        assert_eq!(std::fs::read(dir.join("v.rar")).unwrap(), vol, "{tag}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+/// TODO 118.2's regression, and the reason `corroborate_size` writes
+/// [`Slot::exact_size`] rather than `Slot::size`: an exact witness is
+/// the MAPPER's business and nobody else's. The download path calls it
+/// BEFORE the write that carries the poster's declaration, so the first
+/// cut - which set `size` - replaced a 16 MiB declaration with the
+/// 64 KB the post actually shipped before any declaration was recorded
+/// at all. The plain writer then opened at 64 KB, the file was exactly
+/// as long as the bytes that arrived, and [`Extractor::slot_uncovered`]
+/// had no gap left to report: `a_lying_total_size_does_not_complete_green`
+/// and `a_lying_total_size_is_caught_beside_a_healthy_par2_set` both
+/// went green on main for a day (review sweep 3 Aug M7 is the finding
+/// they guard).
+///
+/// Both orders are asserted on purpose. The witness-first order is the
+/// one the engine actually uses and the one that broke; the
+/// witness-second order was always right and is here so a fix that
+/// repaired only the first would still be visible as half a fix.
+#[test]
+fn a_corroborated_exact_size_does_not_move_the_declared_shortfall() {
+    const DECLARED: u64 = 16 << 20;
+    let shipped = payload(64 << 10, 29);
+
+    for (tag, witness_first) in [
+        ("lying-witness-first", true),
+        ("lying-witness-second", false),
+    ] {
+        let dir = tmpdir(tag);
+        let ex = Extractor::new(&dir, 1, true);
+        // The single-article file the engine vouches for with that
+        // article's own `=ypart end` - which is the bytes it shipped,
+        // never the total it declared.
+        if witness_first {
+            ex.corroborate_size(0, shipped.len() as u64).unwrap();
+        }
+        ex.write(0, "movie.mkv", DECLARED, 0, &shipped).unwrap();
+        if !witness_first {
+            ex.corroborate_size(0, shipped.len() as u64).unwrap();
+        }
+        assert_eq!(
+            ex.slot_file_info(0).map(|(_, sz)| sz),
+            Some(DECLARED),
+            "{tag}: the slot's length is what the POST declared"
+        );
+        assert_eq!(
+            ex.slot_uncovered(0),
+            Some(DECLARED - shipped.len() as u64),
+            "{tag}: the shortfall the completion census fails the job on"
+        );
+        ex.finish().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 /// Variant B: every per-volume invariant holds (the data area ends

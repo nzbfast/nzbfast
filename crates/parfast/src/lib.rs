@@ -469,7 +469,7 @@ pub fn run_controlled(
     // The watch reads the sink's loudness when it is built, so the level
     // goes on first; the commands set it again, to the same value.
     sink.set_level(parsed.opts.level);
-    let watch = control::CliWatch::new(gate, sink);
+    let watch = control::CliWatch::new(gate, sink, parsed.opts.progress);
     let mut code = match parsed.command {
         Command::Help => {
             sink.out(&help::help());
@@ -676,6 +676,34 @@ mod switch_tests {
             assert!(
                 parse(&["c", spell, "set.par2"]).is_err(),
                 "{spell} must not be taken for --no-clobber"
+            );
+        }
+    }
+
+    /// `--progress` (GH #88) is opt-in, accepted on every command for
+    /// the wrapper reason the other long options are, and not reached
+    /// by a near-miss spelling.
+    #[test]
+    fn progress_is_opt_in_and_accepted_on_every_command() {
+        let parse = |args: &[&str]| {
+            let v: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+            super::cli::parse("parfast", &v)
+        };
+        for cmd in ["c", "v", "r"] {
+            let p = parse(&[cmd, "--progress", "set.par2"]).expect("--progress is accepted");
+            assert!(p.opts.progress, "cmd={cmd}");
+            let p = parse(&[cmd, "-q", "-q", "--progress", "set.par2"]).expect("with -q -q");
+            assert!(p.opts.progress && p.opts.level == -2, "cmd={cmd}");
+            let p = parse(&[cmd, "set.par2"]).expect("the bare command parses");
+            assert!(
+                !p.opts.progress,
+                "cmd={cmd} must default to the reference's meters"
+            );
+        }
+        for spell in ["--progres", "--Progress", "--progress=1"] {
+            assert!(
+                parse(&["c", spell, "set.par2"]).is_err(),
+                "{spell} must not be taken for --progress"
             );
         }
     }

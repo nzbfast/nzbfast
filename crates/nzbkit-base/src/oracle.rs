@@ -13,7 +13,7 @@
 //! owner, so even a single user's traffic learns fast: one Highwinds
 //! reseller's 430 pattern predicts every Highwinds reseller. It does
 //! NOT predict Eweka, which the same company owns on a separate spool
-//! under a different takedown regime - see [`BACKBONE_ALIASES`].
+//! under a different takedown regime - see `BACKBONE_ALIASES`.
 
 use crate::sync::MutexExt;
 use std::collections::HashMap;
@@ -475,7 +475,7 @@ fn clamp_weight(hits: u64, misses: u64, weight: u64) -> (u64, u64) {
 /// from each of them - so one release used to arrive as three
 /// independent `(0, 5)` samples that ingest summed into `(0, 15)`,
 /// crossing [`MIN_SAMPLES`] and marking the whole backbone gone off a
-/// single posting. That is the same category error [`clamp_weight`]
+/// single posting. That is the same category error `clamp_weight`
 /// exists to prevent, just at 3x instead of 3,000x: the three probes are
 /// one observation of one release, not three trials.
 ///

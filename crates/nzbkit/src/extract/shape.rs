@@ -43,6 +43,46 @@ static NESTED_RAR_ENCRYPTED: AtomicU64 = AtomicU64::new(0);
 static NESTED_SEVENZ: AtomicU64 = AtomicU64::new(0);
 static NESTED_OTHER: AtomicU64 = AtomicU64::new(0);
 
+// ---- Stage 0a: the tally has to survive a restart ----
+//
+// The counters above are process-global and nothing outside this process
+// ever read them back, so two months of "soaking on the live daemon"
+// banked nothing: a restart zeroed the tally and the only durable copy
+// was the `info!` line in a log the Mac app rotates on every spawn,
+// keeping exactly one `.1`. Measured 20 Sep 2026 over the whole surviving
+// window - two daemon lifetimes, 17 archive jobs - and it held no
+// `nested-prevalence:` line at all
+// (`research/NESTED-ONE-PASS-PLAN-2026-09-20.md` section 2).
+//
+// So the tally gets a BASELINE: whatever previous daemon runs banked,
+// loaded once at startup by the layer that owns daemon state
+// (`nzbfast_core::nestedstat`). This crate holds no path and opens no
+// file - it holds the number and the hook.
+//
+// Two figures, deliberately, because a reader wants both and the
+// existing tests assert deltas within ONE process:
+//   * [`nested_prevalence`]       - this process only, unchanged.
+//   * [`nested_prevalence_total`] - baseline + this process, which is the
+//                                   running total the item needs.
+//
+// The SINK is how the total banks. It is called once per counted level,
+// after the bump, so the file on disk is written exactly when there is
+// something new in it - nested levels are rare (zero in those 17 jobs),
+// so this is not a hot path and does not need a timer, a tick or a
+// shutdown hook to be correct against a `kill -9`.
+static NESTED_BASE: Mutex<NestedPrevalence> = Mutex::new(NestedPrevalence {
+    levels: 0,
+    in_stream: 0,
+    demoted: 0,
+    disk: 0,
+    rar_store: 0,
+    rar_compressed: 0,
+    rar_encrypted: 0,
+    sevenz: 0,
+    other: 0,
+});
+static NESTED_SINK: Mutex<Option<fn()>> = Mutex::new(None);
+
 // ---------------------------------------------------------------------------
 // Archive shape: what the set turned out to BE, published live.
 //
@@ -229,7 +269,7 @@ pub fn shape_word(token: &str) -> &str {
 /// Only the FAMILY, not how it was packed: the disk arms find their
 /// archive by signature and hand the whole thing to a reader, so nothing
 /// on that route ever parses a per-entry method the way the mappers do.
-/// A missing store/compressed token is what [`ArchiveShape::from_bits`]
+/// A missing store/compressed token is what `ArchiveShape::from_bits`
 /// already renders for an unknown packing, so the badge simply says less
 /// rather than guessing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,7 +305,7 @@ impl Extractor {
     /// other SFX routes (the offset-0 sniff, and a mapped volume that
     /// demotes) latch through the mappers and always did.
     ///
-    /// [`SH_MATERIALIZED`] rides along because it is the same fact: these
+    /// `SH_MATERIALIZED` rides along because it is the same fact: these
     /// bytes were written to disk and unpacked afterwards, which is
     /// exactly what that bit means and what "unpacked after download"
     /// renders it as. Latched like every other shape bit, so a set that
@@ -303,12 +343,182 @@ pub struct NestedPrevalence {
     pub other: u64,
 }
 
+/// What ONE counted level contributes to the tally: the single source the
+/// statics and the recorder both read.
+///
+/// The two relational invariants TODO 13 carries (`levels == in_stream +
+/// disk`, `demoted <= disk`) are properties of this mapping and nothing
+/// else - a Demoted bumps `demoted` alone, because the archive
+/// materializes and the disk post-pass counts it under `disk`. Before
+/// 20 Sep 2026 the mapping lived inline in [`note_nested_level`]'s match
+/// arms, where the only way to check it was to read the arms: the
+/// counters are process-global, so a test that measured them under the
+/// parallel runner could assert monotonic lower bounds and nothing more
+/// (TODO 13's "NOT runtime-testable" note). Naming the mapping once lets
+/// a recorder capture exactly what was applied, so the invariants are
+/// asserted over a buffer that no other test can reach.
+///
+/// Read this with [`note_nested_level`]'s section comment: the counting
+/// model is stated there, and this is that model as a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NestedBumps {
+    pub levels: u64,
+    pub in_stream: u64,
+    pub demoted: u64,
+    pub disk: u64,
+    /// Whether the per-kind counter (`rar_store`, `7z`, ...) was bumped.
+    /// A demote does not bump one: the kind is recorded when the
+    /// materialized archive is counted under `disk`.
+    pub kind_counted: bool,
+}
+
+/// The counting model as a value. The ONLY place a disposition becomes
+/// numbers - see [`NestedBumps`].
+fn bumps_for(disposition: &NestedDisposition) -> NestedBumps {
+    let zero = NestedBumps {
+        levels: 0,
+        in_stream: 0,
+        demoted: 0,
+        disk: 0,
+        kind_counted: false,
+    };
+    match disposition {
+        NestedDisposition::InStream => NestedBumps {
+            levels: 1,
+            in_stream: 1,
+            kind_counted: true,
+            ..zero
+        },
+        NestedDisposition::Disk => NestedBumps {
+            levels: 1,
+            disk: 1,
+            kind_counted: true,
+            ..zero
+        },
+        // Diagnostic only - the archive is tallied under `disk` when the
+        // post-pass re-extracts the volumes this demote produced.
+        NestedDisposition::Demoted(_) => NestedBumps { demoted: 1, ..zero },
+    }
+}
+
+/// One emitted nested-prevalence event, as captured by
+/// [`record_nested_events`]. Carries the bumps that were APPLIED, not a
+/// second derivation of them, so an invariant asserted over a buffer of
+/// these is an assertion about [`note_nested_level`] rather than about
+/// the test's own arithmetic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestedEvent {
+    pub depth: usize,
+    pub kind: String,
+    /// `in-stream` / `disk` / `demoted`, the same word the log line uses.
+    pub disposition: &'static str,
+    /// The demote cause, for a `demoted` event only.
+    pub reason: Option<String>,
+    pub bumps: NestedBumps,
+}
+
+type EventBuf = std::sync::Arc<Mutex<Vec<NestedEvent>>>;
+
+thread_local! {
+    /// The recorder installed on THIS thread, if any. Thread-local on
+    /// purpose: a process-global buffer would be corrupted by every
+    /// parallel test in the same process, which is the whole defect the
+    /// recorder exists to get out from under.
+    static NESTED_RECORDER: std::cell::RefCell<Option<EventBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A per-test capture of the nested-prevalence events emitted on THIS
+/// thread, and the way the two relational invariants are tested at all.
+///
+/// The counters [`nested_prevalence`] reports are process-global, and
+/// `cargo test` puts a whole crate in ONE process, so a neighbour test
+/// moves them mid-assertion: only monotonic lower-bound deltas are
+/// race-safe there. A recorder is local to the thread that installs it,
+/// so `levels == in_stream + disk` and `demoted <= disk` can be asserted
+/// EXACTLY over what this test emitted, under both runners.
+///
+/// **Stated limit:** it captures emissions on the installing thread
+/// only. Every `note_nested_level` call site today is reached
+/// synchronously from `feed`/`finish` on the caller's thread; if one
+/// ever moves to a worker, the tests that assert exact event contents go
+/// red with an empty or short buffer rather than passing over nothing.
+/// That is the intended failure - do not "fix" it by widening the
+/// recorder to a global.
+///
+/// Installed for the guard's lifetime and removed on drop, so the test
+/// beside it is unaffected even on a panic. A nested install replaces
+/// the outer one and restores it on drop.
+#[doc(hidden)]
+#[must_use = "the recorder is uninstalled when the guard drops"]
+pub struct NestedRecorder {
+    buf: EventBuf,
+    prev: Option<EventBuf>,
+}
+
+/// Start capturing nested-prevalence events on this thread. See
+/// [`NestedRecorder`].
+#[doc(hidden)]
+pub fn record_nested_events() -> NestedRecorder {
+    let buf: EventBuf = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let prev = NESTED_RECORDER.with(|r| r.borrow_mut().replace(buf.clone()));
+    NestedRecorder { buf, prev }
+}
+
+impl NestedRecorder {
+    /// Everything emitted on this thread since the guard was taken.
+    pub fn events(&self) -> Vec<NestedEvent> {
+        self.buf.lock_ok().clone()
+    }
+
+    /// The captured events folded back up the way the process-global
+    /// counters fold them - the tally this test, and only this test,
+    /// produced.
+    pub fn tally(&self) -> NestedPrevalence {
+        let mut t = NestedPrevalence::default();
+        for e in self.buf.lock_ok().iter() {
+            t.levels += e.bumps.levels;
+            t.in_stream += e.bumps.in_stream;
+            t.demoted += e.bumps.demoted;
+            t.disk += e.bumps.disk;
+            if e.bumps.kind_counted {
+                match e.kind.as_str() {
+                    "rar-store" => t.rar_store += 1,
+                    "rar-compressed" => t.rar_compressed += 1,
+                    "rar-encrypted" => t.rar_encrypted += 1,
+                    "7z" => t.sevenz += 1,
+                    _ => t.other += 1,
+                }
+            }
+        }
+        t
+    }
+}
+
+impl Drop for NestedRecorder {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        NESTED_RECORDER.with(|r| *r.borrow_mut() = prev);
+    }
+}
+
 /// Record one processed nested level: log a line and bump the tally. Cheap
 /// and non-spammy - called once per nested archive at a terminal seam, not
 /// per span. `kind` is one of `rar-store` / `rar-compressed` /
 /// `rar-encrypted` / `7z` / `other`.
 pub fn note_nested_level(depth: usize, kind: &str, disposition: NestedDisposition) {
-    let bump_kind = || {
+    let bumps = bumps_for(&disposition);
+    for (c, n) in [
+        (&NESTED_LEVELS, bumps.levels),
+        (&NESTED_IN_STREAM, bumps.in_stream),
+        (&NESTED_DEMOTED, bumps.demoted),
+        (&NESTED_DISK, bumps.disk),
+    ] {
+        if n > 0 {
+            c.fetch_add(n, Ordering::Relaxed);
+        }
+    }
+    if bumps.kind_counted {
         match kind {
             "rar-store" => &NESTED_RAR_STORE,
             "rar-compressed" => &NESTED_RAR_COMPRESSED,
@@ -316,30 +526,46 @@ pub fn note_nested_level(depth: usize, kind: &str, disposition: NestedDispositio
             "7z" => &NESTED_SEVENZ,
             _ => &NESTED_OTHER,
         }
-        .fetch_add(1, Ordering::Relaxed)
+        .fetch_add(1, Ordering::Relaxed);
+    }
+    let (word, reason) = match disposition {
+        NestedDisposition::InStream => ("in-stream", None),
+        NestedDisposition::Disk => ("disk", None),
+        NestedDisposition::Demoted(r) => ("demoted", Some(r)),
     };
-    match disposition {
-        NestedDisposition::InStream => {
-            NESTED_LEVELS.fetch_add(1, Ordering::Relaxed);
-            NESTED_IN_STREAM.fetch_add(1, Ordering::Relaxed);
-            bump_kind();
-            info!(target: "extract", "nested-prevalence: depth={depth} type={kind} stream=in-stream");
+    match reason {
+        Some(r) => info!(
+            target: "extract",
+            "nested-prevalence: depth={depth} type={kind} stream={word} reason=\"{r}\""
+        ),
+        None => {
+            info!(target: "extract", "nested-prevalence: depth={depth} type={kind} stream={word}")
         }
-        NestedDisposition::Disk => {
-            NESTED_LEVELS.fetch_add(1, Ordering::Relaxed);
-            NESTED_DISK.fetch_add(1, Ordering::Relaxed);
-            bump_kind();
-            info!(target: "extract", "nested-prevalence: depth={depth} type={kind} stream=disk");
+    }
+    NESTED_RECORDER.with(|r| {
+        if let Some(buf) = r.borrow().as_ref() {
+            buf.lock_ok().push(NestedEvent {
+                depth,
+                kind: kind.to_string(),
+                disposition: word,
+                reason: reason.map(str::to_string),
+                bumps,
+            });
         }
-        NestedDisposition::Demoted(reason) => {
-            // Diagnostic only - the archive is tallied under `disk` when
-            // the post-pass re-extracts the volumes this demote produced.
-            NESTED_DEMOTED.fetch_add(1, Ordering::Relaxed);
-            info!(
-                target: "extract",
-                "nested-prevalence: depth={depth} type={kind} stream=demoted reason=\"{reason}\""
-            );
-        }
+    });
+    // Bank the running total. OUTSIDE the bump block on purpose: the
+    // mapping in `bumps_for` is what enforces `levels == in_stream + disk`
+    // and `demoted <= disk` (a Demoted bumps nothing but the demoted
+    // counter, because the archive materializes and is re-counted under
+    // `disk`), it was audited adversarially on 24 Jul, and TODO 13 carries
+    // a standing RISK note asking for it to be re-read on any change here.
+    // One call after it touches none of that and fires for every
+    // disposition, including a demote - which is the one this file's own
+    // invariant note says is only ever a diagnostic, and is therefore the
+    // one most easily lost.
+    let sink = *NESTED_SINK.lock_ok();
+    if let Some(f) = sink {
+        f();
     }
 }
 
@@ -359,10 +585,71 @@ pub fn nested_prevalence() -> NestedPrevalence {
     }
 }
 
-/// Reset the tally to zero. Test-only: the counters are process-global, so
-/// a test that asserts exact counts must isolate itself first.
+/// Seed the tally with what previous daemon runs banked, so
+/// [`nested_prevalence_total`] answers "ever" rather than "since this
+/// process started".
+///
+/// Called once at daemon startup by `nzbfast_core::nestedstat`, which
+/// owns the file. Replaces rather than accumulates: calling it twice with
+/// the same load must not double the history.
+pub fn set_nested_prevalence_baseline(base: NestedPrevalence) {
+    *NESTED_BASE.lock_ok() = base;
+}
+
+/// The baseline alone, as last set. The stats API reports it beside the
+/// process figure so a reader can tell the two apart without arithmetic.
+pub fn nested_prevalence_baseline() -> NestedPrevalence {
+    *NESTED_BASE.lock_ok()
+}
+
+/// The running total: what previous runs banked plus what this process
+/// has counted. This is the figure TODO 13 stage 0 needs - prevalence is
+/// a question about the field, and no single daemon lifetime answers it.
+///
+/// Saturating, not wrapping: a corrupt or hand-edited baseline near
+/// `u64::MAX` must not make a live count read as zero.
+pub fn nested_prevalence_total() -> NestedPrevalence {
+    let base = nested_prevalence_baseline();
+    let now = nested_prevalence();
+    NestedPrevalence {
+        levels: base.levels.saturating_add(now.levels),
+        in_stream: base.in_stream.saturating_add(now.in_stream),
+        demoted: base.demoted.saturating_add(now.demoted),
+        disk: base.disk.saturating_add(now.disk),
+        rar_store: base.rar_store.saturating_add(now.rar_store),
+        rar_compressed: base.rar_compressed.saturating_add(now.rar_compressed),
+        rar_encrypted: base.rar_encrypted.saturating_add(now.rar_encrypted),
+        sevenz: base.sevenz.saturating_add(now.sevenz),
+        other: base.other.saturating_add(now.other),
+    }
+}
+
+/// Install the hook [`note_nested_level`] calls after each counted level,
+/// so the running total reaches disk when it changes rather than when a
+/// process happens to exit cleanly.
+///
+/// A plain `fn()` and not a closure: the one caller is a daemon-state
+/// module that keeps its own path in a static of its own, this crate has
+/// no business holding either, and a bare function pointer is `Copy`, so
+/// the call below takes no allocation and holds no lock while running.
+/// `None` - every CLI run, every test that does not opt in - is a no-op.
+pub fn set_nested_prevalence_sink(f: fn()) {
+    *NESTED_SINK.lock_ok() = Some(f);
+}
+
+/// Drop the sink. Test-only, and the second half of what makes a test
+/// that installs one safe for the test beside it.
+#[doc(hidden)]
+pub fn clear_nested_prevalence_sink() {
+    *NESTED_SINK.lock_ok() = None;
+}
+
+/// Reset the tally to zero, BASELINE INCLUDED. Test-only: the counters are
+/// process-global, so a test that asserts exact counts must isolate itself
+/// first.
 #[doc(hidden)]
 pub fn reset_nested_prevalence() {
+    *NESTED_BASE.lock_ok() = NestedPrevalence::default();
     for c in [
         &NESTED_LEVELS,
         &NESTED_IN_STREAM,

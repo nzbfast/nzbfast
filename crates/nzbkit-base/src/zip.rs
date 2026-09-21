@@ -28,8 +28,37 @@
 //!    the user downloaded. Sniffing is for files whose name has already
 //!    failed to identify them - extensionless, or a bare numeric part.
 //! 2. **`.cbz` and friends are payload, not packaging.** Even if a
-//!    future caller starts sniffing more widely, [`is_final_name`] is
+//!    future caller starts sniffing more widely, `is_final_name` is
 //!    the explicit stop.
+//!
+//! Deciding what a posted file IS, before anything is on disk:
+//!
+//! ```
+//! use nzbkit_base::zip;
+//!
+//! assert!(zip::name_is_zip_shaped("release.zip"));
+//! assert!(zip::name_is_zip_shaped("release.zip.001")); // a byte-split set
+//!
+//! // Rule 2: a container extension that is the deliverable is payload.
+//! assert!(!zip::name_is_zip_shaped("comic.cbz"));
+//!
+//! // A split set's parts resolve to one container and a 1-based index.
+//! assert_eq!(
+//!     zip::split_part_name("Release.ZIP.002"),
+//!     Some(("release.zip".to_string(), 2)),
+//! );
+//! assert_eq!(zip::split_part_name("track.002"), None); // no `.zip` head
+//!
+//! // Rule 1: only a name that failed to identify itself earns a sniff.
+//! assert!(zip::chase_eligible_name("a1b2c3d4")); // extensionless
+//! assert!(!zip::chase_eligible_name("payload.bin"));
+//! ```
+//!
+//! Opening one has no example here: [`Archive::open`] takes the paths
+//! of the parts, and this crate publishes no zip writer for a doctest
+//! to build them with.
+
+#![warn(missing_docs)]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -83,6 +112,10 @@ pub struct Finding {
     pub name: String,
     /// Parts in read order. Single containers hold exactly one.
     pub parts: Vec<PathBuf>,
+    /// Which of the three recognised shapes this set is, which decides
+    /// how `parts` is addressed: one file, a WinZip-spanned set whose
+    /// central directory carries per-disk offsets, or a byte-split set
+    /// that is one container cut into fixed-size pieces.
     pub shape: Shape,
 }
 
@@ -450,12 +483,25 @@ pub fn password_opens(parts: &[PathBuf], password: Option<&str>) -> bool {
 pub enum Stubbed {
     /// Packaging: the archive is a wrapper around a payload, and getting
     /// the payload out means unpacking it.
-    Packaging { base: u64 },
+    Packaging {
+        /// Byte offset of the first local file header, so the zip
+        /// reader treats the file as if it began here. Everything
+        /// before it is the self-extracting stub.
+        base: u64,
+    },
     /// The archive IS the deliverable - a Java archive, an Android
     /// package, an Office document - and the executable in front of it is
     /// a launcher for it, not a self-extractor. `what` names the shape for
     /// the log line.
-    FinalFile { base: u64, what: &'static str },
+    FinalFile {
+        /// Byte offset the embedded archive begins at, as in
+        /// `Stubbed::Packaging` - the same structural fact.
+        base: u64,
+        /// Fixed label for the format recognised (for example the jar
+        /// or Android marker that identified it), for the log line that
+        /// explains why the file was left alone.
+        what: &'static str,
+    },
 }
 
 /// Entry names that identify a zip as the deliverable itself.
@@ -573,6 +619,8 @@ pub fn stubbed_archive(path: &Path) -> Option<Stubbed> {
 /// sentence fragment the caller prints after "…could not be unpacked: ".
 #[derive(Debug)]
 pub enum ZipError {
+    /// The underlying read failed: a missing or short part, a
+    /// permission error, a disk that went away mid-extract.
     Io(std::io::Error),
     /// Structurally not a zip we can read (no end-of-central-directory,
     /// truncated headers, offsets outside the file).
@@ -582,11 +630,13 @@ pub enum ZipError {
     Unsupported(String),
     /// An entry's bytes did not match its stored CRC32.
     BadCrc {
+        /// The entry name as stored, for the message; not a path.
         name: String,
     },
     /// An encrypted entry's password check refused the supplied
     /// password (ZipCrypto check byte / AE verifier).
     WrongPassword {
+        /// The entry name as stored, for the message; not a path.
         name: String,
     },
 }
@@ -802,6 +852,10 @@ the disk pass unpacks this container sequentially",
     })
 }
 
+/// Name of a zip compression method code (§4.4.5) for log lines and
+/// user-facing refusals, including methods this reader does not decode.
+/// Unknown codes get a generic label rather than a panic, because the
+/// number comes from an untrusted header.
 pub fn method_name(m: u16) -> &'static str {
     match m {
         0 => "store",
@@ -848,8 +902,18 @@ pub struct Entry {
     /// backslashes) before touching the filesystem.
     pub name: String,
     pub(crate) method: u16,
+    /// CRC32 of the entry's UNCOMPRESSED bytes, as the central
+    /// directory records it. `read_entry_to` checks the decoded output
+    /// against this and refuses on a mismatch.
     pub crc32: u32,
+    /// Size of the stored bytes, Zip64-resolved: taken from the Zip64
+    /// extra field where the 32-bit field is the 0xFFFFFFFF escape.
+    /// This counts the crypto framing bytes too on an encrypted entry.
     pub compressed_size: u64,
+    /// Size of the entry after decoding, Zip64-resolved the same way.
+    /// Declared by the archive and therefore untrusted: it is checked
+    /// against what actually decoded, never used to size a buffer up
+    /// front.
     pub uncompressed_size: u64,
     /// Whether the entry is a directory marker (trailing `/`, or the
     /// MS-DOS directory attribute).
@@ -925,10 +989,13 @@ impl Entry {
 }
 
 /// A byte source the directory parser reads through. The disk path's
-/// [`Parts`] is one; the in-stream chase's blocking view (extract.rs) is
+/// `Parts` is one; the in-stream chase's blocking view (extract.rs) is
 /// the other - which is what lets ONE parser serve both, instead of the
 /// three hand-rolled detection copies this module exists to prevent.
 pub trait Source {
+    /// Fill `buf` from logical offset `off`, or fail. Logical means the
+    /// whole container's byte space, so a multi-part set's reads may
+    /// span parts; the implementation hides the seam.
     fn read_exact_at(&self, off: u64, buf: &mut [u8]) -> Result<(), ZipError>;
     /// Total logical size of the container.
     fn total(&self) -> u64;
@@ -940,7 +1007,7 @@ pub trait Source {
         false
     }
     /// Turn a central-directory (disk, offset) address into a logical
-    /// offset. See the [`Parts`] impl for the two multi-part shapes;
+    /// offset. See the `Parts` impl for the two multi-part shapes;
     /// a single-file source never sees `multi_disk` (gated by
     /// [`Self::spanning_supported`] before any address is resolved).
     fn logical(&self, multi_disk: bool, _disk: u32, off: u64) -> Option<u64> {
@@ -1064,6 +1131,9 @@ impl Archive {
         Ok(Archive { parts, entries })
     }
 
+    /// The central directory's records in stored order. Never empty:
+    /// `open` refuses a zero-entry archive rather than reporting a
+    /// successful extraction that produced nothing.
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
@@ -1289,11 +1359,21 @@ impl<R: std::io::Read> std::io::Read for AeReader<R> {
 /// cipher, the framing arithmetic and the password check are identical,
 /// and those are the parts worth having exactly once.
 pub enum EntryCipher {
+    /// The entry is not encrypted; the byte source passes through
+    /// untouched.
     None,
+    /// Legacy PKWARE ZipCrypto, keyed and already advanced past the
+    /// 12-byte header whose last byte carried the password check.
     ZipCrypto(crate::zipcrypt::ZipCrypto),
+    /// WinZip AES (AE-1/AE-2), with the password already checked
+    /// against the stored 2-byte verifier.
     Ae {
+        /// AES-CTR keystream over the entry's ciphertext range.
         ctr: crate::zipcrypt::AeCtr,
+        /// HMAC-SHA1 over that same ciphertext, finalised at EOF.
         mac: crate::zipcrypt::AeMac,
+        /// The 10-byte authentication code stored at the end of the
+        /// entry, which the finalised `mac` must equal.
         want: [u8; crate::zipcrypt::AE_AUTH_LEN],
     },
 }
@@ -1303,8 +1383,16 @@ pub enum EntryCipher {
 /// each end (salt + verifier, or the ZipCrypto header; and the AE
 /// authentication code), so the caller reads `[data + head, end - tail)`.
 pub struct EntryCrypto {
+    /// Framing bytes at the START of the data range that are not
+    /// payload: the AE salt plus its 2-byte verifier (10, 14 or 18
+    /// bytes for AES-128, AES-192 and AES-256), or ZipCrypto's 12-byte
+    /// header.
+    /// Zero when the entry is not encrypted.
     pub head: u64,
+    /// Framing bytes at the END of the data range: AE's 10-byte
+    /// authentication code. Zero for ZipCrypto and for plaintext.
     pub tail: u64,
+    /// The keyed cipher to wrap the trimmed range in.
     pub cipher: EntryCipher,
 }
 
@@ -1328,8 +1416,14 @@ impl EntryCipher {
 /// has to box (and so the AE authentication still fires at EOF through
 /// whatever decoder sits on top).
 pub enum CryptoReader<R> {
+    /// No encryption: reads are handed straight to the inner source.
     Plain(R),
+    /// ZipCrypto decryption. There is no authentication here, so a
+    /// wrong password that happens to pass the one-byte check is caught
+    /// only by the entry's CRC32.
     Zc(ZipCryptoReader<R>),
+    /// WinZip AES decryption, which also fails at EOF when the
+    /// accumulated HMAC does not match the stored authentication code.
     Ae(AeReader<R>),
 }
 
@@ -1466,7 +1560,7 @@ impl std::io::Read for RdAdapter<'_, '_> {
 #[derive(Debug, Clone, Copy)]
 pub struct Directory {
     /// Logical offset the first central-directory record starts at,
-    /// [`Directory::base`] already applied.
+    /// `Directory::base` already applied.
     pub at: u64,
     /// How many records the end record says are there.
     pub(crate) count: u64,
@@ -1623,20 +1717,37 @@ pub fn find_central_directory<S: Source + ?Sized>(parts: &S) -> Result<Directory
     if z64_anchor.is_none() {
         z64_anchor = physical_zip64_record(parts, eocd_at);
     }
-    if entries == u16::MAX as u64
-        || per_disk == u16::MAX as u64
-        || cd_size == u32::MAX as u64
-        || cd_off == u32::MAX as u64
-        || disk == u16::MAX as u32
-    {
+    // A count of exactly 65535 is NOT a saturated count: it is the
+    // largest a 16-bit field holds, and a writer that emits the zip64
+    // record only PAST its limit leaves such an archive with a plain
+    // 22-byte EOCD and no locator at all (CPython's `zipfile` tests
+    // `centDirCount > ZIP_FILECOUNT_LIMIT`, and that limit is 65535).
+    // So the count sentinel PROBES for a locator, where a saturated
+    // size, offset or disk - values the 32-bit fields genuinely cannot
+    // express - still DEMANDS one. unzip, 7-Zip and libarchive all fall
+    // back to the 32-bit fields the same way. The fallback is safe
+    // because the geometry checks below still have to agree: a
+    // directory that does not end exactly at the anchor is refused
+    // there, loudly, as it always was.
+    let count_sentinel = entries == u16::MAX as u64 || per_disk == u16::MAX as u64;
+    let geometry_sentinel =
+        cd_size == u32::MAX as u64 || cd_off == u32::MAX as u64 || disk == u16::MAX as u32;
+    let mut loc = [0u8; 20];
+    let mut has_locator = false;
+    if geometry_sentinel {
         if eocd_at < 20 {
             return Err(ZipError::Malformed("zip64 locator does not fit"));
         }
-        let mut loc = [0u8; 20];
         parts.read_exact_at(eocd_at - 20, &mut loc)?;
         if &loc[0..4] != b"PK\x06\x07" {
             return Err(ZipError::Malformed("zip64 sizes without a zip64 locator"));
         }
+        has_locator = true;
+    } else if count_sentinel && eocd_at >= 20 {
+        has_locator =
+            parts.read_exact_at(eocd_at - 20, &mut loc).is_ok() && &loc[0..4] == b"PK\x06\x07";
+    }
+    if has_locator {
         let z64_disk = rd_u32(&loc[4..]);
         let z64_off = rd_u64(&loc[8..]);
         let mut z64 = [0u8; 56];
@@ -1780,6 +1891,62 @@ fn prepended_base<S: Source + ?Sized>(
     Ok(base)
 }
 
+/// The high half of CP437, the code page every pre-2007 DOS and Windows
+/// zip writer stored entry names in. Indexed by `byte - 0x80`.
+#[rustfmt::skip]
+const CP437_HIGH: [char; 128] = [
+    'Ç', 'ü', 'é', 'â', 'ä', 'à', 'å', 'ç',
+    'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å',
+    'É', 'æ', 'Æ', 'ô', 'ö', 'ò', 'û', 'ù',
+    'ÿ', 'Ö', 'Ü', '¢', '£', '¥', '₧', 'ƒ',
+    'á', 'í', 'ó', 'ú', 'ñ', 'Ñ', 'ª', 'º',
+    '¿', '⌐', '¬', '½', '¼', '¡', '«', '»',
+    '░', '▒', '▓', '│', '┤', '╡', '╢', '╖',
+    '╕', '╣', '║', '╗', '╝', '╜', '╛', '┐',
+    '└', '┴', '┬', '├', '─', '┼', '╞', '╟',
+    '╚', '╔', '╩', '╦', '╠', '═', '╬', '╧',
+    '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫',
+    '╪', '┘', '┌', '█', '▄', '▌', '▐', '▀',
+    'α', 'ß', 'Γ', 'π', 'Σ', 'σ', 'µ', 'τ',
+    'Φ', 'Θ', 'Ω', 'δ', '∞', 'φ', 'ε', '∩',
+    '≡', '±', '≥', '≤', '⌠', '⌡', '÷', '≈',
+    '°', '∙', '·', '√', 'ⁿ', '²', '■', '\u{a0}',
+];
+
+/// Decode an entry name from the central directory's raw bytes.
+///
+/// Valid UTF-8 always wins, whatever general-purpose bit 11 says: a
+/// modern writer that stores a UTF-8 name and forgets the flag is by
+/// far the commonest non-ASCII shape, and a flag-driven decode would
+/// mangle it. Bit 11 only decides what to do with bytes that FAIL that
+/// check: a writer that claims UTF-8 and is wrong gets the lossy
+/// decode it asked for, and everything else is CP437, which is what
+/// §4.4.4 says the field holds when the flag is clear.
+///
+/// A plain UTF-8-lossy decode of a CP437 name turns every high byte
+/// into U+FFFD, so `\x8Erger.mkv` files itself as `?rger.mkv` and, worse,
+/// two names differing only in their high bytes collapse to ONE string
+/// and therefore to one output path. The RAR4 arm decodes its own name
+/// encoding for exactly this reason (`rar::decode_rar4_name`).
+fn decode_entry_name(bytes: &[u8], flags: u16) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_owned();
+    }
+    if flags & 0x0800 != 0 {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    bytes
+        .iter()
+        .map(|&b| {
+            if b < 0x80 {
+                b as char
+            } else {
+                CP437_HIGH[(b - 0x80) as usize]
+            }
+        })
+        .collect()
+}
+
 /// Walk the central directory into [`Entry`] records.
 ///
 /// `count` and `cd_size` are two independent statements about the same
@@ -1823,7 +1990,7 @@ pub fn parse_central_directory<S: Source + ?Sized>(
         }
         let mut rest = vec![0u8; name_len + extra_len + comment_len];
         parts.read_exact_at(at + 46, &mut rest)?;
-        let name = String::from_utf8_lossy(&rest[..name_len]).into_owned();
+        let name = decode_entry_name(&rest[..name_len], flags);
 
         // Zip64 extra field (0x0001): present exactly when one of the
         // 32-bit fields above is saturated, and holds only the saturated

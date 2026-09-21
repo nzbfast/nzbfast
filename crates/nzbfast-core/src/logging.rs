@@ -83,9 +83,126 @@ pub fn init(style: Style) {
                 .with_max_level(Level::WARN)
                 .or_else(std::io::stdout),
         );
+    // The filter goes in behind a reload handle so the daemon can turn
+    // the log up or down while it runs (`set_detail`). Nothing else
+    // about the pipeline changes: a reload swaps the `Targets` value
+    // and the fmt layer never knows.
+    let (filter, handle) = tracing_subscriber::reload::Layer::new(env_or_default());
+    let _ = RELOAD.set(handle);
     let _ = tracing_subscriber::registry()
-        .with(fmt.with_filter(filter_from_env()))
+        .with(fmt.with_filter(filter))
         .try_init();
+}
+
+/// How loud the log should be, in the three steps a person picks from.
+///
+/// Deliberately coarser than `NZBFAST_LOG`, which stays the full
+/// `Targets` language for anyone debugging one lane. This is the dial
+/// for the case the setting exists for: somebody who does not want a
+/// log at all, on a machine where setting an environment variable means
+/// editing a launchd plist or a tray shortcut.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Detail {
+    /// Warnings and errors only - the things that are worth waking up
+    /// for. An idle daemon on this setting writes nothing at all.
+    Quiet,
+    /// What the daemon has always written.
+    #[default]
+    Normal,
+    /// Everything, including the `debug` lanes. Costs real throughput on
+    /// a busy pipeline, which is why it is not the place to leave it.
+    Verbose,
+}
+
+impl Detail {
+    /// The stored spelling, and the one the API and settings.json use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Detail::Quiet => "quiet",
+            Detail::Normal => "normal",
+            Detail::Verbose => "verbose",
+        }
+    }
+
+    /// The filter this level means. Every target moves together: a
+    /// per-target dial is what `NZBFAST_LOG` is for.
+    fn filter(self) -> Targets {
+        Targets::new().with_default(match self {
+            Detail::Quiet => LevelFilter::WARN,
+            Detail::Normal => LevelFilter::INFO,
+            Detail::Verbose => LevelFilter::DEBUG,
+        })
+    }
+}
+
+impl FromStr for Detail {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "quiet" => Ok(Detail::Quiet),
+            "normal" | "" => Ok(Detail::Normal),
+            "verbose" => Ok(Detail::Verbose),
+            _ => Err(()),
+        }
+    }
+}
+
+/// The live filter's reload handle, installed by [`init`].
+static RELOAD: std::sync::OnceLock<
+    tracing_subscriber::reload::Handle<Targets, tracing_subscriber::Registry>,
+> = std::sync::OnceLock::new();
+
+/// What [`set_detail`] has been asked for, so [`detail`] can answer
+/// without reading the filter back (a `Targets` does not say which of
+/// our three steps produced it).
+static DETAIL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+
+/// True when the environment named a filter, which pins the level: an
+/// operator who typed `NZBFAST_LOG` gets what they typed, and the
+/// setting must not fight them. The UI reads this to say so rather than
+/// showing a dial that does nothing.
+static ENV_PINNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The startup filter, recording whether the environment set it.
+fn env_or_default() -> Targets {
+    match raw_env() {
+        Some(_) => {
+            ENV_PINNED.store(true, std::sync::atomic::Ordering::Relaxed);
+            filter_from_env()
+        }
+        None => filter_from_env(),
+    }
+}
+
+/// Turn the log up or down, now, for a running process.
+///
+/// Returns false when the environment pinned the filter (see
+/// `ENV_PINNED`) or when no subscriber of ours is installed - a test
+/// binary that brought its own, or a `set_detail` before [`init`]. The
+/// caller stores the setting either way; it takes effect at the next
+/// start, which is the same rule every other startup-shaped setting
+/// here follows.
+pub fn set_detail(d: Detail) -> bool {
+    DETAIL.store(d as u8, std::sync::atomic::Ordering::Relaxed);
+    if env_pinned() {
+        return false;
+    }
+    RELOAD.get().is_some_and(|h| h.reload(d.filter()).is_ok())
+}
+
+/// What the dial is set to.
+pub fn detail() -> Detail {
+    match DETAIL.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => Detail::Quiet,
+        2 => Detail::Verbose,
+        _ => Detail::Normal,
+    }
+}
+
+/// Is the level fixed by `NZBFAST_LOG` / `RUST_LOG`?
+pub fn env_pinned() -> bool {
+    ENV_PINNED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The filter from the environment, or plain `info` when nothing is set.
@@ -94,12 +211,7 @@ pub fn init(style: Style) {
 /// not worth silencing either: fall back to the default and say so on
 /// stderr (the subscriber is not up yet, so this one really is a print).
 fn filter_from_env() -> Targets {
-    let raw = std::env::var(ENV)
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .filter(|s| !s.trim().is_empty());
-    match raw {
+    match raw_env() {
         None => default_filter(),
         Some(s) => match Targets::from_str(&s) {
             Ok(t) => t,
@@ -109,6 +221,17 @@ fn filter_from_env() -> Targets {
             }
         },
     }
+}
+
+/// The directive the environment names, if any. Split out so the
+/// startup path can tell "the operator set a filter" from "we fell back
+/// to the default", which is what pins the dial.
+fn raw_env() -> Option<String> {
+    std::env::var(ENV)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("RUST_LOG").ok())
+        .filter(|s| !s.trim().is_empty())
 }
 
 fn default_filter() -> Targets {
@@ -326,5 +449,66 @@ mod tests {
         assert!(Targets::from_str("queue=verbose").is_err());
         let t = default_filter();
         assert!(t.would_enable("queue", &Level::INFO));
+    }
+
+    /// The dial's three words, and the levels they mean. The mapping is
+    /// the whole setting: get it wrong and "quiet" is a log that still
+    /// writes every info line, which is the complaint the setting
+    /// exists to answer (r/usenet, 18 Sep 2026).
+    #[test]
+    fn the_dial_maps_its_three_words_onto_three_levels() {
+        for (word, want) in [
+            ("quiet", Detail::Quiet),
+            ("normal", Detail::Normal),
+            ("verbose", Detail::Verbose),
+            // Spelling is forgiving in case, and an empty string is the
+            // absent value rather than an error: settings.json can hold
+            // one, and it means "the default".
+            ("  VERBOSE ", Detail::Verbose),
+            ("", Detail::Normal),
+        ] {
+            assert_eq!(word.parse::<Detail>(), Ok(want), "{word:?}");
+        }
+        // Refused rather than defaulted - see the apply arm.
+        assert_eq!("loud".parse::<Detail>(), Err(()));
+
+        // The filters themselves, checked through a callsite-shaped
+        // question rather than by comparing `Targets` values: what
+        // matters is which levels survive.
+        for (d, warn_on, info_on, debug_on) in [
+            (Detail::Quiet, true, false, false),
+            (Detail::Normal, true, true, false),
+            (Detail::Verbose, true, true, true),
+        ] {
+            let f = d.filter();
+            assert_eq!(f.would_enable("index", &Level::WARN), warn_on, "{d:?} warn");
+            assert_eq!(f.would_enable("index", &Level::INFO), info_on, "{d:?} info");
+            assert_eq!(
+                f.would_enable("index", &Level::DEBUG),
+                debug_on,
+                "{d:?} debug"
+            );
+        }
+    }
+
+    /// `set_detail` is what the settings row calls, and `detail` is what
+    /// it reads back - including when the reload could not be applied,
+    /// because the value is still what the user asked for and the UI
+    /// must show it rather than silently snapping back.
+    ///
+    /// Process-global state, so it puts the dial back where it found it:
+    /// this crate's unit tests share ONE process by design (see the
+    /// one-process lines in CLAUDE.md) and a test that leaves the log on
+    /// `quiet` would take another test's expected output with it.
+    #[test]
+    fn the_dial_reads_back_what_it_was_set_to() {
+        let was = detail();
+        for d in [Detail::Quiet, Detail::Verbose, Detail::Normal] {
+            // The answer says whether it took effect NOW; the stored
+            // value moves either way.
+            let _live = set_detail(d);
+            assert_eq!(detail(), d);
+        }
+        set_detail(was);
     }
 }

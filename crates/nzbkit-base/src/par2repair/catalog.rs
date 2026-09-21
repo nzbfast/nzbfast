@@ -386,11 +386,8 @@ impl PacketCatalog {
     }
 
     /// List and stamp the packet files without reading their bytes yet.
-    /// [`scan_file`]/[`scan_rest`] fill them in; `repair_dir` uses this
+    /// `scan_file`/`scan_rest` fill them in; `repair_dir` uses this
     /// to keep its historical critical-prefix + background-tail scan.
-    ///
-    /// [`scan_file`]: Self::scan_file
-    /// [`scan_rest`]: Self::scan_rest
     pub fn build_lazy(dir: &Path) -> Result<Self, RepairError> {
         Self::build_lazy_scoped(dir, PacketScope::Flat)
     }

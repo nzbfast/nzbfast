@@ -216,31 +216,26 @@ pub fn tmdb_lookup(api_key: &str, kind: &Kind, title: &str, year: u32) -> Option
         return None;
     }
     ratelimit::acquire(Provider::Tmdb);
-    let resp = match crate::netfetch::shared_enrich_agent()
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(10))
-        .call()
-    {
-        Ok(r) => r,
+    let body = match crate::netfetch::call_body(
+        crate::netfetch::shared_enrich_agent()
+            .get(&url)
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(10)))
+            .build(),
+    ) {
+        Ok(b) => b,
         Err(e) => {
             // Same rule as get_json: a 429/503 is "ask again later", not
             // an answer. `note_http_err` counts a 429 as a real reply (it
             // is a 4xx), so one rate-limited burst would stamp every row
             // it touched checked-and-empty for good. Penalise so the lane
             // backs off instead of drawing the next 429 immediately.
-            if let ureq::Error::Status(code @ (429 | 503), r) = &e {
-                note_refusal(Provider::Tmdb, r, if *code == 429 { 30 } else { 5 });
+            if let Some(code @ (429 | 503)) = e.code() {
+                note_refusal(Provider::Tmdb, &e, if code == 429 { 30 } else { 5 });
                 note_unreachable();
                 return None;
             }
             note_http_err(&e);
-            return None;
-        }
-    };
-    let body = match resp.into_string() {
-        Ok(b) => b,
-        Err(_) => {
-            note_unreachable();
             return None;
         }
     };
@@ -301,18 +296,20 @@ fn get_body(p: Provider, url: &str) -> Option<String> {
         return None;
     }
     ratelimit::acquire(p);
-    let resp = match crate::netfetch::shared_enrich_agent()
-        .get(url)
-        .timeout(std::time::Duration::from_secs(10))
-        .call()
-    {
-        Ok(r) => r,
+    let resp = match crate::netfetch::call_body(
+        crate::netfetch::shared_enrich_agent()
+            .get(url)
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(10)))
+            .build(),
+    ) {
+        Ok(b) => b,
         Err(e) => {
             // A 429/503 is the provider saying the bucket is too fast.
             // Slow the whole lane, not just this call: the next title is
             // about to ask the same service the same way.
-            if let ureq::Error::Status(code @ (429 | 503), r) = &e {
-                note_refusal(p, r, if *code == 429 { 30 } else { 5 });
+            if let Some(code @ (429 | 503)) = e.code() {
+                note_refusal(p, &e, if code == 429 { 30 } else { 5 });
                 // Both codes are "ask again later", not an answer, and
                 // this helper has no retry to ask with. `note_http_err`
                 // would count the 429 as a real reply (it is a 4xx), so
@@ -325,13 +322,7 @@ fn get_body(p: Provider, url: &str) -> Option<String> {
             return None;
         }
     };
-    match resp.into_string() {
-        Ok(body) => Some(body),
-        Err(_) => {
-            note_unreachable();
-            None
-        }
-    }
+    Some(resp)
 }
 
 /// Strip HTML tags (TVmaze summaries are `<p>…</p>` fragments).
@@ -943,26 +934,20 @@ fn get_json_ua(p: Provider, url: &str) -> Option<serde_json::Value> {
     const BACKOFF_SECS: [u64; 2] = [5, 15];
     for attempt in 0..=BACKOFF_SECS.len() {
         ratelimit::acquire(p);
-        match crate::netfetch::shared_enrich_agent()
-            .get(url)
-            .set("User-Agent", WIKI_UA)
-            .timeout(std::time::Duration::from_secs(10))
-            .call()
-        {
-            Ok(resp) => {
-                return match resp.into_string() {
-                    Ok(body) => parse_answer(&body),
-                    Err(_) => {
-                        note_unreachable();
-                        None
-                    }
-                };
-            }
-            Err(ureq::Error::Status(429, r)) => {
+        match crate::netfetch::call_body(
+            crate::netfetch::shared_enrich_agent()
+                .get(url)
+                .header("User-Agent", WIKI_UA)
+                .config()
+                .timeout_global(Some(std::time::Duration::from_secs(10)))
+                .build(),
+        ) {
+            Ok(body) => return parse_answer(&body),
+            Err(e) if e.code() == Some(429) => {
                 // The clamp that used to be here is gone: it bounded a
                 // private sleep this loop no longer takes, and
                 // `penalise` clamps what it sleeps on itself.
-                note_refusal(p, &r, BACKOFF_SECS[attempt.min(BACKOFF_SECS.len() - 1)]);
+                note_refusal(p, &e, BACKOFF_SECS[attempt.min(BACKOFF_SECS.len() - 1)]);
                 if attempt == BACKOFF_SECS.len() {
                     // Out of retries, and the whole failure was pacing.
                     // A 429 is a 4xx, so falling into the arm below would
@@ -1048,11 +1033,8 @@ fn note_retry_after(secs: u64) {
 /// A missing or unparseable header falls back to `fallback` - these
 /// services do send `Retry-After: <delta-seconds>`, but an HTTP-date
 /// form is legal and is not worth a parser here.
-fn note_refusal(p: Provider, r: &ureq::Response, fallback: u64) -> u64 {
-    let wait = r
-        .header("Retry-After")
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(fallback);
+fn note_refusal(p: Provider, e: &crate::netfetch::Refusal, fallback: u64) -> u64 {
+    let wait = e.retry_after().unwrap_or(fallback);
     ratelimit::penalise(p, wait);
     note_retry_after(wait);
     wait
@@ -1141,14 +1123,15 @@ fn parse_answer(body: &str) -> Option<serde_json::Value> {
     }
 }
 
-fn note_http_err(e: &ureq::Error) {
-    let no_answer = match e {
+fn note_http_err(e: &crate::netfetch::Refusal) {
+    let no_answer = match e.code() {
         // 408 and 425 are 4xx that say "not now" rather than "no such
         // thing", and 429 is the whole subject of TODO 26c - the call
         // sites above catch it first, but a helper that classified it as
         // a real answer is one refactor away from blanking a title again.
-        ureq::Error::Status(code, _) => *code >= 500 || matches!(code, 408 | 425 | 429),
-        ureq::Error::Transport(_) => true,
+        Some(code) => code >= 500 || matches!(code, 408 | 425 | 429),
+        // No reply at all.
+        None => true,
     };
     if no_answer {
         note_unreachable();
@@ -1317,29 +1300,31 @@ pub fn anilist_lookup(title: &str) -> Option<TitleMeta> {
         return None;
     }
     ratelimit::acquire(Provider::AniList);
-    let resp = match crate::netfetch::shared_enrich_agent()
-        .post("https://graphql.anilist.co")
-        .set("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(10))
-        .send_string(&body.to_string())
-    {
-        Ok(r) => r,
+    let resp = crate::netfetch::send_keeping_refusal(
+        crate::netfetch::shared_enrich_agent()
+            .post("https://graphql.anilist.co")
+            .header("Content-Type", "application/json")
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(10)))
+            .build(),
+        &body.to_string()[..],
+    )
+    .and_then(|r| {
+        r.into_body()
+            .read_to_string()
+            .map_err(crate::netfetch::Refusal::Transport)
+    });
+    let body = match resp {
+        Ok(b) => b,
         Err(e) => {
             // Same treatment as `get_json`: slow the lane on a 429/503
             // and never let one count as "there is no such anime".
-            if let ureq::Error::Status(code @ (429 | 503), r) = &e {
-                note_refusal(Provider::AniList, r, if *code == 429 { 30 } else { 5 });
+            if let Some(code @ (429 | 503)) = e.code() {
+                note_refusal(Provider::AniList, &e, if code == 429 { 30 } else { 5 });
                 note_unreachable();
                 return None;
             }
             note_http_err(&e);
-            return None;
-        }
-    };
-    let body = match resp.into_string() {
-        Ok(b) => b,
-        Err(_) => {
-            note_unreachable();
             return None;
         }
     };
@@ -1413,12 +1398,14 @@ fn get_json_paced(p: Provider, url: &str) -> Option<serde_json::Value> {
     const BACKOFF_SECS: [u64; 3] = [5, 15, 30];
     for attempt in 0..=BACKOFF_SECS.len() {
         ratelimit::acquire(p);
-        match crate::netfetch::shared_enrich_agent()
-            .get(url)
-            .set("User-Agent", WIKI_UA)
-            .timeout(std::time::Duration::from_secs(10))
-            .call()
-        {
+        match crate::netfetch::call_keeping_refusal(
+            crate::netfetch::shared_enrich_agent()
+                .get(url)
+                .header("User-Agent", WIKI_UA)
+                .config()
+                .timeout_global(Some(std::time::Duration::from_secs(10)))
+                .build(),
+        ) {
             Ok(resp) => {
                 // Cap the body like `fetch_image` does: a provider that
                 // answers with something enormous should cost us memory
@@ -1426,6 +1413,7 @@ fn get_json_paced(p: Provider, url: &str) -> Option<serde_json::Value> {
                 let mut body = String::new();
                 use std::io::Read;
                 if resp
+                    .into_body()
                     .into_reader()
                     .take(4 * 1024 * 1024)
                     .read_to_string(&mut body)
@@ -1436,8 +1424,8 @@ fn get_json_paced(p: Provider, url: &str) -> Option<serde_json::Value> {
                 }
                 return parse_answer(&body);
             }
-            Err(ureq::Error::Status(429 | 503, r)) => {
-                note_refusal(p, &r, BACKOFF_SECS[attempt.min(BACKOFF_SECS.len() - 1)]);
+            Err(e) if matches!(e.code(), Some(429 | 503)) => {
+                note_refusal(p, &e, BACKOFF_SECS[attempt.min(BACKOFF_SECS.len() - 1)]);
                 if attempt == BACKOFF_SECS.len() {
                     // Still busy after ~50 s. That is "we could not ask",
                     // which is exactly what this function's patience is
@@ -1822,14 +1810,18 @@ pub fn parse_imdb_ratings(tsv: &str, min_votes: u64) -> Vec<(String, f64, u64)> 
 /// Download + gunzip the daily IMDb ratings snapshot (keyless; IMDb's
 /// official non-commercial datasets - credited in the wall footer).
 pub fn imdb_ratings_fetch() -> Option<Vec<(String, f64, u64)>> {
-    let resp = crate::netfetch::shared_enrich_agent()
-        .get("https://datasets.imdbws.com/title.ratings.tsv.gz")
-        .timeout(std::time::Duration::from_secs(120))
-        .call()
-        .ok()?;
+    let resp = crate::netfetch::call_keeping_refusal(
+        crate::netfetch::shared_enrich_agent()
+            .get("https://datasets.imdbws.com/title.ratings.tsv.gz")
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(120)))
+            .build(),
+    )
+    .ok()?;
     let mut gz = Vec::new();
     use std::io::Read;
-    resp.into_reader()
+    resp.into_body()
+        .into_reader()
         .take(64 * 1024 * 1024)
         .read_to_end(&mut gz)
         .ok()?;
@@ -1891,19 +1883,20 @@ pub fn fetch_image_res(url: &str) -> Result<Vec<u8>, ArtMiss> {
     }
     // 15 s, as when this built its own agent: the shared one's default is
     // longer, and an art fetch should not inherit it.
-    let resp = crate::netfetch::shared_enrich_agent()
-        .get(url)
-        .timeout(std::time::Duration::from_secs(15))
-        .call()
-        .map_err(|e| match &e {
-            // Same classification as `note_http_err`, and it has to
-            // stay the same: an art host that is briefly broken is not
-            // an art host with no art.
-            ureq::Error::Status(code, _) if *code < 500 && !matches!(code, 408 | 425 | 429) => {
-                ArtMiss::NoImage
-            }
-            _ => ArtMiss::Transient,
-        })?;
+    let resp = crate::netfetch::call_keeping_refusal(
+        crate::netfetch::shared_enrich_agent()
+            .get(url)
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(15)))
+            .build(),
+    )
+    .map_err(|e| match e.code() {
+        // Same classification as `note_http_err`, and it has to
+        // stay the same: an art host that is briefly broken is not
+        // an art host with no art.
+        Some(code) if code < 500 && !matches!(code, 408 | 425 | 429) => ArtMiss::NoImage,
+        _ => ArtMiss::Transient,
+    })?;
     let mut bytes = Vec::new();
     use std::io::Read;
     // cap + 1, and REFUSE anything that fills past the cap: a bare
@@ -1915,7 +1908,8 @@ pub fn fetch_image_res(url: &str) -> Result<Vec<u8>, ArtMiss> {
     const CAP: u64 = 4 * 1024 * 1024;
     // A read that dies mid-body is a connection that dropped, not an
     // answer about the image.
-    resp.into_reader()
+    resp.into_body()
+        .into_reader()
         .take(CAP + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| ArtMiss::Transient)?;
@@ -2086,20 +2080,22 @@ pub fn wikidata_filmography(qid: &str) -> Option<Vec<FilmoEntry>> {
          }} LIMIT 400"
     );
     ratelimit::acquire(Provider::WikidataSparql);
-    let resp = crate::netfetch::shared_enrich_agent()
-        .get(&format!(
-            "https://query.wikidata.org/sparql?query={}",
-            percent_encode(&query)
-        ))
-        .set("User-Agent", WIKI_UA)
-        .set("Accept", "application/sparql-results+json")
-        // Longer than the metadata calls on purpose: SPARQL is a query
-        // engine, not a document fetch, and a busy service is slow before it
-        // is unavailable.
-        .timeout(std::time::Duration::from_secs(30))
-        .call()
-        .ok()?;
-    let body = resp.into_string().ok()?;
+    let body = crate::netfetch::call_body(
+        crate::netfetch::shared_enrich_agent()
+            .get(&format!(
+                "https://query.wikidata.org/sparql?query={}",
+                percent_encode(&query)
+            ))
+            .header("User-Agent", WIKI_UA)
+            .header("Accept", "application/sparql-results+json")
+            .config()
+            // Longer than the metadata calls on purpose: SPARQL is a
+            // query engine, not a document fetch, and a busy service is
+            // slow before it is unavailable.
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .build(),
+    )
+    .ok()?;
     serde_json::from_str(&body)
         .ok()
         .map(|v: serde_json::Value| parse_sparql_filmography(&v))

@@ -1,4 +1,5 @@
-//! Build rapidyenc (vendor/rapidyenc) as a static library - decode + CRC only.
+//! Build rapidyenc (`vendor/rapidyenc`, under this crate) as a static
+//! library - decode + CRC only.
 //!
 //! We drive the `cc` crate rather than cmake (cmake is not installed on the
 //! dev machine). This replicates upstream CMakeLists.txt: every kernel source
@@ -23,7 +24,16 @@
 
 use std::path::Path;
 
-const VENDOR: &str = "../../vendor/rapidyenc";
+/// The vendored rapidyenc snapshot, relative to this crate's root.
+///
+/// IT LIVES UNDER THE CRATE, and that is load-bearing rather than
+/// tidiness: `cargo package` only ever includes files below the package
+/// root, so while this was `../../vendor/rapidyenc` the published
+/// `.crate` carried a build script whose sources were not in it - it
+/// passed every gate in this repo and would have failed at
+/// `cargo install` on every machine (TODO 84 blocker 2, 20 Sep 2026).
+/// Moving it back out of the crate re-opens that hole silently.
+const VENDOR: &str = "vendor/rapidyenc";
 
 /// True when the RUST half of this build is being compiled with
 /// AddressSanitizer - which in practice means cargo-fuzz.

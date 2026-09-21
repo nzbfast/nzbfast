@@ -395,8 +395,11 @@ impl Extractor {
                 return Ok(false);
             }
         }
-        // Commit.
-        let size = inner.slots[slot].size;
+        // Commit. The frontier's total is the CORROBORATED size, or open
+        // until there is one (TODO 118.2 (b)) - never the raw claim, which
+        // the random-`size=` poster writes afresh on every article.
+        // `close_chase_bound` closes it when the slot's trust moves.
+        let size = inner.slots[slot].chase_total();
         let grp = inner.groups.get_mut(&key).unwrap();
         grp.chase = Some(ctl.clone());
         grp.slots.push(slot);
@@ -492,7 +495,7 @@ impl Extractor {
         ctl.bases.lock_ok().insert(vol_index, base);
         {
             let mut st = ctl.shared.lock_ok();
-            st.vols.insert(vol_index, ChaseVol { buf, size, slot });
+            st.vols.insert(vol_index, ChaseVol { buf, slot });
         }
         ctl.cv.notify_all();
         if fresh {
@@ -815,12 +818,21 @@ impl Extractor {
                     .lock_ok()
                     .iter()
                     .map(|(index, &at)| {
-                        let total = st.vols.get(index).map_or(0, |v| v.size);
+                        // An open total (TODO 118.2 (b)) clamps a
+                        // whole-volume marker to what has arrived. A
+                        // progress figure, not a bound: the standing rule
+                        // against a high-water-mark TOTAL is about what
+                        // the decode may be told the volume is, and this
+                        // tells nobody that.
+                        let total = st.vols.get(index).map_or(0, |v| {
+                            let t = v.buf.total();
+                            if t == OPEN_TOTAL { v.buf.frontier() } else { t }
+                        });
                         at.min(total)
                     })
-                    .sum::<u64>()
+                    .fold(0u64, u64::saturating_add)
             })
-            .sum();
+            .fold(0u64, u64::saturating_add);
         own + child.map_or(0, |c| c.chase_watermark_bytes())
     }
     /// Report a TERMINAL article verdict for `slot`: that slot's bytes
@@ -942,6 +954,14 @@ impl Extractor {
                         return;
                     }
                     ex.park_progress();
+                    // TODO 13 stage 2, and deliberately beside the park
+                    // rather than inside it: both are "the engine
+                    // moved, release what it has read past", but the
+                    // park's is conditional on something being parked
+                    // and this one must run when nothing is - the
+                    // residual it relieves lives UNDER the cap, where
+                    // the park by construction never engages.
+                    ex.chase_progress_pass();
                     ex.run_stalled_page_pass();
                 }
             });
@@ -1029,26 +1049,10 @@ impl Extractor {
         if !inner.rar_trim_on {
             return Ok(());
         }
-        // Every volume, not just the one whose span breached the budget:
-        // arrivals typically run on a LATER volume than the one the
-        // engine is decoding, so the bytes worth releasing belong to a
-        // different slot entirely.
-        // In volume order (the map is ordered by index): the pace gate
-        // below walks the set's contiguous frontier.
-        let volumes: Vec<(Arc<FrontierBuffer>, usize, u64)> = {
-            let st = ctl.shared.lock_ok();
-            let low = ctl.low_water.lock_ok();
-            st.vols
-                .iter()
-                .map(|(index, vol)| {
-                    (
-                        vol.buf.clone(),
-                        vol.slot,
-                        low.get(index).copied().unwrap_or(0),
-                    )
-                })
-                .collect()
-        };
+        // Every volume, not just the one whose span breached the
+        // budget, and in volume order - the pace gate below walks the
+        // set's contiguous frontier. See `chase_volumes`.
+        let volumes = Self::chase_volumes(ctl);
         // Drop or spill, decided ONCE per pass (measured 21 Aug 2026,
         // research/MEASURED-HOLDS-LADDER-2026-08-21.md: a set 2-5x over
         // the cap on a 110 MB/s line spilled 16 of 19 volumes, and that
@@ -1106,7 +1110,27 @@ impl Extractor {
             && self.depth == 0
             && !inner.lost_articles.load(Ordering::Relaxed)
             && !(inner.loss_doubt_on && inner.loss_doubt.raised());
-        let set_total = || volumes.iter().map(|(b, _, _)| b.total()).sum();
+        // The set's size as PLANNED, not as bounded: a volume whose
+        // frontier is still open (TODO 118.2 (b)) counts at its declared
+        // `size` here, which is what this heuristic always read. The
+        // download fetches every volume's head early, so on an honest
+        // post most of the set is registered open at any moment and a
+        // `u64::MAX` per open volume would read every set as too big to
+        // drop - every trim would spill, which is the disk pass the
+        // drop-behind exists to avoid. The declaration decides only
+        // drop-versus-spill; nothing here tells the decode where a
+        // volume ends. Saturating so a declaration cannot overflow it.
+        let set_total = || {
+            volumes.iter().fold(0u64, |a, (b, slot, _)| {
+                let t = b.total();
+                let planned = if t == OPEN_TOTAL {
+                    inner.slots[*slot].size
+                } else {
+                    t
+                };
+                a.saturating_add(planned)
+            })
+        };
         let drop = drop_ok
             && healthy
             && (parked
@@ -1116,30 +1140,274 @@ impl Extractor {
         // reports what the trim RELEASED and never which condition
         // decided it, and the fixes differ (see `chasestat::TrimVeto`).
         // The whole classification sits behind the instrument's own gate
-        // and re-asks the two predicates rather than hoisting them out
-        // of the expression above, so the shipped decision keeps its
-        // exact short-circuit order and an instrument-off build computes
+        // and re-asks the predicates rather than hoisting them out of
+        // the expression above, so the shipped decision keeps its exact
+        // short-circuit order and an instrument-off build computes
         // nothing extra at all. Only drop-eligible passes are counted -
         // a `drop_ok=false` pass is a spill by the caller's choice, not
         // a verdict.
         if drop_ok && super::chasestat::on() {
-            use super::chasestat::TrimVeto;
-            let veto = if drop {
-                TrimVeto::None
-            } else if !healthy {
-                TrimVeto::Loss
-            } else if !Self::rar_engine_keeping_pace(&volumes) {
-                TrimVeto::Pace
-            } else {
-                TrimVeto::Size
-            };
+            // The `healthy` conjunction above is FOUR conditions and
+            // only one of them is a loss verdict, so `!healthy` cannot
+            // be reported as one: until 20 Sep 2026 it was, and every
+            // nested leg of the holds round read `1 vetoed by loss` on a
+            // clean job (`TrimVeto`'s own note). The arms are re-asked
+            // in the shipped short-circuit order, so each names the
+            // FIRST condition that actually said no.
+            let veto = Self::trim_veto_for(
+                drop,
+                inner.rar_drop_on,
+                self.depth != 0,
+                inner.lost_articles.load(Ordering::Relaxed)
+                    || (inner.loss_doubt_on && inner.loss_doubt.raised()),
+                || Self::rar_engine_keeping_pace(&volumes),
+            );
             super::chasestat::trim_pass(veto, parked);
+            // And what the ENGINE had consumed when this pass ran, which
+            // is the quantity that separates "trimmed nothing because
+            // there was no watermark" from "trimmed nothing because the
+            // watermark was under the release bar". Clamped per volume
+            // the way `chase_watermark_bytes` clamps it: a wholly
+            // consumed volume's `low_water` cell is `u64::MAX`.
+            super::chasestat::trim_watermark(
+                volumes.iter().map(|(b, _, wm)| (*wm).min(b.total())).sum(),
+            );
         }
+        let floor = (inner.budget.cap() / 2) as u64;
         for (buf, slot, watermark) in volumes {
-            self.rar_trim_volume(inner, slot, &buf, watermark, drop)?;
+            self.rar_trim_volume(inner, slot, &buf, watermark, drop, floor)?;
         }
         Ok(())
     }
+
+    /// Every live volume of a chase, with the slot it routes through
+    /// and the engine's watermark for it, in volume order (the map is
+    /// ordered by index). Both trim call families walk this: arrivals
+    /// typically run on a LATER volume than the one the engine is
+    /// decoding, so the bytes worth releasing belong to a different
+    /// slot from the one that triggered the pass.
+    fn chase_volumes(ctl: &Arc<ChaseCtl>) -> Vec<(Arc<FrontierBuffer>, usize, u64)> {
+        let st = ctl.shared.lock_ok();
+        let low = ctl.low_water.lock_ok();
+        st.vols
+            .iter()
+            .map(|(index, vol)| {
+                (
+                    vol.buf.clone(),
+                    vol.slot,
+                    low.get(index).copied().unwrap_or(0),
+                )
+            })
+            .collect()
+    }
+
+    /// THE THIRD TRIM CALL SITE (TODO 13 stage 2): release a nested
+    /// chase's consumed prefix as the engine's read frontier passes it,
+    /// whether or not anything is near the budget.
+    ///
+    /// Until this existed, `rar_trim_set` had exactly two callers that
+    /// can fire on a healthy job - `chase_span` on `budget.over()` and
+    /// `park_reeval` at three quarters of the cap - and BOTH are
+    /// pressure. A set that fits under the holds cap reaches neither,
+    /// so it holds its entire input for the whole run: measured 20 Sep
+    /// 2026 at `holds peak 589 MB` against a 589,182,122 B input with
+    /// the trim running ZERO passes, reproduced three times across two
+    /// fixtures (`research/NESTED-CHASE-HOLDS-2026-09-20.md`). Nothing
+    /// declined; nothing was asked. This asks.
+    ///
+    /// **The watermark is the engine's READ frontier, not decode
+    /// progress**, and that is not a detail: the `mark` closure in
+    /// `chase_worker` publishes `rars`'s own promise that nothing at or
+    /// below it will be read again, which is the same quantity the 7z
+    /// trim keys on and for the same reason - an MT-LZMA2 prefetcher
+    /// runs tens of MB ahead of decode output, so a trim keyed to
+    /// decode position takes bytes the prefetcher still wants. A SEEK
+    /// REPLACES that watermark rather than raising it, which is what
+    /// makes an unarmed open phase safe with no phase detection.
+    ///
+    /// **Depth > 0 only, and it is a policy gate rather than a safety
+    /// one.** At depth 0 the pressure trim can DROP a consumed prefix
+    /// outright, at no disk cost, because a top-level slot is an NZB
+    /// file the caller can re-fetch; running this there would convert
+    /// free drops into spilled writes, which is strictly worse than
+    /// what ships. Stage 2's subject is the nested residual and the
+    /// ladder below prices that one thing, so the top level is left
+    /// exactly as it was. The drop arm is depth-gated the other way in
+    /// `rar_trim_set` for a reason that IS safety; these are different
+    /// gates pointing opposite ways and neither implies the other.
+    ///
+    /// **It never drops and never forfeits.** `drop_ok` is false - at
+    /// depth > 0 `rar_trim_set`'s own gate refuses a drop anyway, so
+    /// this is belt-and-braces there and states the intent where a
+    /// later lane might widen the depth gate. And the rung after a
+    /// PRESSURE trim is a forfeit, which is the whole of TODO 251's
+    /// warning; there is no rung after this one, because nothing was
+    /// wrong when it fired.
+    ///
+    /// **The price, and why this ships OFF.** At depth > 0 a release is
+    /// a SPILL into the inner volume's own archive file, so trimming
+    /// eagerly converts RAM into device writes on a job that today
+    /// one-passes at about 1.0x of payload. Measured over a margin
+    /// ladder (section 6 of the stage 1 note): the disk column moves
+    /// **one byte per byte released**, exactly, at every rung; the RAM
+    /// it buys back is much less, because the peak lands before most
+    /// of the trimming does; and the bottom rung costs 1.50x of
+    /// payload at 0.67 GB resident, which is worse on BOTH axes than
+    /// demoting the level to disk (1.47x at 0.40 GB). Between the ends
+    /// the line is straight, so there is no rung to ship at. The
+    /// switch and the ladder are the deliverable - see
+    /// `chase_progress_trim_env_on`.
+    ///
+    /// **Called from the PAGER, and the obvious site is wrong.** The
+    /// first build of this put the call in `chase_span`, on the
+    /// arriving span, reasoning that retention only GROWS on an
+    /// arrival. That is true and it is not the binding constraint: on
+    /// the stage 1 fixture over unthrottled loopback the whole 589 MB
+    /// arrives in about two seconds and the engine then decodes for
+    /// thirty-nine more, so by the time the watermark has moved far
+    /// enough to release anything there are no spans left to trigger
+    /// on. Measured, on the rig, before this was rewritten: **477
+    /// passes, 0 bytes released** on the one-volume fixture and 357
+    /// passes, 0 bytes on the eighteen-volume one. The trim has to be
+    /// pumped by the thing it reads - ENGINE PROGRESS - and the
+    /// mechanism for that already exists, because the holds park has
+    /// exactly the same shape: the `mark` closure wakes the detached
+    /// pager, and `park_progress` re-reads the holds from there. This
+    /// rides the same wake ([`Extractor::chase_progress_pass`]).
+    ///
+    /// It cannot be called from `mark` itself: that closure runs on the
+    /// chase worker and must never take the extractor lock while a
+    /// blocking volume read could be holding a buffer.
+    pub(super) fn rar_trim_set_on_progress(
+        &self,
+        inner: &mut Inner,
+        ctl: &Arc<ChaseCtl>,
+    ) -> io::Result<()> {
+        if !inner.rar_trim_on || !inner.chase_progress_trim_on || self.depth == 0 {
+            return Ok(());
+        }
+        let margin = inner.chase_progress_margin;
+        let volumes = Self::chase_volumes(ctl);
+        // The whole SET's resident bytes against the margin, not one
+        // volume's: the margin is a working set, and a set split into
+        // eighteen volumes holds the same total as the same bytes in
+        // one (measured - granularity does not change the retention).
+        let retained: u64 = volumes.iter().map(|(b, _, _)| b.stored() as u64).sum();
+        if retained <= margin {
+            return Ok(());
+        }
+        // Half the margin, the same hysteresis argument the cap/2
+        // spacing makes one scale up: two passes cannot be closer
+        // together than that many arrived bytes, so the drain's memmove
+        // stays constant per arriving byte. A volume the engine is
+        // wholly past is released regardless (`rar_trim_min_release`).
+        let floor = (margin / 2).max(1);
+        super::chasestat::progress_pass();
+        for (buf, slot, watermark) in volumes {
+            self.rar_trim_volume(inner, slot, &buf, watermark, false, floor)?;
+        }
+        Ok(())
+    }
+
+    /// The pager's half of the progress trim: run
+    /// [`Self::rar_trim_set_on_progress`] over every live chase in this
+    /// chain, then write the spills it planned.
+    ///
+    /// Called from the pager thread beside [`Self::park_progress`], on
+    /// the ROOT, and walks DOWN - so it reaches the child levels where
+    /// a nested chase actually lives. One lock at a time and parent
+    /// before child, the direction `run_stalled_page_pass` beside it
+    /// already takes.
+    ///
+    /// A no-op at every level with no chase, and a no-op at depth 0 by
+    /// the gate inside, so a job with no nesting pays one lock and one
+    /// map walk per wake - and the wake itself is spaced by
+    /// the wake spacing in `chase_worker` rather than fired per engine read.
+    pub(super) fn chase_progress_pass(&self) {
+        let (chases, child) = {
+            let inner = self.inner.lock_ok();
+            (
+                inner
+                    .groups
+                    .values()
+                    .filter(|g| !g.fallback)
+                    .filter_map(|g| g.chase.clone())
+                    .collect::<Vec<_>>(),
+                inner.child.clone(),
+            )
+        };
+        if !chases.is_empty() {
+            // One trim per CHASE. Identity by pointer, as
+            // `relieve_chase_for_parent` does it and for the same
+            // reason: a `ChaseCtl` has no equality worth the name, and
+            // a derived one would compare two live chases' contents.
+            let mut done: Vec<Arc<ChaseCtl>> = Vec::new();
+            {
+                let mut guard = self.inner.lock_ok();
+                let inner = &mut *guard;
+                for ctl in chases {
+                    if done.iter().any(|c| Arc::ptr_eq(c, &ctl)) {
+                        continue;
+                    }
+                    // An error here is a spill write failing, which the
+                    // owning slot sees again on its next span; the
+                    // relief either way is whatever released first.
+                    let _ = self.rar_trim_set_on_progress(inner, &ctl);
+                    done.push(ctl);
+                }
+            }
+            // Planned under the lock, written off it - the same
+            // contract `park_progress` honours one line above the call
+            // to this.
+            let _ = self.flush_pending_spills();
+        }
+        if let Some(c) = child {
+            c.chase_progress_pass();
+        }
+    }
+    /// Which gate in [`Self::rar_trim_set`] turned a drop-eligible pass
+    /// into a spill, for the bench instrument only.
+    ///
+    /// A pure function over the shipped decision's own conditions, in
+    /// the shipped short-circuit order, so every arm names the FIRST
+    /// condition that said no. It is a function rather than a chain at
+    /// the site because the arms are the one part of that block a test
+    /// can reach: the instrument is off in a unit-test build by
+    /// construction (`chasestat::off_by_default_and_free`), so the
+    /// counters it feeds move for nothing there and the classification
+    /// is otherwise unobservable.
+    ///
+    /// `keeping_pace` stays a closure so an early arm never pays for the
+    /// set-wide walk behind it - the reason the site re-asks these
+    /// predicates rather than hoisting them out of `healthy`.
+    ///
+    /// The precedence is the conjunction's and not a ranking: a nested
+    /// chase that ALSO has a lost article reads `Nested`, because that
+    /// is the gate the shipped expression stopped at and it is the one
+    /// nothing about the job can move.
+    fn trim_veto_for(
+        dropped: bool,
+        drop_on: bool,
+        nested: bool,
+        lost: bool,
+        keeping_pace: impl FnOnce() -> bool,
+    ) -> super::chasestat::TrimVeto {
+        use super::chasestat::TrimVeto;
+        if dropped {
+            TrimVeto::None
+        } else if !drop_on {
+            TrimVeto::Off
+        } else if nested {
+            TrimVeto::Nested
+        } else if lost {
+            TrimVeto::Loss
+        } else if !keeping_pace() {
+            TrimVeto::Pace
+        } else {
+            TrimVeto::Size
+        }
+    }
+
     /// Fraction of the set's arrived bytes the engine has consumed above
     /// which a trim drops rather than spills. See `rar_trim_set`.
     const RAR_DROP_PACE: f64 = 0.8;
@@ -1463,17 +1731,24 @@ impl Extractor {
         let _ = self.flush_pending_spills();
     }
 
-    /// Half the cap: bounds the drain's memmove to a constant amount of
-    /// work per arriving byte, since two trims cannot be closer together
-    /// than that many bytes of arrival. A volume the engine is wholly
-    /// past is released regardless of size - it is finished with, and
-    /// holding it buys nothing.
-    fn rar_trim_min_release(inner: &Inner, buf: &FrontierBuffer, watermark: u64) -> u64 {
-        if watermark >= buf.total() {
-            1
-        } else {
-            (inner.budget.cap() / 2) as u64
-        }
+    /// The spacing that bounds the drain's memmove to a constant amount
+    /// of work per arriving byte, since two trims cannot be closer
+    /// together than that many bytes of arrival. A volume the engine is
+    /// wholly past is released regardless of size - it is finished
+    /// with, and holding it buys nothing.
+    ///
+    /// `floor` is the caller's spacing, because the two call families
+    /// are spaced against different quantities. A PRESSURE trim uses
+    /// half the holds cap: it fires when the budget is over, so the cap
+    /// is the scale it is working at. A PROGRESS trim
+    /// ([`Self::rar_trim_set_on_progress`]) uses half its MARGIN, and
+    /// must: at half the cap it would release nothing at all on the
+    /// shape stage 1 measured - one 589 MB inner volume under a 7.73 GB
+    /// cap can never offer 3.86 GB of consumed prefix, so the spacing
+    /// alone would make an eager trim a no-op on the exact worst case
+    /// TODO 94 E names as the one it was built for.
+    fn rar_trim_min_release(floor: u64, buf: &FrontierBuffer, watermark: u64) -> u64 {
+        if watermark >= buf.total() { 1 } else { floor }
     }
     /// May the trim drop a slot's prefix even though the verifier has
     /// not vouched for it, because NO PAR2 SET EVER WILL?
@@ -1542,6 +1817,7 @@ impl Extractor {
         buf: &Arc<FrontierBuffer>,
         watermark: u64,
         drop: bool,
+        min_floor: u64,
     ) -> io::Result<()> {
         if watermark == 0 {
             return Ok(());
@@ -1553,7 +1829,7 @@ impl Extractor {
             Some(ch) if Arc::ptr_eq(&ch.buf, buf) => {}
             _ => return Ok(()),
         }
-        let min_release = Self::rar_trim_min_release(inner, buf, watermark);
+        let min_release = Self::rar_trim_min_release(min_floor, buf, watermark);
         // A conflicted buffer declines a trim, so a prefix that DOES
         // release comes off an unconflicted set: dropping is safe on
         // this volume whenever the pass said so - AND the PAR2 verifier
@@ -1983,16 +2259,54 @@ impl Extractor {
         // relaxed load when nothing is parked; the upgrade and wake are
         // atomics and at most a spawn, which is what this thread may do.
         let park_root = me.upgrade().map(|ex| ex.park_root());
+        // The PROGRESS trim's wake, and whether this chase has one at
+        // all (TODO 13 stage 2). Read ONCE here rather than per mark:
+        // the gates are latched before any span and the depth of an
+        // extractor never changes, so re-reading them tens of thousands
+        // of times down a decode would buy nothing. `wake_step` is the
+        // same spacing the trim's own `min_release` uses - there is no
+        // point waking the pager before enough has been consumed for a
+        // release to be possible.
+        let (progress_pump, wake_step) = me
+            .upgrade()
+            .map(|ex| {
+                let inner = ex.inner.lock_ok();
+                (
+                    ex.depth > 0 && inner.rar_trim_on && inner.chase_progress_trim_on,
+                    (inner.chase_progress_margin / 2).max(1),
+                )
+            })
+            .unwrap_or((false, 1));
         let mark = |index: usize, offset: u64| {
             let base = ctl.bases.lock_ok().get(&index).copied().unwrap_or(0);
             let offset = file_watermark(base, offset);
-            {
+            let advanced = {
                 let mut low = ctl.low_water.lock_ok();
                 let at = low.entry(index).or_insert(0);
+                let was = *at;
                 *at = (*at).max(offset);
-            }
+                at.saturating_sub(was)
+            };
+            // A whole-volume mark (`u64::MAX`) is not a summable
+            // advance and is also the one mark that always makes a
+            // release possible - a volume the engine is wholly past is
+            // released whatever the spacing says
+            // (`rar_trim_min_release`). So it wakes unconditionally and
+            // everything else is spaced.
+            let progress_wake = progress_pump
+                && (offset == u64::MAX || {
+                    let now =
+                        ctl.progress_consumed.fetch_add(advanced, Ordering::Relaxed) + advanced;
+                    if now.saturating_sub(ctl.progress_wake_at.load(Ordering::Relaxed)) >= wake_step
+                    {
+                        ctl.progress_wake_at.store(now, Ordering::Relaxed);
+                        true
+                    } else {
+                        false
+                    }
+                });
             if let Some(root) = park_root.as_ref().and_then(|w| w.upgrade())
-                && root.park_live.load(Ordering::Relaxed)
+                && (progress_wake || root.park_live.load(Ordering::Relaxed))
             {
                 root.wake_pager();
             }
@@ -2088,9 +2402,27 @@ impl Extractor {
                     return Err(io::Error::other("chase aborted").into());
                 }
                 if let Some(vol) = st.vols.get(&index) {
-                    break (vol.buf.clone(), vol.size);
-                }
-                if st.no_more {
+                    let total = vol.buf.total();
+                    // TODO 118.2 (b): a RAR4 volume may carry no END
+                    // block - its end IS the volume's length, which the
+                    // `rar15_40` walk takes from `expected_len` - so the
+                    // v4 driver waits for the bound to close before it
+                    // parses. RAR5 stops at its END header and parses
+                    // open. A bound that never closes (a contested claim
+                    // with no exact witness) is a volume with no end;
+                    // the finish that sets `no_more` is where that is
+                    // known, and the driver fails there rather than park
+                    // into the join.
+                    if !(ctl.v4 && total == OPEN_TOTAL) {
+                        break (vol.buf.clone(), total);
+                    }
+                    if st.no_more {
+                        return Err(io::Error::other(
+                            "rar4 volume length never corroborated (TODO 118.2)",
+                        )
+                        .into());
+                    }
+                } else if st.no_more {
                     return Ok(None);
                 }
                 let t = super::chasestat::mark();
@@ -2099,7 +2431,15 @@ impl Extractor {
             }
         };
         let base = ctl.bases.lock_ok().get(&index).copied().unwrap_or(0);
-        let len = size.saturating_sub(base);
+        // rars narrows `expected_len` to a `usize` and reads no further
+        // than it: an open total hands it the widest bound the host can
+        // hold, and the frontier's own reads are what actually stop the
+        // walk - at a hole, or at the total once it closes.
+        let len = if size == OPEN_TOTAL {
+            usize::MAX as u64
+        } else {
+            size.saturating_sub(base)
+        };
         if base == 0 {
             return Ok(Some((buf, len)));
         }
@@ -2299,12 +2639,31 @@ impl Extractor {
     /// already live in the child chain.
     pub(super) fn chase_finish(&self) -> io::Result<()> {
         let chases: Vec<(String, Arc<ChaseCtl>)> = {
-            let inner = self.inner.lock_ok();
-            inner
+            let mut g = self.inner.lock_ok();
+            let inner = &mut *g;
+            let chases: Vec<(String, Arc<ChaseCtl>)> = inner
                 .groups
                 .iter()
                 .filter_map(|(k, g)| g.chase.clone().map(|c| (k.clone(), c)))
-                .collect()
+                .collect();
+            // TODO 118.2 (b), the chased twin of `size_settle`: a volume
+            // no witness ever vouched for closes to what its articles
+            // CLAIMED (`Claimed` or `Agreed`), so a lone-article volume
+            // keeps the EOF rule it always had. A contested claim stays
+            // open - a known-false bound is worse than none - and the
+            // decode judges it below.
+            for (_, ctl) in &chases {
+                let st = ctl.shared.lock_ok();
+                for vol in st.vols.values() {
+                    let s = &mut inner.slots[vol.slot];
+                    if matches!(s.size_trust, SizeTrust::Claimed | SizeTrust::Agreed)
+                        && vol.buf.is_open()
+                    {
+                        vol.buf.close_total(s.size);
+                    }
+                }
+            }
+            chases
         };
         for (key, ctl) in chases {
             {
@@ -2312,7 +2671,17 @@ impl Extractor {
                 st.no_more = true;
                 for vol in st.vols.values() {
                     if !vol.buf.is_complete() {
-                        vol.buf.abort("bytes never arrived");
+                        if vol.buf.is_open() {
+                            // No trusted total to be short of: seal it
+                            // instead. Every retained byte still serves,
+                            // a read past the frontier errors, and a
+                            // decode that reached its END headers on the
+                            // bytes alone finishes clean (the mapper's
+                            // `Contested` slots settle the same way).
+                            vol.buf.seal();
+                        } else {
+                            vol.buf.abort("bytes never arrived");
+                        }
                     }
                     // §94 B: settle has run, so no repair can rewrite
                     // these bytes any more - and a cell parked at a
@@ -2502,13 +2871,25 @@ pub(super) struct ChaseCtl {
     /// the `rar50` one. Fixed at attach; a slot of the other family never
     /// joins (mixed families are not a set).
     pub(super) v4: bool,
+    /// Bytes the engine has reported reading past, summed over the set
+    /// and monotone - the PROGRESS trim's wake clock (TODO 13 stage 2).
+    /// Accumulated in the `mark` closure, which is on the decode
+    /// thread and may take no lock it does not already hold, so this is
+    /// an atomic and the increment is O(1): a `u64::MAX` mark (a whole
+    /// volume) is not summable and wakes unconditionally instead.
+    pub(super) progress_consumed: AtomicU64,
+    /// The value of `progress_consumed` at the last pager wake. The
+    /// spacing between the two is what keeps a 39-second decode from
+    /// waking the pager on every one of its tens of thousands of
+    /// reads; see the wake spacing in `chase_worker`.
+    pub(super) progress_wake_at: AtomicU64,
 }
 
-/// One registered volume of a chased set.
+/// One registered volume of a chased set. Its size is the buffer's
+/// `total()`, read live: it can be open at registration and close later
+/// (TODO 118.2 (b)), so no copy of it is cached here.
 pub(super) struct ChaseVol {
     pub(super) buf: Arc<FrontierBuffer>,
-    /// Declared volume size (the level-N entry's unpacked size).
-    pub(super) size: u64,
     /// The slot holding this volume - the drop-behind trim spills into
     /// its archive file, and adjusts its budget charge.
     pub(super) slot: usize,
@@ -2537,6 +2918,8 @@ impl ChaseCtl {
             worker: Mutex::new(None),
             sink_slots: Mutex::new(Vec::new()),
             v4,
+            progress_consumed: AtomicU64::new(0),
+            progress_wake_at: AtomicU64::new(0),
         }
     }
 

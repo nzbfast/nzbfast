@@ -12,7 +12,7 @@
 //!
 //! The engine grew the channel on 12 Sep 2026
 //! (`nzbkit::par2repair::control`, whose module doc carries the whole
-//! design). This is the daemon's end of it: a [`ProgressSink`] that
+//! design). This is the daemon's end of it: a `ProgressSink` that
 //! publishes into a value the queue payload reads on every poll, plus
 //! the band decision the engine deliberately refuses to make.
 //!
@@ -71,6 +71,23 @@ const PHASE_NONE: u8 = 0;
 /// [`RepairProgress::route`] values - see [`band`].
 const ROUTE_DISK: u64 = 0;
 const ROUTE_MAPPED: u64 = 1;
+
+/// [`RepairProgress::arm`] values - see [`band`] and
+/// `par2repair::SolveArm`.
+///
+/// Three states for a two-variant announcement, because what [`band`]
+/// needs is not "which arm" but "is this sweep's solve SPLIT, and if so
+/// which half is reporting". A back-substitution that heard no inverse
+/// before it is the ordinary repair, and it must read exactly the band
+/// it always had.
+const ARM_NONE: u64 = 0;
+/// The Gauss-Jordan inverse is reporting: this sweep IS split, and this
+/// is its first half, which runs BEFORE the fold.
+const ARM_INVERSE: u64 = 1;
+/// The back-substitution is reporting AFTER an inverse in this sweep:
+/// still split, second half. A back-substitution with no inverse behind
+/// it leaves the state at [`ARM_NONE`].
+const ARM_SPLIT_BACKSUB: u64 = 2;
 
 /// One job's live repair progress, as both the sink the engine writes
 /// to and the value the queue payload reads.
@@ -148,6 +165,20 @@ pub struct RepairProgress {
     /// `route` - every disk call site there is - gets the table it
     /// always had.
     route: AtomicU64,
+    /// Which arm of the solve announced itself through
+    /// [`ProgressSink::solve_arm`] - [`ARM_NONE`], [`ARM_INVERSE`] or
+    /// [`ARM_SPLIT_BACKSUB`]. Read by [`band`] on the sink's own
+    /// thread, and not part of the bar, for the same reason `slab` and
+    /// `route` are not: it is the FRAME the `Solve` phase is placed in,
+    /// never a thing a poller draws.
+    ///
+    /// PER SWEEP, so [`ProgressSink::slab`] clears it: on a slabbed
+    /// unstructured repair the inverse is recomputed inside every
+    /// sweep, and a state left set from the previous one would put
+    /// sweep N's fold-opening publish above the base of the inverse
+    /// that is about to run - which a monotone bar swallows, the exact
+    /// defect this field exists to remove.
+    arm: AtomicU64,
     /// The current phase's own `(done, total)`, in ITS units - bytes for
     /// Verify, Fold and Write, fold units or matrix columns for Solve
     /// (see `par2repair::RepairPhase`). Published for a caller that
@@ -257,11 +288,49 @@ struct FoldHold {
 /// band is simply never reached on this route's OTHER phases, and the
 /// disk route's table - the one every pinned band-value test in this
 /// file was written against - is untouched.
+///
+/// # AND THE SOLVE IS TWO ARMS, NOT ONE
+///
+/// `Solve` is entered TWICE within one sweep on the unstructured route
+/// (`par2repair::SolveArm`): the Gauss-Jordan inverse before the fold,
+/// the back-substitution after it. Given one band between them the
+/// first walked it to the top and the monotone bar swallowed the
+/// second - the queue row read `95%` unchanged for 19.0 s of a 63.7 s
+/// repair, measured 18 Sep 2026 on the m = 10,000 gapped fixture
+/// (`research/REPAIR-ROW-ACCEPTANCE-2026-09-18.md`, TODO 352).
+///
+/// So when `arm` says this sweep is split, the inverse takes the FIRST
+/// HALF OF THE FOLD'S BAND and the fold keeps the second: within a
+/// sweep segment the cut goes `0.20 / 0.20 / 0.10` instead of
+/// `0.40 / 0.10`. Two things fall out of choosing that shape over any
+/// other:
+///
+/// - **The back-substitution keeps the band it always had**, to the
+///   per-mille, on both routes and at every slab count. Nothing below
+///   the fold moves, so `Write` and both routes' `Verify` are untouched
+///   and the pinned pre-slab table still reads 450 / 850 / 950 / 1000
+///   for a repair that announces no arm.
+/// - **The inverse is placed where it RUNS**, ahead of the fold rather
+///   than behind it. That half is not cosmetic: `new_controlled` builds
+///   the inverse before a block is read, so an inverse banded after the
+///   fold publishes above the whole feed and a monotone bar then
+///   discards every fold reading of an unstructured repair. The gapped
+///   fixture hid it - a gapped set's fold is trivial - and a dense
+///   repair with a real fold would not have.
+///
+/// The `0.20 / 0.10` split of what the two arms share between them is
+/// the measured proportion and is a LABELLING choice like the 45/40/10/5
+/// above, not a prediction: the same run spent 39.6 s in the inverse
+/// against 20.3 s in the back-substitution, which is the 2:1 this gives
+/// them. On that fixture it takes the worst plateau from 19.0 s to about
+/// two seconds - the width of one drawn percentage point - and no region
+/// of the bar is reserved for an arm that does not run.
 fn band(
     phase: nzbkit::par2repair::RepairPhase,
     slab: u32,
     of: u32,
     route: nzbkit::par2repair::RepairRoute,
+    arm: u64,
 ) -> (f64, f64) {
     use nzbkit::par2repair::RepairPhase as P;
     use nzbkit::par2repair::RepairRoute as R;
@@ -275,12 +344,28 @@ fn band(
     // mapped one, which is the same width shifted to make room for a
     // pre-fold `Verify` that this route does not have.
     let seg = 0.50 / of;
+    // Is this sweep's solve SPLIT, and is the inverse the half that is
+    // reporting? Both halves of the split state answer the first
+    // question yes: the fold of a sweep that computed an inverse sits
+    // in the upper half of its band whichever arm last announced
+    // itself, so a straggling fold publish cannot fall back into the
+    // inverse's region.
+    let split = arm != ARM_NONE;
+    let inverse = arm == ARM_INVERSE;
+    // The fold's own base and width inside the segment. Unsplit it is
+    // the whole 0.40; split, the inverse has the first half of it.
+    let (fold_at, fold_span) = if split {
+        (0.20 / of, 0.20 / of)
+    } else {
+        (0.0, 0.40 / of)
+    };
     match route {
         R::Disk => {
             let at = 0.45 + seg * i;
             match phase {
                 P::Verify => (0.0, 0.45),
-                P::Fold => (at, 0.40 / of),
+                P::Fold => (at + fold_at, fold_span),
+                P::Solve if inverse => (at, 0.20 / of),
                 P::Solve => (at + 0.40 / of, 0.10 / of),
                 P::Write => (0.95, 0.05),
             }
@@ -293,7 +378,8 @@ fn band(
                 // Neither re-enters nor slabs, so unlike the other three
                 // this reading does not depend on `slab`/`of` at all.
                 P::Verify => (0.55, 0.45),
-                P::Fold => (at, 0.40 / of),
+                P::Fold => (at + fold_at, fold_span),
+                P::Solve if inverse => (at, 0.20 / of),
                 P::Solve => (at + 0.40 / of, 0.10 / of),
                 P::Write => (0.50, 0.05),
             }
@@ -449,6 +535,10 @@ impl RepairProgress {
         // then falls back to the disk driver must not leave the NEXT
         // engine call reading its `Verify` off the mapped route's band.
         self.route.store(ROUTE_DISK, Ordering::Relaxed);
+        // Back to the unsplit solve: the next engine call may take a
+        // structured arm that computes no inverse at all, and it must
+        // not inherit this one's split band.
+        self.arm.store(ARM_NONE, Ordering::Relaxed);
         // LAST, and ONE store: the bar going back to `PHASE_NONE` and
         // the percentage going back to nought are the same write, so
         // there is no instant at which a poller can read a phase with a
@@ -525,8 +615,8 @@ impl RepairProgress {
 
 impl nzbkit::par2repair::ProgressSink for RepairProgress {
     /// Which route is reporting. One relaxed store on the driver thread,
-    /// once, before its first phase; the weighing is [`band`]'s. See
-    /// [`RepairProgress::clear`] for why the default reading is `Disk`.
+    /// once, before its first phase; the weighing is `band`'s. See
+    /// `RepairProgress::clear` for why the default reading is `Disk`.
     fn route(&self, route: nzbkit::par2repair::RepairRoute) {
         let r = match route {
             nzbkit::par2repair::RepairRoute::Disk => ROUTE_DISK,
@@ -536,10 +626,35 @@ impl nzbkit::par2repair::ProgressSink for RepairProgress {
     }
 
     /// Which sweep of the payload is starting. One relaxed store on the
-    /// driver thread, once per sweep; the weighing is [`band`]'s.
+    /// driver thread, once per sweep; the weighing is `band`'s.
     fn slab(&self, index: usize, of: usize) {
         let pair = ((index as u64) << 32) | (of as u64).max(1) & 0xFFFF_FFFF;
         self.slab.store(pair, Ordering::Relaxed);
+        // A NEW SWEEP IS A NEW SOLVE, so the arm goes back to unsplit
+        // here and this sweep's inverse announces itself again. See
+        // [`RepairProgress::arm`] for what a state carried across the
+        // boundary would swallow.
+        self.arm.store(ARM_NONE, Ordering::Relaxed);
+    }
+
+    /// Which arm of the solve is reporting. One relaxed store on the
+    /// driver thread, before that arm's first publish; the weighing is
+    /// `band`'s.
+    ///
+    /// The transition is where the three states come from: an inverse
+    /// says "split", and a back-substitution says "split" only if an
+    /// inverse announced itself in this sweep first. A route that
+    /// computes no inverse therefore leaves the state at `ARM_NONE`
+    /// and reads the band it always had, which is what keeps the fix
+    /// from trading one dead region for another.
+    fn solve_arm(&self, arm: nzbkit::par2repair::SolveArm) {
+        use nzbkit::par2repair::SolveArm as A;
+        let next = match arm {
+            A::Inverse => ARM_INVERSE,
+            A::BackSub if self.arm.load(Ordering::Relaxed) == ARM_INVERSE => ARM_SPLIT_BACKSUB,
+            A::BackSub => ARM_NONE,
+        };
+        self.arm.store(next, Ordering::Relaxed);
     }
 
     fn progress(&self, phase: nzbkit::par2repair::RepairPhase, done: u64, total: u64) {
@@ -553,7 +668,12 @@ impl nzbkit::par2repair::ProgressSink for RepairProgress {
             ROUTE_MAPPED => nzbkit::par2repair::RepairRoute::Mapped,
             _ => nzbkit::par2repair::RepairRoute::Disk,
         };
-        let (base, span) = band(phase, slab, of, route);
+        // The arm this sweep's solve is in, read once and on the same
+        // terms as the sweep above: published by the driver before the
+        // arm's first `progress` and not touched again until the next
+        // arm's.
+        let arm = self.arm.load(Ordering::Relaxed);
+        let (base, span) = band(phase, slab, of, route, arm);
         let frac = if total == 0 {
             0.0
         } else {
@@ -590,7 +710,7 @@ impl nzbkit::par2repair::ProgressSink for RepairProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nzbkit::par2repair::{ProgressSink, RepairPhase, RepairRoute};
+    use nzbkit::par2repair::{ProgressSink, RepairPhase, RepairRoute, SolveArm};
 
     #[test]
     fn nothing_is_reported_until_a_phase_arrives() {
@@ -779,10 +899,10 @@ mod tests {
                         // lie in the phase's own.
                         let disk = nzbkit::par2repair::RepairRoute::Disk;
                         let (base, span) = match ph {
-                            "verify" => band(RepairPhase::Verify, 0, 1, disk),
-                            "fold" => band(RepairPhase::Fold, 0, 1, disk),
-                            "solve" => band(RepairPhase::Solve, 0, 1, disk),
-                            "write" => band(RepairPhase::Write, 0, 1, disk),
+                            "verify" => band(RepairPhase::Verify, 0, 1, disk, ARM_NONE),
+                            "fold" => band(RepairPhase::Fold, 0, 1, disk, ARM_NONE),
+                            "solve" => band(RepairPhase::Solve, 0, 1, disk, ARM_NONE),
+                            "write" => band(RepairPhase::Write, 0, 1, disk, ARM_NONE),
                             other => panic!("unknown phase {other}"),
                         };
                         let (lo, hi) = ((base * 1000.0) as u64, ((base + span) * 1000.0) as u64);
@@ -1226,7 +1346,7 @@ mod tests {
                 (RepairPhase::Solve, 950.0),
                 (RepairPhase::Write, 1000.0),
             ] {
-                let (base, span) = band(phase, 0, of, disk);
+                let (base, span) = band(phase, 0, of, disk, ARM_NONE);
                 assert_eq!(
                     ((base + span) * 1000.0).round(),
                     top,
@@ -1404,6 +1524,170 @@ mod tests {
             Some(("fold", at)),
             "the label did not cross the sweep boundary on the tie"
         );
+    }
+
+    /// THE HEADLINE OF THE SOLVE SPLIT (TODO 352). The sequence an
+    /// unstructured repair actually makes - inverse, fold,
+    /// back-substitution - moves the bar through all three, and the
+    /// back-substitution is not swallowed by the arm ahead of it.
+    ///
+    /// Before this, both arms shared `[0.85, 0.95)`: the inverse walked
+    /// it to 950 and every one of the back-substitution's readings lost
+    /// the `fetch_max`, so the queue row read `95%` unchanged for
+    /// 19.0 s of a 63.7 s repair on the m = 10,000 gapped fixture
+    /// (`research/REPAIR-ROW-ACCEPTANCE-2026-09-18.md`).
+    ///
+    /// Asserted as READINGS THAT MOVE rather than as figures, plus the
+    /// three landings, so the split's proportions stay a labelling
+    /// choice a later round may re-measure without rewriting the test.
+    #[test]
+    fn both_solve_arms_move_the_bar_and_the_second_is_not_swallowed() {
+        let p = RepairProgress::default();
+        let _run = p.enter();
+        let mut seen: Vec<(String, u64)> = Vec::new();
+        let mut note = |p: &RepairProgress| {
+            if let Some((ph, pm)) = p.bar() {
+                let now = (ph.to_string(), pm);
+                if seen.last() != Some(&now) {
+                    seen.push(now);
+                }
+            }
+        };
+        p.slab(0, 1);
+        p.progress(RepairPhase::Verify, 100, 100);
+        note(&p);
+        // The fold is SIZED before the inverse announces itself, which
+        // is the drivers' real order (`par2repair.rs`: `begin(Fold, ..)`
+        // then `Reconstructor::new_controlled`), so the split has to
+        // survive one fold reading arriving unsplit.
+        p.progress(RepairPhase::Fold, 0, 1000);
+        note(&p);
+
+        // ARM 1: the inverse, per matrix column, BEFORE a byte is
+        // folded.
+        p.solve_arm(SolveArm::Inverse);
+        for done in [0u64, 250, 500, 750, 1000] {
+            p.progress(RepairPhase::Solve, done, 1000);
+            note(&p);
+        }
+        let after_inverse = p.permille();
+
+        // THE FOLD, between the two arms.
+        for done in [250u64, 500, 750, 1000] {
+            p.progress(RepairPhase::Fold, done, 1000);
+            note(&p);
+        }
+        let after_fold = p.permille();
+        assert!(
+            after_fold > after_inverse,
+            "the fold did not move the bar past the inverse ({after_fold} vs              {after_inverse}) - an inverse banded ABOVE the feed swallows the whole              fold of an unstructured repair"
+        );
+
+        // ARM 2: the back-substitution, in fold units, after the feed.
+        p.solve_arm(SolveArm::BackSub);
+        let mut moves = 0;
+        for done in [0u64, 40, 80, 120, 160] {
+            p.progress(RepairPhase::Solve, done, 160);
+            if p.permille() > after_fold {
+                moves += 1;
+            }
+            note(&p);
+        }
+        assert!(
+            moves >= 3,
+            "the back-substitution moved the bar {moves} time(s) past where the fold              left it - this is the arm that used to be swallowed whole"
+        );
+        assert_eq!(
+            p.permille(),
+            950,
+            "the back-substitution still lands exactly where `Solve` always landed"
+        );
+        p.progress(RepairPhase::Write, 100, 100);
+        note(&p);
+        assert_eq!(p.permille(), 1000);
+
+        // MONOTONE THROUGHOUT. Not STRICTLY: a band boundary is a tie
+        // by construction - the phase below lands on the per-mille the
+        // phase above opens at, so `(fold, 850)` is followed by
+        // `(solve, 850)` and only the LABEL changes. What the freeze
+        // broke is a bar that stands still while the work goes on, and
+        // the stretches below are where that is asserted.
+        for w in seen.windows(2) {
+            assert!(w[1].1 >= w[0].1, "the bar went backwards: {seen:?}");
+        }
+        // A DRAWN PERCENTAGE FOR EVERY STRETCH. The dashboard draws
+        // `Math.round(pct)` and the phase word alone, so a stretch of
+        // the repair that publishes inside one whole percent is a
+        // stretch the row cannot show at all. Both arms and the fold
+        // must each cross several.
+        let drawn = |lo: u64, hi: u64| hi / 10 - lo / 10;
+        assert!(
+            drawn(450, after_inverse) >= 5
+                && drawn(after_inverse, after_fold) >= 5
+                && drawn(after_fold, 950) >= 5,
+            "one of the three stretches is too narrow to draw: 450 -> {after_inverse}              -> {after_fold} -> 950"
+        );
+    }
+
+    /// AND THE OTHER HALF OF IT: a solve that announces only the
+    /// back-substitution - every structured route, which computes no
+    /// inverse at all - reads exactly the band it always had.
+    ///
+    /// This is what keeps the fix from trading one dead region for
+    /// another. A split reserved unconditionally would hand the
+    /// inverse's share of the bar to an arm that never runs on the
+    /// common route, and the fold would then jump over it.
+    #[test]
+    fn a_solve_with_no_inverse_behind_it_keeps_the_band_it_always_had() {
+        let p = RepairProgress::default();
+        let _run = p.enter();
+        p.slab(0, 1);
+        p.solve_arm(SolveArm::BackSub);
+        p.progress(RepairPhase::Fold, 100, 100);
+        assert_eq!(p.permille(), 850, "the fold still tops out at 850");
+        p.progress(RepairPhase::Solve, 0, 160);
+        assert_eq!(p.permille(), 850, "and the solve still opens there");
+        p.progress(RepairPhase::Solve, 160, 160);
+        assert_eq!(p.permille(), 950);
+    }
+
+    /// THE ARM IS PER SWEEP. A slabbed unstructured repair recomputes
+    /// its inverse inside every sweep, so the state must go back to
+    /// unsplit at the sweep boundary: carried over, sweep 2's
+    /// fold-opening publish would sit at the TOP of the band its own
+    /// inverse is about to report from, and the monotone bar would
+    /// swallow that inverse exactly as it used to swallow the
+    /// back-substitution.
+    #[test]
+    fn a_new_sweep_starts_unsplit_so_its_own_inverse_is_not_swallowed() {
+        let p = RepairProgress::default();
+        let _run = p.enter();
+        let sweep = |i: usize| {
+            p.slab(i, 2);
+            p.progress(RepairPhase::Fold, 0, 100);
+            let opened = p.permille();
+            p.solve_arm(SolveArm::Inverse);
+            p.progress(RepairPhase::Solve, 0, 100);
+            let inverse_at = p.permille();
+            p.progress(RepairPhase::Solve, 100, 100);
+            let inverse_top = p.permille();
+            p.progress(RepairPhase::Fold, 100, 100);
+            p.solve_arm(SolveArm::BackSub);
+            p.progress(RepairPhase::Solve, 100, 100);
+            (opened, inverse_at, inverse_top)
+        };
+        for i in 0..2 {
+            let (opened, inverse_at, inverse_top) = sweep(i);
+            assert_eq!(
+                opened, inverse_at,
+                "sweep {i}'s inverse opened above the fold's own opening, so the readings                  below its top are swallowed"
+            );
+            assert!(
+                inverse_top > inverse_at,
+                "sweep {i}'s inverse did not move the bar at all"
+            );
+        }
+        assert_eq!(p.permille(), 950, "the last sweep still lands on 950");
     }
 
     /// A phase whose total was an estimate must not report over 100%.

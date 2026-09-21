@@ -231,7 +231,7 @@ impl Extractor {
     /// no span still to come, so act here: a blocker demotes now (the
     /// settle loop deliberately skips blocked mappers, reading them as
     /// already handled), a completed parse re-resolves the group.
-    fn split_after_resize(&self, inner: &mut Inner, head: usize) -> io::Result<()> {
+    pub(super) fn split_after_resize(&self, inner: &mut Inner, head: usize) -> io::Result<()> {
         let blocker = inner.slots[head]
             .mapper
             .as_ref()

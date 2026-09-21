@@ -773,7 +773,7 @@ impl ScaleKernel {
     }
 }
 
-/// The kernel [`scale`] would run here. Read by [`scale_dispatch`],
+/// The kernel [`scale`] would run here. Read by `scale_dispatch`,
 /// [`scale_available`] and by diagnostics; nothing else re-derives it.
 pub fn scale_kernel() -> ScaleKernel {
     #[cfg(target_arch = "aarch64")]

@@ -138,7 +138,7 @@ pub fn joint_armed() -> bool {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum JointDecline {
     /// The repair never reached the Forney solver at all - too few
-    /// blocks missing for [`super::backsub_gate`], recovery packets
+    /// blocks missing for `super::backsub_gate`, recovery packets
     /// lost so the exponents carry no structure to exploit, or a BUILD
     /// with no fused fold kernel (`gf16::multi_fold_width() == 0`: the
     /// armv7 tarball), where that gate answers no at every depth and
@@ -2155,8 +2155,11 @@ mod tests {
     /// power of two is where `n` doubles while `nseg` has barely
     /// grown. 1,025 selects the PEELED kernel, 1,030 the short-tail
     /// one, 1,100 the whole/demand one, so all three run sub-striped.
-    /// 1,000 words is a short last stripe that is PADDED (to 496) and
-    /// then sub-striped (256 + 240), the two mechanisms composed.
+    /// 520 words at 1,025 is a short last stripe that is PADDED and then
+    /// sub-striped, the two mechanisms composed - and it is 3.9 s of
+    /// this test's 7.2 s (18-core arm64, debug, 18 Sep 2026), which is the
+    /// price of the only executed proof that they compose at all. The
+    /// 32- and 64-word cells are 0.35 s and 0.62 s each.
     ///
     /// The widths are asserted as well as the bytes, because a test
     /// that only compared bytes would pass on a build that quietly went
@@ -2237,6 +2240,28 @@ mod tests {
     ///
     /// Admission is asserted against [`kernel_on_this_box`], not a bare
     /// `Some(true)`: see that helper for the CI incident.
+    ///
+    /// # THE `words` AXIS HERE IS FREE, AND THE CELL COUNT IS NOT
+    ///
+    /// Measured 18 Sep 2026 by a round that took this test as one of the
+    /// one-process CI job's largest rows and came away without shrinking
+    /// it. Per cell, 18-core arm64 box, debug, the two solves only:
+    ///
+    ///          words 514   1,000   1,023   1,025   4,097
+    ///   m=64        0.24    0.28    0.29    0.24    0.25  s
+    ///   m=129       0.60    0.71    0.75    0.60    0.61  s
+    ///   m=130       0.61    0.73    0.75    0.60    0.62  s
+    ///   m=200       1.13    1.36    1.42    1.13    1.16  s
+    ///
+    /// **Eight times the payload is 3% of the time.** At these depths a
+    /// solve's cost is the per-`m` setup, so cutting 4,097 to 514 would
+    /// save nothing at all - the lever is CELLS, and each of the twenty
+    /// is a distinct (stage-1 kernel class, last-stripe remainder)
+    /// pair. 1,025 and 4,097 share a remainder of 1 and are the one
+    /// place that looks removable; they are not the same shape, because
+    /// 4,097 is the only cell anywhere in this module that runs EIGHT
+    /// full stripes ahead of a padded one, and dropping it would buy
+    /// 2.6 s of a 186 s crate. Ruled load-bearing rather than trimmed.
     #[test]
     fn a_short_last_stripe_is_padded_and_still_exact() {
         for m in [64, 129, 130, 200] {
@@ -2513,6 +2538,50 @@ mod tests {
     /// to the shipped solve. One cell per test is deliberate - see the
     /// wall-clock rule on `at_the_gate_stage_two_takes_the_factored_arm`
     /// before folding these back into a loop.
+    ///
+    /// # THESE FOUR CELLS ARE LOAD-BEARING AT THEIR COST (18 Sep 2026)
+    ///
+    /// They are four of the seven tests that make this crate the largest
+    /// single row of the one-process CI job on its slow runner class,
+    /// and a round was spent trying to shrink them. It could not be
+    /// done, and the reason is worth keeping so the next reader does not
+    /// re-derive it: **`m` is the production constant and `words` is not
+    /// a lever on EITHER side of the stage-1 gate.**
+    /// Measured on an 18-core arm64 box, debug, this helper's own two
+    /// solves, `base.solve` + `solve_joint`:
+    ///
+    ///   m      words     total   stage 1
+    ///   8192       2      8.6 s  refused
+    ///   8192       4      8.5 s  refused
+    ///   8192      15     10.4 s  refused   <- the shipped cell
+    ///   8192      16      1.4 s  admitted
+    ///   8192     513     27.5 s  admitted
+    ///   8192     520     27.5 s  admitted  <- the shipped cell
+    ///   8191      15     13.1 s  refused   <- the shipped cell
+    ///   8191      16      1.5 s  admitted  <- the shipped cell
+    ///
+    /// The REFUSED arm carries an ~8.5 s floor at this depth that the
+    /// width barely moves (2 -> 15 words is 8.6 -> 10.4 s), because
+    /// `base.solve` falls back with it and the fallback's cost at
+    /// m = 8,192 is per-`m` setup rather than per-word. So trimming 15
+    /// to 4 buys under 20% and spends the 15/16 MINIMAL PAIR - same
+    /// `m`, adjacent widths, opposite stage-1 arms - which is the whole
+    /// reason two of these cells differ by one word.
+    ///
+    /// The ADMITTED arm is strongly per-word (~0.05 s/word here), and
+    /// 513 is the floor rather than 520: past the gate the stripe cap is
+    /// 512 at every `m`, so 512 or under is a single stripe and cannot
+    /// be short, and 513 costs what 520 does. That CONFIRMS the "cheaper
+    /// widths were looked for and do not exist" on
+    /// `at_the_gate_stage_two_takes_the_factored_arm` on a box WITH the
+    /// fold kernel - by a different mechanism from the armv7 width table
+    /// there, which is why it is recorded separately rather than folded
+    /// into it.
+    ///
+    /// `prepare_impl` is NOT the cost and a shared fixture is not the
+    /// lever: 0.47 s + 0.20 s per `m`, about 1.3 s of duplication across
+    /// all four cells against their ~53 s. What would move these is
+    /// [`JOINT_FACTOR_MIN_M`] moving, and it is pinned to production.
     fn stage_split_cell(m: usize, want_factor: bool, words: usize, want_kernel: Option<bool>) {
         let k = ks(m);
         let base = ForneyPlan::prepare_impl(&k, 2, true, false).expect("distinct bases");

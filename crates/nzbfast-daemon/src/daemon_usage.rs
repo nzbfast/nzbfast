@@ -735,7 +735,7 @@ impl BlockStanding {
 
 impl Daemon {
     /// One server's standing, block or no block. `total` of zero is the
-    /// no-block answer and reads as band "ok" (see [`BlockStanding::band`]),
+    /// no-block answer and reads as band "ok" (see `BlockStanding::band`),
     /// which is what lets the servers payload carry the same two fields
     /// for every row without a second spelling of the arithmetic.
     pub fn block_standing(&self, s: &nzbkit::config::ServerConfig) -> BlockStanding {

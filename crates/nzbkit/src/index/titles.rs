@@ -2,6 +2,11 @@
 //! table (seed, fill, identity, lanes), credits, people and their photo
 //! queue. Bodies are verbatim moves from the old index.rs.
 
+// Documented in full as part of TODO 84's missing_docs ratchet. The lint
+// is on here so the count cannot climb back: a new public item in this
+// module needs a doc comment.
+#![warn(missing_docs)]
+
 use super::*;
 
 /// A title with at least one release the wall would actually show.
@@ -132,6 +137,9 @@ pub(super) fn titles_any_sql(whr: &str) -> String {
 /// which, and every new field made that worse.
 #[derive(Debug, Clone, Default)]
 pub struct TitleFill<'a> {
+    /// The provider id this lookup resolved, 0 for none. WHICH
+    /// numbering it is in is `id_src`, and the two must always travel
+    /// together.
     pub tmdb_id: i64,
     /// Which provider's numbering `tmdb_id` above is in - that provider's
     /// own name, '' when nothing resolved one. It travels WITH the id
@@ -143,14 +151,25 @@ pub struct TitleFill<'a> {
     /// the manual wall-fix arm, a poster upload - must preserve this
     /// with it, or the id silently reverts to unlabelled.
     pub id_src: &'a str,
+    /// Plot summary, empty when the provider had none.
     pub overview: &'a str,
+    /// The provider's score, already normalised to a 0-10 scale. 0
+    /// means unrated rather than rated zero.
     pub rating: f64,
+    /// Comma-joined genre names, as the provider spells them.
     pub genres: &'a str,
     /// Local art FILENAMES, not provider URLs - the caller downloads the
     /// images before filling.
     pub poster: &'a str,
+    /// Local art filename for the wide image, same contract as
+    /// `poster`.
     pub backdrop: &'a str,
+    /// IMDb tconst ("tt0133093"), empty when nothing resolved one.
+    /// Shared vocabulary rather than a provider's own numbering, which
+    /// is what lets it join against the ratings snapshot.
     pub imdb: &'a str,
+    /// Top-billed cast, comma-joined. The coarse form; the structured
+    /// one is [`Credit`].
     pub actors: &'a str,
     /// ISO `YYYY-MM-DD`, or empty when the provider had no date.
     pub air_date: &'a str,
@@ -165,6 +184,9 @@ pub struct TitleFill<'a> {
 /// produces a usable credit - it just cannot be followed off-index.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Credit {
+    /// The person's name as this provider spells it. Not an identity:
+    /// two people share a name and one person is spelled two ways,
+    /// which is what `born` and the id handles below are for.
     pub name: String,
     /// actor | director | writer | composer | creator | producer | …
     /// Free text, because crew vocabularies differ per provider and
@@ -176,7 +198,11 @@ pub struct Credit {
     pub character: String,
     /// Billing order, lower first. 0 when unranked.
     pub ord: i64,
+    /// TVmaze person id, 0 when this provider gave none. A handle its
+    /// own filmography endpoint takes.
     pub tvmaze_id: i64,
+    /// Wikidata Q-id, empty when this provider gave none. The same kind
+    /// of handle as `tvmaze_id`, in Wikidata's namespace.
     pub wikidata_qid: String,
     /// IMDb `nm…` id. Unlike the two handles above this one is shared
     /// vocabulary rather than a provider's own numbering, so it is the
@@ -196,48 +222,85 @@ pub struct Credit {
 /// A credit joined to its resolved person (what the detail sheet shows).
 #[derive(Debug, Clone)]
 pub struct PersonCredit {
+    /// The resolved `people` row this credit joined to.
     pub person_id: i64,
+    /// The resolved person's name, which is the stored one and may
+    /// differ from the spelling any single credit used.
     pub name: String,
+    /// Headshot, as a local art-cache filename once fetched.
     pub photo: String,
+    /// What they did on this title. Free text: see [`Credit::role`].
     pub role: String,
+    /// The part they played, empty for crew.
     pub character: String,
+    /// Billing order, lower first. 0 when unranked.
     pub ord: i64,
 }
 
+/// One resolved person: the `people` row several credits collapse onto.
+///
+/// Credits arrive per provider and name the same human differently, so
+/// this row is the merged identity. `imdb` is the field that can carry
+/// the merge across providers; `born` is the disambiguator that tells
+/// two same-named people apart when no shared id exists.
 #[derive(Debug, Clone, Default)]
 pub struct PersonRow {
+    /// Local row id, the handle every credit joins on.
     pub id: i64,
+    /// Display name.
     pub name: String,
+    /// IMDb `nm…` id, empty when unresolved. The only id here that is
+    /// shared vocabulary rather than one provider's numbering.
     pub imdb: String,
+    /// TVmaze person id, 0 when unresolved.
     pub tvmaze_id: i64,
+    /// Wikidata Q-id, empty when unresolved.
     pub wikidata_qid: String,
+    /// Biography text, empty when no provider supplied one.
     pub bio: String,
+    /// Date of birth, ISO `YYYY-MM-DD`, empty when unknown. Carried as
+    /// a disambiguator, not as an identifier.
     pub born: String,
+    /// Headshot, as a local art-cache filename once fetched.
     pub photo: String,
 }
 
 /// One title on a person page's "in your index" half.
 #[derive(Debug, Clone)]
 pub struct PersonTitle {
+    /// `titles.key` - the title's identity.
     pub key: String,
+    /// `titles.kind`: movie / tv / music / book / software / other.
     pub kind: String,
+    /// Display title.
     pub title: String,
+    /// Release year, 0 when unknown.
     pub year: u32,
+    /// Poster, as a local art-cache filename.
     pub poster: String,
+    /// Release / first-air date, ISO `YYYY-MM-DD`, empty when unknown.
     pub air_date: String,
     /// Every role they hold on this title, comma-joined - one person can
     /// star in a show AND produce it.
     pub role: String,
     /// The part they played, from the acting credit; empty for crew-only.
     pub character: String,
+    /// Best (lowest) billing order they hold on this title.
     pub ord: i64,
+    /// How many releases of this title the index holds. The half that
+    /// makes the entry worth showing: a credit on a title with no
+    /// releases is not something the user can act on.
     pub n_releases: i64,
 }
 
+/// One person matching a search, with the signal that ranks them.
 #[derive(Debug, Clone)]
 pub struct PersonHit {
+    /// The `people` row id.
     pub id: i64,
+    /// Display name.
     pub name: String,
+    /// Headshot, as a local art-cache filename.
     pub photo: String,
     /// How many visible titles they are credited on - the ranking signal
     /// and the honest answer to "is this person actually in my index".
@@ -271,16 +334,31 @@ pub struct TitleSeed {
 /// column below is empty by construction.
 #[derive(Debug, Clone, Default)]
 pub struct TitleRow {
+    /// `titles.key` - the card's identity.
     pub key: String,
+    /// `titles.kind`: movie / tv / music / book / software / other. It
+    /// decides which enricher lane picks the row up.
     pub kind: String,
+    /// Display title.
     pub title: String,
+    /// Release year, 0 when unknown.
     pub year: u32,
+    /// The resolved provider id, 0 for none. Read it together with
+    /// `id_src`, which says whose numbering it is in.
     pub tmdb_id: i64,
+    /// Plot summary, empty when no provider gave one.
     pub overview: String,
+    /// Provider score on a 0-10 scale. 0 means unrated.
     pub rating: f64,
+    /// Comma-joined genre names.
     pub genres: String,
+    /// Poster, as a local art-cache filename.
     pub poster: String,
+    /// Wide image, as a local art-cache filename.
     pub backdrop: String,
+    /// When enrichment last stamped this row, Unix seconds; 0 means
+    /// never looked at. The stamp is ONE-SHOT with no way back, which
+    /// is why the queues gate on visibility before spending a lookup.
     pub checked: i64,
     /// IMDb tconst ("tt0133093") when a provider resolved one - joins
     /// against the imdb_ratings snapshot at wall time.
@@ -726,7 +804,7 @@ impl Index {
     /// blanked before the enricher could tell "no such film" from "ask
     /// later". Returns (rows re-queued this call, sweep finished).
     ///
-    /// A one-off, guarded by [`Self::UNSTAMP_DONE`], because the
+    /// A one-off, guarded by `Self::UNSTAMP_DONE`, because the
     /// predicate above is a superset and re-running it on a schedule
     /// would put every genuinely-unknown title back in the queue on
     /// every pass - an enricher that never settles.
@@ -1133,6 +1211,7 @@ impl Index {
         rows.collect()
     }
 
+    /// Load one person by row id. `None` when no such row exists.
     pub fn person_get(&self, id: i64) -> rusqlite::Result<Option<PersonRow>> {
         self.db
             .query_row(

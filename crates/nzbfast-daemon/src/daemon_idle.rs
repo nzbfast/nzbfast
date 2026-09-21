@@ -93,6 +93,15 @@ impl Daemon {
                 // to end. Graceful, like every other pause path: in-flight
                 // articles land and journal, so the job re-queues instead
                 // of failing and a one-pass extraction survives.
+                //
+                // Force priority is NOT spared here, unlike under a plain
+                // pause: `suspend_matching` reads `offline` (set above,
+                // before this call) and exempts nobody, and logs each
+                // Force job it stops under the `offline` target. Offline
+                // is a promise about the network, and a Force job that
+                // kept its fleet open broke it (TODO 65's start gate
+                // covers the jobs that had not begun; this covers the one
+                // already transferring).
                 self.suspend_active(true);
                 // The prefetch sidecar is its own hub and its own fleet,
                 // so the signal above does not reach it. Sync context

@@ -252,9 +252,161 @@ mod app {
         .clone()
     }
 
+    /// ureq 3 has no hook for handing it a whole `rustls::ClientConfig`:
+    /// its `TlsConfig` exposes `disable_verification()`, whose built-in
+    /// verifier also waives the signature checks `LoopbackCerts` keeps
+    /// real. So the config above is wired in the one way 3.x leaves
+    /// open - a bespoke connector, chained behind the plain TCP one, in
+    /// place of `DefaultConnector`'s rustls link. Everything in here is
+    /// ureq's own `RustlsConnector` with the config lookup replaced;
+    /// re-read that file if a ureq minor ever changes the handshake
+    /// dance. `tools/ureq-unversioned-gate.py` refuses a ureq version
+    /// this was not re-read against; its header has the rule.
+    #[derive(Debug, Default)]
+    struct LoopbackTlsConnector;
+
+    impl<In: ureq::unversioned::transport::Transport> ureq::unversioned::transport::Connector<In>
+        for LoopbackTlsConnector
+    {
+        type Out = ureq::unversioned::transport::Either<In, LoopbackTlsTransport>;
+
+        fn connect(
+            &self,
+            details: &ureq::unversioned::transport::ConnectionDetails,
+            chained: Option<In>,
+        ) -> Result<Option<Self::Out>, ureq::Error> {
+            use ureq::unversioned::transport::Either;
+            let Some(transport) = chained else {
+                // Same contract as ureq's own rustls link: it is only
+                // ever reached second in a chain.
+                return Ok(None);
+            };
+            if !details.needs_tls() || transport.is_tls() {
+                return Ok(Some(Either::A(transport)));
+            }
+            let host = details
+                .uri
+                .authority()
+                .map(|a| a.host())
+                .ok_or(ureq::Error::Tls("no authority for tls"))?;
+            // ureq names the peer with its PRIVATE
+            // `AuthorityExt::host_bare()` (`ureq/src/util.rs`), which
+            // strips the RFC 3986 brackets an IPv6 literal carries in a
+            // URI authority. `Authority::host()` keeps them, and
+            // `ServerName::try_from("[::1]")` is `InvalidDnsNameError`,
+            // so a daemon on `https://[::1]:PORT` was unreachable with
+            // "invalid dns name" before a byte was sent. Stripping is
+            // the whole fix: `try_from` tries the DNS grammar first and
+            // falls through to the IP-literal path, and an all-numeric
+            // last label is not a valid DNS name, so `::1` and
+            // `127.0.0.1` both land on `ServerName::IpAddress`.
+            //
+            // `tls_peer_name` in `crates/nzbfast-core/src/netfetch.rs`
+            // is the same three lines: the tray deliberately has no
+            // edge to that crate (see Cargo.toml), so the two copies
+            // move together by hand. The netfetch side carries the unit
+            // tests - this half is Windows-gated and runs nowhere on
+            // the dev fleet.
+            //
+            // ref-gate: `ureq/src/util.rs` is a file in the ureq
+            // CRATE, not in this tree - read it under the cargo
+            // registry checkout `tools/ureq-unversioned-gate.py`
+            // already resolves for its digest arm.
+            let bare = host
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(host);
+            let name: rustls::pki_types::ServerName<'static> =
+                rustls::pki_types::ServerName::try_from(bare)
+                    .map_err(|_| ureq::Error::Tls("invalid dns name"))?
+                    .to_owned();
+            let mut conn = rustls::ClientConnection::new(loopback_tls(), name)?;
+            let mut sock = ureq::unversioned::transport::TransportAdapter::new(transport.boxed());
+            sock.set_timeout(details.timeout);
+            conn.complete_io(&mut sock)?;
+            Ok(Some(Either::B(LoopbackTlsTransport {
+                buffers: ureq::unversioned::transport::LazyBuffers::new(
+                    details.config.input_buffer_size(),
+                    details.config.output_buffer_size(),
+                ),
+                stream: rustls::StreamOwned { conn, sock },
+            })))
+        }
+    }
+
+    /// The TLS half of `LoopbackTlsConnector`'s connection. ureq's own
+    /// `RustlsTransport` is private, so this is that type restated.
+    struct LoopbackTlsTransport {
+        buffers: ureq::unversioned::transport::LazyBuffers,
+        stream: rustls::StreamOwned<
+            rustls::ClientConnection,
+            ureq::unversioned::transport::TransportAdapter,
+        >,
+    }
+
+    impl std::fmt::Debug for LoopbackTlsTransport {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("LoopbackTlsTransport")
+        }
+    }
+
+    impl ureq::unversioned::transport::Transport for LoopbackTlsTransport {
+        fn buffers(&mut self) -> &mut dyn ureq::unversioned::transport::Buffers {
+            &mut self.buffers
+        }
+
+        fn transmit_output(
+            &mut self,
+            amount: usize,
+            timeout: ureq::unversioned::transport::NextTimeout,
+        ) -> Result<(), ureq::Error> {
+            use std::io::Write as _;
+            use ureq::unversioned::transport::Buffers as _;
+            self.stream.get_mut().set_timeout(timeout);
+            let output = &self.buffers.output()[..amount];
+            self.stream.write_all(output)?;
+            Ok(())
+        }
+
+        fn await_input(
+            &mut self,
+            timeout: ureq::unversioned::transport::NextTimeout,
+        ) -> Result<bool, ureq::Error> {
+            use std::io::Read as _;
+            use ureq::unversioned::transport::Buffers as _;
+            self.stream.get_mut().set_timeout(timeout);
+            let input = self.buffers.input_append_buf();
+            let amount = self.stream.read(input)?;
+            self.buffers.input_appended(amount);
+            Ok(amount > 0)
+        }
+
+        fn is_open(&mut self) -> bool {
+            self.stream.get_mut().get_mut().is_open()
+        }
+
+        fn is_tls(&self) -> bool {
+            true
+        }
+    }
+
+    /// `timeout_global` and not one of the per-phase timeouts: ureq 2's
+    /// `AgentBuilder::timeout` was the whole-call budget, and every
+    /// caller below picks its number for the whole call.
     fn agent(timeout_ms: u64, tls: bool) -> ureq::Agent {
-        let b = ureq::AgentBuilder::new().timeout(Duration::from_millis(timeout_ms));
-        if tls { b.tls_config(loopback_tls()) } else { b }.build()
+        use ureq::unversioned::transport::Connector as _;
+        let cfg = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_millis(timeout_ms)))
+            .build();
+        if tls {
+            ureq::Agent::with_parts(
+                cfg,
+                ureq::unversioned::transport::TcpConnector::default().chain(LoopbackTlsConnector),
+                ureq::unversioned::resolver::DefaultResolver::default(),
+            )
+        } else {
+            ureq::Agent::new_with_config(cfg)
+        }
     }
 
     use crate::probe_body::{
@@ -287,7 +439,8 @@ mod app {
             .get(&url)
             .call()
             .ok()?
-            .into_string()
+            .into_body()
+            .read_to_string()
             .ok()?;
         serde_json::from_str(&body).ok()
     }
@@ -329,7 +482,7 @@ mod app {
                 .get(&url)
                 .call()
                 .ok()
-                .and_then(|r| r.into_string().ok())
+                .and_then(|mut r| r.body_mut().read_to_string().ok())
         };
         let body = match rt.as_ref() {
             Some(r) => ask(r.tls),
@@ -607,7 +760,7 @@ mod app {
             .get(&url)
             .call()
             .ok()
-            .and_then(|r| r.into_string().ok())
+            .and_then(|mut r| r.body_mut().read_to_string().ok())
             .and_then(|b| crate::probe_body::body_version(&b))
         else {
             return false;
@@ -620,7 +773,7 @@ mod app {
             data_dir,
             proof(port, data_dir),
         );
-        let _ = agent(5000, tls).post(&url).send_string("");
+        let _ = agent(5000, tls).post(&url).send_empty();
         let t0 = Instant::now();
         while t0.elapsed() < Duration::from_secs(40) {
             if probe(port, data_dir) == Verdict::Free {
@@ -907,13 +1060,13 @@ mod app {
         );
         let resp = agent(10_000, tls)
             .post(&url)
-            .set(
+            .header(
                 "Content-Type",
-                &format!("multipart/form-data; boundary={boundary}"),
+                format!("multipart/form-data; boundary={boundary}"),
             )
-            .send_bytes(&body)
+            .send(&body[..])
             .map_err(|e| format!("addfile: {e}"))?;
-        let v: Value = serde_json::from_str(&resp.into_string().unwrap_or_default())
+        let v: Value = serde_json::from_str(&resp.into_body().read_to_string().unwrap_or_default())
             .map_err(|e| format!("addfile parse: {e}"))?;
         if v.get("status").and_then(Value::as_bool) == Some(true) {
             Ok(name)
@@ -950,7 +1103,7 @@ mod app {
             .get(&url)
             .call()
             .map_err(|e| format!("addnzblnk: {e}"))?;
-        let v: Value = serde_json::from_str(&resp.into_string().unwrap_or_default())
+        let v: Value = serde_json::from_str(&resp.into_body().read_to_string().unwrap_or_default())
             .map_err(|e| format!("addnzblnk parse: {e}"))?;
         if v.get("status").and_then(Value::as_bool) == Some(true) {
             Ok(v.get("name")
@@ -1052,7 +1205,7 @@ mod app {
                 data_dir,
                 proof(port, data_dir),
             );
-            let _ = agent(2000, tls).post(&url).send_string("");
+            let _ = agent(2000, tls).post(&url).send_empty();
             let t0 = Instant::now();
             while t0.elapsed() < Duration::from_secs(8) {
                 if probe(port, data_dir) == Verdict::Free {
@@ -1565,7 +1718,7 @@ mod app {
                     &app.data_dir,
                     proof(p, &app.data_dir),
                 );
-                let _ = agent(2000, tls).post(&url).send_string("");
+                let _ = agent(2000, tls).post(&url).send_empty();
                 let t0 = Instant::now();
                 let mut last = Verdict::Silent;
                 while t0.elapsed() < Duration::from_secs(10) {
@@ -1749,7 +1902,7 @@ mod app {
                     &app.data_dir,
                     proof(app.port, &app.data_dir),
                 );
-                let _ = agent(2000, tls).post(&url).send_string("");
+                let _ = agent(2000, tls).post(&url).send_empty();
                 let t0 = Instant::now();
                 while t0.elapsed() < Duration::from_secs(5) {
                     if child.try_wait().ok().flatten().is_some() {

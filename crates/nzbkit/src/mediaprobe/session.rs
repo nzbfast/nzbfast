@@ -78,7 +78,7 @@ fn mp4_sample_times_ns(t: &Mp4Track) -> Vec<u64> {
 /// Building a playlist from it would mean remuxing a file in order to
 /// describe it.
 ///
-/// It can be computed instead because [`RemuxSession::is_boundary`]
+/// It can be computed instead because `RemuxSession::is_boundary`
 /// depends on nothing else: a fragment opens on a video keyframe once
 /// `FRAG_TARGET_NS` has elapsed since the last one. Same rule, same
 /// inputs, same answer - and `plan_matches_the_fragments_actually_emitted`
@@ -132,7 +132,11 @@ pub enum Emit {
     Fragment(Vec<u8>),
     /// The bytes at `need_off` have not arrived. Retryable, always: the
     /// session's state is exactly what it was before the call.
-    NotYet { need_off: u64 },
+    NotYet {
+        /// The first source offset the session needs and does not
+        /// have. A caller can prefetch from here before retrying.
+        need_off: u64,
+    },
     /// The walk reached the end of the file.
     Eos,
 }
@@ -154,6 +158,14 @@ enum Layout {
     Mp4(Box<Mp4Layout>),
 }
 
+/// One remux in progress: a cursor over the source container that
+/// yields fMP4 init and fragment bytes.
+///
+/// Every `Emit` is driven by a call, so a caller controls the pace. The
+/// session never blocks and never sleeps: bytes that have not arrived
+/// come back as [`Emit::NotYet`] with the session's state EXACTLY as it
+/// was before the call, so a retry is always safe and never
+/// double-counts a sample.
 pub struct RemuxSession {
     layout: Layout,
     iter: Box<dyn SampleIter>,
@@ -174,7 +186,10 @@ pub struct RemuxSession {
     flushed: bool,
     /// Cached Matroska cue points, parsed at most once per session.
     cues: Option<Cues>,
+    /// Every fragment emitted so far, in order. Enough to build a
+    /// playlist without re-muxing.
     pub fragment_index: Vec<FragRef>,
+    /// English wire strings; the UI translates at the edge.
     pub warnings: Vec<String>,
 }
 
@@ -241,6 +256,8 @@ impl RemuxSession {
         &self.init.bytes
     }
 
+    /// The tracks this session selected out of the container, in the
+    /// order their ids are assigned in the init segment.
     pub fn tracks(&self) -> &[SelectedTrack] {
         &self.tracks
     }

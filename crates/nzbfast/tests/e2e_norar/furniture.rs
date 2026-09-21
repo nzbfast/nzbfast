@@ -371,3 +371,136 @@ async fn item34_a_spared_nfo_no_disk_set_covers_is_still_dropped() {
     );
     drop(fx);
 }
+
+/// [`run_norar_chaos`] with the metadata-tail grace named, and the wall
+/// clock of the run returned beside it.
+///
+/// A CLI subprocess, so the knob is passed the way an operator would set
+/// it. Unset it is 20 s, which is right for a real fleet and too long to
+/// stand a 2 s test on.
+async fn run_norar_chaos_grace(
+    fx: &Fixture,
+    chaos: Chaos,
+    grace_secs: &str,
+) -> (String, bool, PathBuf, std::time::Duration) {
+    let srv = MockServer::start(fx.articles.clone(), chaos).await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+    let t0 = std::time::Instant::now();
+    let (log, ok) = tokio::task::spawn_blocking({
+        let (cfg, nzb, out) = (cfg.clone(), nzb.clone(), out.clone());
+        let grace = grace_secs.to_string();
+        move || {
+            run_get(
+                &cfg,
+                &nzb,
+                &out,
+                &[("NZBFAST_META_TAIL_GRACE_SECS", grace.as_str())],
+            )
+        }
+    })
+    .await
+    .unwrap();
+    (log, ok, out, t0.elapsed())
+}
+
+/// 21 Sep 2026, the live 66 GB job that sat at 99%: ONE article of a
+/// non-payload `.nfo` was missing and its refusal came back slowly (a
+/// real provider under a connection cap answers late, or not at all,
+/// and a server that holds no session blocks a terminal verdict for
+/// 120 s), so the run stayed open long after the last payload byte was
+/// on disk, for a file the job completes without.
+///
+/// The refusal here is delayed 120 s. Measured 21 Sep 2026 with the
+/// bound switched off (`NZBFAST_META_TAIL_GRACE_SECS=0`): the pool is
+/// dry at 0.15 s and drains at 68.1 s, held only by the pre-byte budget
+/// churning the one connection, and the job ends the same way - complete,
+/// nfo dropped. With a 2 s grace it ends in about 7 s. The ceiling is
+/// 30 s: past twice the fixed run's wall on a loaded box, under half the
+/// unbounded one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_nfo_article_does_not_hold_the_job_open_past_the_grace() {
+    let mut fx = Fixture::new("nfotailbounded");
+    let video = payload(120_000, 91);
+    fx.add_file("Feature.Main.mkv", &video, 40_000);
+    fx.add_file("release.nfo", b"scene nfo\r\n", 40_000);
+    let chaos = Chaos {
+        missing: HashSet::from(["<release_nfo-1-1@mock>".to_string()]),
+        missing_delay_ms: 120_000,
+        ..Chaos::default()
+    };
+    let (log, ok, out, took) = run_norar_chaos_grace(&fx, chaos, "2").await;
+    assert!(
+        ok,
+        "the job did not complete - payload whole, only a furniture \
+         article outstanding:\n{log}"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(30),
+        "the run took {took:?}: a furniture-only tail was waited on for its \
+         own refusal ladder instead of being bounded by the grace\n{log}"
+    );
+    assert!(
+        log.contains("stopped waiting for them"),
+        "the bound never fired, so this run ended some other way:\n{log}"
+    );
+    assert!(
+        std::fs::read(out.join("Feature.Main.mkv")).unwrap() == video,
+        "the payload is not byte-exact\n{log}"
+    );
+    assert!(
+        !out.join("release.nfo").exists(),
+        "a holed .nfo survived in the completed directory: {:?}\n{log}",
+        tree_names(&out)
+    );
+    // The give-up rides the spare path, unchanged, so the user is told
+    // what the job completed without.
+    assert!(
+        log.contains("metadata the recovery set does not cover, so the download is still complete")
+            && log.contains("without 1 metadata file(s)"),
+        "the job completed silently about what it completed without:\n{log}"
+    );
+    drop(fx);
+}
+
+/// The other half of the bound, and the one that must never move: a
+/// missing PAYLOAD article keeps its full ladder whatever the grace is.
+/// Same shape as the pin above with the roles swapped - the video's last
+/// article is refused slowly, the `.nfo` is whole and arrives at once -
+/// and the grace is 1 s, so any arm that treated "the count stood still"
+/// as licence to stop waiting would have claimed the payload article
+/// long before its verdict came back. What must happen is the verdict:
+/// the job FAILS on the missing video article, in the words the census
+/// uses for payload, and the give-up line never appears.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_payload_article_still_runs_its_whole_ladder_under_the_grace() {
+    let mut fx = Fixture::new("nfotailpayload");
+    let video = payload(120_000, 92);
+    fx.add_file("Feature.Main.mkv", &video, 40_000);
+    fx.add_file("release.nfo", b"scene nfo\r\n", 40_000);
+    let chaos = Chaos {
+        missing: HashSet::from(["<Feature_Main_mkv-0-3@mock>".to_string()]),
+        missing_delay_ms: 4_000,
+        ..Chaos::default()
+    };
+    let (log, ok, _out, took) = run_norar_chaos_grace(&fx, chaos, "1").await;
+    assert!(
+        !ok,
+        "a payload article missing from every server completed green:\n{log}"
+    );
+    assert!(
+        !log.contains("stopped waiting for them"),
+        "the furniture bound reached a payload article:\n{log}"
+    );
+    assert!(
+        log.contains("Feature.Main.mkv: 1 missing"),
+        "the payload verdict was not reached by the ladder itself:\n{log}"
+    );
+    assert!(
+        took >= std::time::Duration::from_secs(4),
+        "the run ended in {took:?}, before the payload's refusal could even \
+         have come back - the ladder was cut short:\n{log}"
+    );
+    drop(fx);
+}

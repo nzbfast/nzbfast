@@ -24,7 +24,10 @@
 // check.py validates per-locale plural-category completeness against the
 // base.one/base.many families this file emits.
 const fs = require('fs');
-const files = ['web/dashboard.html', 'web/wall.html'];
+// TODO 19 added the third shell page. Its t() defaults and data-i18n
+// markup are scraped exactly like the other two - a page whose strings
+// are not in the reference is a page that ships English in 27 locales.
+const files = ['web/dashboard.html', 'web/wall.html', 'web/login.html'];
 const out = {};
 const clash = [];
 function put(k, v) {

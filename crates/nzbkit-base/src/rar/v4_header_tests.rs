@@ -305,3 +305,39 @@ fn a_comment_block_shorter_than_its_fixed_crc_range_is_refused() {
         );
     }
 }
+
+/// A genuine DOS RAR 1.55 marks a directory by its DOS attribute (0x10)
+/// alone: header flags 0x8000, no directory window bits. Read by the
+/// flags only, `SUB` mapped as a zero-length FILE and nothing beneath it
+/// could be created. The fixture is the writer's own bytes.
+///
+/// READ FROM THIS CRATE'S OWN `testdata/`, where it is a SECOND COPY of
+/// `vendor/rars/tests/fixtures/rar15_40/rar155_dos/dir_nested_155_m0.rar`
+/// - the vendored reader's test of the same rule reads that one, and it
+/// stays there. This test used to reach across to it, and `cargo package`
+/// includes only files below the package root, so those 668 bytes would
+/// be absent from a published `nzbkit-base`
+/// (`tools/package-escape-gate.py`, TODO 84 blocker 2's class). If the
+/// writer's bytes for this shape are ever regenerated, regenerate BOTH:
+/// nothing here can see the other copy, which is the price of the fix and
+/// is cheaper than shipping a crate whose test reads a file that is not
+/// in it.
+#[test]
+fn a_dos_rar155_directory_is_marked_by_its_attribute_alone() {
+    let vol = include_bytes!("../../testdata/rar4/dir_nested_155_m0.rar");
+    let mut m = VolumeMapper::new(vol.len() as u64);
+    m.feed(0, vol);
+    let got: Vec<(&str, bool)> = m
+        .entries
+        .iter()
+        .map(|e| (e.name.as_str(), e.is_dir))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("SUB", true),
+            ("SUB\\NESTED", true),
+            ("SUB\\NESTED\\DEEP.TXT", false),
+        ]
+    );
+}

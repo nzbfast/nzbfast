@@ -1,5 +1,7 @@
+use super::address_filters::{self, Direction};
 use super::filters::{self, DeltaErrorMessages, FilterOp};
 use super::huffman;
+use super::match_index::MatchIndex;
 use super::ppmd::{PpmdByteReader, PpmdDecoder, PpmdEncoder};
 use super::rarvm;
 use super::{Error, Result};
@@ -10,9 +12,9 @@ use std::ops::Range;
 const MAIN_COUNT: usize = 299;
 const OFFSET_COUNT: usize = 60;
 const LOW_OFFSET_COUNT: usize = 17;
-const LENGTH_COUNT: usize = 28;
+const LENGTH_SLOTS: usize = 28;
 const LEVEL_COUNT: usize = 20;
-const TABLE_COUNT: usize = MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT + LENGTH_COUNT;
+const TABLE_COUNT: usize = MAIN_COUNT + OFFSET_COUNT + LOW_OFFSET_COUNT + LENGTH_SLOTS;
 const MAX_HISTORY: usize = 4 * 1024 * 1024;
 const STREAM_CHUNK: usize = 1024 * 1024;
 const MAX_VM_FILTER_BLOCK_SIZE: usize = 128 * 1024;
@@ -26,7 +28,7 @@ const MAX_VM_FILTER_BLOCK_SIZE: usize = 128 * 1024;
 // declaring `block_start = 0` and a 2 GiB block therefore grew
 // `self.output` to the whole member's output, and `filtered_range` then
 // copied that block again for the VM - about 4 GiB of peak from a few MB
-// of packed input, with no analogue of RAR5's `add_filter` bail.
+// of packed input, with no analogue of RAR5's `queue_filter` bail.
 //
 // 8 MiB is RAR5's `STREAM_FILTER_HOLD_LIMIT`, kept deliberately
 // identical. It is enormous headroom for RAR 3: a real filter block runs
@@ -36,8 +38,6 @@ const MAX_VM_FILTER_BLOCK_SIZE: usize = 128 * 1024;
 const MAX_VM_FILTER_HOLD: usize = 8 * 1024 * 1024;
 // nzbfast: the packed-input window `decode_member_from_reader` holds, and
 // the margin below which it refuses to begin a decode excursion.
-// (nzbfast-local change, 16 Sep 2026; re-apply on the next rars re-sync,
-// see `vendor/rars/VENDORING.md`.)
 //
 // Until 2026-09-16 that entry point drained the whole packed member into
 // the bit reader before decoding a byte, so an 8 GB -m3 RAR4 member cost
@@ -54,14 +54,14 @@ const MAX_VM_FILTER_HOLD: usize = 8 * 1024 * 1024;
 // and never starts an excursion that could outrun the buffer. The margin
 // must therefore exceed the input any single excursion can consume:
 //
-//   * `read_tables`: 2 bits + 20 x 8 (level lengths) + TABLE_COUNT (404)
+//   * `read_code_length_tables`: 2 bits + 20 x 8 (level lengths) + TABLE_COUNT (404)
 //     symbols of at most 15 + 7 bits = under 1.2 KiB.
 //   * one `decode_lz` outer iteration past the literal burst: a main
 //     symbol (<= 15 bits) plus its arm. The widest arm is 257,
-//     `read_vm_code`, whose length field is a bare 16-bit count read
+//     `read_vm_filter_record`, whose length field is a bare 16-bit count read
 //     BEFORE `MAX_VM_CODE_SIZE` is checked, so it reads at most
 //     65535 + 3 bytes. Every other arm is under 16 bytes.
-//   * `Ppmd::decode_init` out of `read_tables`: a header byte and the
+//   * `Ppmd::decode_init` out of `read_code_length_tables`: a header byte and the
 //     range coder's four-byte prime.
 //
 // 128 KiB clears the worst of those (64 KiB + slop) by 2x. The literal
@@ -69,7 +69,7 @@ const MAX_VM_FILTER_HOLD: usize = 8 * 1024 * 1024;
 // which consumes nothing, so draining the window inside it is safe.
 //
 // PPMd blocks are NOT streamed. A PPMd symbol's input cost is bounded
-// only by the model's escape chain, and `read_vm_code_ppmd` can spend
+// only by the model's escape chain, and `read_vm_filter_record_from_ppmd` can spend
 // 65539 symbols, so no margin this side of tens of megabytes is provable.
 // `decode_until` therefore absorbs the rest of the reader the moment a
 // block selects PPMd and decodes it exactly as before - the old peak, on
@@ -86,11 +86,11 @@ const MAX_VM_CODE_SIZE: usize = 64 * 1024;
 const MAX_VM_PROGRAMS: usize = 8192;
 const MAX_VM_FILTERS: usize = 8192;
 
-const LENGTH_BASES: [usize; LENGTH_COUNT] = [
+const LENGTH_BASES: [usize; LENGTH_SLOTS] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128,
     160, 192, 224,
 ];
-const LENGTH_BITS: [u8; LENGTH_COUNT] = [
+const LENGTH_BITS: [u8; LENGTH_SLOTS] = [
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5,
 ];
 const OFFSET_BASES: [usize; OFFSET_COUNT] = [
@@ -119,13 +119,13 @@ const MAX_PPMD_REPEAT_LENGTH: usize = 259;
 // stream. RAR15_40_FORMAT_SPECIFICATION.md §20 and FILTER_TRANSFORMS.md §9
 // define these blobs by byte length plus CRC32 fingerprint; keep the bytes
 // verbatim so writer output and reader recognition use the same wire identity.
-const RAR3_E8_FILTER_BYTECODE: &[u8] = &[
+pub(crate) const RAR3_E8_FILTER_BYTECODE: &[u8] = &[
     0x97, 0x1b, 0x01, 0x28, 0x07, 0x06, 0x98, 0x08, 0x00, 0x00, 0x00, 0xd1, 0x3a, 0x10, 0x15, 0x92,
     0xec, 0x50, 0xcb, 0x99, 0x20, 0xb9, 0x25, 0xf0, 0x29, 0x19, 0x15, 0x53, 0x03, 0x12, 0xae, 0x51,
     0x10, 0x35, 0x59, 0x2b, 0x60, 0x04, 0x15, 0x6d, 0x40, 0x66, 0xab, 0x02, 0x34, 0x49, 0x04, 0x36,
     0x02, 0x52, 0x3e, 0x97, 0x00,
 ];
-const RAR3_E8E9_FILTER_BYTECODE: &[u8] = &[
+pub(crate) const RAR3_E8E9_FILTER_BYTECODE: &[u8] = &[
     0x84, 0x1b, 0x01, 0x28, 0x11, 0x10, 0x69, 0x80, 0x80, 0x00, 0x00, 0x0d, 0x13, 0xa1, 0x01, 0xc6,
     0x89, 0xd2, 0x80, 0xac, 0x97, 0x62, 0x85, 0x5c, 0xc9, 0x05, 0xc9, 0x2f, 0x81, 0x48, 0xc8, 0xaa,
     0x98, 0x18, 0x95, 0x72, 0x88, 0x81, 0xaa, 0xc9, 0x5b, 0x00, 0x20, 0xab, 0x6a, 0x03, 0x35, 0x58,
@@ -174,23 +174,20 @@ const RAR3_AUDIO_FILTER_BYTECODE: &[u8] = &[
     0x26, 0xcc, 0x64, 0x8a, 0x62, 0x71, 0xa2, 0xb8,
 ];
 
-pub fn unpack29_decode(input: &[u8], output_size: usize) -> Result<Vec<u8>> {
-    let mut decoder = Unpack29::new();
+pub fn decode_rar29(input: &[u8], output_size: usize) -> Result<Vec<u8>> {
+    let mut decoder = Rar29Decoder::new();
     decoder.decode_non_solid_member(input, output_size)
 }
 
-pub fn unpack29_encode_literals(input: &[u8]) -> Result<Vec<u8>> {
+pub fn encode_rar29_literals(input: &[u8]) -> Result<Vec<u8>> {
     encode_member(input, &[])
 }
 
-pub fn unpack29_encode_literals_with_options(
-    input: &[u8],
-    options: EncodeOptions,
-) -> Result<Vec<u8>> {
+pub fn encode_rar29_literals_with_options(input: &[u8], options: EncodeOptions) -> Result<Vec<u8>> {
     encode_member_with_options(input, &[], options)
 }
 
-pub(crate) fn unpack29_encode_literals_with_options_and_progress(
+pub(crate) fn encode_rar29_literals_with_options_and_progress(
     input: &[u8],
     options: EncodeOptions,
     progress: &mut dyn FnMut(usize) -> bool,
@@ -198,19 +195,19 @@ pub(crate) fn unpack29_encode_literals_with_options_and_progress(
     encode_member_with_options_and_progress(input, &[], options, progress)
 }
 
-pub fn unpack29_encode_ppmd_literals(input: &[u8]) -> Result<Vec<u8>> {
+pub fn encode_rar29_ppmd_literals(input: &[u8]) -> Result<Vec<u8>> {
     encode_ppmd_member(input, false, &[])
 }
 
-pub fn unpack29_encode_ppmd(input: &[u8]) -> Result<Vec<u8>> {
+pub fn encode_rar29_ppmd(input: &[u8]) -> Result<Vec<u8>> {
     encode_ppmd_member(input, true, &[])
 }
 
-pub fn unpack29_encode_ppmd_with_filter(input: &[u8], filter: Rar29FilterSpec) -> Result<Vec<u8>> {
+pub fn encode_rar29_ppmd_with_filter(input: &[u8], filter: Rar29FilterSpec) -> Result<Vec<u8>> {
     encode_ppmd_filtered_member(input, filter, true)
 }
 
-pub fn unpack29_encode_ppmd_literals_with_filter(
+pub fn encode_rar29_ppmd_literals_with_filter(
     input: &[u8],
     filter: Rar29FilterSpec,
 ) -> Result<Vec<u8>> {
@@ -234,7 +231,7 @@ fn filtered_members(input: &[u8], filters: &[Rar29FilterSpec]) -> Result<Filtere
     for filter in filters {
         let filtered = filtered_member(input, filter)?;
         let range = filtered.block_start..filtered.block_start + filtered.block_size;
-        data[range.clone()].copy_from_slice(&filtered.data[range]);
+        data[range].copy_from_slice(&filtered.data);
         records.push(OwnedVmFilterRecord {
             block_start: filtered.block_start,
             block_size: filtered.block_size,
@@ -381,7 +378,7 @@ fn encode_ppmd_block(
         encoder.encode_vm_filter_record(record)?;
     }
     for token in encode_ppmd_tokens(input, lz_escapes) {
-        match token {
+        match token.view() {
             PpmdEncodeToken::Literal(byte) => encoder.encode_literal(byte)?,
             PpmdEncodeToken::RepeatOffsetOne { length } => {
                 encoder.encode_repeat_offset_one(length)?
@@ -393,11 +390,90 @@ fn encode_ppmd_block(
     Ok(out)
 }
 
+/// What one planned PPMd token means, as [`encode_ppmd_member`] reads it.
+///
+/// Never stored: the planner keeps [`PackedPpmdToken`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PpmdEncodeToken {
     Literal(u8),
     RepeatOffsetOne { length: usize },
     Match { offset: usize, length: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PpmdTokenKind {
+    Literal,
+    RepeatOffsetOne,
+    Match,
+}
+
+/// One planned PPMd token in eight bytes.
+///
+/// The PPMd path plans the whole member before the model encodes a byte of
+/// it, so this vector is live alongside the model, and this struct's width
+/// is its per-input-byte cost. It was three `usize` words - 24 bytes - until
+/// 16 Sep 2026.
+///
+/// `length` is capped at [`MAX_PPMD_REPEAT_LENGTH`] by both producers and
+/// `offset` at [`MAX_ENCODER_MATCH_OFFSET`] by `best_ppmd_match`; the
+/// constructors `debug_assert` both. Unused fields are zero, so the derived
+/// equality matches the view's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PackedPpmdToken {
+    kind: PpmdTokenKind,
+    byte: u8,
+    length: u16,
+    offset: u32,
+}
+
+impl PackedPpmdToken {
+    fn literal(byte: u8) -> Self {
+        Self {
+            kind: PpmdTokenKind::Literal,
+            byte,
+            length: 0,
+            offset: 0,
+        }
+    }
+
+    fn repeat_offset_one(length: usize) -> Self {
+        Self {
+            kind: PpmdTokenKind::RepeatOffsetOne,
+            byte: 0,
+            length: packed_ppmd_length(length),
+            offset: 0,
+        }
+    }
+
+    fn match_at(offset: usize, length: usize) -> Self {
+        Self {
+            kind: PpmdTokenKind::Match,
+            byte: 0,
+            length: packed_ppmd_length(length),
+            offset: packed_offset(offset),
+        }
+    }
+
+    fn view(self) -> PpmdEncodeToken {
+        match self.kind {
+            PpmdTokenKind::Literal => PpmdEncodeToken::Literal(self.byte),
+            PpmdTokenKind::RepeatOffsetOne => PpmdEncodeToken::RepeatOffsetOne {
+                length: self.length as usize,
+            },
+            PpmdTokenKind::Match => PpmdEncodeToken::Match {
+                offset: self.offset as usize,
+                length: self.length as usize,
+            },
+        }
+    }
+}
+
+fn packed_ppmd_length(length: usize) -> u16 {
+    debug_assert!(
+        length <= MAX_PPMD_REPEAT_LENGTH,
+        "PPMd token length {length} is out of range"
+    );
+    length as u16
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -429,6 +505,12 @@ pub enum Rar29FilterKind {
     Audio { channels: usize },
 }
 
+/// The filtered bytes for one block, holding only the block's own range -
+/// never the rest of the member. `filtered_members` is the only caller and
+/// copies `data` straight into its own full-size buffer at
+/// `[block_start, block_start + block_size)`; nothing reads a byte of it
+/// outside that range, so there is nothing to gain by carrying the member
+/// around it.
 struct FilteredMember {
     data: Vec<u8>,
     block_start: usize,
@@ -451,60 +533,66 @@ fn filtered_member(input: &[u8], filter: &Rar29FilterSpec) -> Result<FilteredMem
     if range.start >= range.end || range.end > input.len() {
         return Err(Error::InvalidData("RAR 2.9 VM filter range is invalid"));
     }
-    let mut filtered = input.to_vec();
-    let (init_regs, code): (Vec<(usize, u32)>, &'static [u8]) = match filter.kind {
+    let (data, init_regs, code): (Vec<u8>, Vec<(usize, u32)>, &'static [u8]) = match filter.kind {
         Rar29FilterKind::E8 => {
+            let mut block = input[range.clone()].to_vec();
             filters::encode_in_place(
                 FilterOp::E8,
-                &mut filtered[range.clone()],
+                &mut block,
                 range.start as u32,
                 rar29_delta_messages(),
             )?;
-            (Vec::new(), RAR3_E8_FILTER_BYTECODE)
+            (block, Vec::new(), RAR3_E8_FILTER_BYTECODE)
         }
         Rar29FilterKind::E8E9 => {
+            let mut block = input[range.clone()].to_vec();
             filters::encode_in_place(
                 FilterOp::E8E9,
-                &mut filtered[range.clone()],
+                &mut block,
                 range.start as u32,
                 rar29_delta_messages(),
             )?;
-            (Vec::new(), RAR3_E8E9_FILTER_BYTECODE)
+            (block, Vec::new(), RAR3_E8E9_FILTER_BYTECODE)
         }
         Rar29FilterKind::Delta { channels } => {
+            let mut block = input[range.clone()].to_vec();
             filters::encode_in_place(
                 FilterOp::Delta { channels },
-                &mut filtered[range.clone()],
+                &mut block,
                 0,
                 rar29_delta_messages(),
             )?;
-            (vec![(0, channels as u32)], RAR3_DELTA_FILTER_BYTECODE)
+            (
+                block,
+                vec![(0, channels as u32)],
+                RAR3_DELTA_FILTER_BYTECODE,
+            )
         }
         Rar29FilterKind::Itanium => {
-            itanium_encode(&mut filtered[range.clone()], range.start as u32);
-            (Vec::new(), RAR3_ITANIUM_FILTER_BYTECODE)
+            let mut block = input[range.clone()].to_vec();
+            address_filters::ia64(&mut block, range.start as u32, Direction::Encode);
+            (block, Vec::new(), RAR3_ITANIUM_FILTER_BYTECODE)
         }
         Rar29FilterKind::Rgb { width, pos_r } => {
-            filtered[range.clone()].copy_from_slice(&rgb_encode(
-                &input[range.clone()],
-                width,
-                pos_r,
-            )?);
+            let block = rgb_encode(&input[range.clone()], width, pos_r)?;
             let init_regs = if pos_r == 0 {
                 vec![(0, width as u32 + 3)]
             } else {
                 vec![(0, width as u32 + 3), (1, pos_r as u32)]
             };
-            (init_regs, RAR3_RGB_FILTER_BYTECODE)
+            (block, init_regs, RAR3_RGB_FILTER_BYTECODE)
         }
         Rar29FilterKind::Audio { channels } => {
-            filtered[range.clone()]
-                .copy_from_slice(&audio_encode(&input[range.clone()], channels)?);
-            (vec![(0, channels as u32)], RAR3_AUDIO_FILTER_BYTECODE)
+            let block = audio_encode(&input[range.clone()], channels)?;
+            (
+                block,
+                vec![(0, channels as u32)],
+                RAR3_AUDIO_FILTER_BYTECODE,
+            )
         }
     };
     Ok(FilteredMember {
-        data: filtered,
+        data,
         block_start: range.start,
         block_size: range.end - range.start,
         init_regs,
@@ -569,12 +657,12 @@ impl Default for EncodeOptions {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Unpack29Encoder {
+pub struct Rar29Encoder {
     history: Vec<u8>,
     options: EncodeOptions,
 }
 
-impl Unpack29Encoder {
+impl Rar29Encoder {
     pub fn new() -> Self {
         Self::default()
     }
@@ -740,11 +828,11 @@ fn encode_member_inner(
     let mut main_frequencies = vec![0usize; MAIN_COUNT];
     let mut offset_frequencies = vec![0usize; OFFSET_COUNT];
     let mut low_offset_frequencies = vec![0usize; LOW_OFFSET_COUNT];
-    let mut length_frequencies = vec![0usize; LENGTH_COUNT];
+    let mut length_frequencies = vec![0usize; LENGTH_SLOTS];
     main_frequencies[257] += initial_filters.len();
     let mut match_state = EncoderMatchState::default();
     for token in &tokens {
-        match *token {
+        match token.view() {
             EncodeToken::Literal(byte) => {
                 main_frequencies[byte as usize] += 1;
             }
@@ -832,7 +920,7 @@ fn encode_member_inner(
     }
     let mut match_state = EncoderMatchState::default();
     for token in tokens {
-        match token {
+        match token.view() {
             EncodeToken::Literal(byte) => {
                 let code = main_codes[byte as usize].ok_or(Error::InvalidData(
                     "RAR 2.9 encoder missing literal Huffman code",
@@ -1122,44 +1210,89 @@ fn audio_encode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn itanium_encode(data: &mut [u8], file_offset: u32) {
-    if data.len() <= 21 {
-        return;
-    }
-    let base_offset = file_offset >> 4;
-    let block_count = (data.len() - 21).div_ceil(16);
-    for block in 0..block_count {
-        let pos = block * 16;
-        let file_offset = base_offset.wrapping_add(block as u32);
-        let mut mask = (0x334b_0000u32 >> (data[pos] & 0x1e)) & 3;
-        if mask != 0 {
-            mask += 1;
-            while mask <= 4 {
-                let p = pos + (mask as usize * 5 - 8);
-                if ((data[p + 3] >> mask) & 15) == 5 {
-                    let raw = u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]);
-                    let mut value = raw >> mask;
-                    value = value.wrapping_add(file_offset) & 0x000f_ffff;
-                    let raw = (raw & !(0x000f_ffff << mask)) | (value << mask);
-                    data[p..p + 4].copy_from_slice(&raw.to_le_bytes());
-                }
-                mask += 1;
-            }
-        }
-    }
-}
-
+/// What one planned LZ token means, as the two passes over the plan read
+/// it. Never stored: the planner keeps [`PackedToken`].
 #[derive(Debug, Clone, Copy)]
 enum EncodeToken {
     Literal(u8),
     Match { length: usize, offset: usize },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenKind {
+    Literal,
+    Match,
+}
+
+/// One planned LZ token in eight bytes.
+///
+/// `encode_member_inner` walks the whole plan once to count symbol
+/// frequencies and again to emit, so the plan is live across both passes
+/// and this struct's width is the planner's per-input-byte cost. It was
+/// three `usize` words - 24 bytes - until 16 Sep 2026.
+///
+/// `length` is capped at [`MAX_ENCODER_MATCH_LENGTH`] by `best_match`'s
+/// `max_length`, and `offset` at the caller's `max_match_distance`, which
+/// the writer draws from the dictionary ladder and so never exceeds 4 MiB;
+/// the constructors `debug_assert` both against the wider `u32` bound they
+/// actually need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PackedToken {
+    kind: TokenKind,
+    byte: u8,
+    length: u16,
+    offset: u32,
+}
+
+impl PackedToken {
+    fn literal(byte: u8) -> Self {
+        Self {
+            kind: TokenKind::Literal,
+            byte,
+            length: 0,
+            offset: 0,
+        }
+    }
+
+    fn match_at(length: usize, offset: usize) -> Self {
+        debug_assert!(
+            length <= MAX_ENCODER_MATCH_LENGTH,
+            "match length {length} is out of range"
+        );
+        Self {
+            kind: TokenKind::Match,
+            byte: 0,
+            length: length as u16,
+            offset: packed_offset(offset),
+        }
+    }
+
+    fn view(self) -> EncodeToken {
+        match self.kind {
+            TokenKind::Literal => EncodeToken::Literal(self.byte),
+            TokenKind::Match => EncodeToken::Match {
+                length: self.length as usize,
+                offset: self.offset as usize,
+            },
+        }
+    }
+}
+
+/// Both planners' offsets share this bound: the largest dictionary the RAR
+/// 2.9 writers offer is 4 MiB, well inside a `u32`.
+fn packed_offset(offset: usize) -> u32 {
+    debug_assert!(
+        offset <= u32::MAX as usize,
+        "match offset {offset} is out of range"
+    );
+    offset as u32
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct EncoderMatchState {
     old_offsets: [usize; 4],
     last_offset: usize,
-    last_length: usize,
+    previous_match_length: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1180,7 +1313,10 @@ enum EncodedMatch {
 
 impl EncoderMatchState {
     fn encode_match(&self, length: usize, offset: usize) -> Result<EncodedMatch> {
-        if offset == self.last_offset && length == self.last_length && self.last_length != 0 {
+        if offset == self.last_offset
+            && length == self.previous_match_length
+            && self.previous_match_length != 0
+        {
             return Ok(EncodedMatch::LastLengthRepeat);
         }
         if let Some(index) = self
@@ -1212,7 +1348,10 @@ impl EncoderMatchState {
     }
 
     fn remember(&mut self, length: usize, offset: usize) {
-        if offset == self.last_offset && length == self.last_length && self.last_length != 0 {
+        if offset == self.last_offset
+            && length == self.previous_match_length
+            && self.previous_match_length != 0
+        {
             return;
         }
         if let Some(index) = self
@@ -1226,12 +1365,12 @@ impl EncoderMatchState {
             self.old_offsets[0] = offset;
         }
         self.last_offset = offset;
-        self.last_length = length;
+        self.previous_match_length = length;
     }
 }
 
 #[cfg(test)]
-fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<EncodeToken> {
+fn encode_tokens(input: &[u8], history: &[u8], options: EncodeOptions) -> Vec<PackedToken> {
     encode_tokens_with_progress(input, history, options, None)
         .expect("encoding without cancellation cannot be cancelled")
 }
@@ -1241,13 +1380,17 @@ fn encode_tokens_with_progress(
     history: &[u8],
     options: EncodeOptions,
     mut progress: Option<&mut dyn FnMut(usize) -> bool>,
-) -> Result<Vec<EncodeToken>> {
+) -> Result<Vec<PackedToken>> {
     let mut tokens = Vec::new();
-    let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
     let history = &history[history.len().saturating_sub(options.max_match_distance)..];
     let mut combined = Vec::with_capacity(history.len() + input.len());
     combined.extend_from_slice(history);
     combined.extend_from_slice(input);
+    let mut buckets = MatchIndex::new(
+        MATCH_HASH_BUCKETS,
+        combined.len(),
+        options.max_match_candidates,
+    );
     for history_pos in 0..history.len().saturating_sub(2) {
         insert_match_position(&combined, history_pos, &mut buckets);
     }
@@ -1259,20 +1402,20 @@ fn encode_tokens_with_progress(
     while pos < end {
         if let Some(candidate) = best_match(&combined, pos, end, &buckets, options, &state) {
             if should_lazy_emit_literal(&combined, pos, end, &buckets, options, &state, candidate) {
-                tokens.push(EncodeToken::Literal(combined[pos]));
+                tokens.push(PackedToken::literal(combined[pos]));
                 insert_match_position(&combined, pos, &mut buckets);
                 pos += 1;
                 continue;
             }
             let MatchCandidate { length, offset, .. } = candidate;
-            tokens.push(EncodeToken::Match { length, offset });
+            tokens.push(PackedToken::match_at(length, offset));
             state.remember(length, offset);
             for history_pos in pos..pos + length {
                 insert_match_position(&combined, history_pos, &mut buckets);
             }
             pos += length;
         } else {
-            tokens.push(EncodeToken::Literal(combined[pos]));
+            tokens.push(PackedToken::literal(combined[pos]));
             insert_match_position(&combined, pos, &mut buckets);
             pos += 1;
         }
@@ -1297,7 +1440,7 @@ fn should_lazy_emit_literal(
     input: &[u8],
     pos: usize,
     end: usize,
-    buckets: &[Vec<usize>],
+    buckets: &MatchIndex,
     options: EncodeOptions,
     state: &EncoderMatchState,
     current: MatchCandidate,
@@ -1323,21 +1466,21 @@ struct MatchCandidate {
     score: isize,
 }
 
-fn encode_ppmd_tokens(input: &[u8], lz_escapes: bool) -> Vec<PpmdEncodeToken> {
+fn encode_ppmd_tokens(input: &[u8], lz_escapes: bool) -> Vec<PackedPpmdToken> {
     if !lz_escapes {
         return input
             .iter()
             .copied()
-            .map(PpmdEncodeToken::Literal)
+            .map(PackedPpmdToken::literal)
             .collect();
     }
 
     let mut tokens = Vec::new();
-    let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+    let mut buckets = MatchIndex::new(MATCH_HASH_BUCKETS, input.len(), MAX_MATCH_CANDIDATES);
     let mut pos = 0usize;
     while pos < input.len() {
         if let Some(length) = ppmd_offset_one_repeat(input, pos) {
-            tokens.push(PpmdEncodeToken::RepeatOffsetOne { length });
+            tokens.push(PackedPpmdToken::repeat_offset_one(length));
             for history_pos in pos..pos + length {
                 insert_match_position(input, history_pos, &mut buckets);
             }
@@ -1346,7 +1489,7 @@ fn encode_ppmd_tokens(input: &[u8], lz_escapes: bool) -> Vec<PpmdEncodeToken> {
         }
 
         if let Some((length, offset)) = best_ppmd_match(input, pos, &buckets) {
-            tokens.push(PpmdEncodeToken::Match { offset, length });
+            tokens.push(PackedPpmdToken::match_at(offset, length));
             for history_pos in pos..pos + length {
                 insert_match_position(input, history_pos, &mut buckets);
             }
@@ -1354,7 +1497,7 @@ fn encode_ppmd_tokens(input: &[u8], lz_escapes: bool) -> Vec<PpmdEncodeToken> {
             continue;
         }
 
-        tokens.push(PpmdEncodeToken::Literal(input[pos]));
+        tokens.push(PackedPpmdToken::literal(input[pos]));
         insert_match_position(input, pos, &mut buckets);
         pos += 1;
     }
@@ -1375,16 +1518,15 @@ fn ppmd_offset_one_repeat(input: &[u8], pos: usize) -> Option<usize> {
     (length >= 4).then_some(length)
 }
 
-fn best_ppmd_match(input: &[u8], pos: usize, buckets: &[Vec<usize>]) -> Option<(usize, usize)> {
+fn best_ppmd_match(input: &[u8], pos: usize, buckets: &MatchIndex) -> Option<(usize, usize)> {
     let max_offset = pos.min(0x1000001).min(MAX_ENCODER_MATCH_OFFSET);
     let max_length = (input.len() - pos).min(MAX_PPMD_MATCH_LENGTH);
     if max_offset < 2 || max_length < MIN_PPMD_MATCH_LENGTH || pos + 2 >= input.len() {
         return None;
     }
-    let bucket = &buckets[match_hash(input, pos)];
     let mut best = None;
     let mut checked = 0usize;
-    for &candidate in bucket.iter().rev() {
+    for candidate in buckets.candidates(match_hash(input, pos)) {
         if candidate >= pos {
             continue;
         }
@@ -1421,7 +1563,7 @@ fn best_match(
     input: &[u8],
     pos: usize,
     end: usize,
-    buckets: &[Vec<usize>],
+    buckets: &MatchIndex,
     options: EncodeOptions,
     state: &EncoderMatchState,
 ) -> Option<MatchCandidate> {
@@ -1434,7 +1576,6 @@ fn best_match(
     {
         return None;
     }
-    let bucket = &buckets[match_hash(input, pos)];
     let mut best = None;
     let mut checked = 0usize;
     for offset in state.old_offsets {
@@ -1444,7 +1585,7 @@ fn best_match(
         let length = match_length(input, pos, offset, max_length);
         consider_match_candidate(&mut best, state, length, offset);
     }
-    for &candidate in bucket.iter().rev() {
+    for candidate in buckets.candidates(match_hash(input, pos)) {
         if candidate >= pos {
             continue;
         }
@@ -1455,7 +1596,7 @@ fn best_match(
         checked += 1;
         let length = match_length(input, pos, offset, max_length);
         consider_match_candidate(&mut best, state, length, offset);
-        if best.is_some_and(|candidate| candidate.length == max_length) {
+        if best.is_some_and(|best| best.length == max_length) {
             break;
         }
         if checked >= options.max_match_candidates {
@@ -1520,9 +1661,9 @@ fn match_length_adjustment(offset: usize) -> usize {
     usize::from(offset >= 0x2000) + usize::from(offset >= 0x40000)
 }
 
-fn insert_match_position(input: &[u8], pos: usize, buckets: &mut [Vec<usize>]) {
+fn insert_match_position(input: &[u8], pos: usize, buckets: &mut MatchIndex) {
     if pos + 2 < input.len() {
-        buckets[match_hash(input, pos)].push(pos);
+        buckets.insert(pos, match_hash(input, pos));
     }
 }
 
@@ -1778,7 +1919,7 @@ fn canonical_codes(lengths: &[u8]) -> Result<Vec<Option<HuffmanCode>>> {
 }
 
 #[derive(Debug, Clone)]
-pub struct Unpack29 {
+pub struct Rar29Decoder {
     bits: BitReader,
     levels: [u8; TABLE_COUNT],
     main: Huffman,
@@ -1787,7 +1928,7 @@ pub struct Unpack29 {
     lengths: Huffman,
     old_offsets: [usize; 4],
     last_offset: usize,
-    last_length: usize,
+    previous_match_length: usize,
     last_low_offset: usize,
     low_offset_repeats: usize,
     pending_match: Option<(usize, usize)>,
@@ -1819,7 +1960,7 @@ pub struct Unpack29 {
     stream_margin: usize,
 }
 
-/// See `Unpack29::state_digest`.
+/// See `Rar29Decoder::state_digest`.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Rar29State {
@@ -1830,7 +1971,7 @@ struct Rar29State {
     levels: u32,
     old_offsets: [usize; 4],
     last_offset: usize,
-    last_length: usize,
+    previous_match_length: usize,
     last_low_offset: usize,
     low_offset_repeats: usize,
     pending_match: Option<(usize, usize)>,
@@ -1887,7 +2028,7 @@ enum StandardFilter {
     Audio,
 }
 
-impl Unpack29 {
+impl Rar29Decoder {
     pub fn new() -> Self {
         Self {
             bits: BitReader::new(),
@@ -1898,7 +2039,7 @@ impl Unpack29 {
             lengths: Huffman::empty(),
             old_offsets: [0; 4],
             last_offset: 0,
-            last_length: 0,
+            previous_match_length: 0,
             last_low_offset: 0,
             low_offset_repeats: 0,
             pending_match: None,
@@ -1923,7 +2064,7 @@ impl Unpack29 {
     ///
     /// Sound only when no excursion in the member under test can consume
     /// `margin` bytes - i.e. the member declares no VM filter, since
-    /// `read_vm_code` alone can spend 64 KiB (see `STREAM_INPUT_MARGIN`).
+    /// `read_vm_filter_record` alone can spend 64 KiB (see `STREAM_INPUT_MARGIN`).
     /// Every caller asserts `filters` stayed empty.
     #[cfg(test)]
     fn set_stream_bounds(&mut self, window: usize, margin: usize) {
@@ -1969,7 +2110,7 @@ impl Unpack29 {
             levels: crc32(&self.levels),
             old_offsets: self.old_offsets,
             last_offset: self.last_offset,
-            last_length: self.last_length,
+            previous_match_length: self.previous_match_length,
             last_low_offset: self.last_low_offset,
             low_offset_repeats: self.low_offset_repeats,
             pending_match: self.pending_match,
@@ -2115,10 +2256,11 @@ impl Unpack29 {
         // and never reads tables, so do the init here so finish_member can
         // observe the block end.
         if final_target == start && !self.in_lz_block && primed != 0 {
-            self.read_tables().map_err(|error| match error {
-                Error::NeedMoreInput => Error::InvalidData("RAR 2.9 bitstream is truncated"),
-                error => error,
-            })?;
+            self.read_code_length_tables()
+                .map_err(|error| match error {
+                    Error::NeedMoreInput => Error::InvalidData("RAR 2.9 bitstream is truncated"),
+                    error => error,
+                })?;
             self.in_lz_block = true;
         }
 
@@ -2249,14 +2391,14 @@ impl Unpack29 {
                 break;
             }
             if !self.in_lz_block {
-                self.read_tables()?;
+                self.read_code_length_tables()?;
                 self.in_lz_block = true;
             }
             match self.block_mode {
                 BlockMode::Lz => self.decode_lz(target)?,
                 BlockMode::Ppmd => {
                     // Not streamable - see STREAM_INPUT_MARGIN. The test is
-                    // here rather than after `read_tables` because a solid
+                    // here rather than after `read_code_length_tables` because a solid
                     // member can OPEN inside a PPMd block the previous one
                     // started.
                     if self.stream_refill {
@@ -2270,7 +2412,7 @@ impl Unpack29 {
         Ok(())
     }
 
-    fn read_tables(&mut self) -> Result<()> {
+    fn read_code_length_tables(&mut self) -> Result<()> {
         self.bits.align_byte();
         if self.bits.peek_bit()? != 0 {
             let first_byte = self.bits.read_bits(8)? as u8;
@@ -2385,7 +2527,7 @@ impl Unpack29 {
             // The burst above stops on a failed peek, which consumes
             // nothing, so it may leave the window all but empty. This is
             // the boundary that matters: everything below can consume up to
-            // `read_vm_code`'s 64 KiB and has no way back.
+            // `read_vm_filter_record`'s 64 KiB and has no way back.
             if self.stream_low() {
                 return Ok(());
             }
@@ -2397,18 +2539,18 @@ impl Unpack29 {
                     return Ok(());
                 }
                 257 => {
-                    self.read_vm_code()?;
+                    self.read_vm_filter_record()?;
                 }
                 258 => {
-                    if self.last_length != 0 {
-                        self.copy_match(self.last_length, self.last_offset, output_size)?;
+                    if self.previous_match_length != 0 {
+                        self.copy_match(self.previous_match_length, self.last_offset, output_size)?;
                     }
                 }
                 259..=262 => {
                     let index = symbol - 259;
                     let offset = self.old_offsets[index];
                     let length_slot = self.lengths.decode(&mut self.bits)?;
-                    if length_slot >= LENGTH_COUNT {
+                    if length_slot >= LENGTH_SLOTS {
                         return Err(Error::InvalidData("RAR 2.9 invalid repeat length slot"));
                     }
                     let mut length = LENGTH_BASES[length_slot] + 2;
@@ -2417,7 +2559,7 @@ impl Unpack29 {
                     }
                     self.rotate_old_offset(index);
                     self.last_offset = offset;
-                    self.last_length = length;
+                    self.previous_match_length = length;
                     self.copy_match(length, offset, output_size)?;
                 }
                 263..=270 => {
@@ -2428,7 +2570,7 @@ impl Unpack29 {
                     }
                     self.push_old_offset(offset);
                     self.last_offset = offset;
-                    self.last_length = 2;
+                    self.previous_match_length = 2;
                     self.copy_match(2, offset, output_size)?;
                 }
                 271..=298 => {
@@ -2446,7 +2588,7 @@ impl Unpack29 {
                     }
                     self.push_old_offset(offset);
                     self.last_offset = offset;
-                    self.last_length = length;
+                    self.previous_match_length = length;
                     self.copy_match(length, offset, output_size)?;
                 }
                 _ => return Err(Error::InvalidData("RAR 2.9 invalid main symbol")),
@@ -2479,7 +2621,7 @@ impl Unpack29 {
                     return Ok(());
                 }
                 3 => {
-                    self.read_vm_code_ppmd()?;
+                    self.read_vm_filter_record_from_ppmd()?;
                 }
                 4 => {
                     let mut offset = 0usize;
@@ -2552,7 +2694,7 @@ impl Unpack29 {
                     if self.bits.remaining_bits_are_zero() {
                         return Ok(());
                     }
-                    if let Err(error) = self.read_tables() {
+                    if let Err(error) = self.read_code_length_tables() {
                         if error == Error::NeedMoreInput {
                             return Ok(());
                         }
@@ -2579,6 +2721,15 @@ impl Unpack29 {
         }
     }
 
+    // Forced inline into `decode_lz`, like `copy_match` below: the hot
+    // RAR 2.9 match arm calls both once per match. rustc already inlines
+    // this one today; `copy_match` it kept out of line, and inlining that
+    // was 1 to 1.4% on RAR4 test wall (18 Sep 2026, M5 Max, rarbench's
+    // RAR4 leg and a held-out archive of binaries; an earlier sitting
+    // read 3 to 3.7%). The attribute here holds the inline against a
+    // later edit that grows the body. Inlining the Huffman and bit-reader
+    // helpers as well bought nothing.
+    #[inline(always)]
     fn read_offset(&mut self) -> Result<usize> {
         let slot = self.offsets.decode(&mut self.bits)?;
         if slot >= OFFSET_COUNT {
@@ -2613,7 +2764,7 @@ impl Unpack29 {
         Ok(offset)
     }
 
-    fn read_vm_code(&mut self) -> Result<()> {
+    fn read_vm_filter_record(&mut self) -> Result<()> {
         let first_byte = self.bits.read_bits(8)?;
         let mut len = (first_byte & 7) + 1;
         if len == 7 {
@@ -2629,7 +2780,7 @@ impl Unpack29 {
         self.parse_vm_code(first_byte, data)
     }
 
-    fn read_vm_code_ppmd(&mut self) -> Result<()> {
+    fn read_vm_filter_record_from_ppmd(&mut self) -> Result<()> {
         let first_byte = u32::from(self.read_ppmd_required_byte()?);
         let mut len = (first_byte & 7) + 1;
         if len == 7 {
@@ -2724,6 +2875,8 @@ impl Unpack29 {
             for _ in 0..code_size {
                 code.push(vm.read_bits(8)? as u8);
             }
+            #[cfg(feature = "bench-internals")]
+            filter_program_census::define(&code, self.programs.len());
             let kind = identify_standard_filter(&code)
                 .map(VmProgramKind::Standard)
                 .map_or_else(
@@ -2737,6 +2890,8 @@ impl Unpack29 {
                 globals: Vec::new(),
             });
         } else if let Some(program) = self.programs.get_mut(program_index) {
+            #[cfg(feature = "bench-internals")]
+            filter_program_census::reuse(program_index);
             program.exec_count = program.exec_count.wrapping_add(1);
             program.block_size = block_size;
         }
@@ -2876,6 +3031,8 @@ impl Unpack29 {
         Ok(safe_end)
     }
 
+    // Forced inline for the reason `read_offset` gives.
+    #[inline(always)]
     fn copy_match(&mut self, length: usize, offset: usize, output_size: usize) -> Result<()> {
         // The bitstream normally encodes match distances as offset+1, so zero
         // is not emitted for fresh matches. Keep the legacy decoder boundary
@@ -3016,7 +3173,7 @@ impl Unpack29 {
     }
 }
 
-impl Default for Unpack29 {
+impl Default for Rar29Decoder {
     fn default() -> Self {
         Self::new()
     }
@@ -3040,49 +3197,206 @@ struct Huffman {
     first_code: [u16; 16],
     first_index: [usize; 16],
     counts: [u16; 16],
-    // Primary decode LUT: top HUFF29_LUT_BITS of the stream -> packed
-    // (symbol << 8) | code_len; 0 means longer-than-LUT or invalid.
     lut: Vec<u32>,
-    // Present whenever the strict canonical form is not COMPLETE, which
-    // is exactly when unrar's own table answers a field this one cannot.
-    // Two ways in. Oversubscribed or all-zero length tables (old WinRAR
-    // 2.x encoders really emitted the first; the second is what a
-    // damaged stream degenerates into) have no strict form at all, so
-    // `symbols` and `lut` stay empty and the twin owns the whole code
-    // space - which also keeps the burst fast paths, gated on a
-    // non-empty LUT, off those tables. An UNDERsubscribed table does
-    // have a strict form and keeps it, LUT and all, because it decodes
-    // its reachable codes exactly like unrar; only the hole (fields no
-    // canonical code covers) is answered from the twin. That split
-    // matters: incomplete tables are common in real archives - the
-    // small length/offset alphabets routinely carry a single 1-bit code
-    // - and routing them all through the twin would cost the LUT for
-    // shapes that never decode a byte differently.
-    tolerant: Option<Box<TolerantHuffman>>,
+    /// Answers what the strict fields above cannot: every lookahead of an
+    /// oversubscribed or all-zero list, and the unused code space and short
+    /// input tail of an incomplete one. Unused for a complete list and for an
+    /// empty alphabet.
+    malformed: MalformedPrefixTable,
 }
 
-/// Bit-exact port of unrar's MakeDecodeTables/DecodeNumber pair, which
-/// never validates subscription at all - it builds a decode table from
-/// whatever lengths it is handed. Oversubscribed: the left-aligned upper
-/// limits are 32-bit, so an oversubscribed length saturates past 0xffff
-/// and every wider code becomes unreachable (truncation, not an error).
-/// Undersubscribed: the limits stop below 0xffff, so fields above the
-/// last one fall out of the length search at 15 bits, and the position
-/// they compute lands in the zero-filled tail of the alphabet list.
-/// All-zero: every limit is 0, so every field resolves the same way, to
-/// alphabet entry 0 with 15 bits consumed. Out-of-range positions clamp
-/// to slot 0 throughout, as upstream does for damaged archives. Built
-/// whenever the strict canonical form is not complete; the member CRC
-/// still gates the output, so genuinely corrupt streams keep failing.
+/// Lookahead bits that index [`MalformedPrefixTable::direct`]. Every code of
+/// at most this width is answered by that one load; the widths above it are
+/// resolved by one branch-free step, which is written out for exactly the
+/// four boundaries between 11 and 15.
+const MALFORMED_LUT_BITS: usize = 10;
+
+/// Decoder for a RAR 2.9 code-length list that is not a complete prefix code
+/// (incomplete, oversubscribed or all zero).
+///
+/// The lengths define left-aligned boundaries in a 16-bit lookahead space:
+/// `bounds[j]` is the sum of `count[i] << (16 - i)` over `i <= j`, never
+/// clipped, so an oversubscribed list runs past 65536. A lookahead `x`, with
+/// its lowest bit ignored, decodes at the narrowest width `w` in 1..=14 whose
+/// boundary lies above it, or at width 15 when none does. Its rank is the
+/// first rank of that width plus the distance past the previous boundary in
+/// width-`w` code units, and names an entry of `order`: every used symbol by
+/// (width, symbol number), then symbol 0 up to the alphabet size. A rank at or
+/// past the alphabet size reads rank 0 instead.
+///
+/// Holds only fixed-size arrays (sized for the 299-symbol main alphabet), so
+/// building one allocates nothing.
 #[derive(Debug, Clone)]
-struct TolerantHuffman {
-    // decode_len[len]: left-aligned (16-bit field space) upper limit for
-    // codes of `len` bits, cumulative, monotone; [0] = 0.
-    decode_len: [u32; 16],
-    // decode_pos[len]: first index in `decode_num` for codes of `len` bits.
-    decode_pos: [usize; 16],
-    // Alphabet numbers ordered by (code length, appearance order).
-    decode_num: Vec<u16>,
+struct MalformedPrefixTable {
+    /// Alphabet size; 0 marks an unused table.
+    alphabet: u16,
+    bounds: [u32; 16],
+    first_rank: [u16; 16],
+    order: [u16; MAIN_COUNT],
+    /// Indexed by the top `MALFORMED_LUT_BITS` bits of the lookahead:
+    /// `symbol << 4 | width` for every lookahead below
+    /// `bounds[MALFORMED_LUT_BITS]`, and 0 above it.
+    direct: [u16; 1 << MALFORMED_LUT_BITS],
+}
+
+impl MalformedPrefixTable {
+    fn unused() -> Self {
+        Self {
+            alphabet: 0,
+            bounds: [0; 16],
+            first_rank: [0; 16],
+            order: [0; MAIN_COUNT],
+            direct: [0; 1 << MALFORMED_LUT_BITS],
+        }
+    }
+
+    #[inline]
+    fn is_unused(&self) -> bool {
+        self.alphabet == 0
+    }
+
+    /// `count[j]` is the number of symbols of width `j` in `lengths`, and every
+    /// length is at most 15 (the caller has checked both).
+    fn from_lengths(lengths: &[u8], count: &[u16; 16]) -> Result<Self> {
+        if lengths.len() > MAIN_COUNT {
+            return Err(Error::InvalidData("RAR 2.9 Huffman alphabet is too large"));
+        }
+        let mut table = Self::unused();
+        table.alphabet = lengths.len() as u16;
+        let mut bound = 0u32;
+        let mut rank = 0u16;
+        for (width, &len_count) in count.iter().enumerate().skip(1) {
+            table.first_rank[width] = rank;
+            rank += len_count;
+            bound += u32::from(len_count) << (16 - width);
+            table.bounds[width] = bound;
+        }
+
+        // Ranks past the used symbols keep the zero `unused()` wrote: the
+        // padding reads symbol 0.
+        let mut next_rank = table.first_rank;
+        for (symbol, &len) in lengths.iter().enumerate() {
+            if len != 0 {
+                let rank = &mut next_rank[usize::from(len)];
+                table.order[usize::from(*rank)] = symbol as u16;
+                *rank += 1;
+            }
+        }
+
+        let index_shift = 16 - MALFORMED_LUT_BITS;
+        for (width, &len_count) in count.iter().enumerate().take(MALFORMED_LUT_BITS + 1).skip(1) {
+            let span = 1u32 << (16 - width);
+            let first = usize::from(table.first_rank[width]);
+            let mut start = table.bounds[width - 1];
+            for &symbol in &table.order[first..first + usize::from(len_count)] {
+                if start >= 1 << 16 {
+                    break;
+                }
+                let end = (start + span).min(1 << 16);
+                let entry = (symbol << 4) | width as u16;
+                table.direct[(start >> index_shift) as usize..(end >> index_shift) as usize]
+                    .fill(entry);
+                start += span;
+            }
+        }
+        Ok(table)
+    }
+
+    /// The symbol and width for a 16-bit lookahead (most significant bit
+    /// first). Only the top `width` bits of `lookahead` affect the answer.
+    #[inline]
+    fn answer(&self, lookahead: u32) -> (usize, u8) {
+        let x = lookahead & 0xfffe;
+        let entry = self.direct[(x >> (16 - MALFORMED_LUT_BITS)) as usize];
+        if entry != 0 {
+            return (usize::from(entry >> 4), (entry & 0x0f) as u8);
+        }
+        // `x` is at or past `bounds[10]`, so the width is 11 plus the number
+        // of the (non-decreasing) boundaries 11..=14 it has reached.
+        let bounds = &self.bounds;
+        let width = 11
+            + usize::from(x >= bounds[11])
+            + usize::from(x >= bounds[12])
+            + usize::from(x >= bounds[13])
+            + usize::from(x >= bounds[14]);
+        let rank = usize::from(self.first_rank[width])
+            + ((x - bounds[width - 1]) >> (16 - width)) as usize;
+        let rank = if rank < usize::from(self.alphabet) {
+            rank
+        } else {
+            0
+        };
+        (usize::from(self.order[rank]), width as u8)
+    }
+
+    /// Decode with whatever input is buffered.
+    fn decode(&self, bits: &mut BitReader) -> Result<usize> {
+        match bits.peek_bits(15) {
+            Ok(peek) => self.decode_lookahead(peek, bits),
+            Err(_) => self.decode_tail(bits),
+        }
+    }
+
+    /// Decode from 15 already-peeked bits (the 16th never matters).
+    #[inline]
+    fn decode_lookahead(&self, peek: u32, bits: &mut BitReader) -> Result<usize> {
+        if self.is_unused() {
+            return Err(Error::InvalidData("RAR 2.9 invalid Huffman code"));
+        }
+        let (symbol, width) = self.answer(peek << 1);
+        bits.consume(width);
+        Ok(symbol)
+    }
+
+    /// Decode when fewer than 15 bits are buffered: the missing bits are read
+    /// as zeros, which cannot change an answer no wider than the bits present.
+    /// A wider answer asks for more input and consumes nothing.
+    fn decode_tail(&self, bits: &mut BitReader) -> Result<usize> {
+        let available = bits.available_bits();
+        if self.is_unused() || available == 0 || available >= 15 {
+            return Err(Error::NeedMoreInput);
+        }
+        let head = bits.peek_bits(available as u8)?;
+        let (symbol, width) = self.answer(head << (16 - available));
+        if usize::from(width) > available {
+            return Err(Error::NeedMoreInput);
+        }
+        bits.consume(width);
+        Ok(symbol)
+    }
+}
+
+/// Test-only census of the tables `Huffman::from_lengths` builds on this
+/// thread, by alphabet size and class (spec D 3.3.4).
+#[cfg(test)]
+mod table_census {
+    use super::CanonicalShape;
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    thread_local! {
+        static COUNTS: RefCell<BTreeMap<(usize, &'static str), usize>> =
+            const { RefCell::new(BTreeMap::new()) };
+    }
+
+    pub(super) fn record(alphabet: usize, count: &[u16; 16], shape: CanonicalShape) {
+        let class = if alphabet == 0 {
+            "empty"
+        } else if count.iter().all(|&value| value == 0) {
+            "all-zero"
+        } else {
+            match shape {
+                CanonicalShape::Complete => "complete",
+                CanonicalShape::Incomplete => "incomplete",
+                CanonicalShape::Oversubscribed => "oversubscribed",
+            }
+        };
+        COUNTS.with(|counts| *counts.borrow_mut().entry((alphabet, class)).or_default() += 1);
+    }
+
+    pub(super) fn take() -> BTreeMap<(usize, &'static str), usize> {
+        COUNTS.with(|counts| std::mem::take(&mut *counts.borrow_mut()))
+    }
 }
 
 const HUFF29_LUT_BITS: usize = 12;
@@ -3102,7 +3416,7 @@ impl Huffman {
             first_index: [0; 16],
             counts: [0; 16],
             lut: Vec::new(),
-            tolerant: None,
+            malformed: MalformedPrefixTable::unused(),
         }
     }
 
@@ -3117,19 +3431,17 @@ impl Huffman {
             }
         }
         let shape = canonical_shape(&count);
+        #[cfg(test)]
+        table_census::record(lengths.len(), &count, shape);
         if shape == CanonicalShape::Oversubscribed || count.iter().all(|&value| value == 0) {
-            // No strict table to build: the lengths either claim more code
-            // space than exists, or claim none at all. unrar builds a
-            // working table for both shapes and decodes every field from
-            // it, so hand the whole code space to the twin. The one shape
-            // with no unrar answer to copy is an empty alphabet - upstream
-            // reads its DecodeNum out of bounds there - so that one keeps
-            // erroring when a symbol is asked for.
+            // No strict table to build: the lengths claim more code space than
+            // exists, or none at all. The malformed table answers every
+            // lookahead. An empty alphabet gets no table and refuses to decode.
             if lengths.is_empty() {
                 return Ok(Self::empty());
             }
             let mut table = Self::empty();
-            table.tolerant = Some(Box::new(TolerantHuffman::from_lengths(lengths, &count)));
+            table.malformed = MalformedPrefixTable::from_lengths(lengths, &count)?;
             return Ok(table);
         }
 
@@ -3175,24 +3487,24 @@ impl Huffman {
             first_index,
             counts: count,
             lut,
-            // Complete: every field decodes strictly, so there is nothing
-            // for a twin to answer. Incomplete: the reachable codes decode
-            // strictly (and keep the LUT), the hole goes to the twin.
-            tolerant: match shape {
-                CanonicalShape::Complete => None,
-                _ => Some(Box::new(TolerantHuffman::from_lengths(lengths, &count))),
+            // Complete: the strict table answers every lookahead. Incomplete:
+            // it answers the lookaheads its codes cover, and the malformed
+            // table answers the unused space and the short tail.
+            malformed: match shape {
+                CanonicalShape::Complete => MalformedPrefixTable::unused(),
+                _ => MalformedPrefixTable::from_lengths(lengths, &count)?,
             },
         })
     }
 
     fn decode(&self, bits: &mut BitReader) -> Result<usize> {
         if self.symbols.is_empty() {
-            // Oversubscribed or all-zero lengths: the twin owns the whole
-            // code space. Without one there is nothing to decode from.
-            return match &self.tolerant {
-                Some(tolerant) => tolerant.decode(bits),
-                None => Err(Error::InvalidData("RAR 2.9 empty Huffman table")),
-            };
+            // No strict table: an oversubscribed or all-zero list is answered
+            // whole by the malformed table; an empty alphabet has nothing.
+            if self.malformed.is_unused() {
+                return Err(Error::InvalidData("RAR 2.9 empty Huffman table"));
+            }
+            return self.malformed.decode(bits);
         }
         if let Ok(peek) = bits.peek_bits(15) {
             let entry = self.lut[(peek >> (15 - HUFF29_LUT_BITS)) as usize];
@@ -3212,29 +3524,16 @@ impl Huffman {
                     }
                 }
             }
-            return self.decode_hole(bits);
+            // Past every strict code: the unused space of an incomplete list.
+            return self.malformed.decode_lookahead(peek, bits);
         }
-        match &self.tolerant {
-            // Sub-15-bit tail of an incomplete table. The twin resolves the
-            // code length from buffered bits alone and consumes nothing
-            // when the answer needs bits that have not arrived, which the
-            // bit-by-bit walk below cannot do - and it agrees with the walk
-            // on every code the walk can complete.
-            Some(tolerant) => tolerant.decode(bits),
-            None => self.decode_slow(bits),
+        if self.malformed.is_unused() {
+            return self.decode_slow(bits);
         }
-    }
-
-    // A field no canonical code covers. A complete table has none; an
-    // incomplete one has a hole, and unrar reads the hole as a 15-bit code
-    // whose position lands in the zero-filled tail of the alphabet list (or
-    // clamps to slot 0 past its end) rather than failing. Nothing has been
-    // consumed at this point, so the twin sees the same bits.
-    fn decode_hole(&self, bits: &mut BitReader) -> Result<usize> {
-        match &self.tolerant {
-            Some(tolerant) => tolerant.decode(bits),
-            None => Err(Error::InvalidData("RAR 2.9 invalid Huffman code")),
-        }
+        // Fewer than 15 bits left on a list that is not complete: the
+        // malformed table answers from the bits that are there, or asks for
+        // more without consuming any.
+        self.malformed.decode_tail(bits)
     }
 
     // Bit-by-bit canonical walk for the input tail, where fewer than 15
@@ -3254,72 +3553,6 @@ impl Huffman {
             }
         }
         Err(Error::InvalidData("RAR 2.9 invalid Huffman code"))
-    }
-}
-
-impl TolerantHuffman {
-    fn from_lengths(lengths: &[u8], count: &[u16; 16]) -> Self {
-        let mut decode_len = [0u32; 16];
-        let mut decode_pos = [0usize; 16];
-        let mut upper_limit = 0u32;
-        for len in 1..16 {
-            upper_limit += u32::from(count[len]);
-            decode_len[len] = upper_limit << (16 - len);
-            upper_limit *= 2;
-            decode_pos[len] = decode_pos[len - 1] + usize::from(count[len - 1]);
-        }
-
-        // Alphabet-order walk, exactly like upstream: within a length,
-        // symbols keep their order of appearance. No sort by code - with
-        // an oversubscribed table the canonical codes wrap, and a sort
-        // keyed on them would reorder the list.
-        let mut decode_num = vec![0u16; lengths.len()];
-        let mut next_pos = decode_pos;
-        for (symbol, &len) in lengths.iter().enumerate() {
-            if len != 0 {
-                decode_num[next_pos[len as usize]] = symbol as u16;
-                next_pos[len as usize] += 1;
-            }
-        }
-        Self {
-            decode_len,
-            decode_pos,
-            decode_num,
-        }
-    }
-
-    fn decode(&self, bits: &mut BitReader) -> Result<usize> {
-        // Left-aligned 16-bit field with bit 0 clear (upstream masks with
-        // 0xfffe). Near the input tail, fewer than 15 bits may be
-        // buffered; the padded low bits never decide a comparison,
-        // because `decode_len[len]` is zero below bit 16-len, so the
-        // outcome at each length depends only on the top `len` real bits.
-        let avail = bits.available_bits().min(15);
-        if avail == 0 {
-            return Err(Error::NeedMoreInput);
-        }
-        let field = bits.peek_bits(avail as u8)? << (16 - avail);
-
-        let mut code_len = 15usize;
-        for len in 1..15 {
-            if field < self.decode_len[len] {
-                code_len = len;
-                break;
-            }
-        }
-        if code_len > avail {
-            return Err(Error::NeedMoreInput);
-        }
-        bits.consume(code_len as u8);
-
-        let dist = (field - self.decode_len[code_len - 1]) >> (16 - code_len);
-        let mut pos = self.decode_pos[code_len] + dist as usize;
-        // Out-of-bounds guard for damaged streams, as upstream: clamp to
-        // slot 0. The member CRC rejects the garbage output downstream.
-        if pos >= self.decode_num.len() {
-            pos = 0;
-        }
-        Ok(usize::from(self.decode_num[pos]))
     }
 }
 
@@ -3416,8 +3649,11 @@ impl BitReader {
     #[inline]
     fn refill(&mut self) {
         if self.byte_pos + 8 <= self.input.len() {
-            let word =
-                u64::from_be_bytes(self.input[self.byte_pos..self.byte_pos + 8].try_into().unwrap());
+            let word = u64::from_be_bytes(
+                self.input[self.byte_pos..self.byte_pos + 8]
+                    .try_into()
+                    .unwrap(),
+            );
             self.cache |= word >> self.cache_bits;
             let whole = (64 - self.cache_bits) & !7;
             self.byte_pos += (whole / 8) as usize;
@@ -3638,6 +3874,101 @@ impl BitWriter {
     }
 }
 
+/// Census of the filter programs RAR 3 archives actually carry, for the
+/// question "how often is a program NOT one of the standard six?". Records
+/// every program DEFINITION the decoder reads (byte length, CRC32, whether
+/// `identify_standard_filter` knew it) and how many filter records used it.
+/// Read by `examples/rar3_filter_program_census.rs`; compiled out otherwise.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub mod filter_program_census {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    /// One program definition as the decoder read it.
+    #[derive(Debug, Clone)]
+    pub struct Definition {
+        pub len: usize,
+        pub crc32: u32,
+        /// The standard filter the engine recognised, if any.
+        pub standard: Option<&'static str>,
+        /// Filter records that ran this program, the defining one included.
+        pub uses: u64,
+        /// The program bytes, kept only when unrecognised.
+        pub code: Vec<u8>,
+    }
+
+    #[derive(Default)]
+    struct State {
+        definitions: Vec<Definition>,
+        /// Program-table index to `definitions` index, for the current table.
+        table: Vec<usize>,
+    }
+
+    static ON: AtomicBool = AtomicBool::new(false);
+    static STATE: Mutex<Option<State>> = Mutex::new(None);
+
+    /// Starts recording, and drops anything already recorded.
+    pub fn enable() {
+        if let Ok(mut state) = STATE.lock() {
+            *state = Some(State::default());
+        }
+        ON.store(true, Ordering::Relaxed);
+    }
+
+    /// Stops recording and returns what was recorded.
+    pub fn take() -> Vec<Definition> {
+        ON.store(false, Ordering::Relaxed);
+        STATE
+            .lock()
+            .ok()
+            .and_then(|mut state| state.take())
+            .map(|state| state.definitions)
+            .unwrap_or_default()
+    }
+
+    pub(super) fn define(code: &[u8], table_index: usize) {
+        if !ON.load(Ordering::Relaxed) {
+            return;
+        }
+        let standard = super::identify_standard_filter(code).map(|kind| match kind {
+            super::StandardFilter::E8 => "e8",
+            super::StandardFilter::E8E9 => "e8e9",
+            super::StandardFilter::Itanium => "itanium",
+            super::StandardFilter::Delta => "delta",
+            super::StandardFilter::Rgb => "rgb",
+            super::StandardFilter::Audio => "audio",
+        });
+        if let Ok(mut guard) = STATE.lock() {
+            if let Some(state) = guard.as_mut() {
+                // A fresh program table starts again at index zero.
+                state.table.truncate(table_index);
+                state.table.push(state.definitions.len());
+                state.definitions.push(Definition {
+                    len: code.len(),
+                    crc32: super::crc32(code),
+                    standard,
+                    uses: 1,
+                    code: if standard.is_some() { Vec::new() } else { code.to_vec() },
+                });
+            }
+        }
+    }
+
+    pub(super) fn reuse(table_index: usize) {
+        if !ON.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Ok(mut guard) = STATE.lock() {
+            if let Some(state) = guard.as_mut() {
+                if let Some(&definition) = state.table.get(table_index) {
+                    state.definitions[definition].uses += 1;
+                }
+            }
+        }
+    }
+}
+
 fn identify_standard_filter(code: &[u8]) -> Option<StandardFilter> {
     if code.iter().fold(0u8, |acc, &byte| acc ^ byte) != 0 {
         return None;
@@ -3666,7 +3997,7 @@ fn apply_standard_filter(
         StandardFilter::E8E9 => {
             filters::decode_in_place(FilterOp::E8E9, data, file_offset, rar29_delta_messages())?
         }
-        StandardFilter::Itanium => itanium_decode(data, file_offset),
+        StandardFilter::Itanium => address_filters::ia64(data, file_offset, Direction::Decode),
         StandardFilter::Delta => {
             let channels = regs[0] as usize;
             if channels == 0 {
@@ -3698,36 +4029,6 @@ fn apply_standard_filter(
         }
     }
     Ok(())
-}
-
-fn itanium_decode(data: &mut [u8], file_offset: u32) {
-    if data.len() <= 21 {
-        return;
-    }
-    let base_offset = file_offset >> 4;
-    // Each 16-byte Itanium bundle can inspect a 4-byte instruction field that
-    // starts up to 13 bytes into the bundle. Keeping a 21-byte tail prevents
-    // decoding a partial final bundle.
-    let block_count = (data.len() - 21).div_ceil(16);
-    for block in 0..block_count {
-        let pos = block * 16;
-        let file_offset = base_offset.wrapping_add(block as u32);
-        let mut mask = (0x334b_0000u32 >> (data[pos] & 0x1e)) & 3;
-        if mask != 0 {
-            mask += 1;
-            while mask <= 4 {
-                let p = pos + (mask as usize * 5 - 8);
-                if ((data[p + 3] >> mask) & 15) == 5 {
-                    let raw = u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]);
-                    let mut value = raw >> mask;
-                    value = value.wrapping_sub(file_offset) & 0x000f_ffff;
-                    let raw = (raw & !(0x000f_ffff << mask)) | (value << mask);
-                    data[p..p + 4].copy_from_slice(&raw.to_le_bytes());
-                }
-                mask += 1;
-            }
-        }
-    }
 }
 
 fn rgb_decode(data: &[u8], width: usize, pos_r: usize) -> Result<Vec<u8>> {
@@ -3848,7 +4149,9 @@ mod tests {
     fn cached_reader_survives_append_after_partial_consume() {
         // Exercises the refill re-OR invariant across append/compact: the
         // owned-buffer property rar50's slice reader never had to prove.
-        let data: Vec<u8> = (0u16..64).map(|i| (i.wrapping_mul(37) >> 1) as u8).collect();
+        let data: Vec<u8> = (0u16..64)
+            .map(|i| (i.wrapping_mul(37) >> 1) as u8)
+            .collect();
         let mut incremental = super::BitReader::new();
         incremental.append(&data[..7]);
         let mut reference = super::BitReader::from_bytes(&data);
@@ -4049,20 +4352,19 @@ mod tests {
     use std::ops::Range;
 
     use super::{
-        apply_standard_filter, audio_encode, best_match, encode_ppmd_tokens,
-        encode_table_level_tokens, encode_tokens, encoded_filter_records, filters,
-        insert_match_position, itanium_decode, itanium_encode, rar29_delta_messages,
-        should_lazy_emit_literal, split_large_filter,
-        unpack29_decode, unpack29_encode_literals, unpack29_encode_ppmd,
-        unpack29_encode_ppmd_literals, unpack29_encode_ppmd_with_filter, BitReader, BitWriter,
+        apply_standard_filter, audio_encode, best_match, decode_rar29, encode_ppmd_tokens,
+        encode_rar29_literals, encode_rar29_ppmd, encode_rar29_ppmd_literals,
+        encode_rar29_ppmd_with_filter, encode_table_level_tokens, encode_tokens,
+        encoded_filter_records, filters, insert_match_position, rar29_delta_messages,
+        should_lazy_emit_literal, split_large_filter, BitReader, BitWriter, BlockMode,
         EncodeOptions, EncodeToken, EncoderMatchState, Error, FilterOp, Huffman, LevelToken,
-        OwnedVmFilterRecord, PpmdEncodeToken, Rar29FilterKind, Rar29FilterSpec, Result,
-        BlockMode, Rar29State, StandardFilter, Unpack29, Unpack29Encoder, VmFilter, VmProgram,
-        VmProgramKind, MAIN_COUNT,
-        MATCH_HASH_BUCKETS, MAX_MATCH_CANDIDATES, MAX_VM_AUDIO_FILTER_BLOCK_SIZE,
-        MAX_VM_DELTA_FILTER_BLOCK_SIZE, MAX_VM_FILTER_BLOCK_SIZE, RAR3_AUDIO_FILTER_BYTECODE,
-        STREAM_INPUT_MARGIN, STREAM_INPUT_WINDOW,
-        RAR3_DELTA_FILTER_BYTECODE, RAR3_RGB_FILTER_BYTECODE, RAR3_X86_PAST_BOUNDARY, TABLE_COUNT,
+        MatchIndex, OwnedVmFilterRecord, PackedPpmdToken, PackedToken, PpmdEncodeToken,
+        Rar29Decoder, Rar29Encoder, Rar29FilterKind, Rar29FilterSpec, Rar29State, Result,
+        StandardFilter, VmFilter, VmProgram, VmProgramKind, MAIN_COUNT, MATCH_HASH_BUCKETS,
+        MAX_MATCH_CANDIDATES, MAX_VM_AUDIO_FILTER_BLOCK_SIZE, MAX_VM_DELTA_FILTER_BLOCK_SIZE,
+        MAX_VM_FILTER_BLOCK_SIZE, RAR3_AUDIO_FILTER_BYTECODE, RAR3_DELTA_FILTER_BYTECODE,
+        RAR3_RGB_FILTER_BYTECODE, RAR3_X86_PAST_BOUNDARY, STREAM_INPUT_MARGIN, STREAM_INPUT_WINDOW,
+        TABLE_COUNT,
     };
 
     const COMPRESSED_TEXT: &[u8] = &[
@@ -4075,193 +4377,664 @@ mod tests {
     #[test]
     fn decodes_rar29_lz_member() {
         assert_eq!(
-            unpack29_decode(COMPRESSED_TEXT, 2400).unwrap(),
+            decode_rar29(COMPRESSED_TEXT, 2400).unwrap(),
             expected_text()
         );
     }
 
-    #[test]
-    fn tolerates_oversubscribed_rar29_huffman_tables() {
-        // Old WinRAR 2.x encoders emit these; unrar truncates instead of
-        // erroring, and so do we (via the tolerant fallback table).
-        let table = Huffman::from_lengths(&[1, 1, 1]).unwrap();
-        assert!(table.tolerant.is_some());
+    // ---------------------------------------------------------------------
+    // Malformed prefix tables (spec D part 3). The exhaustive runs are
+    // release-only:
+    //   cargo test -p rars --lib --release -- --ignored malformed_prefix_exhaustive
+    // ---------------------------------------------------------------------
 
-        // counts[1] = 3 saturates the 1-bit limit past 0xffff, so every
-        // bit field decodes as one of the two reachable 1-bit codes and
-        // the third symbol is unreachable, exactly as unrar behaves.
-        let mut bits = BitReader::from_bytes(&[0b0100_0000, 0]);
-        assert_eq!(table.decode(&mut bits).unwrap(), 0);
-        assert_eq!(bits.position(), 1);
-        assert_eq!(table.decode(&mut bits).unwrap(), 1);
-        assert_eq!(bits.position(), 2);
+    /// The decoding function D of spec D 3.2.1, transcribed directly: 64-bit
+    /// sums, a linear search for the width, no lookup table. An independent
+    /// witness for `MalformedPrefixTable`, which shares none of its code.
+    struct ReferencePrefixDecoder {
+        alphabet: usize,
+        bounds: [u64; 16],
+        first: [u64; 16],
+        order: Vec<usize>,
     }
 
-    #[test]
-    fn oversubscribed_low_offset_shape_from_the_field_decodes_as_unrar() {
-        // The exact 17-symbol low-offset table shape from the 11 Aug soak
-        // set (Rapala WII): two 1-bit codes up front, then 15 junk
-        // lengths. unrar resolves every field at 1 bit; the junk symbols
-        // are unreachable.
-        let lengths: [u8; 17] = [1, 1, 3, 3, 4, 5, 6, 6, 7, 8, 9, 11, 12, 12, 14, 14, 14];
-        let table = Huffman::from_lengths(&lengths).unwrap();
-        assert!(table.tolerant.is_some());
-        for pattern in 0u16..=0xff {
-            let mut bits = BitReader::from_bytes(&[pattern as u8, 0]);
-            let symbol = table.decode(&mut bits).unwrap();
-            assert_eq!(bits.position(), 1);
-            assert_eq!(symbol, usize::from(pattern >> 7));
+    impl ReferencePrefixDecoder {
+        fn new(lengths: &[u8]) -> Self {
+            let mut count = [0u64; 16];
+            for &len in lengths {
+                if len != 0 {
+                    count[usize::from(len)] += 1;
+                }
+            }
+            let mut bounds = [0u64; 16];
+            let mut first = [0u64; 16];
+            for j in 1..=15 {
+                bounds[j] = bounds[j - 1] + count[j] * (1 << (16 - j));
+                if j >= 2 {
+                    first[j] = first[j - 1] + count[j - 1];
+                }
+            }
+            let mut order = Vec::new();
+            for len in 1..=15u8 {
+                for (symbol, &l) in lengths.iter().enumerate() {
+                    if l == len {
+                        order.push(symbol);
+                    }
+                }
+            }
+            order.resize(lengths.len(), 0);
+            Self {
+                alphabet: lengths.len(),
+                bounds,
+                first,
+                order,
+            }
+        }
+
+        fn answer(&self, x: u32) -> (usize, u8) {
+            let x = u64::from(x) & !1;
+            let width = (1..=14).find(|&j| x < self.bounds[j]).unwrap_or(15);
+            let mut rank = self.first[width] + (x - self.bounds[width - 1]) / (1 << (16 - width));
+            if rank >= self.alphabet as u64 {
+                rank = 0;
+            }
+            (self.order[rank as usize], width as u8)
+        }
+
+        fn is_complete(&self) -> bool {
+            self.bounds[15] == 1 << 16
         }
     }
 
-    #[test]
-    fn tolerant_decode_matches_strict_for_the_reachable_code_space() {
-        // A complete table plus one phantom max-length entry (the classic
-        // junk-tail shape) must decode the real code space bit-for-bit
-        // like the strict table without the phantom.
-        let valid: [u8; 6] = [2, 2, 3, 3, 3, 3];
-        let mut padded = [0u8; 7];
-        padded[..6].copy_from_slice(&valid);
-        padded[6] = 15;
-
-        let strict = Huffman::from_lengths(&valid).unwrap();
-        let tolerant = Huffman::from_lengths(&padded).unwrap();
-        assert!(strict.tolerant.is_none());
-        assert!(tolerant.tolerant.is_some());
-
-        for pattern in 0u16..=0xffff {
-            let input = pattern.to_be_bytes();
-            let mut strict_bits = BitReader::from_bytes(&input);
-            let mut tolerant_bits = BitReader::from_bytes(&input);
-            let strict_symbol = strict.decode(&mut strict_bits).unwrap();
-            let tolerant_symbol = tolerant.decode(&mut tolerant_bits).unwrap();
-            assert_eq!(strict_symbol, tolerant_symbol, "pattern {pattern:#06x}");
-            assert_eq!(
-                strict_bits.position(),
-                tolerant_bits.position(),
-                "pattern {pattern:#06x}"
-            );
-        }
+    /// Decodes one symbol from the start of `input` with `reader` reset over
+    /// it; returns the outcome and the bits consumed.
+    fn read_prefix_symbol(
+        reader: &mut BitReader,
+        table: &Huffman,
+        input: &[u8],
+    ) -> (Result<usize>, usize) {
+        reader.input.clear();
+        reader.input.extend_from_slice(input);
+        reader.byte_pos = 0;
+        reader.cache = 0;
+        reader.cache_bits = 0;
+        let outcome = table.decode(reader);
+        (outcome, reader.position())
     }
 
-    // Decode one 16-bit field from a fresh reader: (symbol, bits consumed).
-    // unrar always has 16 bits in hand at this point, so two bytes is the
-    // whole field it would see.
-    fn decode_field(table: &Huffman, pattern: u16) -> (usize, usize) {
-        let input = pattern.to_be_bytes();
-        let mut bits = BitReader::from_bytes(&input);
-        let symbol = table.decode(&mut bits).unwrap();
-        (symbol, bits.position())
+    /// The lookahead `x` as the spec's four-byte and one-byte inputs.
+    fn lookahead_bytes(x: u32) -> [u8; 4] {
+        [(x >> 8) as u8, x as u8, 0, 0]
+    }
+
+    /// One read's outcome and the bits it consumed.
+    type PrefixRead = (Result<usize>, usize);
+    /// Inclusive lookahead ranges with their symbol and width.
+    type PrefixRanges = Vec<(u32, u32, usize, u8)>;
+    /// A second witness called on every lookahead of a list.
+    type PrefixWitness = dyn Fn(&[u8], u32, &PrefixRead, &PrefixRead) + Sync;
+
+    const VECTOR_A: &[u8] = &[2, 3, 1, 3];
+    const VECTOR_B: &[u8] = &[0, 0, 1];
+    const VECTOR_F: &[u8] = &[0, 0, 0, 0, 0];
+    const VECTOR_L: &[u8] = &[1, 1, 1];
+    const VECTOR_M: &[u8] = &[1, 1, 3, 3, 4, 5, 6, 6, 7, 8, 9, 11, 12, 12, 14, 14, 14];
+
+    /// Spec D 3.3.1 lists A-N with their ranges over `x` with bit 0 cleared
+    /// (inclusive `lo`, `hi`, then symbol and width). L and M are checked by
+    /// formula and N by equality, so they carry no ranges here.
+    fn spec_prefix_vectors() -> Vec<(&'static [u8], PrefixRanges)> {
+        vec![
+            (
+                VECTOR_A,
+                vec![
+                    (0x0000, 0x7fff, 2, 1),
+                    (0x8000, 0xbfff, 0, 2),
+                    (0xc000, 0xdfff, 1, 3),
+                    (0xe000, 0xffff, 3, 3),
+                ],
+            ),
+            (
+                VECTOR_B,
+                vec![
+                    (0x0000, 0x7fff, 2, 1),
+                    (0x8000, 0x8003, 0, 15),
+                    (0x8004, 0xffff, 2, 15),
+                ],
+            ),
+            (
+                &[1, 0, 2, 15, 0],
+                vec![
+                    (0x0000, 0x7fff, 0, 1),
+                    (0x8000, 0xbfff, 2, 2),
+                    (0xc000, 0xc001, 3, 15),
+                    (0xc002, 0xffff, 0, 15),
+                ],
+            ),
+            (
+                &[2, 2, 2, 2, 2],
+                vec![
+                    (0x0000, 0x3fff, 0, 2),
+                    (0x4000, 0x7fff, 1, 2),
+                    (0x8000, 0xbfff, 2, 2),
+                    (0xc000, 0xffff, 3, 2),
+                ],
+            ),
+            (
+                &[1, 2, 2, 2, 0, 3],
+                vec![
+                    (0x0000, 0x7fff, 0, 1),
+                    (0x8000, 0xbfff, 1, 2),
+                    (0xc000, 0xffff, 2, 2),
+                ],
+            ),
+            (VECTOR_F, vec![(0x0000, 0xffff, 0, 15)]),
+            (
+                &[4, 0, 4, 4],
+                vec![
+                    (0x0000, 0x0fff, 0, 4),
+                    (0x1000, 0x1fff, 2, 4),
+                    (0x2000, 0x2fff, 3, 4),
+                    (0x3000, 0xffff, 0, 15),
+                ],
+            ),
+            (
+                &[0, 15],
+                vec![
+                    (0x0000, 0x0001, 1, 15),
+                    (0x0002, 0x0003, 0, 15),
+                    (0x0004, 0xffff, 1, 15),
+                ],
+            ),
+            (
+                &[0, 2, 2, 3, 0, 0, 0, 0],
+                vec![
+                    (0x0000, 0x3fff, 1, 2),
+                    (0x4000, 0x7fff, 2, 2),
+                    (0x8000, 0x9fff, 3, 3),
+                    (0xa000, 0xa009, 0, 15),
+                    (0xa00a, 0xffff, 1, 15),
+                ],
+            ),
+            (
+                &[0, 1, 0, 0],
+                vec![
+                    (0x0000, 0x7fff, 1, 1),
+                    (0x8000, 0x8005, 0, 15),
+                    (0x8006, 0xffff, 1, 15),
+                ],
+            ),
+            (&[0u8; 20], vec![(0x0000, 0xffff, 0, 15)]),
+        ]
+    }
+
+    /// Every list named in spec D 3.3.1 (A-P), for the corpus.
+    fn spec_prefix_lists() -> Vec<Vec<u8>> {
+        let mut lists: Vec<Vec<u8>> = spec_prefix_vectors()
+            .into_iter()
+            .map(|(lengths, _)| lengths.to_vec())
+            .collect();
+        lists.extend([
+            VECTOR_L.to_vec(),
+            VECTOR_M.to_vec(),
+            vec![2, 2, 3, 3, 3, 3, 15],
+            vec![2, 2, 3, 3, 3, 3],
+            Vec::new(),
+            vec![1, 1],
+            vec![2, 2, 2, 2],
+            vec![1, 2, 3, 3],
+        ]);
+        lists
     }
 
     #[test]
-    fn undersubscribed_rar29_huffman_tables_answer_the_hole_as_unrar() {
-        // Lengths that leave code space unused. Strict construction is
-        // happy with these (nothing is oversubscribed) but has no code for
-        // fields at or above 0xa000, where unrar still answers: its length
-        // search falls out at 15 bits and the position it computes lands in
-        // the zero-filled tail of the alphabet list, or clamps to slot 0
-        // past its end. Expectations transcribed from unrar 7.20's
-        // MakeDecodeTables/DecodeNumber run over this exact table.
-        let lengths: [u8; 8] = [0, 2, 2, 3, 0, 0, 0, 0];
-        let table = Huffman::from_lengths(&lengths).unwrap();
-
-        // The strict table survives - this shape keeps the LUT and the
-        // burst path, and only borrows the twin for the hole.
-        assert!(!table.symbols.is_empty());
-        assert!(!table.lut.is_empty());
-        assert!(table.tolerant.is_some());
-
-        for pattern in 0u16..=0xffff {
-            let field = pattern & 0xfffe;
-            let expected = match field {
-                0x0000..=0x3fff => (1, 2),
-                0x4000..=0x7fff => (2, 2),
-                0x8000..=0x9fff => (3, 3),
-                // The hole. Position 3 + (field - 0xa000) / 2 reads the
-                // zero-filled tail while it stays inside the 8-entry
-                // alphabet, then clamps to slot 0 - which holds symbol 1,
-                // the first 2-bit code, not symbol 0.
-                0xa000..=0xa009 => (0, 15),
-                _ => (1, 15),
-            };
-            assert_eq!(
-                decode_field(&table, pattern),
-                expected,
-                "field {field:#06x}"
-            );
-        }
-    }
-
-    #[test]
-    fn single_one_bit_code_rar29_table_decodes_as_unrar() {
-        // The commonest incomplete shape in real archives: one used symbol
-        // in a small alphabet, so half the code space is a hole.
-        let table = Huffman::from_lengths(&[0, 1, 0, 0]).unwrap();
-        assert!(table.tolerant.is_some());
-
-        for pattern in 0u16..=0xffff {
-            let field = pattern & 0xfffe;
-            let expected = match field {
-                0x0000..=0x7fff => (1, 1),
-                0x8000..=0x8005 => (0, 15),
-                _ => (1, 15),
-            };
-            assert_eq!(
-                decode_field(&table, pattern),
-                expected,
-                "field {field:#06x}"
-            );
-        }
-    }
-
-    #[test]
-    fn all_zero_rar29_huffman_table_decodes_as_unrar() {
-        // What a damaged stream degenerates into. unrar builds a table here
-        // too: every limit is zero, so every field falls out of the length
-        // search at 15 bits and reads alphabet entry 0. rars used to return
-        // an empty table and then hard-error the first time a symbol was
-        // asked for.
-        let table = Huffman::from_lengths(&[0u8; 20]).unwrap();
-        assert!(table.symbols.is_empty());
-        assert!(table.tolerant.is_some());
-
-        for pattern in 0u16..=0xffff {
-            assert_eq!(
-                decode_field(&table, pattern),
-                (0, 15),
-                "pattern {pattern:#06x}"
-            );
-        }
-    }
-
-    #[test]
-    fn an_empty_alphabet_still_refuses_to_decode() {
-        // The one shape with no unrar answer to copy: upstream reads its
-        // decode table out of bounds. No table, no symbols.
-        let table = Huffman::from_lengths(&[]).unwrap();
-        assert!(table.tolerant.is_none());
-        let mut bits = BitReader::from_bytes(&[0xff, 0xff]);
-        assert!(table.decode(&mut bits).is_err());
-    }
-
-    #[test]
-    fn complete_rar29_tables_keep_the_strict_path_alone() {
-        // No hole, so no twin: the gate must not drag complete tables onto
-        // the tolerant path.
-        for lengths in [&[1u8, 1][..], &[2, 2, 2, 2][..], &[1, 2, 3, 3][..]] {
+    fn malformed_prefix_spec_vectors_decode_every_lookahead() {
+        let mut reader = BitReader::new();
+        for (lengths, ranges) in spec_prefix_vectors() {
             let table = Huffman::from_lengths(lengths).unwrap();
-            assert!(table.tolerant.is_none(), "lengths {lengths:?}");
-            assert!(!table.lut.is_empty(), "lengths {lengths:?}");
+            let reference = ReferencePrefixDecoder::new(lengths);
+            for x in 0..=0xffffu32 {
+                let &(_, _, symbol, width) = ranges
+                    .iter()
+                    .find(|&&(lo, hi, ..)| (lo..=hi).contains(&(x & !1)))
+                    .unwrap_or_else(|| panic!("{lengths:?}: no range holds {x:04x}"));
+                assert_eq!(
+                    reference.answer(x),
+                    (symbol, width),
+                    "{lengths:?} D x={x:04x}"
+                );
+                assert_eq!(
+                    read_prefix_symbol(&mut reader, &table, &lookahead_bytes(x)),
+                    (Ok(symbol), usize::from(width)),
+                    "{lengths:?} x={x:04x}"
+                );
+            }
         }
+        for lengths in [VECTOR_L, VECTOR_M] {
+            let table = Huffman::from_lengths(lengths).unwrap();
+            for x in 0..=0xffffu32 {
+                assert_eq!(
+                    read_prefix_symbol(&mut reader, &table, &lookahead_bytes(x)),
+                    (Ok((x >> 15) as usize), 1),
+                    "{lengths:?} x={x:04x}"
+                );
+            }
+        }
+        let junk = Huffman::from_lengths(&[2, 2, 3, 3, 3, 3, 15]).unwrap();
+        let complete = Huffman::from_lengths(&[2, 2, 3, 3, 3, 3]).unwrap();
+        let mut other = BitReader::new();
+        for x in 0..=0xffffu32 {
+            let bytes = lookahead_bytes(x);
+            assert_eq!(
+                read_prefix_symbol(&mut reader, &junk, &bytes),
+                read_prefix_symbol(&mut other, &complete, &bytes),
+                "N x={x:04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_prefix_empty_alphabet_refuses_without_consuming() {
+        let table = Huffman::from_lengths(&[]).unwrap();
+        let mut reader = BitReader::new();
+        assert_eq!(
+            read_prefix_symbol(&mut reader, &table, &[0xff, 0xff]),
+            (Err(Error::InvalidData("RAR 2.9 empty Huffman table")), 0)
+        );
+        assert!(matches!(
+            Huffman::from_lengths(&[16]),
+            Err(Error::InvalidData("RAR 2.9 Huffman length is too large"))
+        ));
+    }
+
+    #[test]
+    fn malformed_prefix_complete_lists_keep_the_strict_path() {
+        for lengths in [&[1u8, 1][..], &[2, 2, 2, 2], &[1, 2, 3, 3], VECTOR_A] {
+            let table = Huffman::from_lengths(lengths).unwrap();
+            assert!(
+                !table.symbols.is_empty() && !table.lut.is_empty(),
+                "{lengths:?}"
+            );
+            assert!(table.malformed.is_unused(), "{lengths:?}");
+        }
+        for lengths in [VECTOR_B, &[2, 2, 2, 2, 2], VECTOR_F] {
+            assert!(!Huffman::from_lengths(lengths)
+                .unwrap()
+                .malformed
+                .is_unused());
+        }
+    }
+
+    #[test]
+    fn malformed_prefix_tail_vectors() {
+        let mut reader = BitReader::new();
+        let cases: [(&[u8], u8, PrefixRead); 4] = [
+            (VECTOR_A, 0xc0, (Ok(1), 3)),
+            (VECTOR_B, 0x80, (Err(Error::NeedMoreInput), 0)),
+            (VECTOR_L, 0x80, (Ok(1), 1)),
+            (VECTOR_F, 0xff, (Err(Error::NeedMoreInput), 0)),
+        ];
+        for (lengths, byte, expected) in cases {
+            let table = Huffman::from_lengths(lengths).unwrap();
+            assert_eq!(
+                read_prefix_symbol(&mut reader, &table, &[byte]),
+                expected,
+                "{lengths:?}"
+            );
+        }
+    }
+
+    struct PrefixRng(u64);
+
+    impl PrefixRng {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % bound as u64) as usize
+        }
+    }
+
+    /// The spec D 3.3.2 corpus in a fixed order; the flag marks items 2-4,
+    /// which the agreement test (3.3.3) walks.
+    fn malformed_prefix_corpus() -> Vec<(Vec<u8>, bool)> {
+        let mut corpus: Vec<(Vec<u8>, bool)> = spec_prefix_lists()
+            .into_iter()
+            .map(|lengths| (lengths, false))
+            .collect();
+        for n in 1..=4u32 {
+            for index in 0..5usize.pow(n) {
+                let mut code = index;
+                let lengths = (0..n)
+                    .map(|_| {
+                        let len = [0, 1, 2, 3, 15][code % 5];
+                        code /= 5;
+                        len
+                    })
+                    .collect();
+                corpus.push((lengths, true));
+            }
+        }
+        let sizes = [17usize, 20, 28, 60, 299];
+        let mut rng = PrefixRng(0x5eed_d029);
+        for n in sizes {
+            for _ in 0..200 {
+                corpus.push(((0..n).map(|_| rng.below(16) as u8).collect(), true));
+            }
+        }
+        for n in sizes {
+            for _ in 0..100 {
+                let mut frequencies: Vec<usize> = (0..n)
+                    .map(|_| {
+                        if rng.below(4) == 0 {
+                            0
+                        } else {
+                            1 + rng.below(1000)
+                        }
+                    })
+                    .collect();
+                frequencies[rng.below(n)] += 1;
+                let complete = super::huffman::complete_lengths_for_frequencies(&frequencies, 15);
+                let pick = |rng: &mut PrefixRng, keep: &dyn Fn(u8) -> bool| {
+                    let positions: Vec<usize> = (0..n).filter(|&i| keep(complete[i])).collect();
+                    (!positions.is_empty()).then(|| positions[rng.below(positions.len())])
+                };
+                let zero = pick(&mut rng, &|len| len == 0);
+                let used = pick(&mut rng, &|len| len != 0);
+                let shortenable = pick(&mut rng, &|len| len >= 2);
+                corpus.push((complete.clone(), true));
+                if let Some(i) = zero {
+                    let mut lengths = complete.clone();
+                    lengths[i] = 15;
+                    corpus.push((lengths, true));
+                }
+                if let Some(i) = used {
+                    let mut lengths = complete.clone();
+                    lengths[i] = 0;
+                    corpus.push((lengths, true));
+                }
+                if let Some(i) = shortenable {
+                    let mut lengths = complete.clone();
+                    lengths[i] -= 1;
+                    corpus.push((lengths, true));
+                }
+            }
+        }
+        for n in [17usize, 28] {
+            for position in 0..n {
+                for len in 1..=15 {
+                    let mut lengths = vec![0; n];
+                    lengths[position] = len;
+                    corpus.push((lengths, false));
+                }
+            }
+        }
+        corpus
+    }
+
+    /// One read's contribution to a digest: the outcome kind and symbol, and
+    /// the consumed width when the comparison includes it.
+    fn fold_prefix_read(buffer: &mut Vec<u8>, read: &(Result<usize>, usize), with_width: bool) {
+        match read.0 {
+            Ok(symbol) => {
+                buffer.push(0);
+                buffer.extend_from_slice(&(symbol as u16).to_le_bytes());
+            }
+            Err(Error::NeedMoreInput) => buffer.push(1),
+            Err(_) => buffer.push(2),
+        }
+        if with_width {
+            buffer.push(read.1 as u8);
+        }
+    }
+
+    /// Spec D 3.3.2 for one list over every `step`-th lookahead: the new
+    /// decoder against D (the four-byte read always, the one-byte read for a
+    /// non-complete list), with `also` called on each lookahead to compare
+    /// another witness. Returns the CRC-32 of the folded outcomes.
+    fn malformed_prefix_list_digest(
+        lengths: &[u8],
+        step: usize,
+        also: &dyn Fn(u32, &PrefixRead, &PrefixRead),
+    ) -> u32 {
+        let table = Huffman::from_lengths(lengths).unwrap();
+        let reference = ReferencePrefixDecoder::new(lengths);
+        let complete = reference.is_complete();
+        let mut reader = BitReader::new();
+        let mut buffer = Vec::with_capacity(0x1_0000 / step * 8 + 8);
+        for x in (0..=0xffffu32).step_by(step) {
+            let bytes = lookahead_bytes(x);
+            let full = read_prefix_symbol(&mut reader, &table, &bytes);
+            let tail = read_prefix_symbol(&mut reader, &table, &bytes[..1]);
+            if !lengths.is_empty() {
+                let (symbol, width) = reference.answer(x);
+                assert_eq!(
+                    full,
+                    (Ok(symbol), usize::from(width)),
+                    "{lengths:?} x={x:04x}"
+                );
+                if !complete {
+                    let (symbol, width) = reference.answer(x & 0xff00);
+                    let expected = if width <= 8 {
+                        (Ok(symbol), usize::from(width))
+                    } else {
+                        (Err(Error::NeedMoreInput), 0)
+                    };
+                    assert_eq!(tail, expected, "{lengths:?} tail x={x:04x}");
+                }
+            }
+            also(x, &full, &tail);
+            fold_prefix_read(&mut buffer, &full, true);
+            fold_prefix_read(&mut buffer, &tail, !complete);
+        }
+        super::crc32(&buffer)
+    }
+
+    /// The digests of every corpus list, in corpus order, computed on all
+    /// available cores.
+    fn malformed_prefix_corpus_digest(
+        step: usize,
+        also: &PrefixWitness,
+    ) -> u32 {
+        let corpus = malformed_prefix_corpus();
+        let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let chunk = corpus.len().div_ceil(workers);
+        let digests: Vec<u32> = std::thread::scope(|scope| {
+            let handles: Vec<_> = corpus
+                .chunks(chunk)
+                .map(|lists| {
+                    scope.spawn(move || {
+                        lists
+                            .iter()
+                            .map(|(lengths, _)| {
+                                malformed_prefix_list_digest(lengths, step, &|x, full, tail| {
+                                    also(lengths, x, full, tail)
+                                })
+                            })
+                            .collect::<Vec<u32>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().unwrap())
+                .collect()
+        });
+        let bytes: Vec<u8> = digests
+            .iter()
+            .flat_map(|digest| digest.to_le_bytes())
+            .collect();
+        super::crc32(&bytes)
+    }
+
+    // Digests of the replaced RAR 2.9 decoder's outcomes over the corpus,
+    // captured on 15 Sep 2026 from its clean-room oracle (`legacy_rar29_table`,
+    // `legacy_rar29_read`) immediately before the oracle was deleted. With the
+    // oracle present, every case of both runs compared equal to this decoder
+    // (same symbol and width on four bytes; same outcome, and width for a
+    // non-complete list, on one byte), so these equal the old decoder's
+    // digests of the same folded fields. D is still checked case by case.
+    const FROZEN_PREFIX_DIGEST_SAMPLED: u32 = 0x0fd3_17f1;
+    const FROZEN_PREFIX_DIGEST_EXHAUSTIVE: u32 = 0x031d_7d79;
+
+    #[test]
+    fn malformed_prefix_differential_sampled() {
+        assert_eq!(
+            malformed_prefix_corpus_digest(251, &|_, _, _, _| {}),
+            FROZEN_PREFIX_DIGEST_SAMPLED
+        );
+    }
+
+    #[test]
+    #[ignore = "every lookahead of about 4,500 lists; run in release with --ignored"]
+    fn malformed_prefix_exhaustive_differential() {
+        assert_eq!(
+            malformed_prefix_corpus_digest(1, &|_, _, _, _| {}),
+            FROZEN_PREFIX_DIGEST_EXHAUSTIVE
+        );
+    }
+
+    /// Spec D 3.3.3: with the malformed table taken away, the strict path
+    /// alone equals D on every lookahead of a complete list and on every
+    /// lookahead a strict code covers of an incomplete one.
+    fn strict_prefix_path_agrees_with_reference(step: usize) {
+        let mut reader = BitReader::new();
+        for (lengths, agreement) in malformed_prefix_corpus() {
+            if !agreement {
+                continue;
+            }
+            let mut count = [0u16; 16];
+            for &len in &lengths {
+                if len != 0 {
+                    count[usize::from(len)] += 1;
+                }
+            }
+            if super::canonical_shape(&count) == super::CanonicalShape::Oversubscribed
+                || count.iter().all(|&value| value == 0)
+            {
+                continue;
+            }
+            let mut strict = Huffman::from_lengths(&lengths).unwrap();
+            strict.malformed = super::MalformedPrefixTable::unused();
+            let reference = ReferencePrefixDecoder::new(&lengths);
+            for x in (0..=0xffffu32).step_by(step) {
+                if u64::from(x & !1) >= reference.bounds[15] {
+                    continue;
+                }
+                let (symbol, width) = reference.answer(x);
+                assert_eq!(
+                    read_prefix_symbol(&mut reader, &strict, &lookahead_bytes(x)),
+                    (Ok(symbol), usize::from(width)),
+                    "{lengths:?} x={x:04x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn strict_prefix_path_agrees_with_reference_sampled() {
+        strict_prefix_path_agrees_with_reference(127);
+    }
+
+    #[test]
+    #[ignore = "every lookahead of the agreement corpus; run in release with --ignored"]
+    fn malformed_prefix_exhaustive_strict_agreement() {
+        strict_prefix_path_agrees_with_reference(1);
+    }
+
+    /// Spec D 3.4 item 2, structurally: a counting global allocator cannot be
+    /// installed in this crate (`unsafe` is confined to two files), so this
+    /// proves the build allocates nothing instead. The type owns no heap (it
+    /// needs no drop and is a fixed size), and its impl names no allocating
+    /// construct, so `from_lengths` has nothing to allocate with.
+    #[test]
+    fn malformed_prefix_table_build_cannot_allocate() {
+        assert!(!std::mem::needs_drop::<super::MalformedPrefixTable>());
+        assert!(std::mem::size_of::<super::MalformedPrefixTable>() <= 3 * 1024);
+        let source = include_str!("rar29.rs");
+        let start = source.find("\nimpl MalformedPrefixTable {").unwrap();
+        let end = start + source[start..].find("\n}\n").unwrap();
+        let body = &source[start..end];
+        assert!(body.contains("fn from_lengths("));
+        for construct in [
+            "Vec", "vec!", "Box", "String", "format!", "collect", "to_vec", "to_owned", "clone()",
+        ] {
+            assert!(
+                !body.contains(construct),
+                "`{construct}` in impl MalformedPrefixTable"
+            );
+        }
+    }
+
+    /// Spec D 3.3.4: decodes every RAR 2.9+ LZ member of the fixtures (single
+    /// volume, unencrypted) and reports the classes of the tables built on the
+    /// way. Run with --nocapture to see the histogram.
+    #[test]
+    fn fixture_table_class_census() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rar15_40");
+        super::table_census::take();
+        let mut members = 0;
+        for dir in ["rar300", "rar420", "rarvm", "ppmd", "rars_generated"] {
+            let mut paths: Vec<_> = std::fs::read_dir(root.join(dir))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    matches!(
+                        path.extension().and_then(|e| e.to_str()),
+                        Some("rar" | "cbr")
+                    )
+                })
+                .collect();
+            paths.sort();
+            for path in paths {
+                let bytes = std::fs::read(&path).unwrap();
+                let Ok(archive) = crate::rar15_40::Archive::parse(&bytes) else {
+                    continue;
+                };
+                let mut decoder = Rar29Decoder::new();
+                for file in archive.files() {
+                    if file.unp_ver < 29
+                        || file.is_stored()
+                        || file.is_directory()
+                        || file.is_encrypted()
+                        || file.is_split_before()
+                        || file.is_split_after()
+                    {
+                        continue;
+                    }
+                    let Ok(packed) = file.packed_data(&archive) else {
+                        continue;
+                    };
+                    let size = file.unp_size as usize;
+                    let decoded = if file.is_solid() {
+                        decoder.decode_member(&packed, size)
+                    } else {
+                        decoder.decode_non_solid_member(&packed, size)
+                    };
+                    let decoded =
+                        decoded.unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                    assert_eq!(decoded.len(), size, "{}", path.display());
+                    members += 1;
+                }
+            }
+        }
+        let census = super::table_census::take();
+        println!("{members} members; tables by (alphabet, class):");
+        for ((alphabet, class), count) in &census {
+            println!("  {alphabet:>3} {class:<14} {count}");
+        }
+        assert!(members > 0);
+        assert!(census
+            .get(&(MAIN_COUNT, "oversubscribed"))
+            .is_some_and(|&count| count > 0));
     }
 
     #[test]
     fn literal_encoder_round_trips_rar29_lz_blocks() {
         let input = b"literal-only RAR 2.9 baseline\nwith repeated text literal-only\n";
-        let packed = unpack29_encode_literals(input).unwrap();
+        let packed = encode_rar29_literals(input).unwrap();
 
-        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+        assert_eq!(decode_rar29(&packed, input.len()).unwrap(), input);
     }
 
     #[test]
@@ -4280,9 +5053,18 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         )
         .unwrap();
 
-        assert_eq!(unpack29_decode(&single, input.len()).unwrap(), input);
-        assert_eq!(unpack29_decode(&blocked, input.len()).unwrap(), input);
+        assert_eq!(decode_rar29(&single, input.len()).unwrap(), input);
+        assert_eq!(decode_rar29(&blocked, input.len()).unwrap(), input);
         assert!(blocked.len() < input.len());
+    }
+
+    /// Both planners hold one token per literal or match for the whole
+    /// member - the PPMd one alongside the model - so the width is the
+    /// point of these types.
+    #[test]
+    fn packed_tokens_are_eight_bytes() {
+        assert_eq!(std::mem::size_of::<PackedToken>(), 8);
+        assert_eq!(std::mem::size_of::<PackedPpmdToken>(), 8);
     }
 
     #[test]
@@ -4306,7 +5088,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             &[],
             EncodeOptions::new(MAX_MATCH_CANDIDATES).with_lazy_matching(true),
         );
-        let packed = Unpack29Encoder::with_options(
+        let packed = Rar29Encoder::with_options(
             EncodeOptions::new(MAX_MATCH_CANDIDATES).with_lazy_matching(true),
         )
         .encode_member(input)
@@ -4314,11 +5096,11 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
 
         assert!(greedy
             .iter()
-            .any(|token| matches!(token, EncodeToken::Match { length: 4, .. })));
+            .any(|token| matches!(token.view(), EncodeToken::Match { length: 4, .. })));
         assert!(lazy
             .iter()
-            .any(|token| matches!(token, EncodeToken::Match { length, .. } if *length > 8)));
-        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+            .any(|token| matches!(token.view(), EncodeToken::Match { length, .. } if length > 8)));
+        assert_eq!(decode_rar29(&packed, input.len()).unwrap(), input);
     }
 
     #[test]
@@ -4329,7 +5111,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         input[106] = b'!';
         input[pos - 10..pos - 5].copy_from_slice(b"ABCD!");
         input[pos..pos + 7].copy_from_slice(b"ABCDEFG");
-        let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+        let mut buckets = MatchIndex::new(MATCH_HASH_BUCKETS, input.len(), MAX_MATCH_CANDIDATES);
         insert_match_position(&input, 100, &mut buckets);
         insert_match_position(&input, pos - 10, &mut buckets);
 
@@ -4377,7 +5159,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         input[pos - 80..pos - 64].copy_from_slice(b"CDEFGHIJKLMNOPQR");
         input[pos..pos + 18].copy_from_slice(b"ABCDEFGHIJKLMNOPQR");
 
-        let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
+        let mut buckets = MatchIndex::new(MATCH_HASH_BUCKETS, input.len(), MAX_MATCH_CANDIDATES);
         for candidate in 0..pos {
             insert_match_position(&input, candidate, &mut buckets);
         }
@@ -4447,9 +5229,9 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         input[pos - 22] = 0x11;
         input[pos - 503] = 0x22;
         input[pos + 9] = 0x33;
-        let mut buckets = vec![Vec::new(); MATCH_HASH_BUCKETS];
-        insert_match_position(&input, pos - 30, &mut buckets);
+        let mut buckets = MatchIndex::new(MATCH_HASH_BUCKETS, input.len(), MAX_MATCH_CANDIDATES);
         insert_match_position(&input, pos - 512, &mut buckets);
+        insert_match_position(&input, pos - 30, &mut buckets);
 
         let fresh = best_match(
             &input,
@@ -4469,7 +5251,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             &EncoderMatchState {
                 old_offsets: [30, 0, 0, 0],
                 last_offset: 0,
-                last_length: 0,
+                previous_match_length: 0,
             },
         )
         .unwrap();
@@ -4498,10 +5280,10 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         );
 
         assert!(!bounded.iter().any(
-            |token| matches!(token, EncodeToken::Match { offset, .. } if *offset > 128 * 1024)
+            |token| matches!(token.view(), EncodeToken::Match { offset, .. } if offset > 128 * 1024)
         ));
         assert!(unbounded.iter().any(
-            |token| matches!(token, EncodeToken::Match { offset, .. } if *offset > 128 * 1024)
+            |token| matches!(token.view(), EncodeToken::Match { offset, .. } if offset > 128 * 1024)
         ));
     }
 
@@ -4512,10 +5294,10 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             input.push(b'A');
             input.push(byte);
         }
-        let packed = Unpack29Encoder::new().encode_member(&input).unwrap();
-        let mut decoder = Unpack29::new();
+        let packed = Rar29Encoder::new().encode_member(&input).unwrap();
+        let mut decoder = Rar29Decoder::new();
         decoder.bits.append(&packed);
-        decoder.read_tables().unwrap();
+        decoder.read_code_length_tables().unwrap();
         let main_lengths = &decoder.levels[..MAIN_COUNT];
         let nonzero_lengths = main_lengths
             .iter()
@@ -4524,12 +5306,12 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             .collect::<std::collections::BTreeSet<_>>();
 
         assert!(nonzero_lengths.len() > 1);
-        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+        assert_eq!(decode_rar29(&packed, input.len()).unwrap(), input);
     }
 
     #[test]
     fn copy_match_treats_zero_offset_as_distance_one() {
-        let mut decoder = Unpack29::new();
+        let mut decoder = Rar29Decoder::new();
         decoder.output.push(b'Z');
 
         decoder.copy_match(4, 0, 5).unwrap();
@@ -4550,7 +5332,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
                     expected.push(byte);
                 }
 
-                let mut decoder = Unpack29::new();
+                let mut decoder = Rar29Decoder::new();
                 decoder.output = seed;
                 decoder
                     .copy_match(length, distance, distance + length)
@@ -4581,7 +5363,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
                 }
                 expected.push(0xEE);
 
-                let mut decoder = Unpack29::new();
+                let mut decoder = Rar29Decoder::new();
                 decoder.output = seed.clone();
                 decoder
                     .copy_match(length, distance, seed.len() + length)
@@ -4594,7 +5376,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
 
     #[test]
     fn copy_match_period_doubling_preserves_pending_remainder() {
-        let mut decoder = Unpack29::new();
+        let mut decoder = Rar29Decoder::new();
         decoder.output.extend_from_slice(b"abc");
 
         decoder.copy_match(20, 3, 10).unwrap();
@@ -4610,15 +5392,15 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
     fn ppmd_literal_encoder_round_trips_rar29_ppmd_blocks() {
         let mut input = b"rar29 ppmd literal text payload alpha beta gamma\n".repeat(64);
         input.extend_from_slice(&[2, 2, 2, b'e', b's', b'c']);
-        let packed = unpack29_encode_ppmd_literals(&input).unwrap();
+        let packed = encode_rar29_ppmd_literals(&input).unwrap();
 
-        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+        assert_eq!(decode_rar29(&packed, input.len()).unwrap(), input);
         assert_ne!(packed.first().copied(), Some(0));
     }
 
     #[test]
     fn ppmd_encoder_advertises_period_compatible_model_for_external_decoders() {
-        let packed = unpack29_encode_ppmd(b"rar29 ppmd dictionary header").unwrap();
+        let packed = encode_rar29_ppmd(b"rar29 ppmd dictionary header").unwrap();
 
         assert_eq!(packed[0], 0xa7);
         assert_eq!(packed[1], 24);
@@ -4632,12 +5414,12 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             .chain(std::iter::repeat_n(b'Z', 512))
             .collect::<Vec<_>>();
         let tokens = encode_ppmd_tokens(&input, true);
-        let packed = unpack29_encode_ppmd(&input).unwrap();
+        let packed = encode_rar29_ppmd(&input).unwrap();
 
         assert!(tokens.iter().any(
-            |token| matches!(token, PpmdEncodeToken::RepeatOffsetOne { length } if *length >= 4)
+            |token| matches!(token.view(), PpmdEncodeToken::RepeatOffsetOne { length } if length >= 4)
         ));
-        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+        assert_eq!(decode_rar29(&packed, input.len()).unwrap(), input);
     }
 
     #[test]
@@ -4650,12 +5432,12 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         input.extend_from_slice(phrase);
         input.extend_from_slice(b"tail");
         let tokens = encode_ppmd_tokens(&input, true);
-        let packed = unpack29_encode_ppmd(&input).unwrap();
+        let packed = encode_rar29_ppmd(&input).unwrap();
 
         assert!(tokens
             .iter()
-            .any(|token| matches!(token, PpmdEncodeToken::Match { offset, length } if *offset > 1 && *length >= 32)));
-        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+            .any(|token| matches!(token.view(), PpmdEncodeToken::Match { offset, length } if offset > 1 && length >= 32)));
+        assert_eq!(decode_rar29(&packed, input.len()).unwrap(), input);
     }
 
     #[test]
@@ -4668,30 +5450,30 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         let tokens = encode_ppmd_tokens(&input, true);
 
         assert!(tokens.iter().any(
-            |token| matches!(token, PpmdEncodeToken::Match { offset, length } if *offset > 1 && *length >= 32)
+            |token| matches!(token.view(), PpmdEncodeToken::Match { offset, length } if offset > 1 && length >= 32)
         ));
-        assert!(!tokens
-            .iter()
-            .any(|token| matches!(token, PpmdEncodeToken::Match { length, .. } if *length > 255)));
+        assert!(!tokens.iter().any(
+            |token| matches!(token.view(), PpmdEncodeToken::Match { length, .. } if length > 255)
+        ));
     }
 
     #[test]
     fn ppmd_encoder_emits_embedded_vm_filter_escape() {
         let input = b"\xe8\0\0\0\0rar29 ppmd embedded e8 filter payload\n".repeat(16);
         let packed =
-            unpack29_encode_ppmd_with_filter(&input, Rar29FilterSpec::whole(Rar29FilterKind::E8))
+            encode_rar29_ppmd_with_filter(&input, Rar29FilterSpec::whole(Rar29FilterKind::E8))
                 .unwrap();
-        let plain_ppmd = unpack29_encode_ppmd(&input).unwrap();
-        let filtered_lz = Unpack29Encoder::new()
+        let plain_ppmd = encode_rar29_ppmd(&input).unwrap();
+        let filtered_lz = Rar29Encoder::new()
             .encode_member_with_filter(&input, Rar29FilterSpec::whole(Rar29FilterKind::E8))
             .unwrap();
 
         assert!(packed.len() != plain_ppmd.len() || packed.len() != filtered_lz.len());
-        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+        assert_eq!(decode_rar29(&packed, input.len()).unwrap(), input);
     }
 
     fn encode_with_filter(input: &[u8], kind: Rar29FilterKind) -> Result<Vec<u8>> {
-        Unpack29Encoder::new().encode_member_with_filter(input, Rar29FilterSpec::whole(kind))
+        Rar29Encoder::new().encode_member_with_filter(input, Rar29FilterSpec::whole(kind))
     }
 
     fn encode_with_filter_range(
@@ -4699,7 +5481,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         kind: Rar29FilterKind,
         range: Range<usize>,
     ) -> Result<Vec<u8>> {
-        Unpack29Encoder::new().encode_member_with_filter(input, Rar29FilterSpec::range(kind, range))
+        Rar29Encoder::new().encode_member_with_filter(input, Rar29FilterSpec::range(kind, range))
     }
 
     fn encode_with_filter_ranges(
@@ -4711,25 +5493,25 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             .into_iter()
             .map(|range| Rar29FilterSpec::range(kind, range))
             .collect();
-        Unpack29Encoder::new().encode_member_with_filters(input, &filters)
+        Rar29Encoder::new().encode_member_with_filters(input, &filters)
     }
 
     #[test]
     fn encoder_emits_rar29_offset_one_matches_for_repeated_bytes() {
         let input = b"Z".repeat(1024);
-        let packed = unpack29_encode_literals(&input).unwrap();
+        let packed = encode_rar29_literals(&input).unwrap();
 
         assert!(packed.len() < input.len() / 4);
-        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+        assert_eq!(decode_rar29(&packed, input.len()).unwrap(), input);
     }
 
     #[test]
     fn encoder_emits_rar29_dictionary_matches_for_repeated_sequences() {
         let input = b"abc123xyz-".repeat(128);
-        let packed = unpack29_encode_literals(&input).unwrap();
+        let packed = encode_rar29_literals(&input).unwrap();
 
         assert!(packed.len() < input.len() / 2);
-        assert_eq!(unpack29_decode(&packed, input.len()).unwrap(), input);
+        assert_eq!(decode_rar29(&packed, input.len()).unwrap(), input);
     }
 
     #[test]
@@ -4741,14 +5523,14 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         input.extend_from_slice(phrase);
         input.extend_from_slice(phrase);
         let tokens = encode_tokens(&input, &[], EncodeOptions::default());
-        let packed = unpack29_encode_literals(&input).unwrap();
+        let packed = encode_rar29_literals(&input).unwrap();
 
         assert!(tokens.iter().any(|token| matches!(
-            token,
-            EncodeToken::Match { offset, .. } if *offset > 0x40000
+            token.view(),
+            EncodeToken::Match { offset, .. } if offset > 0x40000
         )));
         assert!(packed.len() < input.len());
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
         assert!(
             decoded == input,
             "RAR 2.9 long-distance match round-trip failed"
@@ -4759,7 +5541,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
     fn encoder_emits_rar29_e8_vm_filter_record() {
         let input = b"\xe8\0\0\0\0rar29 e8 filter writer payload\n".repeat(8);
         let packed = encode_with_filter(&input, Rar29FilterKind::E8).unwrap();
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
 
         assert!(
             decoded == input,
@@ -4771,7 +5553,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
     fn encoder_emits_rar29_e8e9_vm_filter_record() {
         let input = b"\xe9\0\0\0\0rar29 e8e9 filter writer payload\n".repeat(8);
         let packed = encode_with_filter(&input, Rar29FilterKind::E8E9).unwrap();
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
     }
@@ -4784,7 +5566,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         let end = input.len();
         input.extend_from_slice(b" suffix data that should also remain raw");
         let packed = encode_with_filter_range(&input, Rar29FilterKind::E8, start..end).unwrap();
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
     }
@@ -4806,7 +5588,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             vec![8_000..8_512, 60_000..60_512],
         )
         .unwrap();
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
     }
@@ -4819,7 +5601,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         let end = input.len();
         input.extend_from_slice(b" suffix data that should also remain raw");
         let packed = encode_with_filter_range(&input, Rar29FilterKind::E8E9, start..end).unwrap();
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
     }
@@ -4828,7 +5610,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
     fn encoder_emits_rar29_delta_vm_filter_record() {
         let input: Vec<u8> = (0..192).map(|index| (index * 13 + 7) as u8).collect();
         let packed = encode_with_filter(&input, Rar29FilterKind::Delta { channels: 3 }).unwrap();
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
     }
@@ -4843,7 +5625,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         let packed =
             encode_with_filter_range(&input, Rar29FilterKind::Delta { channels: 3 }, start..end)
                 .unwrap();
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
     }
@@ -4855,7 +5637,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         input[21] = 20;
         input.extend_from_slice(b"rar29 itanium filter writer payload\n");
         let packed = encode_with_filter(&input, Rar29FilterKind::Itanium).unwrap();
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
     }
@@ -4872,7 +5654,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         input.extend_from_slice(b" suffix bytes after itanium segment");
         let packed =
             encode_with_filter_range(&input, Rar29FilterKind::Itanium, start..end).unwrap();
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
     }
@@ -4882,7 +5664,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         let width = 12;
         let input: Vec<u8> = (0..96).map(|index| (index * 29 + 11) as u8).collect();
         let packed = encode_with_filter(&input, Rar29FilterKind::Rgb { width, pos_r: 0 }).unwrap();
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
     }
@@ -4898,7 +5680,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         let packed =
             encode_with_filter_range(&input, Rar29FilterKind::Rgb { width, pos_r: 0 }, start..end)
                 .unwrap();
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
     }
@@ -4915,7 +5697,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             .map(|index| (index * 7 + index / 3) as u8)
             .collect();
         let packed = encode_with_filter(&input, Rar29FilterKind::Audio { channels: 2 }).unwrap();
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
     }
@@ -5074,7 +5856,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         let packed =
             encode_with_filter_range(&input, Rar29FilterKind::Audio { channels: 2 }, start..end)
                 .unwrap();
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
     }
@@ -5085,7 +5867,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             .map(|index| (index * 7 + index / 3 + index / 257) as u8)
             .collect();
         let packed = encode_with_filter(&input, Rar29FilterKind::Audio { channels: 4 }).unwrap();
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
     }
@@ -5096,7 +5878,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             .map(|index| (index * 11 + index / 5 + index / 251) as u8)
             .collect();
         let packed = encode_with_filter(&input, Rar29FilterKind::Delta { channels: 4 }).unwrap();
-        let decoded = unpack29_decode(&packed, input.len()).unwrap();
+        let decoded = decode_rar29(&packed, input.len()).unwrap();
 
         assert_eq!(decoded, input);
     }
@@ -5137,13 +5919,13 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
     fn solid_encoder_emits_rar29_matches_against_previous_member_history() {
         let first = b"solid rar29 shared phrase alpha beta gamma ".repeat(4);
         let second = b"solid rar29 shared phrase alpha beta gamma ".repeat(2);
-        let independent = unpack29_encode_literals(&second).unwrap();
-        let mut encoder = Unpack29Encoder::new();
+        let independent = encode_rar29_literals(&second).unwrap();
+        let mut encoder = Rar29Encoder::new();
         let first_packed = encoder.encode_member(&first).unwrap();
         let second_packed = encoder.encode_member(&second).unwrap();
 
         assert!(second_packed.len() < independent.len());
-        let mut decoder = Unpack29::new();
+        let mut decoder = Rar29Decoder::new();
         assert_eq!(
             decoder.decode_member(&first_packed, first.len()).unwrap(),
             first
@@ -5186,7 +5968,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         while data.len() < bytes {
             x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             data.extend_from_slice(&x.to_le_bytes());
-            if x % 97 == 0 {
+            if x.is_multiple_of(97) {
                 let end = data.len();
                 let at = end.saturating_sub(4096);
                 data.extend_from_within(at..end);
@@ -5196,7 +5978,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
     }
 
     fn decode_buffered(packed: &[u8], size: usize) -> (Vec<u8>, Rar29State) {
-        let mut decoder = Unpack29::new();
+        let mut decoder = Rar29Decoder::new();
         let mut out = Vec::new();
         decoder.decode_member_to(packed, size, &mut out).unwrap();
         let state = decoder.state_digest();
@@ -5209,7 +5991,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         bounds: Option<(usize, usize)>,
         chunk: usize,
     ) -> (Vec<u8>, Rar29State, usize) {
-        let mut decoder = Unpack29::new();
+        let mut decoder = Rar29Decoder::new();
         if let Some((window, margin)) = bounds {
             decoder.set_stream_bounds(window, margin);
         }
@@ -5233,7 +6015,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
     #[test]
     fn streaming_refill_matches_the_buffered_decode_in_bytes_and_in_state() {
         let data = refill_corpus(2 * 1024 * 1024);
-        let packed = Unpack29Encoder::new().encode_member(&data).unwrap();
+        let packed = Rar29Encoder::new().encode_member(&data).unwrap();
         // Many refills: a 32 KiB window over a ~240 KiB packed member.
         let window = 32 * 1024;
         let margin = 8 * 1024;
@@ -5258,7 +6040,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         // SHIPPED constants bound a member whose packed size is past them,
         // with no knob in the way.
         let data = refill_corpus(12 * 1024 * 1024);
-        let packed = Unpack29Encoder::new().encode_member(&data).unwrap();
+        let packed = Rar29Encoder::new().encode_member(&data).unwrap();
         assert!(
             packed.len() > STREAM_INPUT_WINDOW + STREAM_INPUT_MARGIN,
             "packed {} does not cross the shipped window",
@@ -5284,10 +6066,10 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         // tell two states apart proves nothing when it matches. Same
         // output prefix, different carried state.
         let data = refill_corpus(256 * 1024);
-        let packed = Unpack29Encoder::new().encode_member(&data).unwrap();
+        let packed = Rar29Encoder::new().encode_member(&data).unwrap();
         let (_, whole) = decode_buffered(&packed, data.len());
 
-        let mut decoder = Unpack29::new();
+        let mut decoder = Rar29Decoder::new();
         let mut out = Vec::new();
         decoder
             .decode_member_to(&packed, data.len(), &mut out)
@@ -5295,7 +6077,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         let same = decoder.state_digest();
         assert_eq!(same, whole);
 
-        let mut partial = Unpack29::new();
+        let mut partial = Rar29Decoder::new();
         let mut short = Vec::new();
         partial
             .decode_member_to(&packed, data.len() - 4096, &mut short)
@@ -5314,11 +6096,11 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         let first = refill_corpus(1024 * 1024);
         let mut second = first[4096..8192].repeat(48);
         second.extend_from_slice(&refill_corpus(64 * 1024));
-        let mut encoder = Unpack29Encoder::new();
+        let mut encoder = Rar29Encoder::new();
         let first_packed = encoder.encode_member(&first).unwrap();
         let second_packed = encoder.encode_member(&second).unwrap();
 
-        let mut buffered = Unpack29::new();
+        let mut buffered = Rar29Decoder::new();
         let mut buffered_out = Vec::new();
         buffered
             .decode_member_to(&first_packed, first.len(), &mut buffered_out)
@@ -5328,7 +6110,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             .decode_member_to(&second_packed, second.len(), &mut buffered_out)
             .unwrap();
 
-        let mut streamed = Unpack29::new();
+        let mut streamed = Rar29Decoder::new();
         streamed.set_stream_bounds(32 * 1024, 8 * 1024);
         let mut streamed_out = Vec::new();
         streamed
@@ -5365,7 +6147,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
     #[test]
     fn streaming_refill_decodes_a_filtered_member_at_the_shipped_margin() {
         // A VM filter is the one excursion the margin is sized for
-        // (`read_vm_code` reads its length before `MAX_VM_CODE_SIZE` is
+        // (`read_vm_filter_record` reads its length before `MAX_VM_CODE_SIZE` is
         // checked), and `filtered_range` is the one flush the streaming
         // loop reaches differently. No knob here: the shipped margin is
         // the claim under test.
@@ -5377,13 +6159,13 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             packed.len()
         );
 
-        let mut buffered = Unpack29::new();
+        let mut buffered = Rar29Decoder::new();
         let mut buffered_out = Vec::new();
         buffered
             .decode_member_to(&packed, data.len(), &mut buffered_out)
             .unwrap();
 
-        let mut streamed = Unpack29::new();
+        let mut streamed = Rar29Decoder::new();
         let mut streamed_out = Vec::new();
         streamed
             .decode_member_from_reader(
@@ -5399,8 +6181,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         assert_eq!(streamed_out, buffered_out);
         assert_eq!(streamed.state_digest(), buffered.state_digest());
         assert!(
-            streamed.peak_packed_input()
-                <= STREAM_INPUT_WINDOW + STREAM_INPUT_MARGIN + 4096,
+            streamed.peak_packed_input() <= STREAM_INPUT_WINDOW + STREAM_INPUT_MARGIN + 4096,
             "retained {} of {} packed bytes",
             streamed.peak_packed_input(),
             packed.len()
@@ -5411,15 +6192,15 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
     fn a_ppmd_block_falls_back_to_buffering_and_decodes_identically() {
         let mut input = b"rar29 ppmd literal text payload alpha beta gamma\n".repeat(64);
         input.extend_from_slice(&[2, 2, 2, b'e', b's', b'c']);
-        let packed = unpack29_encode_ppmd_literals(&input).unwrap();
+        let packed = encode_rar29_ppmd_literals(&input).unwrap();
 
-        let mut buffered = Unpack29::new();
+        let mut buffered = Rar29Decoder::new();
         let mut buffered_out = Vec::new();
         buffered
             .decode_member_to(&packed, input.len(), &mut buffered_out)
             .unwrap();
 
-        let mut streamed = Unpack29::new();
+        let mut streamed = Rar29Decoder::new();
         let mut streamed_out = Vec::new();
         streamed
             .decode_member_from_reader(
@@ -5444,10 +6225,10 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
     #[test]
     fn a_truncated_streamed_member_is_refused_rather_than_padded() {
         let data = refill_corpus(512 * 1024);
-        let packed = Unpack29Encoder::new().encode_member(&data).unwrap();
+        let packed = Rar29Encoder::new().encode_member(&data).unwrap();
         let cut = &packed[..packed.len() / 2];
 
-        let mut decoder = Unpack29::new();
+        let mut decoder = Rar29Decoder::new();
         decoder.set_stream_bounds(32 * 1024, 8 * 1024);
         let mut out = Vec::new();
         let error = decoder
@@ -5491,12 +6272,12 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         }
 
         let data = refill_corpus(512 * 1024);
-        let mut packed = Unpack29Encoder::new().encode_member(&data).unwrap();
+        let mut packed = Rar29Encoder::new().encode_member(&data).unwrap();
         // Trailing filler past the member, exactly what read_to_end used
         // to swallow.
         packed.extend_from_slice(&[0u8; 8192]);
 
-        let mut decoder = Unpack29::new();
+        let mut decoder = Rar29Decoder::new();
         decoder.set_stream_bounds(32 * 1024, 8 * 1024);
         let mut reader = CountingReader {
             input: &packed,
@@ -5530,7 +6311,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             }
         }
 
-        let mut decoder = Unpack29::new();
+        let mut decoder = Rar29Decoder::new();
         let mut reader = TinyReader {
             input: COMPRESSED_TEXT,
         };
@@ -5544,7 +6325,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
 
     #[test]
     fn decode_non_solid_member_resets_reusable_decoder_state() {
-        let mut decoder = Unpack29::new();
+        let mut decoder = Rar29Decoder::new();
         decoder.output.extend_from_slice(b"stale history");
         decoder.filters.push(VmFilter {
             program: 0,
@@ -5564,7 +6345,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
 
     #[test]
     fn e8_filter_uses_member_relative_offset_in_solid_stream() {
-        let mut decoder = Unpack29::new();
+        let mut decoder = Rar29Decoder::new();
         let member_start = 1000usize;
         let filter_start = member_start + 100;
         decoder.output.resize(filter_start + 8, 0);
@@ -5603,7 +6384,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
 
     #[test]
     fn generic_vm_filter_executes_from_filtered_range() {
-        let mut decoder = Unpack29::new();
+        let mut decoder = Rar29Decoder::new();
         decoder.output.extend_from_slice(&[0x11, 0x22, 0x33]);
         decoder.programs.push(VmProgram {
             kind: VmProgramKind::Generic(Program {
@@ -5678,7 +6459,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
 
     #[test]
     fn vm_global_data_size_does_not_reserve_untrusted_declared_size() {
-        let mut decoder = Unpack29::new();
+        let mut decoder = Rar29Decoder::new();
         decoder.programs.push(VmProgram {
             kind: VmProgramKind::Standard(StandardFilter::E8),
             block_size: 1,
@@ -5704,7 +6485,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
     /// declaring `block_start = 0` and a 2 GiB block grew `self.output`
     /// to the whole member's output, and `filtered_range` then copied
     /// that block AGAIN for the VM: about 4 GiB of peak from a few MB of
-    /// packed input. RAR5 refuses the equivalent in `add_filter`; RAR3
+    /// packed input. RAR5 refuses the equivalent in `queue_filter`; RAR3
     /// had no bail and no buffered fallback.
     ///
     /// NEGATIVE CONTROL, run: remove the `MAX_VM_FILTER_HOLD` check from
@@ -5712,7 +6493,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
     #[test]
     fn vm_filter_block_size_is_capped_before_it_can_hold_the_member() {
         let oversized = |declared: u32| {
-            let mut decoder = Unpack29::new();
+            let mut decoder = Rar29Decoder::new();
             let mut data = BitWriter::default();
             data.write_encoded_u32(0); // program index (0 = a fresh one)
             data.write_encoded_u32(0); // block start
@@ -5754,7 +6535,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
 
     #[test]
     fn vm_code_size_is_capped_before_allocation() {
-        let mut decoder = Unpack29::new();
+        let mut decoder = Rar29Decoder::new();
         let mut data = BitWriter::default();
         data.write_encoded_u32(0);
         data.write_encoded_u32(1);
@@ -5768,7 +6549,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
 
     #[test]
     fn vm_program_and_filter_counts_are_capped() {
-        let mut decoder = Unpack29::new();
+        let mut decoder = Rar29Decoder::new();
         decoder
             .programs
             .resize_with(super::MAX_VM_PROGRAMS, || VmProgram {
@@ -5813,12 +6594,18 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         for (index, byte) in data.iter_mut().enumerate() {
             *byte = index as u8;
         }
-        data[0] = 0;
-        data[7] = 5 << 3;
+        // Template 0x16 opens all three slots of bundle 0 and the three
+        // opcode nibbles are 5, so every slot is a branch the filter moves.
+        // (With template 0, as this test once had, nothing was rewritten.)
+        data[0] = 0x16;
+        data[5] = 0x14;
+        data[10] = 0x28;
+        data[15] = 0x50;
         let original = data.clone();
 
-        itanium_encode(&mut data, u32::MAX);
-        itanium_decode(&mut data, u32::MAX);
+        crate::codec::address_filters::ia64(&mut data, u32::MAX, super::Direction::Encode);
+        assert_ne!(data[..16], original[..16], "bundle 0 must be rewritten");
+        crate::codec::address_filters::ia64(&mut data, u32::MAX, super::Direction::Decode);
 
         assert_eq!(data, original);
     }
@@ -5827,4 +6614,3 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         "Hello, RAR 3.x fixture world.\n".repeat(80).into_bytes()
     }
 }
-

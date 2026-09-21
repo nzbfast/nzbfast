@@ -255,7 +255,226 @@ opt-level = 2
 [profile.dev.package.libsqlite3-sys]
 opt-level = 2
 
+# nzbkit-base ITSELF, and unlike the five above this one is not a fixture
+# builder - it is the crate under test. Measured 20 Sep 2026, claim
+# `profile-dev-package-opt-level-ci-keys-20sep`, which took the third
+# bullet of section 3 of the 18 Sep 2026 forney/par2ntt slow-class
+# writeup (claim `nzbkit-base-forney-slowclass-18sep-r2`) - that one
+# named this "the one lever that would move every row at once" and left
+# it as a cross-cutting item because of the cache-key trap the paragraph
+# further down answers. Both writeups are private; grep either claim id.
+#
+# THE SUBJECT. That handoff measured seven
+# `par2repair::forney::joint` / `par2ntt` tests as ~336-395 s of
+# `unit-one-process`'s 555 s nzbkit-base row, the largest single row of
+# the job on the slow runner class, and proved that NOT ONE of them
+# shrinks without spending the property it proves: the stripe widths are
+# already minimal on both the admitted and the refused arm, four of the
+# `m` values are pinned to `JOINT_FACTOR_MIN_M` on purpose so a
+# recalibration reds there, and `prepare_impl` is ~1.3 s of the ~53 s so
+# the shared-fixture lever does not apply either. So the TESTS are not
+# the cost. The CODEGEN is: `gf16`, `par2ntt` and `par2repair` are
+# GF(2^16) and NTT bit-arithmetic, the shape unoptimised rustc punishes
+# hardest, and all three live IN this crate - which is why not one of
+# the five dependency overrides above can reach them.
+#
+# MEASURED, dev Mac, `--features test-support`, ONE process, serial, and
+# the same-load control arm run from the same target dir rather than
+# quoted from another box. Load was 169-328 load1 against 186-257
+# load15, so WALL IS NOT THE RESULT HERE and CPU is, per CLAUDE.md's
+# rising/drained rule and the handoff's own "price them in CPU" - the
+# forney solves are internally rayon-parallel (`per_stripe` takes
+# `cpu_workers()`), so a loaded box loses the intra-test parallelism as
+# well as the core speed:
+#
+#   the seven tests, user CPU:   142.93 s -> 3.41 s    (42x)
+#   whole crate suite, user CPU: 286.86 s -> 34.93 s   (8.2x)
+#   whole crate suite, wall:    1213.35 s -> 310.46 s  (3.9x)
+#
+# 1,656 passed / 0 failed / 8 ignored on BOTH arms. The opt-0 control's
+# 286.86 s agrees within 5% with the 273.10 s the handoff measured on a
+# quieter 18-core box, which is the cross-check that the CPU figure is
+# the robust one; and the opt-2 arm was taken at HIGHER load (load1 328
+# against 209), so the ratio above UNDERSTATES the win.
+#
+# opt-level 1 WAS MEASURED AND IS NOT ENOUGH, which is the reason this
+# says 2 rather than inheriting the rars precedent: the seven cost
+# 31.54 s of CPU at 1 against 3.41 s at 2, so 1 leaves 9x on the table
+# to save 35 s of one-time build CPU (116 s against 151 s for the test
+# harness) - and the archive is built ONCE and then run by
+# `unit-one-process`, every `linux-tests` shard and `windows-unit`.
+#
+# WHY THIS IS SAFE ON A CRATE WHOSE OWN THROUGHPUT ITS RIGS MEASURE,
+# which is the question the rars note above does not have to ask. Six
+# assertions in the crate read a clock, and their DIRECTIONS are what
+# matters: four are upper bounds (`< 60 s` in par2gen/digest_cache_tests,
+# `< 2 s` in live/tests, `< 100 ms` in disk/tests) which faster code
+# makes strictly safer, and the two lower bounds
+# (`>= stall`, `>= budget` in nntp/unit_tests) are sleep-paced, so
+# codegen cannot shorten the wait they assert. Nothing in
+# `par2repair/`, `par2ntt*` or `gf16*` asserts a clock at all. The
+# 1,656-green run above is the empirical half of that.
+#
+# BOTH PROFILES, for the reason the rars note gives ("`dev` covers it as
+# a DEPENDENCY, `test` covers its own test target") and one more that is
+# specific to a workspace member this big: if `dev` and `test` disagree
+# on opt-level then nzbkit-base is built TWICE per target dir - once at
+# 0 as a dependency of every other crate's tests, once at 2 as its own
+# test harness - which is a second full artifact set of the largest
+# crate in the tree, exactly the cost CLAUDE.md's "Build artifacts and
+# disk" section is about. Setting both keeps it at one. Session env
+# (`CARGO_PROFILE_DEV_DEBUG=1` in .claude/settings.json) does not add a
+# split either: it maps to `profile.dev.debug`, `test` inherits it, so
+# the two profiles still agree on every fingerprint input.
+#
+# WHY THIS NEEDED NO CI CACHE-KEY BUMP. State this precisely, because
+# the general rule is real, it is the reason this was a separate item,
+# and this is a genuine exception rather than a lapse. The rule (TODO
+# 116 and the `-v2` note in ci-private.yml): a profile change moves
+# rustc fingerprints, the target-cache keys hash the NORMALISED
+# `Cargo.lock` and never `Cargo.toml`, and actions/cache saves only on
+# an exact-key miss - so a GLOBAL profile flag landed without bumping
+# every key makes every run rebuild cold forever behind a green
+# cache-hit line. That trap needs a CACHED artifact's fingerprint to
+# move. A `package.<one workspace member>` override does not move one:
+# verified on this tree by flipping each half and counting what cargo
+# rebuilds, which is `Compiling nzbkit-base` and NOTHING else - zero
+# third-party units - on the dev rlib and on the test harness alike.
+# ci-private.yml's own cache note states the other half: "the workspace
+# crates' own artifacts are stale in it by construction and always were;
+# they are rebuilt every push regardless". So every key still hits,
+# every dependency still arrives warm, and the single unit that
+# recompiles is one CI recompiles on every push anyway. A needless bump
+# is NOT the safe direction here: the repo is at 11.85 GB against
+# GitHub's 10 GB per-repo limit with LRU eviction active (same note), so
+# nine cold multi-GB archives would evict the nightly caches to buy
+# nothing. The census, for whoever DOES land a global flag: 10 key
+# families over 34 target-bearing cache steps in 6 workflow files
+# (ci-private 5, nightly 17 across five families, pr-check 4, fuzz 4,
+# coverage 2, journeys 2) - the "nine caches" the older notes quote is
+# stale, and fuzz-cargo-v2 caches only the DETACHED fuzz workspace's own
+# target, which a root-profile change cannot reach at all.
+#
+# WHAT IT COSTS, MEASURED AS A DELTA - and it is 5.5x, not the "couple
+# of minutes" the first version of this note implied. That version quoted
+# bare wall figures for one opt-2 build with no opt-0 comparator and no
+# load stated, which is an absolute masquerading as a cost and is the
+# thing CLAUDE.md's rising/drained section refuses. Re-measured properly:
+# an EDIT-TRIGGERED harness rebuild (touch lib.rs, same target dir, the
+# two arms back to back), load1 186-242 against load15 229-248:
+#
+#   opt-0:  153.58 s wall,  27.44 s user CPU
+#   opt-2:  205.59 s wall, 149.70 s user CPU
+#   delta:  +52 s wall (+34%), +122.3 s CPU (5.5x)
+#
+# The wall column flatters this change rather than the other way round:
+# at 27.44 s of CPU under 153.58 s of wall the opt-0 rebuild is almost
+# entirely WAITING on an oversubscribed box, so the +34% is largely a
+# queueing artifact. On an idle box expect the gap to be wider than
+# +34%, because rustc's parallelism inside ONE crate is bounded by its
+# codegen units - magnitude NOT measured here, so do not quote one.
+#
+# SO WHO PAYS. One run of this crate's suite saves 251.9 s of CPU
+# (286.86 -> 34.93), so an edit followed by the SUITE repays the rebuild
+# about twice over; an edit followed by ONE narrow non-par2 test is a
+# straight loss of ~122 s of CPU. A lane doing tight local iteration on
+# nzbkit-base is therefore worse off, and that is a real cost this entry
+# accepts rather than hides.
+#
+# WHERE THE WIN ACTUALLY LANDS, measured 21 Sep 2026 because the first
+# version of this entry implied it was everywhere and that is WRONG. The
+# win is large where test execution is SERIAL and small where it is
+# PARALLEL, and the reason is arithmetic rather than anything subtle:
+# this removes ~252 s of CPU, and a parallel runner spreads that over the
+# box's cores, so on 32 cores it is ~8 s of wall.
+#
+#   SERIAL, and this is the case worth having:
+#     `cargo test -p nzbkit-base --lib --features test-support`
+#     1213.35 s -> 310.46 s of wall, 3.9x. One of CLAUDE.md's twelve
+#     one-process lines, and `unit-one-process` is the CI job of the same
+#     shape - its ~555 s nzbkit-base row is what GAP 4 was about.
+#
+#   PARALLEL, and this is the case NOT to promise anyone: the whole
+#     workspace nextest sweep, BOTH ARMS PREBUILT, box drained to load1
+#     22-58 - 133.38 s at opt-0 against 117.66 s at opt-2, so 11.8%, and
+#     that is an UPPER BOUND because the opt-0 arm ran at load1 58 and
+#     RISING against 22 drained. The same applies to CI's `linux-tests`
+#     and `windows-unit` shards, which are parallel too.
+#
+# The longest pole DID move and it still does not buy wall: in the opt-0
+# arm five of the eight slowest tests in the whole sweep were
+# nzbkit-base, topping at 162.1 s, and in the opt-2 arm NONE of the
+# slowest eight were, the top being postfast at 164.6 s. A pole that
+# moves while the wall does not is the signature of a throughput-bound
+# run, and it is why "the slowest test got 30x faster" is not a wall
+# claim.
+#
+# METHOD WARNING for whoever re-measures this, because the obvious
+# experiment is wrong: do NOT compare outer wall across a profile flip.
+# The flip invalidates this crate, so the arm you flip INTO pays a
+# rebuild the other does not - measured here at 366.6 s of build against
+# 38.9 s, which swamped the test difference and read as a 1.63x win that
+# does not exist. Prebuild both arms (`--no-run`), time only the run, and
+# state the load of each arm.
+#
+# CI IS STILL WHY THIS SHIPS, on the serial row rather than the sharded
+# ones: the nextest archive is built ONCE and then run by
+# `unit-one-process`, every `linux-tests` shard and `windows-unit`, so
+# +122 s of CPU once is paid once. Setting BOTH profiles is also what keeps
+# that number at 122 s: with `dev` left at 0 and only `test` at 2 the
+# crate compiles TWICE per target dir (27 s + 150 s) instead of once, so
+# the split everyone reaches for first is DEARER for the archive than
+# this is, as well as costing a second artifact set.
+#
+# THERE IS NO PER-INVOCATION ESCAPE, checked rather than assumed: cargo's
+# config-env mapping is `CARGO_PROFILE_<profile>_<key>` and cannot express
+# a package override, so
+# `CARGO_PROFILE_TEST_PACKAGE_nzbkit-base_OPT_LEVEL=0` is silently
+# IGNORED - verified by fingerprint, the build staying on the opt-2 hash
+# and finishing as a 1.47 s no-op. Opting out locally means editing this
+# tracked file, which shows up in `git status` in a shared checkout.
+# If the local cost bites, the documented retreat is opt-level 1 further
+# up, and the condition to revisit this entry is a lane iterating hard on
+# nzbkit-base rather than a number in this comment.
+#
+# The rars note above can call its own cost free only because git
+# checkout restamps rars anyway; this crate is under active development
+# and has no such excuse. `debug-assertions` and
+# `overflow-checks` are untouched and stay ON, so every runtime check
+# the suite relies on (and tools/overflow-gate.py's whole subject) still
+# fires; optimising is not the same as trusting. The debuggability cost
+# is real: frames in this crate now inline, and `frame variable` already
+# needed `CARGO_PROFILE_DEV_DEBUG=2` per CLAUDE.md.
+#
+# WHAT THIS ALREADY COVERS, because the first version of this comment got
+# it backwards and a reader acting on that would add a redundant entry:
+# `nzbkit`'s own tests DO get the optimised nzbkit-base, by the `dev` half
+# above and for exactly the reason the rars note gives - `dev` covers a
+# crate as a DEPENDENCY of nzbkit's tests, `test` covers its own test
+# target. Every crate above nzbkit-base inherits this the same way, so
+# parfast and postfast need nothing either.
+#
+# What no entry here touches is nzbkit's OWN code, and the prior for
+# wanting it is weak rather than unmeasured: the facade is orchestration -
+# extraction, the connection pool, media probing, the indexer - and the
+# heavy codecs beneath it are vendored crates with their own entries
+# (rars above; lzma-rust2 and sevenz-rust2 are separate packages). There
+# is no GF(2^16) or NTT arithmetic in it, which is the shape that made
+# this entry worth 42x. Reopen it only on evidence of the same kind:
+# a slow row in nzbkit's own suite that profiles into nzbkit's own
+# functions rather than into nzbkit-base or a vendored codec. GAP 4's
+# ranking named nzbkit-base as the largest row and nothing has named
+# nzbkit.
+[profile.dev.package.nzbkit-base]
+opt-level = 2
+
 [profile.test.package.rars]
+opt-level = 2
+
+# nzbkit-base's own test harness. The measurement, the opt-1 comparison
+# and the cache-key reasoning are all on the `profile.dev` entry above;
+# BOTH are needed or the crate builds twice per target dir.
+[profile.test.package.nzbkit-base]
 opt-level = 2
 
 # sevenz-rust2 0.22.2 vendored from crates.io (Apache-2.0) for TWO changes

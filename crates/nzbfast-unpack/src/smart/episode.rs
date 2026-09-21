@@ -113,7 +113,7 @@ fn tv_path_as(stem: &str, show_of: impl Fn(&str) -> String) -> Option<(String, O
 /// turned "delete this episode" and "play this episode" into no-ops.
 ///
 /// A struct rather than two more `&str` parameters for the reason
-/// [`crate::serve::FinalizeJob`] is one: they are the same type, and a
+/// `crate::serve::FinalizeJob` is one: they are the same type, and a
 /// caller that swapped them would have compiled.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FiledTail {
@@ -288,7 +288,7 @@ impl EpisodeTitles {
 /// [`filed_bases`] is empty for one - so it never reaches a matcher.)
 ///
 /// One seam is deliberately not chased: a show still filed under a
-/// PRE-sanitiser folder name ([`legacy_tv_path`]) has a base of a
+/// PRE-sanitiser folder name (`legacy_tv_path`) has a base of a
 /// different length, so a title long enough to be truncated could be
 /// truncated by one word more or less there. The consequence is a name
 /// this stops recognising, which leaves a file behind - the cheap
@@ -405,13 +405,13 @@ fn fit_title(title: &str, room: usize) -> String {
 /// or a history "delete files" destroyed every episode). We instead match
 /// only files whose name begins with this release's episode-unique base
 /// (`Show - S03E05.`), which catches the renamed video and any sidecar
-/// sharing that stem (see [`is_rename_tail`] for the sidecars it can't
+/// sharing that stem (see `is_rename_tail` for the sidecars it can't
 /// reach) but never a sibling - E06's files begin `Show - S03E06.`.
 ///
 /// The episode base alone is NOT release-specific: an upgrade files the
 /// better copy into the same season folder under the same
 /// `Show - S03E05` base, differing only in the quality suffix
-/// [`tv_organize`] appended. Matching on the base plus ANY rename tail is
+/// `tv_organize` appended. Matching on the base plus ANY rename tail is
 /// therefore quality-blind, and deleting the superseded copy took the
 /// freshly-downloaded replacement with it - the user ended up with
 /// neither. `suffix` is THIS release's [`nzbkit::release::quality_suffix`]
@@ -516,7 +516,7 @@ impl Default for FiledDelete {
 /// Every spelling of this release's filed episode base, ASCII-lowercased:
 /// the one filing would write today, plus the one an older build wrote
 /// for the same release when the show name reshapes (see
-/// [`legacy_tv_path`]). Empty when the stem doesn't name one episode.
+/// `legacy_tv_path`). Empty when the stem doesn't name one episode.
 pub fn filed_bases(stem: &str) -> Vec<String> {
     let mut out = Vec::with_capacity(2);
     for path in [tv_path(stem), legacy_tv_path(stem)] {

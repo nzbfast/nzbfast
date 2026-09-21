@@ -21,7 +21,7 @@
 //!   are reconstructed into the volume files via the map, so nothing is
 //!   lost and PAR2 repair sees ordinary files. The holds cap gets one
 //!   relief valve first: held spans page to a scratch file
-//!   ([`HoldSpan`]/[`HoldsScratch`]) and the set stays one-pass; only a
+//!   (`HoldSpan`/`HoldsScratch`) and the set stays one-pass; only a
 //!   breach of the scratch ceiling too demotes.
 //! - [`Extractor::read_at`] serves byte-exact volume reads for the live
 //!   verifier's read-back path (header stash + inner-file pread), so
@@ -144,8 +144,10 @@ use sevenz::*;
 use sevenz_map::*;
 use shape::*;
 pub use shape::{
-    ArchiveShape, DiskArchive, NestedDisposition, NestedPrevalence, nested_prevalence,
-    note_nested_level, reset_nested_prevalence, shape_word,
+    ArchiveShape, DiskArchive, NestedBumps, NestedDisposition, NestedEvent, NestedPrevalence,
+    NestedRecorder, clear_nested_prevalence_sink, nested_prevalence, nested_prevalence_baseline,
+    nested_prevalence_total, note_nested_level, record_nested_events, reset_nested_prevalence,
+    set_nested_prevalence_baseline, set_nested_prevalence_sink, shape_word,
 };
 use split::*;
 pub use split::{RAR_SPLIT_MISALIGNED, rar_split_part_name};
@@ -188,7 +190,7 @@ pub type MaterializedHook = Arc<dyn Fn(usize, &str, u64) + Send + Sync>;
 /// the NZB's own classification and the in-stream `PAR2\0PKT` sniff -
 /// neither of which the extractor can see. It is asked ONLY once every
 /// slot's offset-0 span has reached this extractor
-/// ([`Extractor::parity_ruled_out`]), which is what makes a "nothing has
+/// (`Extractor::parity_ruled_out`), which is what makes a "nothing has
 /// been sniffed yet" answer mean "nothing ever will be": a par2 volume
 /// is identified from its offset-0 bytes, and the engine sets that flag
 /// before it hands the same span here.
@@ -225,10 +227,251 @@ enum SlotMode {
     Discard,
 }
 
+/// TODO 118.2: what vouches for a slot's declared size.
+///
+/// `=ybegin size=` is a poster-written field nothing verifies
+/// (`yenc::check_part_geometry` declines to, on the stated grounds that
+/// real posters get it wrong on good articles), and the RAR mapper turned
+/// it straight into a hard refusal: a declaration short of the physical
+/// volume trips `data area exceeds volume` on EVERY volume of a healthy
+/// set, which is the 60-of-60 signature TODO 118 item 2 waited on since
+/// 5 Aug 2026. The evidence landed 20 Sep 2026: a live poster that writes
+/// a fresh RANDOM `size=` on every article (4.8 MB to 15.6 MB against
+/// 200 MB volumes), so the first-arriving article's claim refused
+/// one-pass on 88 of 88 volumes and the job paid 112 s of materialized
+/// unpack in a 132 s tail.
+///
+/// The bound is therefore closed only on a CORROBORATED length, and the
+/// ladder here is what counts as corroboration:
+///
+/// - `Claimed`: one article's word. The mapper is built open-ended
+///   (`volume_size` 0, the TODO 211 (b) split shape) and maps; nothing
+///   is refused on one claim, nothing is trusted on one claim either.
+/// - `Agreed`: a second article of the same slot repeated the claim. An
+///   honest poster writes one value on every article, so this is the
+///   strongest thing the articles alone can say - and it is STILL the
+///   poster's word twice, not a measurement. It used to close the bound
+///   at once, and that was the #24 shape's whole failure: a poster whose
+///   field is wrong the SAME way on every article agrees with itself,
+///   the bound closed short, `data area exceeds volume` refused, and the
+///   slot demoted to a materialized volume on the spot - before the
+///   exact witness (usually the LAST segment) could arrive, and a demote
+///   cannot be undone (`VolumeMapper::fail` drops the window; a blocked
+///   mapper is dead). So an `Agreed` claim closes NOTHING mid-stream: the
+///   mapper stays open-ended, an exact witness closes it whenever it
+///   lands, and a slot still `Agreed` at finish closes to the claim then
+///   ([`Extractor::size_settle`]) - which is where the guard fires for a
+///   post that never produced a witness, materializing the volumes
+///   exactly as before, only later. What that delay costs an honest set
+///   is the EOF-rule completion of a RAR4 volume without an end block
+///   and the early refusal of a balloon, both of which now wait for the
+///   witness or the finish; what it buys is one-pass on the #24 shape,
+///   whose witness is the last segment of every volume.
+/// - `Contested`: a second article DISAGREED. The claim is known false
+///   and never becomes the bound; only an exact source can close it.
+///   This is the random-`size=` poster.
+/// - `Exact`: the engine corroborated the length from a source the
+///   poster did not write per article - the last segment's `=ypart end`
+///   (segment number equal to the NZB's count for the file), or an
+///   article whose own `=ypart end` lands exactly on its `size=`.
+///   Overrides every claim, closes or corrects the bound, and no later
+///   claim moves it. [`Extractor::corroborate_size`] is the entry.
+///
+/// What NEVER closes the bound is a high-water mark of bytes received:
+/// coverage is not contiguous, and the guard exists to refuse mapping an
+/// entry over bytes that never arrive (TODO 118.2's standing rule). At
+/// finish, a slot still `Claimed` or `Agreed` closes to its claim
+/// ([`Extractor::size_settle`]) so a lone-article volume keeps the EOF
+/// rule and every uncorroborated volume keeps the sparse-balloon refusal
+/// it always had; a `Contested` slot stays open, a known-false bound
+/// being worse than none - the settle's tiling and coverage checks are
+/// what judge it then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SizeTrust {
+    /// No nonzero size has been declared yet.
+    Unclaimed,
+    Claimed,
+    Agreed,
+    Contested,
+    Exact,
+}
+
+impl Slot {
+    /// Record one write's declared `size` against the slot: the first
+    /// nonzero claim is `Claimed`, a repeat of it `Agreed`, a different
+    /// one `Contested`. None of them moves the mapper's bound
+    /// ([`Self::mapper_size`]); the trust is read at finish
+    /// ([`Extractor::size_settle`]). A zero size says nothing. Returns
+    /// the trust as it stood BEFORE this claim, so a caller can see the
+    /// one transition the chase side acts on (`Agreed`, for the RAR4
+    /// driver and the 7z attach - see [`Self::size_agreed`]).
+    fn note_size_claim(&mut self, size: u64) -> SizeTrust {
+        let before = self.size_trust;
+        if size == 0 {
+            return before;
+        }
+        if self.size == 0 {
+            // The DECLARED length is the slot's own and is read by
+            // everything but the mapper - preallocation, the chase, the
+            // read-back ranges, and the completion coverage census
+            // (`slot_uncovered`, which is sized off the writer this
+            // value opens). It must be recorded whatever the mapper's
+            // trust already is: on the download path
+            // [`Extractor::corroborate_size`] runs BEFORE the write that
+            // carries the claim, so an exact witness on a single-article
+            // file reaches an Exact slot that has never seen a declared
+            // size at all. Leaving it at zero there opened the writer at
+            // zero bytes and made the census's gap vanish - a post
+            // declaring 16 MiB and shipping 64 KB completed GREEN again,
+            // which is the false green review sweep 3 Aug M7 closed.
+            self.size = size;
+            if self.size_trust == SizeTrust::Unclaimed {
+                self.size_trust = SizeTrust::Claimed;
+            }
+            return before;
+        }
+        match self.size_trust {
+            SizeTrust::Exact | SizeTrust::Agreed | SizeTrust::Contested => {}
+            SizeTrust::Unclaimed => {
+                // `size` is nonzero here - the zero case is handled
+                // above - so this is a resume adopt (`reader.rs`) or a
+                // nested delivery that set it directly. A direct set is
+                // the slot's own knowledge, so a claim that agrees with
+                // it corroborates and one that differs contests, exactly
+                // as a second article would.
+                if self.size == size {
+                    self.size_trust = SizeTrust::Agreed;
+                } else {
+                    self.size_trust = SizeTrust::Contested;
+                }
+            }
+            SizeTrust::Claimed => {
+                self.size_trust = if self.size == size {
+                    SizeTrust::Agreed
+                } else {
+                    SizeTrust::Contested
+                };
+            }
+        }
+        before
+    }
+
+    /// The length the RAR mapper may bound its volume by MID-STREAM: the
+    /// CORROBORATED length once an exact witness vouched for one, `0`
+    /// (open-ended) on any claim however many articles repeat it. See
+    /// [`SizeTrust`]; the finish-time close of a claimed size is
+    /// [`Extractor::size_settle`].
+    ///
+    /// `Exact` reads `Slot::exact_size` and NOT `Slot::size`, which
+    /// stays the poster's declaration: the two differ precisely when the
+    /// declaration is a lie, and that difference is what the completion
+    /// census exists to see.
+    fn mapper_size(&self) -> u64 {
+        match self.size_trust {
+            SizeTrust::Exact => self.exact_size,
+            SizeTrust::Unclaimed
+            | SizeTrust::Claimed
+            | SizeTrust::Agreed
+            | SizeTrust::Contested => 0,
+        }
+    }
+
+    /// `size` once the articles AGREE on it or a witness vouched for it,
+    /// `0` otherwise (TODO 118.2 (b)). Two consumers read this rather
+    /// than [`Self::mapper_size`], and both need SOME bound to run at
+    /// all: the RAR4 chase driver (`rar15_40` walks to the volume's
+    /// length; there may be no END block) and the 7z attach (the reader
+    /// seeks to the container's end to open it, and a split's geometry
+    /// is part 1's size). For them a wrong-agreed size costs what it
+    /// cost before (c): a decode error or a refusal at attach, and the
+    /// materialize - where waiting for the exact witness (usually the
+    /// LAST segment) would hold every honest volume whole in RAM first.
+    /// The mapper, whose refusal is a demote that cannot be undone,
+    /// keeps (c)'s stricter rule.
+    ///
+    /// `Agreed` reads [`Self::size`] and `Exact` reads
+    /// [`Self::exact_size`], for the same reason [`Self::mapper_size`]
+    /// does: Agreed means the ARTICLES agreed on the declaration, so the
+    /// declaration is the length; Exact means a witness vouched for a
+    /// length the declaration may contradict, and on that slot `size` is
+    /// the lie the completion census still has to be able to see.
+    fn size_agreed(&self) -> u64 {
+        match self.size_trust {
+            SizeTrust::Agreed => self.size,
+            SizeTrust::Exact => self.exact_size,
+            SizeTrust::Unclaimed | SizeTrust::Claimed | SizeTrust::Contested => 0,
+        }
+    }
+
+    /// The slot's TRUE extent for a consumer that needs one: the
+    /// corroborated length where a witness vouched for one, the
+    /// declaration everywhere else.
+    ///
+    /// The two differ only on an `Exact` slot whose declaration was a
+    /// lie, which is exactly the case [`Self::size`] must keep (the
+    /// completion census reads the declaration through the writer's
+    /// extent). A consumer that seeks to the container's END - the 7z
+    /// attach - needs the truth instead, and a nested delivery, which
+    /// sets `size` directly from the parent's entry at `Unclaimed`,
+    /// still gets what it always did.
+    fn trusted_size(&self) -> u64 {
+        match self.size_trust {
+            SizeTrust::Exact => self.exact_size,
+            SizeTrust::Unclaimed
+            | SizeTrust::Claimed
+            | SizeTrust::Agreed
+            | SizeTrust::Contested => self.size,
+        }
+    }
+
+    /// The total a RAR chase frontier is born with (TODO 118.2 (b)): the
+    /// corroborated size, or [`frontier::OPEN_TOTAL`] until there is one.
+    /// The chase reads forward and stops at each volume's END header, so
+    /// an open total costs it nothing; a false one cost it the set.
+    fn chase_total(&self) -> u64 {
+        match self.mapper_size() {
+            0 => frontier::OPEN_TOTAL,
+            n => n,
+        }
+    }
+}
+
 struct Slot {
     mode: SlotMode,
     name: String,
+    /// The slot's length as the writes DECLARED it - the first nonzero
+    /// `size` any `write*` carried, which on the download path is the
+    /// article's `=ybegin size=`. Every consumer reads it as before
+    /// (preallocation, the chase, the read-back ranges, and the
+    /// completion coverage census through the writer's extent); the ONE
+    /// reader that must not is the RAR mapper's volume bound (TODO
+    /// 118.2), which goes through [`Slot::mapper_size`] and
+    /// [`Slot::size_trust`] instead.
+    ///
+    /// A corroborated exact length does NOT overwrite it. It used to,
+    /// and that is how `a_lying_total_size_does_not_complete_green`
+    /// broke: a single-article file's own `=ypart end` is an exact
+    /// witness, so a post declaring 16 MiB and shipping 64 KB had its
+    /// declaration replaced by the 64 KB it actually shipped, the writer
+    /// opened at 64 KB, and [`Extractor::slot_uncovered`] found nothing
+    /// missing. The shortfall between the two is the whole finding.
     size: u64,
+    /// The length the engine CORROBORATED from a source the poster did
+    /// not write per article, or 0. Only [`Slot::mapper_size`] reads it.
+    /// See [`Extractor::corroborate_size`].
+    exact_size: u64,
+    /// How far the mapper's volume bound may be closed. See
+    /// [`SizeTrust`].
+    size_trust: SizeTrust,
+    /// TODO 118.2 (b): the offset-0 sniff found a 7z container but the
+    /// slot's size is not trusted yet, so the head was parked in `holds`
+    /// instead of attaching a chase on a claim the poster may have
+    /// randomized. The next write that finds the size trusted re-runs the
+    /// sniff from the parked head ([`Extractor::resniff_parked_head`]).
+    /// Cleared there; a slot that leaves `Unknown` any other way (the
+    /// pre-sniff spill, the finish settle) drains the head as an ordinary
+    /// hold and the flag is dead.
+    head_awaits_size: bool,
     /// `vol_sort_key(&name)`, computed once - `reresolve` runs per volume
     /// arrival over EVERY group slot, and recomputing the key allocated
     /// 2-3 Strings per slot per call (quadratic on many-volume sets).
@@ -976,6 +1219,22 @@ struct Inner {
     /// and a later demote re-fetches it. Off: every trim spills, as
     /// before 22 Aug 2026.
     rar_drop_on: bool,
+    /// PROGRESS-trim arm for the RAR chase
+    /// (`NZBFAST_CHASE_PROGRESS_TRIM` / runtime setter), OFF unless
+    /// asked for. On: a NESTED chase releases its consumed prefix as
+    /// the engine's read frontier passes it, keeping a working set of
+    /// `chase_progress_margin` instead of the whole input. Off (the
+    /// default): the only two trim call sites fire under PRESSURE and
+    /// a set that fits under the holds cap reaches neither, so the
+    /// chase holds its whole input - measured and deliberate. Why the
+    /// default is off, with the ladder that decided it:
+    /// `chase_progress_trim_env_on` and
+    /// `Extractor::rar_trim_set_on_progress`.
+    chase_progress_trim_on: bool,
+    /// Bytes of consumed input the progress trim above leaves in RAM
+    /// behind the engine's read frontier
+    /// (`NZBFAST_CHASE_TRIM_MARGIN` / runtime setter).
+    chase_progress_margin: u64,
     /// Bytes the RAR drop-behind released without a disk copy, a subset
     /// of `chase_trimmed`.
     chase_dropped: u64,
@@ -1482,6 +1741,9 @@ impl Extractor {
                 zip_direct_on: !zip_direct_env_off(),
                 rar_trim_on: !rar_trim_env_off(),
                 rar_drop_on: !rar_drop_env_off(),
+                chase_progress_trim_on: chase_progress_trim_env_on(),
+                chase_progress_margin: chase_progress_margin_env()
+                    .unwrap_or(CHASE_PROGRESS_MARGIN_DEFAULT),
                 chase_dropped: 0,
                 chase_trimmed: 0,
                 resume_pending: Vec::new(),
@@ -1535,7 +1797,7 @@ impl Extractor {
     /// `drain_holds` replayed parked spans, in THIS level's slot/volume
     /// address space. A nested child's drained holds are folded in,
     /// translated back through the forward windows recorded when the
-    /// child parked them ([`FwdWindow`]); a child placement with no
+    /// child parked them (`FwdWindow`); a child placement with no
     /// window (structurally unexpected) is dropped, which errs toward a
     /// refetch on resume. The journal writer joins these against
     /// articles parked on a [`Persist::Held`] return; a PLAIN entry's
@@ -1624,6 +1886,9 @@ impl Extractor {
             mode: SlotMode::Unknown,
             name: String::new(),
             size: 0,
+            exact_size: 0,
+            size_trust: SizeTrust::Unclaimed,
+            head_awaits_size: false,
             sort_key: None,
             holds: Vec::new(),
             pre_bytes: 0,
@@ -1763,6 +2028,20 @@ impl Extractor {
                 // gate, and the pool reports per JOB, not per depth.
                 ci.loss_doubt = inner.loss_doubt.clone();
                 ci.verify_gate_waits = inner.verify_gate_waits;
+                // The PROGRESS trim's two knobs (TODO 13 stage 2).
+                // Inherited rather than re-read from the environment
+                // like the gates in `build` above, because this one is
+                // depth-gated to `depth > 0`: the level that can
+                // actually run it is NEVER the level a runtime setter
+                // reaches, so `set_chase_progress_trim` /
+                // `set_chase_progress_margin` on the root would
+                // configure the one extractor in the chain that never
+                // uses them - and a ladder leg would silently measure
+                // the default at every rung. The env arms still work
+                // either way (the child re-reads the same process
+                // environment); this is what makes the setters real.
+                ci.chase_progress_trim_on = inner.chase_progress_trim_on;
+                ci.chase_progress_margin = inner.chase_progress_margin;
             }
             inner.child = Some(child);
         }
@@ -1826,7 +2105,7 @@ impl Extractor {
     /// 2. nothing will open one of those outputs BY NAME - settle's
     ///    read-back, a PAR2 scan, an unpack step, a user - until the
     ///    caller has lowered this and called
-    ///    [`disk::FileWriter::flush_staged`] over
+    ///    `disk::FileWriter::flush_staged` over
     ///    [`Self::writers_snapshot`].
     ///
     /// The `get` pipeline can promise both, at one point in the code,
@@ -1869,6 +2148,193 @@ impl Extractor {
         data: &[u8],
     ) -> io::Result<Persist> {
         self.write_impl(slot, name, size, offset, data, false, None, None)
+    }
+
+    /// TODO 118.2: the engine learned this slot's EXACT length from a
+    /// source the poster did not write per article, and the RAR mapper
+    /// may bound the volume by it. The download path's witnesses are the
+    /// last segment's `=ypart end` (segment number equal to the NZB's
+    /// count for the file) and an article whose own `=ypart end` lands
+    /// exactly on its `size=`; the PAR2 FileDesc length is the third,
+    /// handed over the moment the live verifier CONFIRMS which FileDesc
+    /// the slot is (by its first 16 KiB or its first Ok block - by slot,
+    /// never by yEnc name, which the poster this exists for randomizes
+    /// too), and on a post with a recovery set it is usually the first
+    /// of the three to land.
+    ///
+    /// Overrides whatever the articles claimed FOR THE MAPPER and for
+    /// nothing else: an open-ended mapper closes on it
+    /// (`VolumeMapper::set_volume_size` re-runs the bound and EOF rules,
+    /// so a data area past the corroborated end still refuses and a parse
+    /// parked at the end completes), and no later claim moves it. The
+    /// first exact witness wins; a second call is a no-op. Safe on any
+    /// slot in any mode - a materialized or plain writer keeps its own
+    /// extent, only the mapper's bound is touched. A `size` of 0 says
+    /// nothing.
+    ///
+    /// It lands in `Slot::exact_size` and DOES NOT overwrite
+    /// `Slot::size`, the poster's declaration. Overwriting it was the
+    /// first cut's bug: this runs BEFORE the write that carries the
+    /// declaration, so on a single-article file the witness (that
+    /// article's own `=ypart end`) became the slot's length before any
+    /// declaration was recorded, the plain writer opened at the bytes
+    /// actually shipped rather than the bytes declared, and the
+    /// completion census had no shortfall left to find. A post declaring
+    /// 16 MiB and shipping 64 KB completed green
+    /// (`a_lying_total_size_does_not_complete_green`).
+    pub fn corroborate_size(&self, slot: usize, size: u64) -> io::Result<()> {
+        if size == 0 {
+            return Ok(());
+        }
+        let mut g = self.inner.lock_ok();
+        let inner = &mut *g;
+        let Some(s) = inner.slots.get_mut(slot) else {
+            return Ok(());
+        };
+        if s.size_trust == SizeTrust::Exact {
+            return Ok(());
+        }
+        if s.size != 0 && s.size != size {
+            tracing::debug!(
+                target: "extract",
+                "slot {slot} {}: exact size {size} corrects the declared {} ({:?})",
+                s.name,
+                s.size,
+                s.size_trust
+            );
+        }
+        s.exact_size = size;
+        s.size_trust = SizeTrust::Exact;
+        self.close_mapper_bound(inner, slot)
+    }
+
+    /// Give a mapping slot's mapper the bound its trust now allows
+    /// ([`Slot::mapper_size`]), and act on what the resize did. A no-op
+    /// for a slot that is not mapping, a split head (its extent is the
+    /// joined volume's and `split.rs` closes it), an unchanged bound, a
+    /// bound still open, or a mapper that ALREADY carries a blocker: that
+    /// blocker's own route owns the slot - a password await keeps it
+    /// parked with the blocker in place, and re-keying builds the fresh
+    /// mapper at `mapper_size` anyway - and `split_after_resize` would
+    /// read it as a refusal the resize raised and demote a slot that was
+    /// deliberately waiting.
+    fn close_mapper_bound(&self, inner: &mut Inner, slot: usize) -> io::Result<()> {
+        if matches!(inner.slots[slot].mode, SlotMode::RarChase) {
+            return self.close_chase_bound(inner, slot);
+        }
+        let size = inner.slots[slot].mapper_size();
+        self.close_mapper_bound_to(inner, slot, size)
+    }
+
+    /// [`Self::close_mapper_bound`] at a caller-chosen bound: the
+    /// mid-stream caller passes what the trust allows, the finish-time
+    /// caller ([`Self::size_settle`]) passes the claim itself.
+    fn close_mapper_bound_to(&self, inner: &mut Inner, slot: usize, size: u64) -> io::Result<()> {
+        if !matches!(inner.slots[slot].mode, SlotMode::Rar)
+            || inner.slots[slot].split_head.is_some()
+        {
+            return Ok(());
+        }
+        let Some(m) = inner.slots[slot].mapper.as_mut() else {
+            return Ok(());
+        };
+        if size == 0 || m.volume_size() == size || m.blocker.is_some() {
+            return Ok(());
+        }
+        m.set_volume_size(size);
+        self.split_after_resize(inner, slot)
+    }
+
+    /// The chased twin of [`Self::close_mapper_bound`] (TODO 118.2 (b)):
+    /// give a chased volume's frontier the total its trust now allows.
+    /// A frontier born open ([`frontier::OPEN_TOTAL`]) closes here on
+    /// the exact witness (an agreed claim closes nothing mid-stream since
+    /// (c), except a RAR4 chase's - [`Self::close_v4_chase_on_agreed`]);
+    /// a frontier closed on an agreed claim is corrected by an exact
+    /// witness that disagrees. The group's condvar is kicked because a
+    /// RAR4 driver may be parked on the bound (`chase_wait_volume`).
+    fn close_chase_bound(&self, inner: &mut Inner, slot: usize) -> io::Result<()> {
+        let size = inner.slots[slot].mapper_size();
+        if size == 0 {
+            return Ok(());
+        }
+        let Some(ch) = inner.slots[slot].chase.as_ref() else {
+            return Ok(());
+        };
+        if ch.buf.total() == size {
+            return Ok(());
+        }
+        ch.buf.close_total(size);
+        if let Some(ctl) = inner.slots[slot]
+            .group
+            .as_ref()
+            .and_then(|k| inner.groups.get(k))
+            .and_then(|g| g.chase.as_ref())
+        {
+            ctl.cv.notify_all();
+        }
+        Ok(())
+    }
+
+    /// TODO 118.2 (b): the ONE mid-stream close an agreed claim still
+    /// makes - a RAR4 chase volume's frontier. See [`Slot::size_agreed`]
+    /// for why that driver cannot wait for the exact witness; a RAR5
+    /// chase parses open and is untouched here.
+    fn close_v4_chase_on_agreed(&self, inner: &mut Inner, slot: usize) -> io::Result<()> {
+        if !matches!(inner.slots[slot].mode, SlotMode::RarChase) {
+            return Ok(());
+        }
+        let Some(ctl) = inner.slots[slot]
+            .group
+            .as_ref()
+            .and_then(|k| inner.groups.get(k))
+            .and_then(|g| g.chase.as_ref())
+        else {
+            return Ok(());
+        };
+        if !ctl.v4 {
+            return Ok(());
+        }
+        let size = inner.slots[slot].size_agreed();
+        let Some(ch) = inner.slots[slot].chase.as_ref() else {
+            return Ok(());
+        };
+        if size != 0 && ch.buf.is_open() {
+            ch.buf.close_total(size);
+            ctl.cv.notify_all();
+        }
+        Ok(())
+    }
+
+    /// End of download: a mapping slot whose bound is still open because
+    /// no exact witness ever vouched for it closes to what its articles
+    /// CLAIMED (`Claimed` or `Agreed`), so a lone-article volume keeps
+    /// the EOF rule (a RAR4 volume without an end block completes on it)
+    /// and every uncorroborated volume keeps the sparse-balloon refusal
+    /// it always had - a claim short of the data area refuses here, and
+    /// the demote that used to fire on the second article fires now,
+    /// with the volumes materialized from what was mapped. A `Contested`
+    /// slot stays open: its claim is known false, and the settle's
+    /// tiling and coverage checks judge what was mapped.
+    fn size_settle(&self, inner: &mut Inner) -> io::Result<()> {
+        for slot in 0..inner.slots.len() {
+            let s = &mut inner.slots[slot];
+            if !matches!(s.size_trust, SizeTrust::Claimed | SizeTrust::Agreed)
+                || !matches!(s.mode, SlotMode::Rar)
+            {
+                continue;
+            }
+            let open = s
+                .mapper
+                .as_ref()
+                .is_some_and(|m| m.volume_size() == 0 && m.blocker.is_none());
+            if !open {
+                continue;
+            }
+            let claim = s.size;
+            self.close_mapper_bound_to(inner, slot, claim)?;
+        }
+        Ok(())
     }
 
     /// [`Self::write`] carrying what the decode established about this
@@ -1949,7 +2415,7 @@ impl Extractor {
     /// reconstructed offset-0 bytes. The repair marker still matters:
     /// a range whose earlier (wire-damaged) arrival already composed
     /// into the piece CRCs must REPLACE it, not be clipped as a
-    /// duplicate (see [`CrcRuns::overwrite`]).
+    /// duplicate (see `CrcRuns::overwrite`).
     pub fn write_repair(
         &self,
         slot: usize,
@@ -2059,14 +2525,62 @@ impl Extractor {
                 if fresh {
                     s.name = name.to_string();
                 }
-                if s.size == 0 {
+                // TODO 118.2: the claim is recorded and never bounds the
+                // mapper mid-stream - only an exact witness does, through
+                // `corroborate_size`, or the finish (`SizeTrust`).
+                let before = s.note_size_claim(size);
+                let agreed_now = before != SizeTrust::Agreed && s.size_trust == SizeTrust::Agreed;
+                let mut corroborated = false;
+                // The engine's second witness, applied here as well: an
+                // article whose end lands EXACTLY on its own `size=` is
+                // two fields of one header agreeing that this is the
+                // file's last byte, which a randomized field does not do
+                // by accident (`get::workers::exact_size_witness`). On the
+                // download path the engine corroborates it a moment
+                // before this write, so this is a no-op there; it is
+                // what makes a hand-fed one-article file - every 7z
+                // fixture in the suite - trusted on arrival the way the
+                // engine would have made it (TODO 118.2 (b)).
+                if size != 0
+                    && s.size_trust != SizeTrust::Exact
+                    && offset.checked_add(data.len() as u64) == Some(size)
+                {
+                    // BOTH, and they are the same number here by the
+                    // condition above: the article's `end` landing on
+                    // its own `size=` is what makes this declaration an
+                    // exact witness, so the slot's declared length and
+                    // its corroborated one agree. They part company only
+                    // where the witness comes from elsewhere - see
+                    // `Slot::size` and [`Extractor::corroborate_size`],
+                    // which must NOT move the declaration.
                     s.size = size;
+                    s.exact_size = size;
+                    s.size_trust = SizeTrust::Exact;
+                    corroborated = true;
                 }
                 if fresh {
                     // TODO 211 (b): a declared split learns this part's
                     // exact size here, whichever offset arrived first.
                     self.split_note_size(inner, slot)?;
                 }
+                if corroborated {
+                    self.close_mapper_bound(inner, slot)?;
+                } else if agreed_now {
+                    self.close_v4_chase_on_agreed(inner, slot)?;
+                }
+            }
+            // TODO 118.2 (b): a 7z head parked for want of a trusted size
+            // is re-sniffed by the first write that brings the trust -
+            // this one, whose claim just agreed, or whose article the
+            // engine corroborated a moment ago. BEFORE the dispatch
+            // below, so this span then routes in whatever mode the
+            // sniff picked, exactly as it would have had the head
+            // classified on arrival.
+            if inner.slots[slot].head_awaits_size
+                && matches!(inner.slots[slot].mode, SlotMode::Unknown)
+                && inner.slots[slot].size_agreed() != 0
+            {
+                routed_rar |= self.resniff_parked_head(inner, slot, &mut *jobs, &mut *fwd)?;
             }
 
             match inner.slots[slot].mode {

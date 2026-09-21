@@ -424,7 +424,7 @@ pub(crate) fn scan_packets_deferring<'a>(
 /// resync by scanning for the magic byte by byte and this walk cannot;
 /// the caller then reads the file whole and takes that path. Nothing
 /// here is MD5-verified: the critical packets are verified by the
-/// parse that follows, the recovery packets by [`verify_span`] over a
+/// parse that follows, the recovery packets by `verify_span` over a
 /// later read, the same two gates the whole-read path applies.
 pub struct SparseFrame {
     /// Every non-recovery packet, whole, in file order.
@@ -435,13 +435,33 @@ pub struct SparseFrame {
 
 /// One recovery packet a [`sparse_frame`] walk skipped.
 pub struct SparseRecovery {
+    /// Byte offset of the packet's 64-byte header in the file.
     pub offset: u64,
+    /// Total packet length in bytes from the header, including that
+    /// 64-byte header. Already checked to be a multiple of 4 and to fit
+    /// inside the file, so `offset + len` is in range.
     pub len: u64,
+    /// The packet's own MD5 field, as claimed by the header and NOT yet
+    /// checked - the payload was skipped rather than read, so nothing
+    /// has hashed it. `verify_span` over a later read is the gate.
     pub md5: [u8; 16],
+    /// The Recovery Set ID claimed by the header, unverified for the
+    /// same reason.
     pub set_id: [u8; 16],
+    /// The recovery packet's exponent, the first 4 bytes of the body,
+    /// which is what says which parity slice this is. `None` when the
+    /// packet is too short to carry one or the extra read failed.
     pub exponent: Option<u32>,
 }
 
+/// Frame a PAR2 file by seeking: build a [`SparseFrame`] holding every
+/// critical packet whole and only the place and header claims of each
+/// recovery packet, without reading a byte of parity payload.
+///
+/// `file_len` must be the file's real length; it bounds every offset
+/// the walk accepts. Returns `None` on any structural anomaly, which is
+/// the caller's signal to fall back to reading the file whole - see the
+/// type's own note on why this walk cannot resync.
 pub fn sparse_frame(f: &std::fs::File, file_len: u64) -> Option<SparseFrame> {
     let mut bytes = Vec::new();
     let mut recovery = Vec::new();

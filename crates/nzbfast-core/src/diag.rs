@@ -130,7 +130,7 @@ pub fn print_failure_diagnostics(
 /// sentence.
 ///
 /// The two share `derrs` and have OPPOSITE remedies, so
-/// [`incomplete_reason`] has to tell them apart to pick a verdict: a
+/// `incomplete_reason` has to tell them apart to pick a verdict: a
 /// corrupt article is the SERVER's copy failing its own yEnc CRC, where
 /// free space and permissions are irrelevant and a re-fetch from
 /// another provider is the fix, while a write fault is this machine and
@@ -257,7 +257,7 @@ pub struct LossCauses<'a> {
     /// above: the article IS still absent from every server that
     /// answered, so moving it out would change what the repair planner
     /// and every gate here read. What it buys is the WORDING - see
-    /// [`LossCauses::asked_430`] and [`unasked_clause`]. The standing
+    /// `LossCauses::asked_430` and `unasked_clause`. The standing
     /// rule is the memory topic `nzbfast-retry-propagation-trap`: say
     /// it in the message, keep the classification.
     ///
@@ -301,7 +301,7 @@ pub struct LossCauses<'a> {
     /// yield gate behind that verdict; today nothing sets it and the
     /// counters above are the only evidence this module has. It is here
     /// rather than in item 4's own change because the ORDERING is this
-    /// module's business - see [`recovery_is_the_casualty`] - and a
+    /// module's business - see `recovery_is_the_casualty` - and a
     /// verdict landing later must not have to re-argue where it goes.
     ///
     /// The incident this whole rung exists for is exactly the case only
@@ -654,7 +654,7 @@ pub fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCauses) -> 
 /// are ever wanted here, take them from `adopted_from` rather than
 /// classifying inside-versus-outside at the construction sites - the
 /// success line already spells them that way ("N block(s) adopted from
-/// <names>"), and one spelling is the whole point.
+/// `<names>`"), and one spelling is the whole point.
 ///
 /// Empty when nothing was adopted, so the everyday line is unchanged.
 pub fn adopted_clause(adopted: usize) -> String {
@@ -1398,7 +1398,7 @@ impl UnsupportedArchive {
 ///
 /// This is what downgrades "zip present" from a job failure to a
 /// reported gap, so it has to see everything the detection side sees -
-/// which since zip joined [`is_extractable_archive`] means the whole
+/// which since zip joined `is_extractable_archive` means the whole
 /// tree, not just the top level: a pass now descends into a subfolder
 /// zip and reports it, and a `false` this function could not explain
 /// would fail the job with the wrong reason.
@@ -1687,7 +1687,7 @@ pub fn bomb_fallback<'a>(reasons: impl IntoIterator<Item = &'a str>) -> Option<S
 /// NOT read as a disk-full to [`crate::failkind::disk_full_failure`]
 /// (which arms the min-free hold and would requeue the job to wait for
 /// space it can never have enough of). `bomb_fallback` above is the
-/// demote-side site; [`crate::rarfix::try_unrar_spent_why`] is the two
+/// demote-side site; `crate::rarfix::try_unrar_spent_why` is the two
 /// refusals INSIDE the ladder, which have no demote reason to carry
 /// anything for them.
 pub fn bomb_failure() -> String {

@@ -46,7 +46,7 @@
 //! attribution rather than as the unattributed remainder round 14 spent
 //! a whole lane chasing.
 //!
-//! **RUN BUFFERS COME FROM A FREE LIST ([`RunPool`]), AND THAT IS WHAT
+//! **RUN BUFFERS COME FROM A FREE LIST (`RunPool`), AND THAT IS WHAT
 //! LETS A RUN RESERVE ITS WHOLE SIZE UP FRONT.**
 //! `research/SMALL-ARTICLE-MEMCPY-2026-09-16.md` profiled a 128 KB-article
 //! download and found this module twice in the mem-op stacks: 3.78% of
@@ -63,7 +63,7 @@
 //!
 //! Reserving [`Caps::run`] at the open would have fixed the realloc and
 //! broken the accounting, which is why the note filed a pool rather than
-//! a one-line change: [`charge`] accounts the STAGED BYTES and not the
+//! a one-line change: `charge` accounts the STAGED BYTES and not the
 //! capacity, so runs opened at their full size would have under-reported
 //! the memory floor by up to 4x. The pool answers both halves at once.
 //! A buffer is minted at [`Caps::run`] + [`Caps::max_article`] - the
@@ -129,7 +129,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// ext4 on a device and found a wall LOSS at every article size from
 /// 20 KB to 360 KB; the round after it
 /// (`research/WSTAGE-WINDOW-DEFAULT-2026-09-17.md`) re-ran that on a
-/// binary carrying [`RunPool`] and on a SECOND filesystem - twelve
+/// binary carrying `RunPool` and on a SECOND filesystem - twelve
 /// spinning disks under btrfs - and the loss holds on both:
 /// `unstaged/staged` wall 0.712 and 0.807 on the SSD at 128 KB and
 /// 250 KB articles (the pool is worth 22-28% of the staged arm and
@@ -215,7 +215,7 @@ pub const MAX_RUNS: usize = 16;
 /// failure.
 pub const COALESCE_TOTAL_DEFAULT: u64 = 64 << 20;
 
-/// Ceiling on the run-buffer CAPACITY [`RunPool`] may own at once,
+/// Ceiling on the run-buffer CAPACITY `RunPool` may own at once,
 /// across the free list and every buffer out on loan.
 ///
 /// The same 64 MiB as [`COALESCE_TOTAL_DEFAULT`], and deliberately the
@@ -330,11 +330,6 @@ pub fn stage_max_article() -> usize {
 /// all, which is a benchmark arm and not a shippable configuration -
 /// see [`STAGE_MAX_AGE_DEFAULT`] for the invariant it would give up.
 pub fn max_age() -> std::time::Duration {
-    // env-default-gate: the 100 ms the doc row states is
-    // [`STAGE_MAX_AGE_DEFAULT`], reached as `.as_millis() as u64` - a
-    // METHOD CALL on a `Duration` const, which is not an expression the
-    // const folder evaluates. The sibling `NZBFAST_WRITE_COALESCE_TOTAL_MB`
-    // pairs because its const is a plain integer expression.
     static V: OnceLock<std::time::Duration> = OnceLock::new();
     *V.get_or_init(|| {
         std::time::Duration::from_millis(env_bytes(
@@ -360,13 +355,6 @@ pub fn coalesce_total_cap() -> u64 {
 /// The run pool's own ceiling ([`RUN_POOL_DEFAULT`]). Latched on first
 /// use like every other knob here, for the same reason.
 pub fn run_pool_cap() -> u64 {
-    // env-default-gate: the 64 the doc row states is [`RUN_POOL_DEFAULT`],
-    // which is [`COALESCE_TOTAL_DEFAULT`] (`64 << 20`) divided by this
-    // call's own `1 << 20` unit - the same arithmetic that pairs the
-    // TOTAL_MB row twelve lines up. What defeats the resolver here is
-    // only the SPELLING: that one is a multi-line `env_bytes(..)` call
-    // and this one sits on one line inside the `get_or_init` closure,
-    // which the chain walk does not step into.
     static V: OnceLock<u64> = OnceLock::new();
     *V.get_or_init(|| env_bytes("NZBFAST_WRITE_COALESCE_POOL_MB", 1 << 20, RUN_POOL_DEFAULT))
 }
@@ -443,7 +431,7 @@ static EVER_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// Spans staged, runs written out of the window, and bytes staged since
 /// the process started. `(0, 0, 0)` is the exact statement "this process
-/// never coalesced a byte" - see [`EVER_SPANS`] for why a level cannot
+/// never coalesced a byte" - see `EVER_SPANS` for why a level cannot
 /// say that.
 pub fn staged_totals() -> (u64, u64, u64) {
     (
@@ -580,7 +568,7 @@ impl RunPool {
 }
 
 /// Capacity bytes the run pool owns right now - the free list plus every
-/// buffer on loan. The tests' door onto [`RUN_POOL`]; production reads
+/// buffer on loan. The tests' door onto `RUN_POOL`; production reads
 /// the same figure out of `memgauge::Sub::WriteStageReserve` plus
 /// [`outstanding`].
 pub fn pool_owned() -> u64 {

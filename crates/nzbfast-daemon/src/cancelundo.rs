@@ -145,7 +145,7 @@ pub struct UndoRow {
     /// The directory the cancelled job was downloading into.
     ///
     /// Carried so the restore can go back to it - see
-    /// [`Daemon::reuse_cancelled_dir`], which is the difference between
+    /// `Daemon::reuse_cancelled_dir`, which is the difference between
     /// an undo that resumes and one that quietly starts again from zero.
     pub out_dir: PathBuf,
     /// The retained link, under `<spool>/undo/`.

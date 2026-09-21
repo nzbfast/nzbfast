@@ -45,7 +45,7 @@ use std::path::Path;
 /// Probes the nearest EXISTING ancestor, so it still answers correctly when
 /// the output directory has not been created yet (sensitivity is a mount
 /// property, and an ancestor is on the same mount). A directory reached
-/// through a SYMLINK is measured too - see [`probed_case_insensitive`],
+/// through a SYMLINK is measured too - see `probed_case_insensitive`,
 /// which is where that has to be arranged. Falls back to the platform
 /// default only if no probe can be written.
 pub fn case_insensitive_dir(dir: &Path) -> bool {

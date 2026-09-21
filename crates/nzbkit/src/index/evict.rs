@@ -439,8 +439,15 @@ pub enum EvictOrder {
     Ladder,
     /// Single-key orders. No ladder, no junk/completeness preference.
     Oldest,
+    /// Newest `first_posted` first. Only sensible with a narrow
+    /// [`EvictScope`]: unscoped, it deletes exactly what the user just
+    /// found.
     Newest,
+    /// Largest `total_bytes` first - fewest deletions for a given cap,
+    /// at the cost of taking the biggest things the user has.
     Largest,
+    /// Smallest `total_bytes` first. Frees the least per row, so a cap
+    /// it can satisfy is one the ladder would have absorbed anyway.
     Smallest,
 }
 
@@ -475,8 +482,11 @@ fn evict_scope_sql(scope: EvictScope) -> Option<&'static str> {
     }
 }
 
+/// Everything that shapes an eviction except the target size: what may
+/// be taken, in what order, and how far past the cap to go.
 #[derive(Debug, Clone, Default)]
 pub struct EvictPolicy {
+    /// The order candidates are walked in. Default [`EvictOrder::Ladder`].
     pub order: EvictOrder,
     /// Restrict eviction to these kinds ("movie"/"tv"/"software"/"other").
     /// Empty = all kinds.
@@ -511,23 +521,39 @@ fn evict_low_water(target_bytes: u64, policy: &EvictPolicy) -> u64 {
 /// the daemon owns the queue, watchlist and history and passes it in.
 #[derive(Debug, Clone, Default)]
 pub struct Protected {
+    /// Title keys nothing may be evicted under - a watchlist entry the
+    /// user is waiting on. Matched by key rather than by row, so it
+    /// protects a release the index has not seen yet too.
     pub title_keys: Vec<String>,
+    /// Release row ids that must survive: what the queue and history
+    /// still point at. A row id and not a name, because the daemon
+    /// holds ids.
     pub release_ids: Vec<i64>,
 }
 
+/// What one eviction actually did. Read [`Self::live_after`] against
+/// the target to judge it, never [`Self::bytes_after`], and read
+/// [`Self::blocked`] before calling a still-oversized database a
+/// failure.
 #[derive(Debug, Clone, Default)]
 pub struct EvictReport {
+    /// Release rows deleted.
     pub removed: usize,
     /// Raw file size (`db_bytes()`) either side of the call. This is what
     /// the user sees in Finder, so it is what the daemon reports - but it
     /// barely moves, because DELETE frees pages to the freelist rather
     /// than shortening the file. Do NOT test progress with it.
     pub bytes_before: u64,
+    /// The same raw file size after. Expect it to be near
+    /// [`Self::bytes_before`] even on a large eviction - see that
+    /// field.
     pub bytes_after: u64,
     /// `live_bytes()` either side of the call: the honest figure, and the
     /// one to compare against the target. `live_after <= target` is what
     /// "we got there" means.
     pub live_before: u64,
+    /// `live_bytes()` after. THE figure to compare against the target:
+    /// `live_after <= target` is what "we got there" means.
     pub live_after: u64,
     /// True when rows were deleted, so the caller should schedule a compact.
     pub needs_compact: bool,
@@ -557,7 +583,11 @@ pub struct EvictPreview {
     pub by_kind: Vec<(String, usize, u64)>,
     /// The live size the walk started from, and the line it walked to.
     pub live_bytes: u64,
+    /// The cap the preview was asked about.
     pub target_bytes: u64,
+    /// The line the walk actually aimed for: the target less the
+    /// policy's headroom. Below the target on purpose, so the next
+    /// arrival does not immediately trigger another eviction.
     pub low_bytes: u64,
     /// True when the candidates reach the low water mark (per the
     /// estimate). False = a real eviction would stop short too: the

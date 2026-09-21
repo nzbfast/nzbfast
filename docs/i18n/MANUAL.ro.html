@@ -112,12 +112,13 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
     <li><a href="#automation">10 · Automatizare</a></li>
     <li><a href="#arr">11 · Sonarr, Radarr și prietenii</a></li>
     <li><a href="#remotes">12 · Telefon și aplicații la distanță</a></li>
-    <li><a href="#performance">13 · Instrumente de performanță</a></li>
-    <li><a href="#updates">14 · Actualizări</a></li>
-    <li><a href="#cli">15 · Linia de comandă</a></li>
-    <li><a href="#api">16 · Prezentare API</a></li>
-    <li><a href="#files">17 · Fișiere și locații</a></li>
-    <li><a href="#troubleshooting">18 · Depanare</a></li>
+    <li><a href="#security">13 · Securitate și acces</a></li>
+    <li><a href="#performance">14 · Instrumente de performanță</a></li>
+    <li><a href="#updates">15 · Actualizări</a></li>
+    <li><a href="#cli">16 · Linia de comandă</a></li>
+    <li><a href="#api">17 · Prezentare API</a></li>
+    <li><a href="#files">18 · Fișiere și locații</a></li>
+    <li><a href="#troubleshooting">19 · Depanare</a></li>
   </ol>
 </nav>
 <main>
@@ -641,7 +642,7 @@ cursorul pe un rând pentru poster și rezumat, toate din propriul tău index.</
 release-urile dedesubt. Deschide-l cu <b>&#9656;</b> sau apăsând rândul; caseta de pe
 titlu selectează release-urile afișate. Gruparea este doar pentru <b>Acest index</b>;
 alegi <b>Indexere</b> sau <b>Ambele</b> și tabelul redevine plat, și o spune.</li>
-<li><b>Un grup pe rând.</b> Apasă numele grupului de sub o lansare și pagina se restrânge la lansările postate acolo; o pastilă deasupra tabelului numește grupul până îl ștergi. Restrânge deopotrivă peretele și tabelul, așa că trecerea de la unul la altul îl păstrează. Cealaltă intrare este Setări &rarr; Organizare &rarr; <b>Indexare</b> &rarr; <b>Grupuri de scanat</b> &rarr; <b>Găsește…</b>: deschide un grup pe care îl scanezi deja și apasă <b>Lansări indexate</b>.</li>
+<li><b>Un grup pe rând.</b> Meniul <b>Grup</b> de deasupra tabelului enumeră grupurile pe care le indexezi; alege unul și pagina se restrânge la lansările postate acolo, iar bara de adrese îl poartă, așa că o reîncărcare sau un link partajat îl păstrează. Apăsarea numelui grupului de sub o lansare alege același grup. Restrânge deopotrivă peretele și tabelul, așa că trecerea de la unul la altul îl păstrează. Cealaltă intrare este Setări &rarr; Organizare &rarr; <b>Indexare</b> &rarr; <b>Grupuri de scanat</b> &rarr; <b>Găsește…</b>: deschide un grup pe care îl scanezi deja și apasă <b>Lansări indexate</b>.</li>
 <li><b>Fiecare release al unui titlu</b> apare când îi deschizi fișa, cu rezoluția,
 codecul, formatul audio și gama dinamică (Dolby Vision, HDR10) citite din numele
 release-ului, plus mărimea, vechimea și dacă fiecare parte mai este la furnizorul tău.
@@ -685,7 +686,7 @@ similare peretele învață: îți propune un filtru pe care îl accepți dintr-
 („Ascunzi toate titlurile Reality de acum înainte?”). Tot ce ai ascuns și fiecare
 filtru învățat se află la <b>Ascunse și filtre</b> și pot fi anulate acolo.</li>
 <li>Un mic <b>punct de disponibilitate</b> pe o plachetă este verdictul oracolului
-(<a href="#performance">§13</a>): un „?” chihlimbariu înseamnă incert la providerii tăi,
+(<a href="#performance">§14</a>): un „?” chihlimbariu înseamnă incert la providerii tăi,
 roșu că părțile lipsesc în mod repetat. Grupurile aflate în curățare poartă o insignă
 <b>curățat</b>.</li>
 </ul>
@@ -772,12 +773,12 @@ sau excluderea oricărui server din pool. Fiecare server are:</p>
 <tr><th>Câmp</th><th>Note</th></tr>
 <tr><td>Host / port</td><td>Folosește portul SSL <b>563</b>. TLS nu costă nimic măsurabil - nzbfast criptează întotdeauna.</td></tr>
 <tr><td>Nume de utilizator / parolă</td><td>Stocate local în <code>config.local.json</code>, nearătate niciodată înapoi browserului. Lăsând parola goală la editare, se păstrează cea stocată. Parolele sunt <a href="#passwords">ofuscate pe disc, nu criptate</a>.</td></tr>
-<tr><td>Conexiuni</td><td>Conexiuni simultane per server. Folosește <b>Reglarea conexiunilor</b> (<a href="#performance">§13</a>) pentru a găsi punctul optim al fiecărui provider în loc să ghicești mare.</td></tr>
+<tr><td>Conexiuni</td><td>Conexiuni simultane per server. Folosește <b>Reglarea conexiunilor</b> (<a href="#performance">§14</a>) pentru a găsi punctul optim al fiecărui provider în loc să ghicești mare.</td></tr>
 <tr><td>Nivel (treaptă)</td><td>0 = primar; nivelurile mai mari sunt servere de umplere, întrebate doar pentru articolele pe care le-a ratat fiecare nivel inferior. Pune conturile nelimitate la 0, conturile cu bloc la 1+.</td></tr>
 <tr><td>Dimensiunea blocului (GB)</td><td>Pentru conturile cu bloc (plată-per-GB): nzbfast urmărește utilizarea pe toată durata față de aceasta și nu mai folosește serverul când e consumat (avertisment la 85%).</td></tr>
-<tr><td>Fiecare bait este facturat</td><td>Activeaz-o pentru un cont contorizat. Descărcările tale folosesc serverul exact ca înainte; ce încetează este traficul propriu pe care i-l trimite nzbfast - regulatorul automat de conexiuni, etapa de rețea a benchmark-ului de sistem și scanările de antete pentru indexul încorporat îl sar toate. Independentă de nivel și de dimensiunea blocului, pentru că un cont contorizat poate fi singurul tău provider, iar unul nelimitat poate sta la nivelul 2. Dezactivată implicit. <b>Testul</b> manual din <b>Reglarea conexiunilor</b> (<a href="#performance">§13</a>) funcționează în continuare pe un server marcat și întreabă mai întâi, fiindcă acolo tu ești cel care alege să cheltuiască.</td></tr>
+<tr><td>Fiecare bait este facturat</td><td>Activeaz-o pentru un cont contorizat. Descărcările tale folosesc serverul exact ca înainte; ce încetează este traficul propriu pe care i-l trimite nzbfast - regulatorul automat de conexiuni, etapa de rețea a benchmark-ului de sistem și scanările de antete pentru indexul încorporat îl sar toate. Independentă de nivel și de dimensiunea blocului, pentru că un cont contorizat poate fi singurul tău provider, iar unul nelimitat poate sta la nivelul 2. Dezactivată implicit. <b>Testul</b> manual din <b>Reglarea conexiunilor</b> (<a href="#performance">§14</a>) funcționează în continuare pe un server marcat și întreabă mai întâi, fiindcă acolo tu ești cel care alege să cheltuiască.</td></tr>
 </table></div>
-<p><b>Lasă puțină marjă sub limita de conexiuni a contului tău.</b> Setarea conexiunilor puțin sub limită nu costă nimic: debitul se aplatizează cu mult înainte de ultimele una sau două conexiuni, iar <b>Reglarea conexiunilor</b> (<a href="#performance">§13</a>) rămâne oricum sub ea. Acele locuri libere sunt cele care lasă un al doilea dispozitiv, alt client sau o reîncercare după un socket căzut să intre totuşi, în loc să fie refuzate în timp ce acesta ocupă fiecare loc.</p>
+<p><b>Lasă puțină marjă sub limita de conexiuni a contului tău.</b> Setarea conexiunilor puțin sub limită nu costă nimic: debitul se aplatizează cu mult înainte de ultimele una sau două conexiuni, iar <b>Reglarea conexiunilor</b> (<a href="#performance">§14</a>) rămâne oricum sub ea. Acele locuri libere sunt cele care lasă un al doilea dispozitiv, alt client sau o reîncercare după un socket căzut să intre totuşi, în loc să fie refuzate în timp ce acesta ocupă fiecare loc.</p>
 <p><b>Nu trebuie să te ocupi de limita de fișiere deschise a mașinii tale.</b> Sistemul
 socotește fiecare conexiune drept un fișier deschis, iar macOS pornește un program cu o
 limită de 256, pe care un set complet de conexiuni răspândite pe mai multe servere o poate
@@ -835,7 +836,7 @@ a găsit și copiază serverele (sărind duplicatele).</li>
 <li>Editările de server se aplică de la <em>următoarea</em> descărcare - fără repornire.</li>
 </ul>
 <div class="tip"><b>Recomandare</b>Doi provideri pe backbone-uri <em>diferite</em>
-întrec trei pe același. Rulează <b>Diversitatea serverelor</b> (<a href="#performance">§13</a>)
+întrec trei pe același. Rulează <b>Diversitatea serverelor</b> (<a href="#performance">§14</a>)
 pentru a vedea care dintre providerii tăi îți diversifică efectiv acoperirea și care sunt
 copii redundante unul al altuia.</div>
 
@@ -852,9 +853,9 @@ făcută aici este salvată în <code>settings.json</code> și supraviețuiește
 <tr><th>Setare</th><th>Ce face</th></tr>
 <tr><td>Limită de viteză</td><td>Plafon în octeți/sec (<code>50M</code>, <code>1G</code>, 0 = nelimitat). Aplicațiile la distanță pot trimite procentaje - setează <i>Viteza liniei</i> ca ele să se traducă corect. Intrarea <b>personalizat…</b> din antet setează același plafon fără a deschide Setările.</td></tr>
 <tr><td>Viteză automată</td><td>Plafon guvernat de RTT care cedează celuilalt trafic din casă și se reextinde când linia e liniștită.</td></tr>
-<tr><td>Amână automat descărcările lente</td><td>Un job blocat pe un singur server lent în timp ce altele așteaptă este mutat la coada cozii (progresul e păstrat). Vezi <a href="#performance">§13</a>.</td></tr>
-<tr><td>Preîncărcare pe serverele inactive</td><td>Serverele inutile pentru jobul activ pornesc următorul job din coadă. Vezi <a href="#performance">§13</a>.</td></tr>
-<tr><td>Actualizare automată / URL de verificare a actualizărilor</td><td>Vezi <a href="#updates">§14</a>.</td></tr>
+<tr><td>Amână automat descărcările lente</td><td>Un job blocat pe un singur server lent în timp ce altele așteaptă este mutat la coada cozii (progresul e păstrat). Vezi <a href="#performance">§14</a>.</td></tr>
+<tr><td>Preîncărcare pe serverele inactive</td><td>Serverele inutile pentru jobul activ pornesc următorul job din coadă. Vezi <a href="#performance">§14</a>.</td></tr>
+<tr><td>Actualizare automată / URL de verificare a actualizărilor</td><td>Vezi <a href="#updates">§15</a>.</td></tr>
 <tr><td>Viteza liniei</td><td>Viteza nominală a conexiunii tale - activează limitele procentuale de la aplicațiile compatibile SABnzbd.</td></tr>
 <tr><td>Program săptămânal</td><td>Editor de rânduri pentru reguli după momentul săptămânii: pauză, reluare sau setarea unei limite de viteză la anumite zile/ore (ora locală). Ex. limitează la 20&nbsp;MB/s în zilele lucrătoare 9–17, nelimitat altfel.</td></tr>
 </table></div>
@@ -1074,7 +1075,7 @@ instalare.</p>
 <h3>Avansat: butoanele din spatele celor evidente</h3>
 <p>Șase setări fără opțiune în linia de comandă. Fiecare are acum un rând avansat pe
 cardul de setări căruia îi aparține și rămâne accesibilă prin API
-(<a href="#api">§16</a>), de ex.
+(<a href="#api">§17</a>), de ex.
 <code>/api?mode=config&amp;name=verify_mode&amp;value=lean&amp;apikey=…</code>. Ca toate
 celelalte, ajung în <code>settings.json</code>.</p>
 <div class="tblwrap"><table>
@@ -1082,7 +1083,7 @@ celelalte, ajung în <code>settings.json</code>.</p>
 <tr><td><code>verify_mode</code></td><td><code>full</code> | <code>fast</code> | <code>lean</code> (implicit <code>fast</code>). <code>lean</code> este impulsul pentru procesoare lente: ca fast, dar sare în plus peste CRC-ul yEnc per articol de îndată ce PAR2 acoperă un fișier, lăsând un singur strat CRC32 în loc de două. Descărcările fără PAR2 își păstrează CRC-urile de articol, iar verificarea și repararea de la finalul sarcinii rămân neschimbate în ambele cazuri. Selectorul <b>Verificare în timpul descărcării</b> de mai sus este această setare.</td></tr>
 <tr><td><code>auto_retry_mins</code></td><td>Așteptarea dinaintea <em>singurei</em> reîncercări automate pe care o primește un prim eșec cu articole lipsă (implicit 20). Întârzierea de propagare este o cauză reală a articolelor lipsă și se rezolvă de la sine; datorită jurnalului, reluarea aduce doar ce încă lipsește. Eșecurile din cauza parolei sau a retragerii nu se califică niciodată.</td></tr>
 <tr><td><code>index_scan_par</code></td><td>Câte grupuri scanează indexatorul în paralel (implicit 3, limitat la 1-8).</td></tr>
-<tr><td><code>oracle_sample</code></td><td>Bugetul de STAT în repaus al oracolului de disponibilitate (<a href="#oracle">§13</a>), sondaje pe oră și pe server. Implicit 300, maximum 3600, <code>0</code> dezactivează complet eșantionarea.</td></tr>
+<tr><td><code>oracle_sample</code></td><td>Bugetul de STAT în repaus al oracolului de disponibilitate (<a href="#oracle">§14</a>), sondaje pe oră și pe server. Implicit 300, maximum 3600, <code>0</code> dezactivează complet eșantionarea.</td></tr>
 <tr><td><code>predb_max_rows</code></td><td>Câte anunțuri pre păstrează tabelul fluxului (implicit 250000, limitat la 10000-5000000). Curățarea orară taie până la acest număr, iar importul istoric refuză să pornească dacă l-ar depăși, așa că un import nu adaugă niciodată rânduri pe care următoarea curățare le șterge.</td></tr>
 <tr><td><code>predb_seed_days</code></td><td>Cât de departe în urmă ajunge un import istoric pornit fără o fereastră proprie (implicit 180 de zile, maximum 366). O fereastră mai mare înseamnă mai multe cereri către sursa pre, care merge cu o cerere la două secunde.</td></tr>
 </table></div>
@@ -1278,7 +1279,7 @@ panou și perete au un aspect tactil. Panoul Setări → Acces la distanță ara
 URL-urile exacte și un cod QR de scanat.</p>
 
 <h3 id="remote-proxy">Accesul la nzbfast din afara casei</h3>
-<p>Nu există o pagină de autentificare, iar asta este intenționat. Un login cu cookie de sesiune este o suprafață de securitate de întreținut la nesfârșit și ar rămâne oricum cea mai slabă încuietoare a oricărui lucru expus pe internet. nzbfast se autentifică în schimb cu cheia ta API și acceptă cheia atât într-un antet al cererii, cât și în URL (<code>X-Api-Key</code> sau <code>Authorization: Bearer</code>) - exact ceea ce permite unui serviciu aflat în față să se ocupe cum trebuie de autentificare.</p>
+<p>nzbfast se autentifică cu cheia ta API și acceptă cheia atât într-un antet al cererii, cât și în adresă (<code>X-Api-Key</code> sau <code>Authorization: Bearer</code>), și tocmai asta permite unui serviciu așezat în fața lui să se ocupe cum trebuie de autentificare. Mai există și, opțional, un nume de utilizator cu parolă în fața panoului într-un browser, care nu schimbă nimic pentru Sonarr, Radarr sau aplicațiile de telefon; <a href="#security">§13</a> le compară pe cele două și spune când fiecare e răspunsul potrivit.</p>
 <p><b>Cel mai simplu este să nu îl publici deloc.</b> Instalează <b>Tailscale</b> pe această mașină și pe telefon, iar amândouă intră în aceeași rețea privată: nimic nu este expus, nu e nevoie de router sau certificate, iar Setări → Acces la distanță afișează o adresă care funcționează de oriunde de îndată ce vede Tailscale pornit. Alege această cale dacă nu ai nevoie explicit de un domeniu public.</p>
 <p><b>nzbfast poate servi și el însuși HTTPS.</b> Îndreaptă Setări → Securitate →
 Certificat HTTPS / Cheie privată HTTPS spre un certificat PEM și cheia lui (sau
@@ -1321,7 +1322,142 @@ tot ce faci cu ea ar traversa internetul lizibile pentru oricine de pe traseu,
 iar o instalare fără nicio cheie setată este deschisă oricui o găsește. Dacă
 redirecționezi totuși un port, setează mai întâi o cheie API și activează HTTPS.</div>
 
-<h2 id="performance">13 · Instrumente de performanță</h2>
+<h2 id="security">13 · Securitate și acces</h2>
+<p>nzbfast are patru feluri de a controla cine ajunge la el, și nu fac aceeași
+treabă. Două sunt acreditări pe care le verifică singur: <b>cheia API</b>, pe care
+o prezintă orice program care vorbește cu el, și <b>autentificarea în panou</b>,
+opțională, un nume de utilizator și o parolă în fața paginilor într-un browser.
+Celelalte două țin de rețea, nu de persoană: pe ce adresă răspunde serviciul și
+dacă ceva din fața lui decide cine intră. Niciuna nu o înlocuiește pe alta. O
+instalare de acasă, într-o rețea de încredere, are nevoie doar de prima; o
+instalare publicată pe internet vrea trei din patru.</p>
+<div class="tblwrap"><table>
+<tr><th>Strat</th><th>Ce oprește</th><th>Unde</th></tr>
+<tr><td>Cheia API</td><td>orice apel către API fără ea: altă mașină, alt program, o pagină web pe care se întâmplă să o vizitezi</td><td>Setări → Securitate. Creată la prima pornire</td></tr>
+<tr><td>Cheia NZB</td><td>nimic de una singură. E o cheie mai slabă, de dat mai departe, care poate adăuga descărcări și nimic altceva</td><td>Setări → Securitate. Opțională</td></tr>
+<tr><td>Autentificarea în panou</td><td>o persoană la un browser care nu știe parola</td><td>Setări → Securitate. Oprită implicit</td></tr>
+<tr><td>Rețeaua din față</td><td>rețele întregi dintr-o dată: adresa de ascultare, firewallul tău, un proxy invers, un VPN</td><td>Setări → Securitate, și în afara nzbfast</td></tr>
+</table></div>
+
+<h3 id="sec-apikey">Cheia API</h3>
+<p>Cheia API este acreditarea principală. Păzește tot API-ul compatibil SAB
+(<a href="#api">§17</a>), adică întreaga suprafață de control: coada, istoricul,
+fiecare setare, parolele serverelor tale, apelul de oprire. Tot ce vorbește cu
+nzbfast o folosește. Sonarr, Radarr și restul familiei *arr
+(<a href="#arr">§11</a>), nzb360 și LunaSea pe telefon
+(<a href="#remotes">§12</a>) și extensiile de browser precum NZB Unity și NZB
+Donkey prezintă toate aceeași cheie.</p>
+<p>Nu trebuie să creezi una. La prima pornire nzbfast generează o cheie
+aleatoare, o salvează lângă setările tale într-un fișier numit
+<code>apikey</code> (<a href="#files">§18</a>), o afișează o dată în terminal și o
+păstrează între reporniri, ceea ce le permite programelor *arr să o țină. Setări →
+Securitate o arată din nou: câmpul e gol intenționat, așa că apasă
+<b>Arată</b> ca să o citești și <b>Creează una nouă</b> ca să o înlocuiești.
+Înlocuirea are efect imediat, și fiecare aplicație configurată se oprește din
+funcționat până lipești noua cheie în ea.</p>
+<p>Clienții pot trimite cheia în adresă ca <code>apikey=…</code> sau într-un
+antet, <code>X-Api-Key</code> ori <code>Authorization: Bearer</code>. Antetul e de
+preferat de îndată ce ceva îți înregistrează adresele, și el este cel care permite
+unui proxy invers să adauge cheia în numele clienților din spate.</p>
+
+<h3 id="sec-nzbkey">Cheia NZB, doar pentru adăugare</h3>
+<p>Cheia NZB este o a doua cheie, făcută dinadins mai slabă, pentru tot ce are ca
+unică sarcină să îi predea o descărcare lui nzbfast. Cine o prezintă poate adăuga
+un NZB, poate întreba versiunea, poate citi rezumatul de pauză, disc și
+avertismente și poate lua numele categoriilor, adică exact ce îi trebuie unei
+extensii de trimitere ca să adauge o lansare și să îți arate o listă de categorii.
+Nu poate citi coada sau istoricul, nu poate vedea sau schimba nicio setare și nu
+poate pune pe pauză, șterge, reîncerca sau opri nimic. Nu este o versiune mai mică
+a cheii API, de pus în locul uneia adevărate: este ceva de lipit într-o extensie
+de browser, ca o mașină în care nu ai încredere deplină să nu îți poată citi
+înapoi configurația.</p>
+
+<h3 id="sec-login">Autentificarea în panou</h3>
+<p>Pune un nume de utilizator și o parolă în Setări → Securitate și nzbfast așază
+o pagină de autentificare în fața panoului și a zidului de afișe. Este oprită
+implicit, și cât timp unul dintre cele două câmpuri e gol nu se schimbă nimic
+nicăieri. Există pentru o singură situație: o instalare pe care ai publicat-o
+dincolo de rețeaua ta, unde o cheie într-o adresă nu e ceea ce vrei să tasteze un
+om.</p>
+<p>Parola trebuie să aibă cel puțin opt caractere, iar alte patru forme sunt
+refuzate pentru că sunt primele pe care le încearcă cineva care ghicește: chiar
+numele de utilizator, una dintre cele mai încercate parole precum
+<code>password123</code>, un singur caracter repetat precum
+<code>aaaaaaaa</code> și o succesiune continuă precum <code>abcdefgh</code>.
+Refuzul spune care regulă a fost. Este păstrată sub formă de hash Argon2id,
+ceea ce înseamnă că nzbfast nu ți-o poate arăta înapoi, doar o poate înlocui:
+lasă câmpul gol ca să o păstrezi pe cea deja salvată și scrie un singur spațiu
+ca să o ștergi. Schimbarea oricăruia dintre cele două câmpuri deconectează
+fiecare browser, inclusiv acesta, iar <b>Deconectează toate browserele</b> face
+același lucru la cerere. Un browser conectat rămâne așa vreme de paisprezece
+zile de folosire.</p>
+<p><b>Nu schimbă nimic pentru Sonarr, Radarr, nzb360, LunaSea sau extensiile
+tale.</b> Este întrebarea pe care o are toată lumea, iar răspunsul e că această
+autentificare este doar o acreditare de browser. Programele acelea folosesc cheia
+API exact ca înainte, și niciun program nu trebuie să completeze o pagină de
+autentificare. Ce acoperă autentificarea este o persoană cu un browser: panoul,
+zidul și apelurile API pe care le fac acele pagini odată ce ești conectat.</p>
+<p>Singurul lucru pe care nu îl face este să apere o instalare fără cheie API.
+Autentificarea păzește paginile, nu API-ul: un serviciu fără cheie tot răspunde
+oricui îl întreabă direct, cu pagină de autentificare sau fără. Pune și o cheie.
+Pe o instalare publicată, pune-le pe amândouă.</p>
+
+<h3 id="sec-outside">Cum ajungi la el din afara rețelei tale</h3>
+<p>Funcționează trei răspunsuri, și nu sunt echivalente.
+<a href="#remote-proxy">§12</a> are configurația pentru fiecare; aici e vorba de
+cum alegi.</p>
+<div class="tblwrap"><table>
+<tr><th>Abordare</th><th>Ce îți dă</th><th>Cât costă</th></tr>
+<tr><td><b>O rețea privată</b> (Tailscale, WireGuard)</td><td>Nu se publică absolut nimic. Nu există adresă publică de găsit, de scanat sau de ghicit, așa că întrebarea cine are voie să se autentifice nici nu apare</td><td>VPN-ul trebuie să ruleze pe fiecare dispozitiv pe care vrei să îl folosești. Fără domeniu public, deci nu ajunge la el nimic pe care nu poți instala software</td></tr>
+<tr><td><b>Un proxy invers care autentifică</b> (Caddy, nginx sau Apache, cu basic auth, Authelia, Authentik ori oauth2-proxy)</td><td>O ușă de la stradă adevărată pe un domeniu adevărat, cu un certificat pe care oricum îl reînnoiești, o autentificare împărțită cu celelalte servicii ale tale, și limitare de cereri și jurnale acolo unde le poți vedea</td><td>Încă un lucru de configurat și de ținut în picioare. Programele tale *arr și aplicațiile de telefon nu pot completa o pagină de autentificare, așa că proxy-ul trebuie să lase să treacă o cerere care poartă o cheie API validă</td></tr>
+<tr><td><b>nzbfast de unul singur</b> (<code>tls_cert</code> și <code>tls_key</code>, plus autentificarea în panou)</td><td>Un singur program, fără proxy. HTTPS cap la cap și o pagină de autentificare pentru oameni</td><td>Reînnoirea certificatului rămâne în grija ta. Primești autentificarea nzbfast în loc de cea a casei, iar limita pentru parole greșite se numără pe adresă</td></tr>
+</table></div>
+<p>Orice ai alege, <b>pune și o cheie API</b>. Un proxy este un strat în față, nu
+o broască pe ușa din spate: tot ce ajunge la serviciu direct, prin rețeaua locală
+sau printr-o greșeală în configurația proxy-ului, dă peste ce cere nzbfast însuși.
+O origine fără cheie în spatele unui proxy care autentifică este la o singură
+cerere greșit dirijată distanță de a fi deschisă.</p>
+<p>Dacă închei certificatul într-un proxy, pornește nzbfast cu
+<code>--bind 127.0.0.1</code>, ca proxy-ul să fie chiar singura cale înăuntru.
+Dacă preferi ca nzbfast să servească el însuși HTTPS, îndreaptă Setări →
+Securitate spre un certificat PEM și cheia lui privată și repornește. Singurul
+lucru de evitat este să redirecționezi portul pe router fără niciuna dintre ele:
+asta publică HTTP simplu, iar cheia ta și tot ce faci cu ea traversează internetul
+lizibile pentru oricine se află pe drum.</p>
+
+<h3 id="sec-cors">Extensiile de browser și la ce e <code>cors_origin</code></h3>
+<p><code>cors_origin</code> nu este stratul de autentificare, și merită spus
+limpede, fiindcă setarea stă în același card. Decide ce <i>pagini web</i> lasă un
+browser să citească acest API, și nimic mai mult. Fiecare dintre acele cereri are
+în continuare nevoie de cheia API; ce schimbă setarea este dacă browserul dă
+răspunsul înapoi paginii care a întrebat.</p>
+<p>Valoarea implicită este <code>*</code>, la fel ca la SABnzbd. De aceea extensii
+precum NZB Unity și NZB Donkey funcționează de îndată ce lipești o cheie în ele,
+fără nicio configurare aici. Ca să strângi, înlocuiește-o cu originile pe care le
+permiți (<code>https://example.com</code>), separate prin virgule. Gol nu trimite
+niciun antet, ceea ce blochează orice extensie.</p>
+
+<h3 id="sec-open">Ce nu apără nimic din toate acestea</h3>
+<p><b>O instalare fără cheie API este deschisă.</b> Fără cheie nu există acreditare
+de verificat, așa că orice gazdă care ajunge la port are control complet, și la
+fel are orice pagină web pe care o vizitezi, ale cărei cereri către propria ta
+adresă locală serviciul nu le poate deosebi de ale tale. nzbfast spune asta la
+pornire, în jurnal și în panou, ori de câte ori e adevărat. E la un câmp distanță
+de a fi rezolvat.</p>
+<p><b>O cheie apără API-ul, nu mașina.</b> Setări → Securitate →
+<b>Ascultă pe</b> decide ce adrese răspund. <code>0.0.0.0</code>, valoarea
+implicită, răspunde în fiecare rețea în care se află această mașină, ceea ce îi
+trebuie unui NAS sau unui container. <code>127.0.0.1</code> răspunde doar pe
+această mașină, așa că nimic altceva din rețeaua ta nu ajunge la el nici măcar cu
+cheia. Atenție: o adresă pe care mașina nu o are împiedică pornirea următoare să
+se mai ridice, iar singura cale înapoi e să corectezi
+<code>settings.json</code> de mână.</p>
+<p><b>Copia ta de rezervă a setărilor conține totul.</b> Fișierul de rezervă din
+același card duce fiecare setare, ambele chei și parolele serverelor tale Usenet
+în clar. Ține-l într-un loc privat și tratează trimiterea lui cuiva ca pe
+trimiterea conturilor tale.</p>
+
+<h2 id="performance">14 · Instrumente de performanță</h2>
 <h3 id="perf-benchmark">Benchmark de sistem</h3>
 <p>Un singur clic măsoară cele trei plafoane ale tale - debitul de rețea (o sondă reală de 8 secunde
 cu mai multe conexiuni), rata de verificare CPU și viteza de scriere pe disc - și începe
@@ -1372,7 +1508,7 @@ provider e întrebat ultimul pentru descărcarea respectivă, nu primul. Nimic n
 așa că o apreciere greșită costă puțin timp în loc de descărcare.</li>
 </ul>
 <p class="dim">Verdictul este o predicție pornind de la indicii, nu o garanție. Pentru
-un răspuns ferm despre un NZB, <code>nzbfast check</code> (<a href="#cli">§15</a>)
+un răspuns ferm despre un NZB, <code>nzbfast check</code> (<a href="#cli">§16</a>)
 numără articolele reale. Ambele numără răspunsuri, nu conținut. O verificare curată înseamnă că articolele erau
 acolo când au fost cerute, nu că ceea ce conțin este nevătămat: un număr mic de furnizori
 răspund pentru articolele eliminate cu date false în loc să le refuze, iar asta apare
@@ -1431,7 +1567,7 @@ doar nu va satura linia.</p>
 <p class="dim">Benchmark-urile sunt rerulate pentru fiecare release; metoda și cifrele per mașină
 sunt publicate alături de rezultate.</p>
 
-<h2 id="updates">14 · Actualizări</h2>
+<h2 id="updates">15 · Actualizări</h2>
 <ul>
 <li>Actualizările sunt <b>doar notificare</b>: nzbfast nu își descarcă și nu
 își înlocuiește niciodată propriul binar și nu conține cod care să poată face
@@ -1449,12 +1585,12 @@ de actualizare; un URL de verificare gol face același lucru.</li>
 <p>O singură regulă acoperă fiecare instalare: <b>o actualizare înlocuiește
 programul, niciodată setările tale.</b> Tot ce ai configurat - serverele, căile,
 cheia API, coada - trăiește într-o mână de fișiere dintr-un singur folder
-(<a href="#files">§17</a>), și niciun program de instalare, pull de imagine sau
+(<a href="#files">§18</a>), și niciun program de instalare, pull de imagine sau
 upgrade de pachet nu atinge acel folder. Când setările chiar par dispărute după
 o actualizare, aproape întotdeauna e pentru că noua instalare citește un folder
 <em>diferit, gol</em>, nu pentru că ceva ar fi fost șters; fișierele vechi sunt
 tot acolo unde au fost mereu.
-<a href="#settings-gone">§18</a> are pașii de recuperare.</p>
+<a href="#settings-gone">§19</a> are pașii de recuperare.</p>
 <div class="tblwrap"><table>
 <tr><th>Instalare</th><th>Cum actualizezi</th></tr>
 <tr><td>Aplicația macOS</td><td>Deschide noul DMG și trage <b>NzbFast</b> în
@@ -1491,7 +1627,7 @@ ele.</td></tr>
 <tr><td>Debian / Ubuntu (.deb)<br>Fedora / RHEL (.rpm)</td><td>Instalați noul pachet peste cel vechi: <code>sudo dpkg -i nzbfast_*.deb</code> sau <code>sudo rpm -U nzbfast-*.rpm</code>. Folderul cu setări nu face parte din pachet, așa că o actualizare nu poate înlocui nimic din el, iar modificările dumneavoastră din <code>/etc/nzbfast/nzbfast.env</code> se păstrează. Serviciul este repornit doar dacă rula deja.</td></tr>
 <tr><td>Homebrew</td><td><code>brew upgrade nzbfast</code></td></tr>
 <tr><td>Binar simplu</td><td>Înlocuiește binarul. Configul tău rămâne oriunde
-l-ai făcut (<a href="#files">§17</a>).</td></tr>
+l-ai făcut (<a href="#files">§18</a>).</td></tr>
 </table></div>
 <div class="tip"><b>Sfat</b>Utilizatorii Docker care leagă Sonarr sau Radarr:
 pune cheia API chiar în definiția containerului
@@ -1501,7 +1637,7 @@ oricărei pățanii a containerului, pentru că trăiește pe gazdă, în defini
 este reaplicată la fiecare pornire. O cheie pe care o setezi ulterior în Setări
 tot are prioritate față de ea.</div>
 
-<h2 id="cli">15 · Linia de comandă</h2>
+<h2 id="cli">16 · Linia de comandă</h2>
 <p>Tot ce face daemonul poate fi și scriptat. Comenzile de zi cu zi:</p>
 <div class="tblwrap"><table>
 <tr><th>Comandă</th><th>Scop</th></tr>
@@ -1523,7 +1659,7 @@ comandă acceptă <code>--config</code> și <code>--help</code>. Li se adaugă <
 yEnc și scrie NZB-ul corespunzător. Este o unealtă de operare, cere un
 <code>--post-server</code> explicit și nu alege niciodată un server în locul tău.</p>
 
-<h2 id="api">16 · Prezentare API</h2>
+<h2 id="api">17 · Prezentare API</h2>
 <p>Endpoint de bază: <code>http://host:6789/api?mode=…&amp;apikey=…&amp;output=json</code> -
 compatibil SABnzbd, așa că integrările SAB existente funcționează neschimbate. Două chei:
 <b>cheia API</b> (control complet) și <b>cheia NZB</b> (doar adăugare:
@@ -1542,7 +1678,7 @@ compatibil SABnzbd, așa că integrările SAB existente funcționează neschimba
 <tr><td>Monitorizare</td><td><code>/metrics</code> răspunde în formatul text Prometheus 0.0.4: viteza de descărcare, adâncimea cozii și octeții, conexiunile per furnizor, întreruperile și numărul de articole, memoria pe subsistem și timpul de funcționare. Unități de bază peste tot (octeți, secunde), astfel încât panoul face conversia și nimic nu sosește prerotunjit. Doar GET și, implicit, este nevoie de cheia API completă. Setați <code>metrics_open</code> pentru a-l servi fără cheie, ceea ce este aranjamentul obișnuit cu Prometheus: nu conține nume de sarcini și nici căi, dar publică numele de gazdă al fiecărui furnizor configurat oricui poate ajunge la port.</td></tr>
 </table></div>
 
-<h2 id="files">17 · Fișiere și locații</h2>
+<h2 id="files">18 · Fișiere și locații</h2>
 <p>Unde se află folderul de setări depinde de felul în care a fost instalat
 nzbfast. Acest singur folder conține tot ce merită salvat într-un backup:</p>
 <div class="tblwrap"><table>
@@ -1573,20 +1709,20 @@ sau oriunde arată <code>--config</code> / <code>$NZBFAST_CONFIG</code>.</td></t
 <tr><td>Instrumente externe</td><td>Nu e nevoie de niciunul - extragerea RAR și repararea PAR2 sunt native. Dacă un set exotic are vreodată nevoie de un <code>unrar</code> sau <code>par2</code> extern ca rezervă, nzbfast caută lângă executabilul său, apoi în <code>$PATH</code>.</td></tr>
 </table></div>
 
-<h2 id="troubleshooting">18 · Depanare</h2>
+<h2 id="troubleshooting">19 · Depanare</h2>
 <div class="tblwrap"><table>
 <tr><th>Simptom</th><th>Verificare</th></tr>
 <tr><td>Descărcări lente</td><td>Întreabă mai întâi descărcarea însăși: cât rulează, linia de sub bara ei de progres numește stratul care ține <i>această</i> descărcare pe loc, iar un clic pe verdict deschide rândul pe dovezile lui (vezi <a href="#dash-queue">Coadă</a>). Rulează <b>Benchmark de sistem</b> - numește strangularea direct. Dacă e rețeaua: rulează <b>Reglarea conexiunilor</b>, verifică numărul de conexiuni per server și confirmă că providerii tăi nu sunt toți un singur backbone (<b>Diversitatea serverelor</b>).</td></tr>
 <tr><td>Lent doar la joburi foarte mari<br>(NAS sau mașină cu RAM redus)</td><td>De așteptat și măsurabil: un buget de memorie înfometat face spill cache-urilor pe disc și costă 20–40% peste ~87 GB. Vezi <a href="#memory">Buget de memorie</a> pentru cifre și câtă memorie să-i dai. Joburile mai mici nu sunt afectate.</td></tr>
 <tr><td>Descărcarea eșuează cu „articole lipsă”</td><td>Postarea a expirat sau a fost retrasă la providerii tăi. Un al doilea provider pe un backbone diferit salvează majoritatea acestora. <code>nzbfast check</code> prezice asta înainte de descărcare. Iar peretele semnalează din timp release-urile probabil dispărute prin
-punctul său de disponibilitate (<a href="#oracle">§13</a>). Un prim eșec de acest fel se
+punctul său de disponibilitate (<a href="#oracle">§14</a>). Un prim eșec de acest fel se
 reia singur o dată după o așteptare, fiindcă întârzierea de propagare arată exact la fel
 și se rezolvă de la sine.</td></tr>
 <tr><td>Arhiva terminată cere o parolă</td><td>Rândul din Istoric arată 🔑 - introdu parola acolo; jobul se finalizează pe loc. </td></tr>
 <tr><td>O arhivă nu se despachetează</td><td>Eșecurile de parolă și de reparare se numesc singure în rândul din Istoric. Pentru orice altceva există o supapă de siguranță: Setări → Folder monitorizat și post-procesare → <b>Despachetează cu unrar extern</b> (o setare avansată) predă despachetarea programului <code>unrar</code> instalat pe mașina ta în locul extractorului integrat. Altfel las-o dezactivată: calea integrată este mai rapidă pe fiecare formă pe care am măsurat-o, iar postările obfuscate cu nume hash o folosesc oricum întotdeauna, pentru că unrar nu le poate urmări redenumirea. Același comutator pentru rulările <code>nzbfast get</code> este variabila de mediu <code>NZBFAST_NO_NATIVE_UNRAR=1</code>. Dacă unrar despachetează o arhivă pe care extractorul integrat a refuzat-o, te rugăm să ne-o semnalezi ca să reparăm calea integrată.</td></tr>
 <tr><td>Sonarr/Radarr nu se poate conecta</td><td>Portul 6789 e accesibil? Cheia API e corectă (cheia completă, nu cheia NZB)? Tipul de client setat pe SABnzbd?</td></tr>
 <tr><td>Panoul cere o cheie API pe care nu am setat-o niciodată</td><td>O instalare nouă își face una singură și o afișează o dată la pornire (<a href="#firstrun-key">§2</a>). Se află în fișierul <code>apikey</code> de lângă configul tău și în ieșirea de pornire. Sau scrie o cheie proprie în Setări → Securitate dintr-un browser care este deja autentificat.</td></tr>
-<tr id="settings-gone"><td>Toate setările mele par dispărute după o actualizare<br>(servere, căi, cheia API)</td><td>Nimic dintr-o actualizare nu șterge setări; asta înseamnă că nzbfast citește un folder diferit, gol. Mai întâi: câmpul cheii API din Setări apare gol prin design - dă clic pe <b>Show</b> înainte să tragi concluzia că s-a pierdut. Pe Docker, compară maparea <code>/config</code> a containerului nou cu cea a celui vechi: o cale schimbată pe gazdă, o cale relativă rulată din alt director sau un folder appdata proaspăt pornesc toate nzbfast de la zero, în timp ce setările tale reale stau neatinse la calea de dinainte. Găsește folderul vechi (caută <code>settings.json</code>, fișierul tău de config și <code>apikey</code> - locațiile în <a href="#files">§17</a>), apoi fie îndreaptă maparea înapoi spre el, fie copiază acele fișiere în folderul nou și repornește. Jurnalul de pornire numește exact fișierul de setări folosit: <code>[settings] applying saved settings from …</code></td></tr>
+<tr id="settings-gone"><td>Toate setările mele par dispărute după o actualizare<br>(servere, căi, cheia API)</td><td>Nimic dintr-o actualizare nu șterge setări; asta înseamnă că nzbfast citește un folder diferit, gol. Mai întâi: câmpul cheii API din Setări apare gol prin design - dă clic pe <b>Show</b> înainte să tragi concluzia că s-a pierdut. Pe Docker, compară maparea <code>/config</code> a containerului nou cu cea a celui vechi: o cale schimbată pe gazdă, o cale relativă rulată din alt director sau un folder appdata proaspăt pornesc toate nzbfast de la zero, în timp ce setările tale reale stau neatinse la calea de dinainte. Găsește folderul vechi (caută <code>settings.json</code>, fișierul tău de config și <code>apikey</code> - locațiile în <a href="#files">§18</a>), apoi fie îndreaptă maparea înapoi spre el, fie copiază acele fișiere în folderul nou și repornește. Jurnalul de pornire numește exact fișierul de setări folosit: <code>[settings] applying saved settings from …</code></td></tr>
 <tr><td>Nimic din rețea nu ajunge la daemon</td><td>Verifică <code>--bind</code>: <code>127.0.0.1</code> servește doar mașina pe care rulează nzbfast. Valoarea implicită, <code>0.0.0.0</code>, servește fiecare interfață. Apoi verifică firewallul mașinii pentru portul 6789.</td></tr>
 <tr><td>Cardul Răsfoiește rămâne mic</td><td>Indexerul crește în fundal - verifică dacă grupurile din Setări → Indexare sunt setate și dă-i timp Aprofundării per scanare să acumuleze istoric. „Scanează acum” forțează o trecere; linia de stare arată progresul în timp real.</td></tr>
 <tr><td>Peretele arată grafică greșită/lipsă</td><td>Fișa de detalii → ✎ Corectează potrivirea sau ↻ Reîmprospătează metadatele. Căutările de filme se îmbunătățesc cu o cheie OMDb gratuită.</td></tr>

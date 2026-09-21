@@ -154,6 +154,17 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
         /// only a blocking handshake can promise that.
         tx_extra: std::sync::mpsc::Sender<Vec<par2repair::ExtraFileMatch>>,
         rx_extra_ack: std::sync::mpsc::Receiver<()>,
+        /// THE THIRD HANDSHAKE, and it exists for the same reason the
+        /// extra-file one does: a damaged original this run could not
+        /// back up has to be SAID before the fold's meter starts
+        /// writing to the same terminal, and only a blocking
+        /// acknowledgement can promise that. It carries the failures
+        /// out of `before_write` to the main thread, which owns the
+        /// sink. An empty vector is still sent, so the main thread's
+        /// `recv` has exactly two outcomes: the engine reached its
+        /// first write, or it never did and the sender dropped.
+        tx_backup_failed: std::sync::mpsc::Sender<Vec<BackupFailure>>,
+        rx_backup_ack: std::sync::mpsc::Receiver<()>,
         pending: BackupBatch,
         /// The watch's, taken once on the main thread before the engine
         /// thread is spawned - the trait's contract is that it is the
@@ -191,7 +202,15 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
             let _ = self.rx_extra_ack.recv();
         }
         fn before_write(&mut self) {
-            join_backups(std::mem::take(&mut self.pending));
+            let failed = join_backups(std::mem::take(&mut self.pending));
+            // Hand them over and WAIT. Not a fire-and-forget: the value
+            // of the line is that it lands while the damaged original
+            // is still whole, and the first write follows this call.
+            // A dead receiver is a main thread that is no longer
+            // printing, and then there is nobody to wait for.
+            if self.tx_backup_failed.send(failed).is_ok() {
+                let _ = self.rx_backup_ack.recv();
+            }
         }
         fn control(&self) -> par2repair::RepairControl {
             self.control.clone()
@@ -219,6 +238,8 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
         let (tx_action, rx_action) = std::sync::mpsc::channel::<(AfterSurvey, BackupBatch)>();
         let (tx_extra, rx_extra) = std::sync::mpsc::channel::<Vec<par2repair::ExtraFileMatch>>();
         let (tx_extra_ack, rx_extra_ack) = std::sync::mpsc::channel::<()>();
+        let (tx_backup_failed, rx_backup_failed) = std::sync::mpsc::channel::<Vec<BackupFailure>>();
+        let (tx_backup_ack, rx_backup_ack) = std::sync::mpsc::channel::<()>();
         let edir = dir.clone();
         // The bare arguments AFTER the recovery-set name. par2cmdline
         // takes them as extra data files / donor directories to scan,
@@ -241,6 +262,8 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
                 rx_action,
                 tx_extra,
                 rx_extra_ack,
+                tx_backup_failed,
+                rx_backup_ack,
                 pending: BackupBatch::default(),
                 control,
             };
@@ -368,9 +391,24 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
         if scanned.is_ok() {
             let _ = tx_extra_ack.send(());
         }
+        // THE THIRD HANDSHAKE, answered here because this thread owns
+        // the sink. A `recv` error is the engine having stopped, failed
+        // or found nothing to repair before it reached its first write,
+        // and then there is no backup verdict to print and nobody
+        // waiting on one. Whatever comes back is printed BEFORE the ack,
+        // so the engine is still parked and the fold's meter has not
+        // started.
+        if let Ok(failed) = rx_backup_failed.recv() {
+            report_backup_failures(&failed, sink);
+            let _ = tx_backup_ack.send(());
+        }
         worker.join().expect("engine survey thread panicked")
     });
-    join_backups(leftover);
+    // Non-empty only where `before_write` never ran, so the fold wrote
+    // nothing and the damaged original is still whole. Reported anyway:
+    // the copy failing says the directory is not writable, which is
+    // worth knowing whichever way the run then went.
+    report_backup_failures(&join_backups(leftover), sink);
 
     if let Some(code) = early {
         return code;
@@ -417,8 +455,15 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
         // same way one arm above rather than panicking; this used to
         // `expect`, which aborted the process with an exit code
         // outside the dialect this crate's whole interface is.
+        // The SAME line as `finish`'s `Err` arm, through the same
+        // helper, on purpose: this is a failed repair too, it returns
+        // the same exit code, and SAB reads the stream and not the code.
+        // Leaving one of the two arms unmapped would give a caller a
+        // reason for some repair failures and silence for others, which
+        // is the half-mapped dialect `repair_failed_line` exists to
+        // close.
         if let Err(e) = &status {
-            sink.err(&format!("Repair failed: {e}"));
+            sink.err(&repair_failed_line(e));
         }
         return crate::EXIT_REPAIR_FAILED;
     };
@@ -510,7 +555,7 @@ fn announce_tail(
 ) -> AfterSurvey {
     verify::print_extra_scan(loaded, survey, matches, sink);
     sink.line(Level::Terse, "Repair is required.");
-    verify::print_damage_detail(survey, sink);
+    verify::print_damage_detail(survey, matches, sink);
     // The block-count gate may only refuse when there is NOTHING for the
     // engine's adoption pass to find.
     //
@@ -702,8 +747,10 @@ fn run_resurveying(loaded: &Loaded, opts: &Options, sink: &mut Sink) -> u8 {
     // it made, so the destinations are taken off it first.
     let created = backups.created.clone();
     // No `before_write` on this entry point, so the copies finish here,
-    // in front of the fold, as they always did on this path.
-    join_backups(backups);
+    // in front of the fold, as they always did on this path - which
+    // makes this the one site where the warning is naturally in front
+    // of the first write with no handshake to arrange.
+    report_backup_failures(&join_backups(backups), sink);
     let set_id = loaded.set.recovery_set_id;
     let status = par2repair::repair_dir_set_with_donors_as(
         &loaded.dir,
@@ -945,10 +992,58 @@ fn finish(
             crate::EXIT_REPAIR_NOT_POSSIBLE
         }
         Err(e) => {
-            sink.err(&format!("Repair failed: {}", failure_reason(&e)));
+            sink.err(&repair_failed_line(&e));
             crate::EXIT_REPAIR_FAILED
         }
     }
+}
+
+/// The line a failed repair prints, and A DELIBERATE DIVERGENCE FROM
+/// par2cmdline 1.2.0, taken 20 Sep 2026 as a contract decision rather
+/// than by accident.
+///
+/// The reference prints no `Repair Failed.` sentence at 1.2.0 at all: on
+/// an I/O failure mid-repair it prints its own `<x> cannot be renamed to
+/// <y>` or `Could not write ...` line and exits 6 (measured 18 Sep 2026,
+/// three ways, in the READ-ONLY OUTPUT DIRECTORY block of
+/// `tools/sab-parser-gate.py`'s header). `Repair Failed.` is the
+/// 0.8.1-era sentence SABnzbd's branch was written for, and SAB is the
+/// caller that reads this stream.
+///
+/// WHAT IT BUYS. SAB does not look at the exit code. Every verdict it
+/// reaches comes out of a chain of `startswith` tests in
+/// `newsunpack.py::par2cmdline_verify`, and the arm for an otherwise
+/// unclassified failure is `line.startswith("Repair Failed.")`, whose
+/// body is `msg = T("Repairing failed, %s") % line`. So SAB shows THE
+/// LINE THAT TOOK THE BRANCH, which is why the reason is on this line
+/// and not on a second one: `Repair failed: Permission denied (os error
+/// 13)` - lower-case `f`, a colon - matched that branch, and every other
+/// branch of that chain, NOT AT ALL, so a permission failure, a
+/// read-only volume and every other `io::Error` failed the job with no
+/// reason for SAB to show the user. A second line carrying the reason
+/// would not help: the branch fires on the FIRST line and SAB
+/// interpolates that one.
+///
+/// WHY THIS IS NOT A NEW KIND OF EDIT. [`failure_reason`] already takes
+/// exactly this trade for one error kind - it rewrites `StorageFull`
+/// into the reference's WINDOWS sentence so the line reaches SAB's
+/// `disk-full` branch on a Mac, where the reference itself cannot reach
+/// it. This widens that accepted shape from one `io::ErrorKind` to the
+/// whole arm. The two compose in the right order and that is checked,
+/// not assumed: SAB tests `"There is not enough space on the disk" in
+/// line` EARLIER in the chain than `startswith("Repair Failed.")`, so a
+/// full disk still reaches `disk-full` and still reads "Repairing
+/// failed, Disk full" rather than the generic verdict.
+///
+/// WHAT IT COSTS. A script that greps par2cmdline's exact bytes for a
+/// failed repair sees a sentence the reference does not print. Nothing
+/// in `tools/conformance/`'s matrix reaches this arm - no row induces an
+/// I/O failure mid-repair, so no expected table moves - and the
+/// divergence is recorded in `tools/conformance/README.md` beside the
+/// Creator packet's so the oracle records it rather than a later lane
+/// reading it as a defect.
+fn repair_failed_line(e: &par2repair::RepairError) -> String {
+    format!("Repair Failed. {}", failure_reason(e))
 }
 
 /// What a failed repair says went wrong, with ONE substitution: a full
@@ -1117,19 +1212,39 @@ fn back_up_damaged(loaded: &verify::Loaded, survey: &verify::Survey) -> BackupBa
     let created = jobs.iter().map(|(_, dst)| dst.clone()).collect();
     let lanes = jobs.len().min(4);
     let queue = std::sync::Arc::new(std::sync::Mutex::new(jobs));
+    // THE COPY ERROR IS KEPT, and until 20 Sep 2026 it was dropped at
+    // this `fs::copy` with a `let _ =`. A read-only output DIRECTORY is
+    // the shape that reaches it: the reference cannot rename its
+    // original aside there and stops at exit 6, where parfast patches
+    // in place and needs nothing from the directory, so it repaired and
+    // exited 0 having silently not kept the one copy a backup exists to
+    // be. The failure is reported by the caller, which knows when the
+    // first write is about to happen; see `report_backup_failures`.
+    let failed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let lanes = (0..lanes)
         .map(|_| {
             let queue = std::sync::Arc::clone(&queue);
+            let failed = std::sync::Arc::clone(&failed);
             std::thread::spawn(move || {
                 loop {
                     let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop();
                     let Some((src, dst)) = next else { return };
-                    let _ = std::fs::copy(&src, &dst);
+                    if let Err(e) = std::fs::copy(&src, &dst) {
+                        failed.lock().unwrap_or_else(|p| p.into_inner()).push((
+                            src,
+                            dst,
+                            e.to_string(),
+                        ));
+                    }
                 }
             })
         })
         .collect();
-    BackupBatch { lanes, created }
+    BackupBatch {
+        lanes,
+        created,
+        failed,
+    }
 }
 
 /// Copy lanes and only their newly selected destinations. Existing numbered
@@ -1138,7 +1253,18 @@ fn back_up_damaged(loaded: &verify::Loaded, survey: &verify::Survey) -> BackupBa
 struct BackupBatch {
     lanes: Vec<std::thread::JoinHandle<()>>,
     created: Vec<std::path::PathBuf>,
+    /// `(source, destination, error)` for every copy that did not land.
+    /// Shared with the lanes, which is why it is behind a lock rather
+    /// than returned by a join: a lane reports its own failure and the
+    /// join collects them all.
+    failed: BackupFailures,
 }
+
+/// Damaged originals this run could not keep, as
+/// `(source, destination, error)`.
+type BackupFailures = std::sync::Arc<std::sync::Mutex<Vec<BackupFailure>>>;
+
+type BackupFailure = (std::path::PathBuf, std::path::PathBuf, String);
 
 /// Wait for every backup copy handed over. A lane that panicked has
 /// nothing to report that the missing `.n` file does not already say.
@@ -1155,7 +1281,7 @@ struct BackupBatch {
 /// this line existed the seconds landed inside the engine's `patch`
 /// phase, where they read as a write that writes 4.4 MB.
 /// `research/PARFAST-SINGLE-MEMBER-REPAIR-FIXED-COST-2026-09-16.md`.
-fn join_backups(backups: BackupBatch) {
+fn join_backups(backups: BackupBatch) -> Vec<BackupFailure> {
     let timing = std::env::var_os("NZBFAST_REPAIR_TIMING").is_some();
     // Sized BEFORE the join, from the destinations this batch declared,
     // so a copy still in flight is counted at what it will be rather
@@ -1190,6 +1316,53 @@ fn join_backups(backups: BackupBatch) {
             bytes as f64 / 1e6,
             done as f64 / 1e6,
         );
+    }
+    // After the join, so a lane that was still copying when this was
+    // called has had its say. A panicked lane leaves nothing here and
+    // nothing at the destination, which `-p` and the `created` list
+    // both tolerate.
+    std::mem::take(&mut *backups.failed.lock().unwrap_or_else(|p| p.into_inner()))
+}
+
+/// Say which damaged originals could not be kept, one line each.
+///
+/// **THE POINT IS WHERE THIS IS CALLED, not what it prints.** The
+/// caller on the engine's `before_write` runs it immediately before the
+/// first byte reaches any target, which is the last moment the damaged
+/// original is still whole: a user who reads it there can interrupt,
+/// fix the directory and run again with the original intact. The same
+/// words after the patch describe a loss already taken. That is the
+/// whole reason this is not simply reported at the end of the run, and
+/// it is why the `before_write` caller pays for a blocking handshake to
+/// get the line out before the fold's meter starts writing.
+///
+/// `sink.err`, so `-q -q` does not swallow it: the ladder is silence
+/// about progress, not about failure (see [`Sink::err`]). No row of the
+/// conformance matrix reaches this - none induces an I/O failure
+/// mid-repair - so it diverges from no captured table. par2cmdline has
+/// no line to match here in any case: its rename FAILS the run at exit
+/// 6 rather than warning, and repairing anyway is the behaviour this
+/// crate keeps. `tools/conformance/README.md` records that divergence.
+///
+/// WHETHER THE REPAIR ITSELF THEN SUCCEEDS is not this function's to
+/// promise, and it depends on which write route the engine took: a
+/// rebuild staged through `par2repair`'s temp needs the directory just
+/// as the reference's rename does and fails there too, where one
+/// patched in place needs nothing from it and completes. Both print
+/// this line.
+fn report_backup_failures(failed: &[BackupFailure], sink: &mut Sink) {
+    for (src, dst, err) in failed {
+        let name = |p: &std::path::Path| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.display().to_string())
+        };
+        sink.err(&format!(
+            "Could not keep a backup of the damaged \"{}\" as \"{}\": {err}. \
+             Repairing in place anyway, so the damaged original will not be recoverable.",
+            name(src),
+            name(dst),
+        ));
     }
 }
 

@@ -80,7 +80,13 @@ pub(crate) fn body_rate_floor() -> Option<RateFloor> {
 /// loses nothing), and lets a silence that began under the floor be
 /// judged by the trained bound.
 pub enum StallBound<'a> {
+    /// One bound, sampled when the wait is armed and held for its whole
+    /// duration. Right where the bound cannot move, and the cheaper arm
+    /// - no per-second wake.
     Fixed(std::time::Duration),
+    /// A bound the reader re-asks for roughly once a second while the
+    /// connection is silent, so a wait armed under the flat floor can
+    /// still be judged by the trained figure once the gauge has one.
     Live(&'a (dyn Fn() -> std::time::Duration + Sync)),
 }
 

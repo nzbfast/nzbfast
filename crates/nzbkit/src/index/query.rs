@@ -636,7 +636,7 @@ impl Index {
     /// tried; without it Radarr's primary lookup reads the whole titles
     /// table on every search, 32.6 ms against 0.10 ms at 300 k titles.
     ///
-    /// And [`Self::title_keys`]'s `ORDER BY key` tail is what makes that
+    /// And `Self::title_keys`'s `ORDER BY key` tail is what makes that
     /// miss invisible: the plan reads `SCAN titles USING INDEX
     /// sqlite_autoindex_titles_1`, which names an index while scanning
     /// every row of it. plan_tests.rs asserts the pairing per resolver.

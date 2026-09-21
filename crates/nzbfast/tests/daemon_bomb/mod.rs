@@ -765,7 +765,6 @@ const ROOMY_FREE: &str = "9000000000";
 /// (`settle_without_set` opens on `incomplete == 0 && derrs == 0`), so a
 /// set that arrives whole never gets there however damaged its bytes.
 fn rr_set(name: &str) -> Vec<(String, Vec<u8>)> {
-    use rars::rar50::{CompressedEntry, Rar50VolumeWriter, WriterOptions};
     // COMPRESSIBLE, and that is load-bearing rather than incidental: the
     // top-level chase gate this leg's daemon closes only diverts a
     // COMPRESSED set to the disk ladder ("a posted compressed RAR
@@ -790,19 +789,14 @@ fn rr_set(name: &str) -> Vec<(String, Vec<u8>)> {
             b'0'.wrapping_add(((state >> 33) % 16) as u8)
         })
         .collect();
-    let entries = [CompressedEntry {
-        name: b"inner/data.bin",
-        data: &payload,
-        mtime: None,
-        attributes: 0o100644,
-        host_os: 1,
-    }];
-    let volumes = Rar50VolumeWriter::new(WriterOptions::default())
-        .compressed_entries(&entries)
-        .max_payload_per_volume(64 * 1024)
-        .recovery_percent(Some(20))
-        .finish()
-        .expect("building the recovery-record fixture");
+    let volumes = crate::rarfixtures::compressed_volume_set_with_recovery(
+        &[crate::rarfixtures::Member::unix(
+            b"inner/data.bin",
+            &payload,
+        )],
+        64 * 1024,
+        Some(20),
+    );
     assert!(
         volumes.len() >= 4,
         "expected a multivolume set, got {}",
@@ -849,21 +843,11 @@ fn damaged_rr_set(name: &str) -> Vec<(String, Vec<u8>)> {
 /// exactly one damaged named-RAR set, which is `unpack_named_rar`'s
 /// whole job.
 fn outer_rar(volumes: &[(String, Vec<u8>)]) -> Vec<u8> {
-    use rars::rar50::{Rar50Writer, StoredEntry, WriterOptions};
-    let members: Vec<StoredEntry<'_>> = volumes
+    let members: Vec<crate::rarfixtures::Member<'_>> = volumes
         .iter()
-        .map(|(name, bytes)| StoredEntry {
-            name: name.as_bytes(),
-            data: bytes,
-            mtime: None,
-            attributes: 0o100644,
-            host_os: 1,
-        })
+        .map(|(name, bytes)| crate::rarfixtures::Member::unix(name.as_bytes(), bytes))
         .collect();
-    Rar50Writer::new(WriterOptions::default())
-        .stored_entries(&members)
-        .finish()
-        .expect("building the outer container")
+    crate::rarfixtures::stored_archive(&members)
 }
 
 /// The daemon both legs of the recovery-record rung run: the disk

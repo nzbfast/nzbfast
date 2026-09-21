@@ -16,8 +16,9 @@
 // (runners of differing CPU capability, or an ISA-limiting emulator), and
 // it is the only one that also works from a plain `cargo test`.
 //
-// This file is OURS, not vendor: the same code inside vendor/rapidyenc
-// would be drift the next re-sync has to reconcile.
+// This file is OURS, not vendor: the same code inside
+// crates/nzbkit-base/vendor/rapidyenc would be drift the next re-sync
+// has to reconcile.
 //
 // A kernel may only be pinned DOWNWARD - to a level this CPU actually
 // supports - or the pinned code executes instructions the CPU does not
@@ -327,7 +328,7 @@ uintptr_t nzbfast_rapidyenc_crc_impl_addr(int which) {
 
 // Is the C++ half of this build compiled with AddressSanitizer?
 //
-// `crates/nzbkit/build.rs` adds `-fsanitize=address` to every rapidyenc
+// `crates/nzbkit-base/build.rs` adds `-fsanitize=address` to every rapidyenc
 // object when the RUST half is sanitized, and this file goes through the
 // same `base_build()`, so the answer here is the answer for all of them.
 //

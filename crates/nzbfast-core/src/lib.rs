@@ -81,6 +81,11 @@ pub mod manifest;
 // Outbound HTTP for third-party URLs - the SSRF guard, the shared agents
 // and URL credential redaction. Hoisted out of serve/ by TODO 276 item 3.
 pub mod netfetch;
+// TODO 13 stage 0a: the nested-prevalence tally on disk, so the phase
+// 0(b) instrument accumulates across daemon restarts instead of starting
+// from zero every spawn. Beside `conntune` because it is the same kind of
+// thing - a small JSON file of daemon state, loaded at startup.
+pub mod nestedstat;
 pub mod notify;
 // The bounded PAR2 packet-byte scan of a directory, hoisted out of
 // `unpack` by the crate-split prep so the junk sweep can ask it.

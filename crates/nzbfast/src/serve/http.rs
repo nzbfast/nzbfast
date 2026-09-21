@@ -29,6 +29,68 @@ fn full_key_ok(given: Option<&str>, apikey: &Option<String>, nzbkey: &Option<Str
     }
 }
 
+/// The session id this request presented, if any. `None` on every
+/// keyless-browser caller, which is every *arr and every phone remote.
+fn session_id(req: &tiny_http::Request, d: &Daemon) -> Option<String> {
+    nzbfast_daemon::websession::cookie_value(
+        req,
+        &nzbfast_daemon::websession::session_cookie(d.port),
+    )
+}
+
+/// TODO 19: a READ door's gate - the full key, or a live dashboard
+/// session.
+///
+/// The session half asks for no CSRF token, and that is a decision
+/// rather than an omission. These doors are loaded by the BROWSER
+/// directly - `/preview/media` is the `src` of a `<video>`, which cannot
+/// carry a custom header at all - so demanding one would mean the player
+/// does not play. What it costs is nothing a cross-site page can spend:
+/// the request is a read, nothing behind it mutates, and the answer is
+/// unreadable to the page that caused it because we never send
+/// `Access-Control-Allow-Credentials`, so no `fetch` with credentials
+/// ever gets a body.
+///
+/// The two GET doors that DO mutate - `/stream`'s library trigger, which
+/// force-starts a parked job past a user pause, and `/watch`, which
+/// enqueues - are deliberately NOT on this path and stay key-or-token.
+fn read_door_ok(
+    req: &tiny_http::Request,
+    d: &Arc<Daemon>,
+    given: Option<&str>,
+    apikey: &Option<String>,
+    nzbkey: &Option<String>,
+) -> bool {
+    full_key_ok(given, apikey, nzbkey) || d.sessions.is_live(session_id(req, d).as_deref())
+}
+
+/// Is this `Range` value one `/preview/media` must refuse with a 416?
+///
+/// Only a `bytes=` range can be. RFC 9110 section 14.2 requires an
+/// origin server to IGNORE a range unit it does not understand, so a
+/// `Range: seconds=0-10` from an exotic player or an intermediary falls
+/// through to the ordinary 200 rather than taking the 416 arm. That is
+/// the rule `nzbfast-daemon`'s other byte server already states at
+/// `stream::byte_range`'s `RangeVerdict::Ignore`; the two byte-serving
+/// paths agreed about `bytes=` and disagreed about everything else.
+///
+/// Within `bytes=`, the refusal is unchanged: `bytes=0-` is the whole
+/// resource and a 200 satisfies it, and every other spelling (Safari's
+/// `bytes=0-1` probe above all) is refused. The unit is compared
+/// case-insensitively because a range unit is a token, which widens
+/// what is REFUSED rather than what is served.
+fn preview_range_unhonourable(value: &str) -> bool {
+    let v = value.trim();
+    let Some(rest) = v
+        .get(..6)
+        .filter(|p| p.eq_ignore_ascii_case("bytes="))
+        .map(|_| &v[6..])
+    else {
+        return false;
+    };
+    rest.trim() != "0-"
+}
+
 fn route_stream(req: tiny_http::Request, d: &Arc<Daemon>, path: &str, query: &str) {
     // M11: progressive playback of the active download's media
     // file; M14i: /stream/<nzo_id> fetches a parked library job
@@ -113,7 +175,7 @@ fn route_preview_probe(req: tiny_http::Request, d: &Arc<Daemon>, id: &str, query
     let key_ok = {
         let a = d.apikey.lock_ok().clone();
         let n = d.nzbkey.lock_ok().clone();
-        full_key_ok(given, &a, &n)
+        read_door_ok(&req, d, given, &a, &n)
     };
     let token_ok = sp.get("t").is_some_and(|t| ct_eq(t, &d.stream_token(&id)));
     if !(key_ok || token_ok) {
@@ -199,7 +261,7 @@ fn route_preview_media(req: tiny_http::Request, d: &Arc<Daemon>, id: &str, query
     let key_ok = {
         let a = d.apikey.lock_ok().clone();
         let n = d.nzbkey.lock_ok().clone();
-        full_key_ok(given, &a, &n)
+        read_door_ok(&req, d, given, &a, &n)
     };
     let token_ok = sp.get("t").is_some_and(|t| ct_eq(t, &d.stream_token(&id)));
     if !(key_ok || token_ok) {
@@ -245,12 +307,15 @@ fn route_preview_media(req: tiny_http::Request, d: &Arc<Daemon>, id: &str, query
     // `bytes=0-` is the whole resource and a 200 does satisfy it. That
     // is what Chromium sends before playing this happily, so its path
     // is deliberately untouched.
+    //
+    // A unit that is not `bytes` is a different matter and is IGNORED,
+    // which `preview_range_unhonourable` documents at the site.
     if let Some(r) = req
         .headers()
         .iter()
         .find(|h| h.field.equiv("Range"))
         .map(|h| h.value.as_str().trim().to_string())
-        && r.strip_prefix("bytes=").map(str::trim) != Some("0-")
+        && preview_range_unhonourable(&r)
     {
         let _ = req.respond(
             json_resp(serde_json::json!({
@@ -362,7 +427,7 @@ fn route_m3u(req: tiny_http::Request, d: &Arc<Daemon>, id: &str, query: &str) {
     let key_ok = {
         let a = d.apikey.lock_ok().clone();
         let n = d.nzbkey.lock_ok().clone();
-        full_key_ok(given, &a, &n)
+        read_door_ok(&req, d, given, &a, &n)
     };
     // The job's OWN `?t=` capability token authenticates here as well as
     // the full key, and widens nothing: the whole answer is a
@@ -417,15 +482,28 @@ fn route_m3u(req: tiny_http::Request, d: &Arc<Daemon>, id: &str, query: &str) {
 
 /// `GET /metrics`: the Prometheus scrape.
 ///
-/// AUTH IS THE FULL API KEY BY DEFAULT, with `metrics_open` to lift it,
-/// and both halves of that were a decision rather than a default.
+/// AUTH IS A READ DOOR BY DEFAULT, with `metrics_open` to lift it, and
+/// both halves of that were a decision rather than a default.
 ///
-/// Behind the key, because the body is a read of this daemon's state -
-/// queue depth, provider hostnames, memory - and every other read of
-/// that state on this port already needs the key. Prometheus can send
-/// one: a scrape config takes `authorization` or a `params:` entry, and
-/// `?apikey=` and the `X-Api-Key` header both work here, the same two
-/// spellings the rest of the API takes.
+/// A read door is `read_door_ok`: the full API key, OR a live dashboard
+/// session cookie, which asks for no CSRF token. So an operator who has
+/// turned on the login form has given every logged-in browser this
+/// scrape as well; the key is what a HEADLESS caller needs, not what
+/// every caller needs. Do not read "the API key" here as the whole
+/// rule - `/jobnzb` takes the same session, and `Sessions::is_live`'s
+/// own doc enumerates a shorter list of takers than it has.
+///
+/// Behind a credential at all, because the body is a read of this
+/// daemon's state - queue depth, provider hostnames, memory - and every
+/// other read of that state on this port already needs one. Prometheus
+/// can send the key: a scrape config takes `authorization` or a
+/// `params:` entry, and `?apikey=` and the `X-Api-Key` header both work
+/// here, the same two spellings the rest of the API takes.
+///
+/// What a cross-site page cannot do with that session is read the
+/// answer: `Access-Control-Allow-Credentials` is never sent, so a
+/// credentialed `fetch` never gets a body. That is the argument
+/// `read_door_ok` makes at length.
 ///
 /// And a switch to open it, because the CONVENTION is an
 /// unauthenticated scrape and there are real installs where the key is
@@ -438,8 +516,9 @@ fn route_m3u(req: tiny_http::Request, d: &Arc<Daemon>, id: &str, query: &str) {
 /// provider's HOSTNAME as a label.
 ///
 /// A keyless install stays open either way, which is not this route
-/// being lax - it is `full_key_ok`'s first arm, and on such an install
-/// every other endpoint is already answering the same caller.
+/// being lax - it is `full_key_ok`'s first arm, still reached through
+/// `read_door_ok`, and on such an install every other endpoint is
+/// already answering the same caller.
 ///
 /// GET only. A scrape is a read, and a POST that answered would be a
 /// route a browser form could reach cross-origin.
@@ -457,7 +536,7 @@ fn route_metrics(req: tiny_http::Request, d: &Arc<Daemon>, query: &str) {
         let given = sp.get("apikey").map(String::as_str);
         let a = d.apikey.lock_ok().clone();
         let n = d.nzbkey.lock_ok().clone();
-        full_key_ok(given, &a, &n)
+        read_door_ok(&req, d, given, &a, &n)
     };
     if !ok {
         // Counted into the same bad-key ladder as every other
@@ -598,7 +677,10 @@ fn route_getnzb(
     rest: &str,
     nz_authed: &impl Fn() -> bool,
 ) {
-    if !nz_authed() {
+    // TODO 19: or a signed-in dashboard. This is an ordinary `<a href>`
+    // in the page, which cannot carry a header, and it is a read - see
+    // [`read_door_ok`] for the full argument.
+    if !(nz_authed() || d.sessions.is_live(session_id(&req, d).as_deref())) {
         let blocked = d.note_auth_failure(peer_ip(&req), "getnzb");
         let _ = req.respond(if blocked {
             tiny_http::Response::from_string("too many bad keys").with_status_code(429)
@@ -649,11 +731,14 @@ fn route_jobnzb(
     cur_nzbkey: &Option<String>,
 ) {
     let given = params.get("apikey").map(String::as_str);
+    // TODO 19 adds the second arm: a signed-in dashboard, for the same
+    // reason `route_getnzb` above takes one - the drawer's "Download
+    // .nzb" is a link, which cannot carry a header, and this is a read.
     let full_ok = match (&cur_apikey, &cur_nzbkey) {
         (None, None) => true,
         (Some(k), _) => given.is_some_and(|g| ct_eq(g, k)),
         (None, Some(_)) => false,
-    };
+    } || d.sessions.is_live(session_id(&req, d).as_deref());
     if !full_ok {
         let blocked = d.note_auth_failure(peer_ip(&req), "jobnzb");
         let _ = req.respond(if blocked {
@@ -729,6 +814,182 @@ fn route_jobnzb(
                 req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
         }
     }
+}
+
+/// TODO 19 (public request #4): the login page, the sign-in POST and the
+/// sign-out POST.
+///
+/// `dashboard`-gated with the rest of the browser-facing surface: a slim
+/// build carries no page to sign in to, and the 404 at the foot of the
+/// router is the honest answer there (the same argument `/config/
+/// categories` and the manual routes already make).
+///
+/// With no login form configured this route exists but has nothing to
+/// do: it redirects to `/`. That is deliberate rather than a 404 - a
+/// bookmark to `/login` made while a password was set must not become a
+/// dead link when the owner removes it.
+#[cfg(feature = "dashboard")]
+fn route_login(req: tiny_http::Request, d: &Arc<Daemon>) {
+    let post = req.method() == &tiny_http::Method::Post;
+    let on = nzbfast_daemon::websession::login_on(d);
+    if !post {
+        // Already signed in, or there is nothing to sign in to: go to
+        // the dashboard rather than presenting a form that would either
+        // do nothing or be answered by a cookie the browser already has.
+        if !on || d.sessions.is_live(session_id(&req, d).as_deref()) {
+            return redirect_to(req, "/");
+        }
+        return respond_shell(req, d, Shell::Login);
+    }
+    // From here down it is the sign-in itself. Same-site only, for the
+    // reason `same_site_only` states: a cross-site form must not be able
+    // to drive this, and no non-browser client signs in with a form.
+    if api::config::same_site_only(&req).is_err() {
+        let _ = req.respond(
+            json_resp(json!({"status": false, "error": "login.crosssite"})).with_status_code(403),
+        );
+        return;
+    }
+    if !on {
+        let _ = req.respond(
+            json_resp(json!({"status": false, "error": "login.off"})).with_status_code(404),
+        );
+        return;
+    }
+    // A credential form is kilobytes at most. The cap is the point: this
+    // is an UNAUTHENTICATED body read, and the /api pre-drain's 256 MiB
+    // would be a free memory sink on the one route that has no key in
+    // front of it.
+    let mut req = req;
+    let (raw, _hold) = read_body_capped_hold(req.as_reader(), 4096);
+    let fields: std::collections::HashMap<String, String> = std::str::from_utf8(&raw)
+        .map(|s| parse_form_body(s).into_iter().collect())
+        .unwrap_or_default();
+    let user = fields.get("username").map(String::as_str).unwrap_or("");
+    let pass = fields.get("password").map(String::as_str).unwrap_or("");
+    let want_user = d.web_username.lock_ok().clone().unwrap_or_default();
+    let want_hash = d.web_password.lock_ok().clone().unwrap_or_default();
+    // BOTH halves are checked, and the password verification runs even
+    // when the name is already wrong. Short-circuiting would make a
+    // wrong username answer in microseconds and a wrong password answer
+    // in the ~50 ms Argon2id costs, which is a timing oracle for "does
+    // this account exist" on a box published to the internet - the
+    // deployment this whole item is for.
+    let name_ok = ct_eq(user, &want_user);
+    // Open question 3 of research/LOGIN-RATE-LIMIT-MEASURED-2026-09-20.md,
+    // taken on 21 Sep 2026. The verification is 19 MiB and
+    // ~16 ms on the shared worker pool for an UNAUTHENTICATED caller, so
+    // at most `VERIFY_PERMITS` of them run at once; a POST that cannot
+    // get a permit inside `VERIFY_WAIT` is answered 503 with
+    // `Retry-After` rather than made to wait.
+    //
+    // THE PROPERTY THIS KEEPS, which is the whole reason the cap is a
+    // short WAIT and not a window: a correct credential is never
+    // refused, from any address, in any state, except for the
+    // milliseconds a permit takes to free. A 503 says "ask me again" and
+    // the login page does; the password is not read, not counted into
+    // the ladder below, and nothing about this caller is remembered past
+    // the end of the request. That is what makes this safe behind a
+    // reverse proxy, where every client shares one address and any
+    // limiter with a window would hold the owner out of their own
+    // dashboard.
+    let pass_ok = match nzbfast_daemon::websession::verify_password_capped(pass, &want_hash) {
+        nzbfast_daemon::websession::VerifyOutcome::Checked(ok) => ok,
+        nzbfast_daemon::websession::VerifyOutcome::Busy => {
+            let mut resp =
+                json_resp(json!({"status": false, "error": "login.busy"})).with_status_code(503);
+            if let Ok(h) = tiny_http::Header::from_bytes(&b"Retry-After"[..], &b"1"[..]) {
+                resp.add_header(h);
+            }
+            let _ = req.respond(resp);
+            return;
+        }
+    };
+    if !(name_ok && pass_ok) {
+        // The same bad-credential ladder every other door is counted
+        // into. It matters more here than anywhere else: a password is
+        // guessable in a way a 192-bit key is not.
+        let blocked = d.note_auth_failure(peer_ip(&req), "login");
+        let _ = req.respond(
+            json_resp(json!({
+                "status": false,
+                // ONE message for both halves. Saying which was wrong
+                // tells a guesser that the username is right, which
+                // halves the work for nothing the owner needs.
+                "error": if blocked { "login.blocked" } else { "login.bad" },
+            }))
+            .with_status_code(if blocked { 429 } else { 401 }),
+        );
+        return;
+    }
+    let Some((id, csrf)) = d.sessions.create() else {
+        let _ = req.respond(
+            json_resp(json!({"status": false, "error": "login.nornd"})).with_status_code(500),
+        );
+        return;
+    };
+    info!(target: "auth", "dashboard sign-in for {user}");
+    // `Secure` follows the CLIENT-facing scheme, not ours: behind a TLS
+    // reverse proxy - the deployment this item is for - we are spoken to
+    // over plain http and the browser is not.
+    let secure = public_base(&req, d).starts_with("https:");
+    let mut resp = json_resp(json!({"status": true, "csrf": csrf}));
+    for c in nzbfast_daemon::websession::login_cookies(d.port, &id, &csrf, secure) {
+        if let Ok(h) = tiny_http::Header::from_bytes(&b"Set-Cookie"[..], c.into_bytes()) {
+            resp.add_header(h);
+        }
+    }
+    let _ = req.respond(resp);
+}
+
+/// Sign this browser out: drop the server-side session and clear both
+/// cookies.
+///
+/// POST and same-site only. It needs no CSRF TOKEN, and that is a
+/// judgement rather than an oversight: the worst a forged sign-out can
+/// do is make the owner sign in again, and requiring the token would
+/// mean a page that has somehow lost it - a stale tab, a cleared
+/// companion cookie - has no way to sign out at all, which is the
+/// failure that actually hurts.
+#[cfg(feature = "dashboard")]
+fn route_logout(req: tiny_http::Request, d: &Arc<Daemon>) {
+    if req.method() != &tiny_http::Method::Post {
+        let _ =
+            req.respond(tiny_http::Response::from_string("POST required").with_status_code(405));
+        return;
+    }
+    if api::config::same_site_only(&req).is_err() {
+        let _ = req.respond(
+            json_resp(json!({"status": false, "error": "login.crosssite"})).with_status_code(403),
+        );
+        return;
+    }
+    d.sessions.drop_one(session_id(&req, d).as_deref());
+    let mut resp = json_resp(json!({"status": true}));
+    for c in nzbfast_daemon::websession::logout_cookies(d.port) {
+        if let Ok(h) = tiny_http::Header::from_bytes(&b"Set-Cookie"[..], c.into_bytes()) {
+            resp.add_header(h);
+        }
+    }
+    let _ = req.respond(resp);
+}
+
+/// A 302 to `where_to`. 302 and not 301 for the reason the
+/// `/config/categories` arm gives: a permanent redirect is cached by the
+/// browser forever, and whether a login form stands in front of the
+/// dashboard is a SETTING, which can be turned off ten seconds later.
+#[cfg(feature = "dashboard")]
+fn redirect_to(req: tiny_http::Request, where_to: &str) {
+    let mut resp = tiny_http::Response::from_string("").with_status_code(302);
+    if let Ok(h) = tiny_http::Header::from_bytes(&b"Location"[..], where_to.as_bytes()) {
+        resp.add_header(h);
+    }
+    // A redirect that a browser caches is a redirect the owner cannot
+    // undo by changing the setting.
+    if let Ok(h) = tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]) {
+        resp.add_header(h);
+    }
+    let _ = req.respond(resp);
 }
 
 fn handle_api(
@@ -855,6 +1116,56 @@ fn handle_api(
         (Some(k), _) => given.is_some_and(|g| ct_eq(g, k)),
         (None, Some(_)) => false,
     };
+    // TODO 19 (public request #4): the dashboard's own session, which is
+    // how the page authenticates once a login form is configured and the
+    // user has signed in. It stands in for the FULL key - the dashboard
+    // is the full-control surface - and it is the one credential here
+    // that the browser sends on its own, so it carries the CSRF
+    // machinery the key never needed:
+    //
+    //   * `same_site_only`, the check the credential-mutation routes
+    //     already use, so a cross-site form or navigation is refused
+    //     even when the cookie rides along; and
+    //   * the session's own CSRF token in `X-CSRF-Token`, compared
+    //     against the SERVER's record of it. A page on another origin
+    //     cannot read the companion cookie and cannot set the header, so
+    //     it cannot produce this, and a `<img src=".../api?mode=
+    //     shutdown">` on a page the owner visits gets nothing.
+    //
+    // Applied to every mode and not just the mutating ones, deliberately:
+    // a list of "which modes change something" is a second copy of the
+    // dispatch table and would be wrong the first time a mode is added.
+    // The dashboard sends the header on every call, so the strict rule
+    // costs it nothing, and a caller with no cookie never reaches here.
+    //
+    // `SessionCheck::NoCsrf` contributes nothing - the cookie proves
+    // nothing without its token, which is the CSRF shape itself. It does
+    // not REFUSE the request either, because a caller may have sent a
+    // valid key alongside a stale cookie (a dashboard tab open across a
+    // sign-out is exactly that), and `full` is already true in that
+    // case. What it cannot do is authenticate on its own: with no key
+    // the request lands on the ordinary "API Key Required" refusal
+    // below, which is the honest answer - it presented no credential
+    // this daemon accepts.
+    //
+    // FOLDED IN HERE and not further down, which is the one placement
+    // detail that matters: `via_add_only` below is `!full && ...`, so a
+    // session decided AFTER it would leave a request that is fully
+    // authorised also flagged as the add-only tier, and the handlers
+    // that read that flag would withhold `complete_dir` and the password
+    // warnings from somebody who has signed in. Deciding it here also
+    // means a signed-in browser disarms the first-run handoff token, on
+    // the same reasoning the key does: whoever sent this is demonstrably
+    // already in.
+    let session = match d.sessions.check(
+        session_id(&req, d).as_deref(),
+        nzbfast_daemon::websession::csrf_header(&req).as_deref(),
+    ) {
+        nzbfast_daemon::websession::SessionCheck::Ok => api::config::same_site_only(&req).is_ok(),
+        nzbfast_daemon::websession::SessionCheck::NoCsrf => false,
+        nzbfast_daemon::websession::SessionCheck::None => false,
+    };
+    let full = full || session;
     // Whoever sent this already holds the key, so the first-run token
     // stops being worth one (`disarm_handoff_in`). A relaxed load on
     // every run that armed nothing.
@@ -1114,8 +1425,34 @@ pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>,
                 // unknown path falls through to the 404 at the foot of
                 // this loop, which is the honest answer for a build that
                 // carries no page: there is no hidden door to find.
+                // TODO 19 (public request #4): the login form, ahead of
+                // the shell so a sign-in page is reachable without one.
+                #[cfg(feature = "dashboard")]
+                if path == "/login" {
+                    route_login(req, &d);
+                    continue;
+                }
+                #[cfg(feature = "dashboard")]
+                if path == "/logout" {
+                    route_logout(req, &d);
+                    continue;
+                }
                 #[cfg(feature = "dashboard")]
                 if path == "/" || path == "/index.html" {
+                    // TODO 19: with a login form configured and no live
+                    // session, the shell is not served at all. Sending
+                    // 1.2 MB of page that will then have every one of
+                    // its calls refused is worse than a redirect in
+                    // every way - it is slower, it shows the reader a
+                    // broken dashboard, and it hands an unauthenticated
+                    // visitor the whole UI to read. The WALL takes the
+                    // same treatment below.
+                    if nzbfast_daemon::websession::login_on(&d)
+                        && !d.sessions.is_live(session_id(&req, &d).as_deref())
+                    {
+                        redirect_to(req, "/login");
+                        continue;
+                    }
                     // The daemon state the page needs BEFORE its first
                     // paint - locale, indexer switches - is stamped in by
                     // `ShellKey`, which owns every such input and is the
@@ -1324,7 +1661,13 @@ pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>,
                 #[cfg(feature = "indexer")]
                 if path == "/wall" || path == "/wall/" {
                     // M13: the poster wall, stamped and cached exactly as
-                    // the dashboard above.
+                    // the dashboard above - login gate included (TODO 19).
+                    if nzbfast_daemon::websession::login_on(&d)
+                        && !d.sessions.is_live(session_id(&req, &d).as_deref())
+                    {
+                        redirect_to(req, "/login");
+                        continue;
+                    }
                     respond_shell(req, &d, Shell::Wall);
                     continue;
                 }
@@ -1497,6 +1840,28 @@ pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 9110 section 14.2: a range unit this endpoint does not
+    /// understand is IGNORED, never refused with a 416. The `bytes=`
+    /// refusals (Safari's `bytes=0-1` probe) are unchanged.
+    #[test]
+    fn an_unknown_range_unit_is_ignored_not_refused() {
+        // Not `bytes`: ignored, so the ordinary 200 path runs.
+        assert!(!preview_range_unhonourable("seconds=0-10"));
+        assert!(!preview_range_unhonourable("items=0-5"));
+        assert!(!preview_range_unhonourable("nonsense"));
+        assert!(!preview_range_unhonourable(""));
+        // `bytes=0-` is the whole resource and a 200 satisfies it.
+        assert!(!preview_range_unhonourable("bytes=0-"));
+        assert!(!preview_range_unhonourable("  bytes= 0-  "));
+        // Every other `bytes=` spelling is still refused.
+        assert!(preview_range_unhonourable("bytes=0-1"));
+        assert!(preview_range_unhonourable("bytes=100-200"));
+        assert!(preview_range_unhonourable("bytes=-500"));
+        // The unit is a token, so the refusal is case-insensitive.
+        assert!(preview_range_unhonourable("BYTES=0-1"));
+        assert!(!preview_range_unhonourable("Bytes=0-"));
+    }
 
     #[test]
     fn parse_query_decodes_values_and_last_key_wins() {

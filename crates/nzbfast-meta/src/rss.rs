@@ -226,7 +226,7 @@ const FEED_URL_PLAIN_PARAMS: &[&str] = &[
 /// Three things go: the userinfo (`user:pw@`), any path segment shaped
 /// like an opaque token (some sites put the key in the path), and the
 /// value of every query parameter outside
-/// [`FEED_URL_PLAIN_PARAMS`]. The parameter NAMES stay - the name is
+/// `FEED_URL_PLAIN_PARAMS`. The parameter NAMES stay - the name is
 /// what tells the user their key is in there.
 ///
 /// This is a display transform, never a security boundary on its own:
@@ -400,16 +400,16 @@ impl FeedHealth {
 #[derive(Debug, PartialEq)]
 pub struct FeedItem {
     pub title: String,
-    /// NZB download URL (enclosure url, else <link>).
+    /// NZB download URL (enclosure url, else `<link>`).
     pub link: String,
     pub size: u64,
-    /// Dedupe identity: <guid>, else the link.
+    /// Dedupe identity: `<guid>`, else the link.
     pub guid: String,
     /// When the item says it was posted, as unix seconds: RSS
     /// `<pubDate>`, else Atom `<published>`/`<updated>`, else RSS 1.0
     /// `<dc:date>`. `None` is "this feed did not say", and the `age`
     /// terms treat that as unknown rather than as 1970 - see
-    /// [`term_matches_at`].
+    /// `term_matches_at`.
     pub pub_date: Option<i64>,
 }
 

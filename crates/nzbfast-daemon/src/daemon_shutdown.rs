@@ -78,7 +78,7 @@ const INDEX_CHECKPOINT_WAIT: std::time::Duration = std::time::Duration::from_sec
 /// restart then asked for a full pool the account could not give it and
 /// sat at 0 MB/s.
 ///
-/// Bounded by [`WIND_DOWN_BUDGET`] as a whole: if a step overruns we
+/// Bounded by `WIND_DOWN_BUDGET` as a whole: if a step overruns we
 /// carry on regardless, because a slow clean exit that gets SIGKILLed is
 /// worth no more than the abrupt one.
 pub fn wind_down(d: &Arc<Daemon>, rt: &tokio::runtime::Handle, reason: &str) {
@@ -522,11 +522,24 @@ pub fn timed_pause(d: &Arc<Daemon>, mins: u64, graceful: bool) {
         // daemon.log at all (13 h of a held queue, found by the file's
         // mtime). `graceful` and `mins` are the two things a reader
         // wants to know first.
+        // And what this pause did NOT stop: Force priority runs through
+        // a queue pause, so a header that says `paused` over a running
+        // transfer needs its own line in the log to explain it (21 Sep
+        // 2026: the whole pause path had printed this one line).
+        let exempt = d.pause_exempt();
         info!(
             target: "pause",
-            "downloads paused ({}{})",
+            "downloads paused ({}{}){}",
             if graceful { "graceful" } else { "now" },
-            if mins == 0 { String::new() } else { format!(", {mins} min") }
+            if mins == 0 { String::new() } else { format!(", {mins} min") },
+            if exempt.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " - Force priority keeps running through a pause: {}",
+                    exempt.join(", ")
+                )
+            }
         );
         d.note_event(
             "pause",

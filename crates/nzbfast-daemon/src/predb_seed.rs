@@ -447,14 +447,21 @@ enum FetchErr {
 /// already 6 h, longer than any date form a rate limiter realistically
 /// sends, and a clock-skewed date parse that SHORTENS the wait is worse
 /// than no parse at all.
-fn retry_after_secs(resp: &ureq::Response) -> Option<i64> {
-    parse_retry_after(resp.header("Retry-After")?)
+fn retry_after_secs(e: &crate::netfetch::Refusal) -> Option<i64> {
+    // `Refusal::retry_after` has already read the header and taken the
+    // delta-seconds form off it - ureq 3 drops the response from its
+    // status error, so that has to happen before the error exists. The
+    // CLAMP is still this source's own, and stricter than the shared
+    // helper's fallback.
+    clamp_retry_after(i64::try_from(e.retry_after()?).ok()?)
 }
 
-/// The header's delta-seconds form, clamped. Split out from the
-/// response so it can be tested without one.
-fn parse_retry_after(raw: &str) -> Option<i64> {
-    let secs: i64 = raw.trim().parse().ok()?;
+/// This source's own clamp on a wait it was asked for. The HEADER is
+/// parsed one layer down by `netfetch::Refusal` (ureq 3 drops the
+/// response from its status error, so it has to be); what stays here is
+/// the policy: a positive number of seconds, never more than
+/// [`RETRY_AFTER_MAX_SECS`].
+fn clamp_retry_after(secs: i64) -> Option<i64> {
     (secs > 0).then_some(secs.min(RETRY_AFTER_MAX_SECS))
 }
 
@@ -466,24 +473,20 @@ fn cool_secs(retry_after: Option<i64>) -> i64 {
 }
 
 fn fetch_page(agent: &ureq::Agent, url: &str) -> Result<Vec<SeedRow>, FetchErr> {
-    let resp = agent
-        .get(url)
-        .set("User-Agent", UA)
-        .call()
-        .map_err(|e| match e {
-            ureq::Error::Status(code @ (403 | 429), resp) => FetchErr::Refused {
+    let text =
+        crate::netfetch::call_body(agent.get(url).header("User-Agent", UA)).map_err(|e| match e
+            .code()
+        {
+            Some(code @ (403 | 429)) => FetchErr::Refused {
                 code,
-                retry_after: retry_after_secs(&resp),
+                retry_after: retry_after_secs(&e),
             },
             // Past the API's paging depth. Not an error: it is the
             // far edge of the walk, same as an empty page.
-            ureq::Error::Status(400, _) => FetchErr::End,
-            ureq::Error::Status(code, _) => FetchErr::Transient(format!("HTTP {code}")),
-            ureq::Error::Transport(t) => FetchErr::Transient(t.to_string()),
+            Some(400) => FetchErr::End,
+            Some(code) => FetchErr::Transient(format!("HTTP {code}")),
+            None => FetchErr::Transient(e.to_string()),
         })?;
-    let text = resp
-        .into_string()
-        .map_err(|e| FetchErr::Transient(format!("read body: {e}")))?;
     let body: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| FetchErr::Transient(format!("bad JSON: {e}")))?;
     let Some(data) = body.get("data").and_then(|d| d.as_array()) else {
@@ -697,15 +700,23 @@ mod tests {
     /// the full 6 h rather than no wait at all.
     #[test]
     fn retry_after_lengthens_the_cooling_window_but_never_shortens_it() {
-        assert_eq!(parse_retry_after("120"), Some(120));
-        assert_eq!(parse_retry_after("  120  "), Some(120));
-        assert_eq!(parse_retry_after("0"), None);
-        assert_eq!(parse_retry_after("-5"), None);
+        // Driven through a real refused reply rather than a number
+        // typed into the assertion: since the ureq 3 port the HEADER is
+        // read one layer down (`netfetch::Refusal`) and only the clamp
+        // is this source's, so a test that called the clamp alone would
+        // have stopped covering the half that actually moved.
+        let ra = |hdr: &str| retry_after_secs(&crate::netfetch::refusal_for_test(429, hdr));
+        assert_eq!(ra("Retry-After: 120\r\n"), Some(120));
+        assert_eq!(ra("Retry-After:   120  \r\n"), Some(120));
+        assert_eq!(ra("Retry-After: 0\r\n"), None);
+        assert_eq!(ra("Retry-After: -5\r\n"), None);
         // The HTTP-date form is legal and deliberately unparsed.
-        assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        assert_eq!(ra("Retry-After: Wed, 21 Oct 2026 07:28:00 GMT\r\n"), None);
+        // No header at all is the full window, not no wait.
+        assert_eq!(ra(""), None);
         // Clamped, so a nonsense header cannot park the source forever.
         assert_eq!(
-            parse_retry_after("99999999"),
+            ra("Retry-After: 99999999\r\n"),
             Some(RETRY_AFTER_MAX_SECS),
             "an absurd Retry-After must clamp"
         );

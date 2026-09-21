@@ -53,6 +53,11 @@ __NZBFAST_UI_TOKENS__
      assets.rs from web/ui-sound.html. One copy for both shell pages -
      the wall used to carry a stale hand-made fork of it. -->
 __NZBFAST_UI_SOUND__
+<!-- The shared sign-out control, substituted by assets.rs from
+     web/ui-signout.html. One copy for both shell pages: the endpoint,
+     the method and where a signed-out browser lands are daemon
+     decisions the pages only mirror. -->
+__NZBFAST_UI_SIGNOUT__
 <!--
   nzbfast dashboard - richer visual layer over the daemon's JSON API.
   Self-contained (no external deps): all charts are hand-rolled canvas
@@ -1989,6 +1994,16 @@ body.chipcolor-shape .qbadge.shape.t-mid{color:var(--acc);border-color:color-mix
    light and dark alike - and the name is spelled out in the pill, so
    the tint is never the only way to read it. */
 .qbadge.cat{color:color-mix(in srgb,var(--catc) 55%,var(--fg));border-color:color-mix(in srgb,var(--catc) 45%,transparent);background:color-mix(in srgb,var(--catc) 12%,transparent)}
+/* The "forced" badge: this row runs even while the queue is paused, which
+   is a state the user set (often without knowing - a duplicate hold's
+   download-anyway button writes it) and the one thing on a row that makes
+   a Pause look broken. Accent, not amber: --warn is the media-mismatch
+   state's. It is a BUTTON (one click stops forcing, the tooltip says so),
+   so it resets the browser button and beats the touch layer's bare
+   `button{min-height:44px}` on specificity, exactly as `button.whychip`
+   does - the row's own stop-forcing control is the 44px target. */
+button.qbadge.force{font:inherit;font-size:11px;cursor:pointer;min-height:0;min-width:0;color:var(--acc);border-color:color-mix(in srgb,var(--acc) 55%,transparent);background:color-mix(in srgb,var(--acc) 12%,transparent)}
+button.qbadge.force:hover,button.qbadge.force:focus-visible{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 22%,transparent)}
 #wlCal h4{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin:0 0 6px}
 .calrow{display:flex;gap:10px;align-items:baseline;font-size:12.5px;padding:3px 0;border-bottom:1px dashed var(--line)}
 .calrow:last-child{border-bottom:none}
@@ -2254,6 +2269,11 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
   <a href="/wall" class="pill" id="navWall" style="text-decoration:none" data-i18n-title="hdr.wall.title" title="Poster wall"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wall"/></svg> <span data-i18n="hdr.wall" id="navWallLbl">wall</span></a>
   <a href="#" class="pill" id="setPill" style="text-decoration:none" data-i18n-title="hdr.settings.title" title="Settings" onclick="return setView('settings')"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg> <span data-i18n="hdr.settings">settings</span></a>
   <a href="/manual" target="_blank" class="pill" style="text-decoration:none" data-i18n-title="hdr.manual.title" title="User manual"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-manual"/></svg> <span data-i18n="hdr.manual">manual</span></a>
+  <!-- TODO 19 (public request #4): only when a login form is configured
+       AND this browser is signed in. Hidden by default, revealed by
+       signOutSync() once get_config answers - a sign-out control on an
+       install with no login is a button that logs you out of nothing. -->
+  <a href="#" class="pill" id="navSignout" style="text-decoration:none;display:none" data-i18n-title="hdr.signout.title" title="Sign this browser out of the dashboard" onclick="return signOut()"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-signout"/></svg> <span data-i18n="hdr.signout">sign out</span></a>
   </nav>
   <!-- The version, AFTER the nav for the same reason as the two chips
        below it, and it did not used to be. It is EMPTY in the markup and
@@ -3201,6 +3221,8 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
     <input class="txt sm" type="number" min="0" max="3600" id="s_queue_finished_delay_secs" onchange="setCfg('queue_finished_delay_secs',this.value)"></div>
   <div class="row"><label data-i18n="set.watchdir.parclean">Delete recovery files<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.parclean.hint">a download's .par2 repair files have done their job once everything verifies, so they are removed when it completes successfully. Turn off to keep them in the download folder</span></label>
     <input type="checkbox" id="s_par_cleanup" onchange="setCfg('par_cleanup',this.checked?1:0)"></div>
+  <div class="row"><label data-i18n="set.watchdir.repairdefer">Wait before a long repair<span class="badge next" data-i18n="badge.next">applies from the next download</span><span class="hint" data-i18n="set.watchdir.repairdefer.hint">some downloads need a slow repair, taking minutes rather than seconds, because the recovery files are themselves damaged. With this on, such a download goes back to the end of the queue once before it starts, so you have a chance to see what is coming and remove it if you would rather not wait. It only waits once: next time round it repairs, because a download that never repairs while nobody is watching is worse than a slow one. Nothing has been written to disk at that point, so nothing is lost either way. Off by default</span></label>
+    <input type="checkbox" id="s_repair_defer_long" onchange="setCfg('repair_defer_long',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.watchdir.cleanup">Cleanup after download<span class="hint" data-i18n="set.watchdir.cleanup.hint">file extensions or name patterns deleted from a job's folder once it completes successfully, e.g. sfv, srr, url, *sample*, Subs/*; empty = off. Recovery files have their own switch above</span></label>
     <input class="txt" id="s_cleanup_exts" placeholder="sfv, srr, url" onchange="setCfg('cleanup_exts',this.value)"></div>
   <div class="row"><label data-i18n="set.watchdir.pwprompt">When an archive needs a password<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.pwprompt.hint">"ask right away" prompts the moment a running download turns out to be password-protected, so you can type it while it keeps downloading; "ask when finished" waits until the download completes and offers the 🔑 unlock; "never ask" completes the download quietly with the archive left packed in its folder for you to extract by hand. Set password on the download itself works in every mode</span></label>
@@ -3328,7 +3350,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
     <input type="checkbox" id="s_identity_lookup" onchange="setCfg('identity_lookup',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.skipsample">Skip sample files<span class="badge next" data-i18n="badge.next">applies from the next download</span><span class="hint" data-i18n="set.skipsample.hint">do not download sample and proof clips at all, so you never pay for a teaser you were only going to delete. A file counts as a sample only if its name says so and it is a small slice of the release, so a full-length film whose title happens to contain the word, and a job whose only video is sample-named, are always fetched in full. A skipped file is treated as deliberately absent: repair leaves it alone and the job still completes normally. Off by default, because before the bytes arrive the name is the only evidence there is and a skip cannot be undone. Leaving it off costs a teaser's worth of bandwidth, and "Remove junk files" below already deletes samples once the download has finished. Samples packed inside the archive are not affected either way</span></label>
     <input type="checkbox" id="s_skip_samples" onchange="setCfg('skip_samples',this.checked?1:0)"></div>
-  <div class="row"><label data-i18n="set.rename.junk">Remove junk files<span class="hint" data-i18n="set.rename.junk.hint">delete leftover .par2, .nzb, .sfv, .nfo and sample clips from finished movie/TV folders, never the video or its subtitles</span></label>
+  <div class="row"><label data-i18n="set.rename.junk">Remove junk files<span class="hint" data-i18n="set.rename.junk.hint">delete leftover .par2, .nzb, .sfv, .nfo and sample clips from finished movie/TV folders, never the video or its subtitles, and never a file the poster listed in their own recovery set - so a .nfo is kept on some releases and not others, depending on how it was posted. To choose the list yourself, leave this off and name the extensions you want gone in Cleanup after download, under Watch folder and post-processing, which applies to every download rather than film and TV only</span></label>
     <input type="checkbox" id="s_rename_junk" onchange="setCfg('rename_junk',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.rename.mediaonly">Keep only the media file<span class="hint" data-i18n="set.rename.mediaonly.hint">⚠ permanently deletes everything except the video(s) and subtitles; every episode of a season pack is kept</span></label>
     <input type="checkbox" id="s_rename_media_only" onchange="setCfg('rename_media_only',this.checked?1:0)"></div>
@@ -3939,6 +3961,18 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
       <button class="ghost mini" id="s_nzbkey_show" onclick="showNzbKey(this)" data-i18n="set.sec.apikey.show">Show</button>
       <button class="ghost mini" onclick="newNzbKey()" data-i18n="set.sec.apikey.new">Create new</button>
     </span></div>
+  <!-- TODO 19 (public request #4): the optional dashboard login. Two
+       rows and a button, deliberately below the two keys - the keys are
+       what Sonarr and the phone apps use and are not replaced by
+       anything here. -->
+  <div class="row"><label data-i18n="set.sec.login">Dashboard login<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.sec.login.hint">a username and password in front of the dashboard in a browser, for an install you have published to the internet behind a reverse proxy. Set both to switch it on; clear either to switch it off. It changes nothing for Sonarr, Radarr, NZB360 or LunaSea - they keep using the API key above. Changing either field signs every browser out, this one included</span></label>
+    <input class="txt" id="s_web_username" autocomplete="off" spellcheck="false" data-i18n-placeholder="set.sec.login.ph" placeholder="no login" onchange="setCfg('web_username',this.value)"></div>
+  <div class="row"><label data-i18n="set.sec.webpass">Dashboard password<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.sec.webpass.hint">at least 8 characters, and not the username, a commonly guessed password, one character repeated or a straight run like abcdefgh. Stored hashed with Argon2id - nzbfast cannot show it back to you, only replace it. Leave it blank to keep the one already stored; type a single space and save to remove it</span></label>
+    <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <input class="txt" id="s_web_password" type="password" autocomplete="new-password" onchange="saveWebPassword(this)">
+      <span class="hint" id="s_web_password_state"></span>
+      <button class="ghost mini" onclick="signOutEverywhere(this)" data-i18n="set.sec.logoutall">Sign out every browser</button>
+    </span></div>
   <div class="row"><label data-i18n="set.sec.cors">Browser extensions<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.sec.cors.hint">which web pages a browser will let read this API. * is the default and matches SABnzbd, so extensions like NZB Unity and NZBDonkey work with no setup - your API key is still needed on every request. To keep it tighter, list the origins you allow instead (https://example.com), separated by commas. Empty sends no header at all, which blocks every extension</span></label>
     <input class="txt" id="s_cors_origin" spellcheck="false" placeholder="*" onchange="setCfg('cors_origin',this.value)"></div>
   <div class="row"><label data-i18n="set.sec.backup">Settings backup<span class="hint" data-i18n="set.sec.backup.hint">one file holding every setting, your servers (passwords included) and both keys - keep it somewhere private. Restoring it on a fresh install brings everything back</span></label>
@@ -3993,6 +4027,16 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
     <button class="ghost" onclick="exportLog()" data-i18n="log.export" data-i18n-title="log.export.title" title="save the lines the current view shows as a text file">Export</button>
     <button class="ghost" onclick="refreshLog(this)" data-i18n="log.refresh">Refresh</button>
   </span></h3>
+  <!-- The dial that decides what gets WRITTEN, as against the view
+       above, which only decides what this pane shows. Asked for on
+       r/usenet 18 Sep 2026 by somebody with indexing switched off who
+       did not want a log at all: until now the only way to turn the
+       level down was NZBFAST_LOG, which nobody running the app or the
+       tray can reach. Live - no restart - unless that variable is set,
+       and then the save warns that it is what decides. -->
+  <div class="row"><label data-i18n="set.log.detail">How much to log<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.log.detail.hint">quiet writes only warnings and problems, which on an idle machine is nothing at all. Normal is what nzbfast has always written. Verbose adds the debug lanes and costs real speed on a busy download, so it is for chasing something down, not for leaving on</span></label>
+    <select class="sel" id="s_log_detail" style="max-width:200px" onchange="setCfg('log_detail',this.value)">
+      <option value="quiet" data-i18n="set.log.detail.quiet">quiet - problems only</option><option value="normal" data-i18n="set.log.detail.normal">normal</option><option value="verbose" data-i18n="set.log.detail.verbose">verbose - for debugging</option></select></div>
   <details id="logBox" ontoggle="if(this.open)refreshLog()">
     <summary class="dim" style="cursor:pointer;font-size:13px" data-i18n="log.show">show the daemon's recent output</summary>
     <pre id="logOut" style="max-height:320px;overflow:auto;font-size:11.5px;line-height:1.5;margin:10px 0 0;white-space:pre-wrap;color:var(--dim)"></pre>
@@ -4722,7 +4766,9 @@ function injectHelp(){
     'set.db.title':'settings',
     'set.lib.title':'settings', 'set.remote.title':'remotes',
     'set.ui.title':'settings', 'set.snd.title':'settings',
-    'set.sec.title':'settings',
+    // TODO 19 follow-up: the manual grew a Security chapter (#security)
+    // on 20 Sep 2026, and the card's own HTTPS hint already promises it.
+    'set.sec.title':'security',
   };
   const title=t('hlp.title','Open the manual for this section');
   // Card hints: the one line of "how do I drive this card" that used to
@@ -4816,6 +4862,32 @@ function helpEsc(e){ if(e.key==='Escape') closeHelp(); }
 // doubles as ok/warn/bad, and PC used to hand the error red to whichever
 // provider happened to be fourth in the list.
 const PC = ['--id0','--id1','--id2','--id3','--id4','--id5'].map(v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim());
+// TODO 19 (public request #4): the dashboard session's CSRF token, read
+// from the readable companion cookie the daemon sets beside the HttpOnly
+// session. Its presence is also how this page knows a session EXISTS -
+// the session cookie itself is HttpOnly and deliberately invisible here.
+//
+// Read per call rather than latched: a sign-out in another tab, or an
+// expiry, clears the cookie, and a page holding a stale token would keep
+// sending it instead of falling back to the key. The name carries the
+// daemon's PORT (two daemons on one host would otherwise share a cookie),
+// which behind a reverse proxy is not the port in `location`, so the
+// match is on the prefix.
+function csrfToken(){
+  try{
+    const m = document.cookie.match(/(?:^|;\s*)nzbfast_csrf_\d+=([^;]*)/);
+    return m ? decodeURIComponent(m[1]) : '';
+  }catch(_){ return ''; }
+}
+// The auth headers for a raw fetch: the session's CSRF token when one
+// exists, otherwise the key. `oneShot` is an explicit credential the
+// caller is asking a question ABOUT (the key modal's probe, the apikey
+// bootstrap) and always wins.
+function authHeaders(sent, oneShot){
+  const tok = oneShot ? '' : csrfToken();
+  if(tok) return {'X-CSRF-Token': tok};
+  return sent ? {'X-Api-Key': sent} : {};
+}
 let key = localStorage.nzbfastKey || '';
 // Every adoption of a different key goes through here, and every one of
 // them bumps the epoch. A 403 is only ever news about the key the
@@ -4825,7 +4897,18 @@ let key = localStorage.nzbfastKey || '';
 // api() compares the epoch it sent under against this one for exactly
 // that reason.
 let keyEpoch = 0;
-function adoptKey(v){ key = v; localStorage.nzbfastKey = v; keyEpoch++; }
+// TODO 19: with a session in force the key is NOT written to
+// localStorage. That is the leak this item is about - a credential
+// sitting in browser storage on a machine that is now reachable from the
+// internet - and once a login form exists the page has no need of one:
+// the cookie authenticates every call. A key stored BEFORE the login was
+// set up is left alone rather than deleted, because deleting it would
+// strand a user who then turns the login off again.
+function adoptKey(v){
+  key = v;
+  if(!csrfToken()) localStorage.nzbfastKey = v;
+  keyEpoch++;
+}
 // A rotation THIS page is performing (Create new, or typing your own key
 // into Settings). Between the request going out and its answer being
 // adopted, the daemon's key and this page's key genuinely disagree, so
@@ -4898,8 +4981,14 @@ function dismissAppNotice(){
 // after this runs - a stored key that turns out to be refused is
 // replaced by the one that arrived in our own URL - and the href a
 // browser follows is whatever it holds at the moment of the click.
+//
+// TODO 19: and omitted with a login form in force, where it is not
+// sanctioned at all - the browser it opens will be met by the form and
+// will authenticate with a cookie, so the key in that URL would buy
+// nothing and travel for no reason.
 function appOpenHref(a){
-  a.href = location.origin + '/' + (key ? '?apikey=' + encodeURIComponent(key) : '');
+  a.href = location.origin + '/'
+    + ((key && !csrfToken()) ? '?apikey=' + encodeURIComponent(key) : '');
   return true;
 }
 (function(){
@@ -5455,10 +5544,19 @@ async function api(mode, extra, authKey, post){
   // Referer headers. The /m3u player handoff fetches with the header
   // too (m3uHandoff, §61d); the only key still in a URL is the per-job
   // ?t= stream token inside the playlist itself.
+  // TODO 19: which credential this call carries. An explicit one-shot
+  // key (the key modal's own probe, the apikey bootstrap) always wins -
+  // it is asking a question ABOUT that key. Otherwise a live session
+  // takes precedence over the stored key, and the key is not sent at
+  // all: the point of the session is that the key stops travelling.
+  //
+  // `X-CSRF-Token` is REQUIRED by the daemon on every cookie-authenticated
+  // call, mutating or not - see the session block in `handle_api` for why
+  // the rule is not narrowed to a list of modes.
   let r;
   try {
     r = await fetch(`/api?mode=${mode}${extra||''}`,
-      {method: post?'POST':'GET', headers: sent?{'X-Api-Key': sent}:{}});
+      {method: post?'POST':'GET', headers: authHeaders(sent, authKey != null)});
   } catch(e) { return fetchFail(); }
   const j = await readJson(r);
   // authKey set = an explicit one-shot credential (the apikey bootstrap):
@@ -5575,7 +5673,29 @@ async function togglePause(){
   // The optimistic flip is its own rollback: tick() re-derives `paused`
   // from the daemon's own answer (see the poll), so a refused pause puts
   // the button back within the second, and reportRefusal says why.
-  reportRefusal(await api(paused ? 'pause' : 'resume')); tick();
+  const r=await api(paused ? 'pause' : 'resume');
+  if(reportRefusal(r) && paused) notePauseExempt(r);
+  tick();
+}
+// Force priority runs through a queue pause (SAB semantics), so a pause
+// pressed while a forced download runs leaves it running - and a header
+// that flips to "paused" over a transfer at line rate reads as a pause
+// that did nothing (reported 21 Sep 2026, over a duplicate released with
+// the row's download-anyway button, which sets Force). The daemon names
+// what it did not stop in `pause_exempt`; this is the one place that says
+// so at the moment of the click. The header pill says it for as long as
+// it stays true (see the poll).
+//
+// The toast carries the answer to it, because a toast is where the user is
+// looking when they find out: "stop forcing" takes the Force off every job
+// the pause left running (they stay in the queue), and the pause then
+// applies to them. Which jobs, and the same button, stay on their rows.
+function notePauseExempt(r){
+  if(r && Array.isArray(r.pause_exempt) && r.pause_exempt.length){
+    const ids=r.pause_exempt.slice();
+    toast(t('status.paused.force.title','Force priority runs even while the queue is paused, so a forced download keeps going. Pause that download itself to stop it.'),
+      false, {label:t('queue.unforce','stop forcing'), fn:()=>unforceJobs(ids)});
+  }
 }
 let offline=false;
 // Going offline hangs up every provider connection at once. It also
@@ -5645,13 +5765,19 @@ async function pauseNow(){
   paused=true;
   notePauseCost(null);
   paintPauseBtn();
-  reportRefusal(await api('pause','&value2=now')); tick();
+  const r=await api('pause','&value2=now');
+  if(reportRefusal(r)) notePauseExempt(r);
+  tick();
 }
 async function pauseFor(mins){
   // A timed pause is a pause: same non-blocking heads-up. The select is
   // reset either way, so a refused one does not leave the menu stuck on a
   // duration that never took.
-  if(mins){ notePauseCost(null); reportRefusal(await api('pause','&value='+mins)); }
+  if(mins){
+    notePauseCost(null);
+    const r=await api('pause','&value='+mins);
+    if(reportRefusal(r)) notePauseExempt(r);
+  }
   document.getElementById('pauseSel').value='';
   tick();
 }
@@ -5907,11 +6033,46 @@ function fmtEta(sec){
   // Round the TOTAL once, then split it. Rounding a remainder on its own
   // prints the rollover it should have carried: 1319.7s came out "21m
   // 60s", and the hour arm had the same "1h 60m" edge.
-  const s=Math.round(sec);
+  // A real, positive wait never reads "0s": a row with 33 MiB left did
+  // for minutes, which is a countdown claiming to have finished. The
+  // floor is one second.
+  const s=Math.max(1,Math.round(sec));
   if(s<60) return s+'s';
   if(s<3600) return Math.floor(s/60)+'m '+(s%60)+'s';
   const m=Math.round(s/60);
   return Math.floor(m/60)+'h '+(m%60)+'m';
+}
+// How long THIS row has left, or why it cannot say. One place, so the row
+// cell and the hero card cannot disagree, and a pure function of the slot
+// so `web/eta_test.js` can lift it and run it.
+//
+// A download's ETA is its OWN bytes over its OWN rate (`job_bps`, the
+// bytes/sec the daemon measures off that job's counter) - never over the
+// line's. The line's rate adds the successor's bytes to a job still
+// draining behind it, so a job crawling at 1.7 MB/s beside a successor at
+// 110 MB/s read "3 seconds left" and then "0s" with 33 MiB to go, for
+// minutes. A job whose own rate is nothing is STALLED, and says so.
+//
+// A row that is not downloading has no rate of its own; what it waits on
+// is everything ahead of it draining the line, so its estimate is
+// `aheadMb` (that backlog, MiB, itself included) over the LINE's rate
+// `lineMbps` - the one place the whole-line figure is the right divisor.
+//
+// {kind:'eta',secs} | {kind:'stalled'} | {kind:'unknown'}. `unknown` is a
+// row with no honest number yet: a job still connecting, a payload from a
+// daemon that predates `job_bps`, or no line rate to divide by.
+function jobEta(s,lineMbps,aheadMb){
+  if(s&&s.status==='Downloading'){
+    const bps=s.job_bps;
+    if(typeof bps!=='number') return {kind:'unknown'};
+    // mbleft arrives in MiB (the API's MB); job_bps is bytes per second.
+    if(bps>1) return {kind:'eta',secs:(parseFloat(s.mbleft)||0)*1048576/bps};
+    // Nothing moved on this job's own counter. Still setting up is not
+    // yet a stall - the row's activity line says so.
+    return ['preflight','connecting','reconnecting'].includes(s.activity)
+      ?{kind:'unknown'}:{kind:'stalled'};
+  }
+  return lineMbps>0&&aheadMb!=null?{kind:'eta',secs:aheadMb/lineMbps}:{kind:'unknown'};
 }
 // A unix stamp as a wall clock in the reader's own locale - 12- or
 // 24-hour is the locale's call, not ours. Used where the daemon has
@@ -6510,13 +6671,55 @@ function drawHistogram(){
 // tick fed it, and a frozen series is drawn at phase 0.
 const burnHist=[];
 let burnLive=false;
+// The whole queue's declared size in MiB (the header's `mb`), refreshed
+// every poll: the burn-down's 100%.
+let burnTotal=0;
 function drawBurn(frac=0){
   const cv=document.getElementById('burnChart');
   if(burnHist.length<3){ cv.parentElement.style.display='none'; return; }
   cv.parentElement.style.display='';
-  const m=drawArea(cv, burnHist, css('--acc2'), frac);
+  // WHAT THE HEIGHT MEANS. drawArea scales to the tallest sample in view
+  // when nothing tells it otherwise, and a burn-down has a natural scale
+  // that is not that: the queue's size, with zero (done) at the floor.
+  // Scaled to the window a 213 GiB queue that had shed a few percent drew
+  // as a full-height flat block - "full" while it was half way across the
+  // section - and nothing marked where the end was. So the top of the
+  // chart is the queue's own total (or the biggest the backlog has been
+  // in this run, since finished jobs leave the queue and take their
+  // share of `mb` with them) and the floor is zero, both ruled and named
+  // below: height is the fraction left, and the line reaches the floor
+  // exactly when the queue is done.
+  const top=Math.max(burnTotal,...burnHist);
+  // The scale runs a fifth past the total, so the "all of it" rule sits
+  // below the top edge with the captions in the clear strip above it
+  // instead of on the trace, which rides that rule while the queue is
+  // barely started.
+  const m=drawArea(cv, burnHist, css('--acc2'), frac, top*1.2);
   if(!m) return;
   m.ctx.font='9px -apple-system,system-ui,sans-serif'; m.ctx.fillStyle=css('--dim');
+  // Baseline of both captions: just above the total's rule.
+  const ly=Math.max(9,m.y(top)-2);
+  {
+    const {ctx,y,w}=m, y0=y(0), yt=y(top);
+    ctx.save(); ctx.lineWidth=1;
+    // The top of the scale: faint and dashed, it says "this is all of
+    // it".
+    ctx.strokeStyle=css('--line'); ctx.setLineDash([3,3]);
+    ctx.beginPath(); ctx.moveTo(0,yt+0.5); ctx.lineTo(w,yt+0.5); ctx.stroke();
+    // The floor: solid, in the label colour. THIS is where the end is.
+    ctx.setLineDash([]); ctx.strokeStyle=css('--dim');
+    ctx.beginPath(); ctx.moveTo(0,y0+0.5); ctx.lineTo(w,y0+0.5); ctx.stroke();
+    ctx.restore();
+    ctx.textAlign='left';
+    ctx.fillText('0 · '+t('chart.burn.done','done'), 4, y0-3);
+    // The total, on the right of the caption's line; skipped when a
+    // long locale would run the two together.
+    const of=t('chart.burn.of','of {n}',{n:fmtMB(top)});
+    const cap=t('chart.left','{n} left',{n:fmtMB(burnHist[burnHist.length-1])});
+    if(ctx.measureText(cap).width+ctx.measureText(of).width+16<w){
+      ctx.textAlign='right'; ctx.fillText(of, w-4, ly); ctx.textAlign='left';
+    }
+  }
   // burnHist samples are MiB, the unit `mbleft` arrives in, and fmtMB is
   // the one thing that turns those into a size a human reads. The caption
   // used to divide them by 1000 and call the result GB, which is neither
@@ -6524,7 +6727,7 @@ function drawBurn(frac=0){
   // the same bytes 1.00 GiB. Keeping the unit out of the string and
   // letting the formatter supply it is the standing rule for every
   // stat-bearing caption here.
-  m.ctx.fillText(t('chart.left','{n} left',{n:fmtMB(burnHist[burnHist.length-1])}), 4, 10);
+  m.ctx.fillText(t('chart.left','{n} left',{n:fmtMB(burnHist[burnHist.length-1])}), 4, ly);
 }
 
 // Verify-health timeline: bad PAR2 blocks per download over recent
@@ -7061,12 +7264,20 @@ async function tick(){
     // drive instead of to their ISP. The evidence hangs off the tooltip
     // and the drawer; the pill carries the claim.
     const pstore = paused && q.pause_source==='storage' && q.storage_pause;
-    pill.title = pstore ? storageEvidence(q.storage_pause) : '';
+    // The other pause that is not the whole story: Force priority runs
+    // through a queue pause, so while a forced download is on the wire the
+    // pill must not claim a queue that is standing still. The daemon names
+    // the jobs (`pause_exempt`); the tooltip says why and how to stop one.
+    const pforce = paused && Array.isArray(q.pause_exempt) && q.pause_exempt.length>0;
+    pill.title = pstore ? storageEvidence(q.storage_pause)
+      : pforce ? forcePillTitle(q)
+      : '';
     pill.textContent = paused? t('status.paused','paused')+(
         pstore? ` · ${t('queue.storage.reason','output storage is not keeping up')}`
         : pwhen? ` · ${t('status.paused.sched','by your schedule until {t}',{t:pwhen})}`
         : psched? ` · ${t('status.paused.sched.open','by your schedule')}`
         : pmin? ` · ${t('status.minleft','{n}m left',{n:pmin})}` : '')
+        + (pforce? ` · ${t('status.paused.force','forced downloads keep running')}` : '')
       : (visibleHold(q) && !busy ? t('status.held','held')
       : tailNow ? tStatus(tailNow.status)
       : postWord ? tStatus(postWord)
@@ -7227,13 +7438,14 @@ async function tick(){
     const runLeft=parseFloat(q.mbleft_runnable)||0;
     // Burn-down samples only while downloading; a drained queue resets it.
     burnLive = q.slots.some(s=>s.status==='Downloading');
-    // MiB, as `mbleft` arrives; the caption formats them. drawArea
-    // normalises to the series' own max, so the magnitude is free to be
-    // the honest one.
+    // MiB, as `mbleft` arrives; the caption formats them. The chart's
+    // scale is the queue's own total (`mb`, same unit, whole queue), kept
+    // in burnTotal - see drawBurn for why the top is not the window max.
     // TODO 200: a queue holding only finishing rows is not a frozen
     // download - "0.00 MiB left" over a flat line read as download
     // trouble on a job whose download was over. Drop the series, as an
     // empty queue does; a paused or held queue keeps its frozen chart.
+    burnTotal=parseFloat(q.mb)||0;
     if(burnLive) push(burnHist, totLeft);
     else if(!qCount(q)||(totLeft<=0&&q.slots.length&&q.slots.every(isTail))) burnHist.length=0;
     if(MOTION_OFF) drawBurn(0);
@@ -7260,16 +7472,22 @@ async function tick(){
       ||q.slots.find(s=>isTail(s))
       ||q.slots.find(s=>s.status==='Queued');
     if(act){
-      const left=parseFloat(act.mbleft)||0, eta=mbps>0?left/mbps:Infinity;
+      // This card is about ONE job, so its time left is that job's own
+      // (jobEta): the line's rate would add a successor's bytes to a job
+      // draining behind it. A card pinned to a queued row falls back to
+      // its own bytes over the line.
+      const left=parseFloat(act.mbleft)||0, est=jobEta(act,mbps,left);
       setHtml('active',
         `<div style="display:flex;justify-content:space-between;font-size:13px">
-           <span style="min-width:0">${esc(act.filename||act.name)}</span>
+           <span style="min-width:0">${esc(act.filename||act.name)}${isTail(act)?'':forceChip(act)}</span>
            <span class="dim mono">${isTail(act)
              // Pinned to a finishing job (nothing is downloading behind
              // it): "100% · 0:00:00 left" beside a full bar is the
              // reading that could not be told from a stalled one.
              ? esc(tStatus(act.status))
-             : `${act.percentage}% · ${t('queue.timeleft','{t} left',{t:fmtEta(eta)})}`}</span></div>
+             : `${act.percentage}% · ${est.kind==='stalled'
+                 ? `<span class="warn">${t('queue.eta.stalled','stalled')}</span>`
+                 : t('queue.timeleft','{t} left',{t:fmtEta(est.kind==='eta'?est.secs:Infinity)})}`}</span></div>
          <div class="bar" style="margin-top:6px"><i style="width:${act.percentage}%"></i></div>
          ${(()=>{
            // What the bytes say this download IS, spelled out where the
@@ -7785,6 +8003,88 @@ function altSwitchBlock(s){
 function dupHeld(s){
   const l=s&&s.labels;
   return Array.isArray(l)&&(l.indexOf('DUPLICATE')>=0||l.indexOf('ALTERNATIVE')>=0);
+}
+// ---- Force priority: show it, and let the user take it back --------------
+//
+// Force (SAB priority 2) runs even while the queue is paused. That is the
+// documented semantic and it stays; what was missing was any sign of it on
+// the row. A user pressed Pause, the download kept going at line rate, and
+// the row said nothing (reported 21 Sep 2026) - they had never chosen Force:
+// the download-anyway button on a held duplicate writes it. So the row says
+// "forced", the pause pill names the jobs it did not stop, and stopping the
+// force is one click that leaves the job in the queue.
+//
+// `priority` is the SAB word and is enough on its own; a held duplicate
+// reports Normal, and a released one reports Force.
+function isForced(s){ return !!s && s.priority==='Force'; }
+// The display names of the jobs a queue pause is NOT stopping, for the
+// pill's tooltip. `ids` is the daemon's `pause_exempt`, `slots` the queue
+// rows on this page; an id whose row is past the window still counts, in
+// `more`, because the list is a statement about the daemon and not about
+// the page. Names are clipped so a release name cannot make a tooltip a
+// paragraph. Pure: the caller words it.
+function exemptNames(slots, ids, max, clip){
+  const list=Array.isArray(ids)?ids:[], rows=Array.isArray(slots)?slots:[];
+  const names=[]; let more=0;
+  for(const id of list){
+    const s=rows.find(x=>x&&x.nzo_id===id);
+    const n=s?String(s.filename||s.name||''):'';
+    if(!n||names.length>=max){ more++; continue; }
+    names.push(n.length>clip?n.slice(0,clip-1)+'…':n);
+  }
+  return {names,more};
+}
+// The tooltip the pill wears while a pause is standing aside for a forced
+// job: WHICH job, why, and how to stop it.
+function forcePillTitle(q){
+  const ex=exemptNames(q&&q.slots,q&&q.pause_exempt,2,48);
+  if(!ex.names.length) return t('status.paused.force.title','Force priority runs even while the queue is paused, so a forced download keeps going. Pause that download itself to stop it.');
+  const list=ex.names.join(', ')+(ex.more?' '+t('status.paused.force.more','and {n} more',{n:ex.more}):'');
+  return t('status.paused.force.named','Still downloading because it is forced: {names}. Force priority runs even while the queue is paused. Stop forcing it from its row to make the pause apply.',{names:list});
+}
+// One place, one literal: the badge, the row button and the drawer all say
+// this sentence, and the i18n extractor reads the default off the call.
+function forcedTip(){
+  return t('queue.forced.title','Force priority: this download runs even while the queue is paused. Stop forcing it to make a pause apply to it - it stays in the queue at Normal priority.');
+}
+function forceChip(s){
+  if(!isForced(s)) return '';
+  return ` <button type="button" class="qbadge force" title="${escA(forcedTip())}" onclick="event.stopPropagation();unforceJobs(['${escA(s.nzo_id)}'])">⏫ ${esc(t('queue.forced','forced'))}</button>`;
+}
+// The row's one-click control: replaces the ⏫ button on a forced queued
+// row (which has nothing left to do there) and rides beside stop on the
+// downloading one.
+function unforceBtn(s){
+  return `<button class="ghost mini" title="${escA(forcedTip())}" aria-label="${escA(t('queue.unforce','stop forcing'))}" data-snd="down" onclick="event.stopPropagation();unforceJobs(['${escA(s.nzo_id)}'])">⏬</button>`;
+}
+// The drawer's version: the sentence, and the words on the buttons - plus
+// the way back to the hold for a copy that was a held duplicate.
+function forceBlock(s){
+  if(!isForced(s)) return '';
+  const id=escA(s.nzo_id);
+  return `<div style="font-size:12px;margin-top:7px">${esc(forcedTip())}<br>`
+    +`<button class="ghost mini" onclick="event.stopPropagation();unforceJobs(['${id}'])">⏬ ${esc(t('queue.unforce','stop forcing'))}</button>`
+    +(s.held_for?` <button class="ghost mini" title="${escA(t('queue.rehold.title','Put this copy back on hold as a duplicate, the way it was before you pressed download anyway. It stays in the queue, stopped.'))}" onclick="event.stopPropagation();reholdJob('${id}')">⏸ ${esc(t('queue.rehold','put back on hold'))}</button>`:'')
+    +`</div>`;
+}
+// Back to Normal - the job stays in the queue, and is neither restarted
+// nor deleted. Under a queue pause the daemon winds a running job down
+// (it resumes from the journal), so the toast is the same sentence either
+// way. `ids` so the pause toast can take the whole exempt list at once.
+async function unforceJobs(ids){
+  if(!ids||!ids.length) return;
+  const j=await apiPost('queue',{name:'priority', value:ids.join(','), value2:'0'});
+  if(!reportRefusal(j)){ tick(); return; }
+  toast(t('toast.unforced','No longer forced: back to Normal priority. It stays in the queue, and a pause now applies to it.'));
+  tick();
+}
+// A released duplicate back to the hold it came from (Duplicate priority
+// on a row that was held for another is the hold again, daemon-side).
+async function reholdJob(id){
+  const j=await api('queue',`&name=priority&value=${encodeURIComponent(id)}&value2=-3`);
+  if(!reportRefusal(j)){ tick(); return; }
+  toast(t('toast.reheld','Back on hold. It stays in the queue.'));
+  tick();
 }
 function insChip(s){
   const q=s&&s.insurance; if(!q) return '';
@@ -8583,7 +8883,7 @@ function probeFetch(id){
   // have left) is the ONE refusal that is not settled, and the box has
   // to keep asking or it would say "no video file" about a file that is
   // whole and lands seconds later.
-  fetch('/preview/probe/'+encodeURIComponent(id), {headers:key?{'X-Api-Key':key}:{}})
+  fetch('/preview/probe/'+encodeURIComponent(id), {headers: authHeaders(key, false)})
     .then(r=>r.json().catch(()=>({media:null,pending:false})))
     .catch(()=>({media:null,pending:false}))
     .then(j=>{
@@ -9058,7 +9358,7 @@ async function pvWhyRemuxFailed(){
 // the /stream link inside it carries its own per-job ?t= token.
 async function m3uHandoff(id){
   try{
-    const r=await fetch('/m3u/'+encodeURIComponent(id), {headers:key?{'X-Api-Key':key}:{}});
+    const r=await fetch('/m3u/'+encodeURIComponent(id), {headers: authHeaders(key, false)});
     if(!r.ok){ toast(tErr('failed'), true); return; }
     const a=document.createElement('a');
     a.href=URL.createObjectURL(await r.blob());
@@ -10146,15 +10446,25 @@ function actLine(s){
     case 'extracting':{
       const u=s.unpack;
       const vols=u&&u.volumes>1?u.volumes:0;
+      // TODO 101: the volume-eating mode is a choice with a consequence
+      // the user has to be able to see WHILE it runs - once the parts
+      // are gone a failure means fetching the download again, and until
+      // this clause the only places that said so were the drawer that
+      // asked and a report afterwards. Deliberately the disk-full
+      // drawer's OWN button label, not a sentence of its own: the row
+      // and the drawer then name the choice with one vocabulary, and it
+      // is a string all 27 catalogues already carry, so the row says it
+      // in the user's language on the day it ships.
+      const eat=u&&u.eating?' \u00b7 '+t('hist.space.eat','extract in place'):'';
       if(u&&u.total>0){
         const p={a:gb(u.done),b:gb(u.total),u:unit('GB'),n:vols};
-        return vols?t('queue.act.unpackvols','unpacking {a} of {b} {u} across {n} volumes',p)
-                   :t('queue.act.unpackbytes','unpacking {a} of {b} {u}',p);
+        return (vols?t('queue.act.unpackvols','unpacking {a} of {b} {u} across {n} volumes',p)
+                    :t('queue.act.unpackbytes','unpacking {a} of {b} {u}',p))+eat;
       }
       // The count lands before the first volume set is parsed, so this
       // is the shape a just-started ladder shows.
-      if(vols) return t('queue.act.unpackcount','unpacking {n} volumes',{n:vols});
-      return t('queue.act.extracting','unpacking');
+      if(vols) return t('queue.act.unpackcount','unpacking {n} volumes',{n:vols})+eat;
+      return t('queue.act.extracting','unpacking')+eat;
     }
     // U1: the write-out tail in plain words. A row at 100% saying
     // nothing but "Moving · moving files" read as a hang; the sentence
@@ -10653,7 +10963,10 @@ function renderQueue(){
   const finishMb={}; let acc=0;
   for(const x of runnable){ acc+=x.left; finishMb[x.s.nzo_id]=acc; } // inclusive of self
   setHtml(tb, slots.map((s,i)=>{
-    const cum=finishMb[s.nzo_id], eta=(mbps>0&&cum!=null)?cum/mbps:Infinity;
+    // A downloading row's ETA is its OWN bytes over its OWN rate; only a
+    // queued row is estimated from the line (everything ahead of it, over
+    // the whole line's rate). See jobEta.
+    const cum=finishMb[s.nzo_id], est=jobEta(s,mbps,cum);
     const dl=s.status==='Downloading', pz=s.status==='Paused', tail=isTail(s), open=openDrawer===s.nzo_id;
     // U1: the write-out tail gets the plain "not stuck" ETA tooltip.
     const wtail=tail&&(s.finishing||s.status==='Moving');
@@ -10674,8 +10987,11 @@ function renderQueue(){
     const stopTitle = (s.pause_cost && s.pause_cost.kind==='refetch')
       ? t('queue.stop.title.refetch','Stop this download: it unpacks as it arrives, so nothing on disk can be picked up again - the {gb} GB already fetched would be fetched from the start.',{gb:pauseCostGB(s.pause_cost)})
       : t('queue.stop.title','Stop this download: partial data stays on disk, and adding the same NZB again picks up from it');
+    // A forced row gets the way OUT of Force beside its other controls: on
+    // the downloading row next to stop, and on a queued one in place of the
+    // up-arrow that would only write the priority it already has.
     const ctl = dl
-      ? `<button class="ghost mini" title="${escA(stopTitle)}" data-snd="remove" onclick="stopJob('${s.nzo_id}')">✕ ${t('queue.stop','stop')}</button>`
+      ? (isForced(s)?unforceBtn(s):'')+`<button class="ghost mini" title="${escA(stopTitle)}" data-snd="remove" onclick="stopJob('${s.nzo_id}')">✕ ${t('queue.stop','stop')}</button>`
       : tail
       ? `<button class="ghost mini" title="${escA(t('queue.remove.finishing.title','Remove this job. It has already downloaded - this stops the work it is finishing and drops it from the queue.'))}" aria-label="${escA(t('queue.remove.title','Remove from the queue'))}" data-snd="remove" onclick="qOp('delete','${s.nzo_id}')">✕</button>`
       : `<button class="ghost mini" title="${escA(pz?t('queue.resume.title','Resume this item'):t('queue.pause.title','Pause this item'))}" aria-label="${escA(pz?t('queue.resume.title','Resume this item'):t('queue.pause.title','Pause this item'))}" data-snd="${pz?'on':'off'}" onclick="qOp('${pz?'resume':'pause'}','${s.nzo_id}')">${pz?'▶':'⏸'}</button>`+
@@ -10685,7 +11001,9 @@ function renderQueue(){
         // no way to know that - one reported hunting for "that blue
         // icon". The label costs a little width on the rows that are
         // stuck and says nothing on the rows that are not.
-        (dupHeld(s)
+        (isForced(s)
+          ? unforceBtn(s)
+          : dupHeld(s)
           ? `<button class="ghost mini" title="${escA(t('queue.dup.force.title','Download this copy anyway: it releases the duplicate hold and starts this job next.'))}" data-snd="top" onclick="forceJob('${s.nzo_id}')">⏫ ${esc(t('queue.dup.force','download anyway'))}</button>`
           : `<button class="ghost mini" title="${escA(t('queue.force.title','Download this next (force: starts even while paused)'))}" aria-label="${escA(t('queue.force.title','Download this next (force: starts even while paused)'))}" data-snd="top" onclick="forceJob('${s.nzo_id}')">⏫</button>`)+
         // Buttoned reorder beside the drag: drag does not exist on touch,
@@ -10796,8 +11114,8 @@ function renderQueue(){
     // §129 2f: the checkbox renders its state straight from the Set, so
     // selection survives every setHtml tbody re-render by construction.
     const selBox=`<td class="selcol" onclick="selCellClick(event,'q',this)" ondblclick="event.stopPropagation()"><input type="checkbox" class="rowsel" data-sel="${s.nzo_id}"${qSel.has(s.nzo_id)?' checked':''} onclick="selClick(event,'q',this)" aria-label="${escA(t('sel.row','Select {name}',{name:s.filename||s.name}))}"></td>`;
-    return `<tr class="qrow${open?' open':''}" data-id="${s.nzo_id}" data-i="${i}" data-drag="${dl||tail?'0':'1'}" tabindex="0" role="button" aria-expanded="${open}">${selBox}<td>${esc(s.filename||s.name)}${identName(s)}${mediaBadge(s.media)}${shapeBadge(s.archive_shape)}${catBadge(s.cat)}${originGlyph(s.origin)}${ruleBadge(s)}${pz?' '+pzLabel:''}${tail?` <span class="dim">· ${tailWord}</span>`:''}${defer}</td><td class="nowrap">${fmtMB(s.mb)}</td>
-      <td class="nowrap dim"${tail?` title="${escA(t('queue.left.done','nothing left to download - every byte is in; this row is finishing'))}"`:''}>${tail?'-':fmtMB(s.mbleft)}</td><td class="nowrap mono" title="${escA(wtail?t('queue.eta.tail','not stuck: downloading is finished, and anything packed has been unpacked - the row leaves the queue once the last files are written'):tail||actWord?t('queue.eta.finishing','the download is done - this is the work that follows it'):dl?t('queue.eta.active','time to finish this download'):t('queue.eta.queued','estimated finish, once the items ahead complete'))}">${tail?`<span class="dim">${tailWord}</span>`:actWord?`<span class="dim">${actWord}</span>`:pz?'-':fmtEta(eta)}</td>
+    return `<tr class="qrow${open?' open':''}" data-id="${s.nzo_id}" data-i="${i}" data-drag="${dl||tail?'0':'1'}" tabindex="0" role="button" aria-expanded="${open}">${selBox}<td>${esc(s.filename||s.name)}${tail?'':forceChip(s)}${identName(s)}${mediaBadge(s.media)}${shapeBadge(s.archive_shape)}${catBadge(s.cat)}${originGlyph(s.origin)}${ruleBadge(s)}${pz?' '+pzLabel:''}${tail?` <span class="dim">· ${tailWord}</span>`:''}${defer}</td><td class="nowrap">${fmtMB(s.mb)}</td>
+      <td class="nowrap dim"${tail?` title="${escA(t('queue.left.done','nothing left to download - every byte is in; this row is finishing'))}"`:''}>${tail?'-':fmtMB(s.mbleft)}</td><td class="nowrap mono" title="${escA(wtail?t('queue.eta.tail','not stuck: downloading is finished, and anything packed has been unpacked - the row leaves the queue once the last files are written'):tail||actWord?t('queue.eta.finishing','the download is done - this is the work that follows it'):dl&&est.kind==='stalled'?t('queue.eta.stalled.title','No data has arrived for this download recently, so there is no honest time left to show. It counts down again as soon as data moves.'):dl?t('queue.eta.active','time to finish this download'):t('queue.eta.queued','estimated finish, once the items ahead complete'))}">${tail?`<span class="dim">${tailWord}</span>`:actWord?`<span class="dim">${actWord}</span>`:pz?'-':est.kind==='stalled'?`<span class="warn">${t('queue.eta.stalled','stalled')}</span>`:fmtEta(est.kind==='eta'?est.secs:Infinity)}</td>
       <td><div class="bar"><i style="width:${s.percentage}%"></i></div>${actSub(s)}</td>
       <td class="nowrap" style="text-align:end">${ctl}</td></tr>`+
       (open?`<tr class="drawer"><td colspan="7">${drawerHtml(s)}</td></tr>`:'');
@@ -10864,7 +11182,7 @@ async function restartDaemon(btn){
     for(let i=0;i<40;i++){
       await new Promise(r=>setTimeout(r,1000));
       try{
-        const r=await fetch(`/api?mode=version&output=json`, {headers: key?{'X-Api-Key': key}:{}});
+        const r=await fetch(`/api?mode=version&output=json`, {headers: authHeaders(key, false)});
         if(r.ok){ location.reload(); return; }
       }catch(e){/* still down */}
     }
@@ -11539,7 +11857,7 @@ function drawerHtml(s){
     // an insurance run is `Downloading` and is the active job while it
     // runs - so the row that most needs to say it is not an ordinary
     // download is exactly the one that would have missed the block.
-    return files+vline+sline+oline+whyslowBlock(s)+reportBlock(s)+mediaWarnBlock(s.media)+insBlock(s)+altSwitchBlock(s)+pwBlock(s)
+    return files+vline+sline+oline+forceBlock(s)+whyslowBlock(s)+reportBlock(s)+mediaWarnBlock(s.media)+insBlock(s)+altSwitchBlock(s)+pwBlock(s)
       +`<div style="font-size:12px;margin-top:7px">${nzbBlock(s)}</div>`
       +qDelFilesBlock(s)
       +(previewMode==='off'?'':probeHtml(s.nzo_id));
@@ -11605,6 +11923,7 @@ function drawerHtml(s){
       ${dol?`<span class="dim">${t('drawer.origin','added by')}</span><span>${originIconHtml(s.origin)}${esc(dol)}</span>`:''}
       ${s.nzb_path?`<span class="dim">${t('drawer.nzbfile','NZB file')}</span><span class="mono" style="word-break:break-all;font-size:11.5px">${esc(s.nzb_path)} ${nzbBlock(s)}</span>`:''}
     </div>`+
+    forceBlock(s)+
     // The same listing the running job gets, which this branch had none
     // of: get_files answers a queued job from its own spooled .nzb, so
     // "what did I actually queue" is answerable before it starts - which
@@ -11663,7 +11982,7 @@ function drawerHtml(s){
 // bar (see the grab-apikey leak).
 async function dlNzb(id){
   try{
-    const r=await fetch('/jobnzb/'+encodeURIComponent(id), {headers:key?{'X-Api-Key':key}:{}});
+    const r=await fetch('/jobnzb/'+encodeURIComponent(id), {headers: authHeaders(key, false)});
     // Truth-audit I: say WHY it is gone. nzbfast keeps a job's spooled
     // .nzb only while the job is in the queue or history; an hourly
     // sweep clears the ones nothing refers to any more. A bare "it is
@@ -12141,7 +12460,7 @@ async function plexLink(btn){
     setHtml(out, `<b style="font-size:15px;letter-spacing:2px">${esc(j.code)}</b> `
       +`<span class="dim">${t('lsrc.linkhow','enter this code on the Plex page that just opened, then come back - this waits for you.')}</span>`);
     window.open(j.url,'_blank','noopener');
-    // Plex's strong pins last a quarter of an hour; stop well inside it.
+    // A plex.tv/link code lasts a quarter of an hour; stop well inside it.
     for(let i=0;i<100;i++){
       await new Promise(go=>setTimeout(go,3000));
       const p=await api('plex_link_poll',`&value=${encodeURIComponent(j.id)}`);
@@ -16513,7 +16832,7 @@ async function adPreview(nzbs){
     try{
       const fd=new FormData(); fd.append('nzbfile', f, f.name);
       const r=await fetch('/api?mode=nzb_preview',
-        {method:'POST', body:fd, headers: key?{'X-Api-Key': key}:{}});
+        {method:'POST', body:fd, headers: authHeaders(key, false)});
       const j=await r.json().catch(()=>({}));
       if(j.status&&j.checked&&j.health) v={health:j.health};
       else if(j.status&&!j.checked) v={reason:j.reason||'unknown'};
@@ -16631,7 +16950,7 @@ async function uploadNzbsWith(nzbs, stream, opt){
         +(opt.cat?`&cat=${encodeURIComponent(opt.cat)}`:'')
         +(opt.prio!==''?`&priority=${encodeURIComponent(opt.prio)}`:'');
       const r=await fetch(`/api?${q}`,
-        {method:'POST',body:fd,headers: sent?{'X-Api-Key': sent}:{}});
+        {method:'POST',body:fd,headers: authHeaders(sent, false)});
       const j=await r.json().catch(()=>({}));
       if(authFail(j)){ if(await ensureKey(sent)) return uploadNzbsWith(nzbs, stream, opt); return; }
       if(j.status){
@@ -17288,8 +17607,10 @@ async function apiPost(mode, body, authKey){
   if (authKey == null && keyHandoff) await keyHandoff;
   const sent = authKey != null ? authKey : key;
   const epoch = keyEpoch;
+  // TODO 19: same credential choice api() makes, for the same reasons.
   const r=await fetch(`/api?mode=${mode}`,
-    {method:'POST', body:JSON.stringify(body), headers: sent?{'X-Api-Key': sent}:{}});
+    {method:'POST', body:JSON.stringify(body),
+     headers: authHeaders(sent, authKey != null)});
   const j=await readJson(r);
   // Never prompt for a one-shot credential: surface the error instead,
   // exactly as `api` does.
@@ -17317,6 +17638,9 @@ async function apiPost(mode, body, authKey){
 // special-character bug: those requests worked perfectly and disclosed
 // the secret anyway.
 const SECRET_CFG = new Set(['apikey','nzbkey','omdb_key','tmdb_key','notify_targets',
+  // TODO 19: the dashboard password, for exactly the reason this set
+  // exists - and the username with it, which is half a credential.
+  'web_password','web_username',
   'arr_instances','indexers','feeds','unraid_key','scoreboard_key',
   // §151: a Plex watchlist address is a bearer capability, not an
   // address - anyone holding it can read the list. One source is well
@@ -17568,6 +17892,46 @@ async function newApiKey(){
   await loadSettings();
 }
 
+
+// ---- TODO 19 (public request #4): the optional dashboard login -------
+// The daemon owns every rule here; these three are the controls.
+
+// Save the password box. Not `setCfg`, because this field's EMPTY state
+// means "leave the stored one alone" rather than "clear it" - a
+// write-only box that wiped the password every time the settings panel
+// re-rendered would be a lockout waiting to happen. Removing it is a
+// deliberate act: a single space, which the daemon's setter reads as
+// non-empty and the 8-character floor then refuses... so it is handled
+// here instead, with a confirm, and sends the true empty string.
+async function saveWebPassword(el){
+  const v = el.value;
+  el.value = '';
+  if(v === '') return;                       // keep what is stored
+  if(v.trim() === ''){
+    if(!confirm(t('set.sec.webpass.remove','Remove the dashboard password?\n\nThe login form goes away and the dashboard opens with the API key again, as it did before. Every signed-in browser is signed out.')))
+      return;
+    await setCfg('web_password', '');
+    return;
+  }
+  await setCfg('web_password', v);
+}
+
+// `signOut()` is NOT here. It is web/ui-signout.html, shared with the
+// wall, which is behind the same login gate and had no way out of it
+// until 21 Sep 2026. `assets.rs` substitutes the partial into this
+// page's <head>, so the pill's `onclick` resolves it as before.
+
+// Sign EVERY browser out, including this one. The daemon drops the whole
+// session table, so the reload that follows lands on the form.
+async function signOutEverywhere(btn){
+  if(!confirm(t('set.sec.logoutall.confirm','Sign every browser out of the dashboard?\n\nThis one included - you will be asked for the password again. Sonarr, Radarr and phone apps are not affected.')))
+    return;
+  await busy(btn, t('set.sec.logoutall.working','Signing out…'), async () => {
+    mustOk(await api('config', '&name=web_logout_all&value=1', undefined, true));
+    location.href = '/';
+  });
+}
+
 // Same two buttons for the add-only NZB key (a Reddit ask: NZB Donkey
 // wants this key, and there was no way to see or mint one). Reveal
 // rides apikey_show, which returns both keys; both buttons still need
@@ -17721,6 +18085,24 @@ function renderTuneHint(){
   thr.style.display=msg?'':'none';
   document.getElementById('tuneHint').textContent=msg?('⚠ '+msg):'';
 }
+// The sign-out pill in the nav. `web_login` is the daemon's own answer
+// to "is there a login form", so the page does not re-derive the
+// both-halves rule that `websession::login_on` owns.
+//
+// ONE function with TWO callers, and the second one is why it exists.
+// This used to be two lines inside loadSettings(), which runs only when
+// somebody OPENS Settings - so on a protected install the only control
+// that signs a browser out was invisible until the user had been to a
+// page they had no reason to visit. Found 21 Sep 2026 by
+// journeys/tests/login.spec.ts, which is what that suite is for.
+// checkWelcome() already reads the same `get_config` at boot, so the fix
+// is a second call and not a second fetch.
+function renderSignoutPill(c){
+  // The reveal itself is the wall's too, so it lives in the shared
+  // partial; what stays here is the dashboard's own SOURCE for it - the
+  // `get_config` answer, which the wall does not fetch.
+  revealSignoutPill(!!(c&&c.web_login));
+}
 async function loadSettings(){
   // Appearance is browser-local, so it does not wait on the daemon and
   // must still populate if the config call fails below.
@@ -17777,6 +18159,7 @@ async function loadSettings(){
    ['s_rename_extra_words',c.rename_extra_words],['s_rename_identify',c.rename_identify],
    ['s_rename_episode_titles',c.rename_episode_titles],
    ['s_skip_samples',c.skip_samples],
+   ['s_repair_defer_long',c.repair_defer_long],
    ['s_rename_junk',c.rename_junk],['s_rename_media_only',c.rename_media_only],
    // Not a rename-sub either: it is the OTHER answer to what a finished
    // download is called, so it stays readable with auto-rename off.
@@ -17870,6 +18253,7 @@ async function loadSettings(){
   if(!document.querySelector('#catfilerows :focus')) renderCatFiles(c.categories||'', c.move_completed_cats||'', c.cat_meta||{}, c.write_through_cats||'');
   put('s_out_umask', c.out_umask||''); put('s_min_free', sizeStr(c.min_free)); put('s_quota', sizeStr(c.quota));
   put('s_quota_period', c.quota_period||'d');
+  put('s_log_detail', c.log_detail||'normal');
   put('s_dupe_action', c.dupe_action||'pause');
   put('s_dupe_scope', c.dupe_scope||'smart');
   put('s_nested_max_depth', c.nested_max_depth??5);
@@ -18146,6 +18530,22 @@ async function loadSettings(){
   // LAN URLs and QR codes. Same fact, same volume, in both places.
   const ob=document.getElementById('secOpenBadge'); if(ob) ob.style.display=c.has_apikey?'none':'';
   const on=document.getElementById('remoteOpenNote'); if(on) on.style.display=c.has_apikey?'none':'';
+  // TODO 19: the dashboard login. The username box echoes the stored
+  // name (it is not a secret); the password box is write-only like the
+  // two keys above it, and says only whether one is stored.
+  const wu=document.getElementById('s_web_username');
+  if(wu && document.activeElement!==wu) wu.value=c.web_username||'';
+  const wp=document.getElementById('s_web_password');
+  if(wp && document.activeElement!==wp) wp.value='';
+  const wps=document.getElementById('s_web_password_state');
+  // Deliberately NOT a plural family. "signed in" counts browsers rather
+  // than agreeing with one, so a `.one/.many` pair here would cost every
+  // Slavic catalogue a `.few` and Arabic four extra forms to say the same
+  // thing in every one of them.
+  if(wps) wps.textContent = (c.has_web_password
+    ? t('set.sec.webpass.on','stored · {n} signed in',{n:c.web_sessions||0})
+    : t('set.sec.webpass.off','not set'));
+  renderSignoutPill(c);
   noteServerConfig(c); renderServers(); renderSetup(c); renderPresetState();
   if(!document.querySelector('#schedrows :focus')) renderSched(parseSchedText(c.schedule));
   if(!document.querySelector('#feedrows :focus')) renderFeeds(c.feeds||[]);
@@ -21042,6 +21442,9 @@ async function checkWelcome(){
     // Shared with the role presets and the setup checklist, which both
     // read the live config rather than being handed a copy of it.
     window._lastCfg=c;
+    // TODO 19: the sign-out pill, on the ONE call every dashboard load
+    // already makes. See `renderSignoutPill`.
+    renderSignoutPill(c);
     const first = c.servers_configured===false;
     // §129 4c: state B - a server exists, nothing has ever downloaded.
     // `jobs_ever` is a STICKY daemon fact (queue, history, or a nonzero

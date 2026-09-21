@@ -36,13 +36,13 @@
 //! one file: `polyglot` appends a second, complete archive of another
 //! format behind the first, so what the client does with the file
 //! depends on which signature it trusts and in what order. See
-//! [`refuse_a_polyglot_the_client_never_has_to_read`] for the two
+//! `refuse_a_polyglot_the_client_never_has_to_read` for the two
 //! shapes that look like C8 and are not. Several keys on this table are
 //! RAR's alone - `version`, `recovery_record_pct` (C10) and
 //! `volume_style` (C11) - and a 7z or zip profile that writes one is
 //! refused by name rather than having it quietly dropped
-//! ([`refuse_a_sevenz_shape_that_is_rars`],
-//! [`refuse_a_zip_shape_that_is_rars`]).
+//! (`refuse_a_sevenz_shape_that_is_rars`,
+//! `refuse_a_zip_shape_that_is_rars`).
 //!
 //! **A split archive means three different things on this plane.** A
 //! RAR volume set is self-describing - every volume carries a header -
@@ -52,7 +52,7 @@
 //! The cut itself is one function, [`crate::sevenz::split_parts`],
 //! because chunking a byte slice knows nothing about either format; the
 //! part NAMES differ (`.7z.001` against `.zip.001`) and live in
-//! [`volume_names`]. The zip format has a second multi-part spelling -
+//! `volume_names`. The zip format has a second multi-part spelling -
 //! WinZip spanning, `.z01` ... `.zip` - which `nzbkit::zip` reads and
 //! no writer here emits; [`crate::zip`]'s header says why it is left
 //! unemitted rather than approximated.
@@ -208,7 +208,7 @@ pub enum ContainerError {
     RoundTrip(String),
     /// `kind = "rar-compressed"` was selected and the writer stored
     /// every member, so the emitted archive is a C1 wearing a C3
-    /// selection. See [`refuse_a_compressed_archive_that_stored`].
+    /// selection. See `refuse_a_compressed_archive_that_stored`.
     NothingToCompress,
     /// H4: a level's own PAR2 set could not be built.
     LevelRecovery { level: usize, detail: String },
@@ -2616,5 +2616,10 @@ impl Write for Collect {
 // The case table, out of line so the production file keeps its whole
 // ceiling: a `#[cfg(test)] mod foo;` TARGET is scored against size-gate's
 // TEST_FILE_CEILING rather than the flat production one.
+// The ONE place this crate's tests build RAR fixtures through the
+// engine's writer directly, named by shape (cutover plan P3).
+#[cfg(test)]
+mod rarfixtures;
+
 #[cfg(test)]
 mod tests;

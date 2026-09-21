@@ -61,14 +61,14 @@ fn only_the_unpacking_row_carries_its_ladder_counters() {
         // reason this is keyed by nzo_id rather than held in one slot.
         assert_eq!(row(d, "nzo-b")["unpack"], Value::Null);
 
-        // The ladder's first set parses and starts producing. `watch`
-        // cannot raise a total from an empty archive list, so the figure
-        // comes from the same call the plain feed route uses - the
+        // The ladder's first set parses and starts producing. `watch` is
+        // handed no total here, so the figure comes from the same call
+        // the plain feed route uses - the
         // arithmetic that derives a real total from real headers is
         // pinned in `unpacked_total`'s own tests, and end to end on all
         // four routes in `repair::unpackprog_tests`.
         let written = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        crate::unpackprog::watch(&written, &[], 0);
+        crate::unpackprog::watch(&written, 0, 0);
         crate::unpackprog::raise_total(40_000_000_000);
         written.store(9_000_000_000, std::sync::atomic::Ordering::Relaxed);
         let a = row(d, "nzo-a");

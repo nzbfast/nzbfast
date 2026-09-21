@@ -1,6 +1,6 @@
-use crate::codec::rar13::Unpack15;
-use crate::codec::rar20::Unpack20;
-use crate::codec::rar29::Unpack29;
+use crate::codec::rar13::Rar15Decoder;
+use crate::codec::rar20::Rar20Decoder;
+use crate::codec::rar29::Rar29Decoder;
 use crate::crc32::{crc32, Crc32};
 use crate::crypto::rar15::Rar15Cipher;
 use crate::crypto::rar20::Rar20Cipher;
@@ -84,6 +84,10 @@ const FHD_UNICODE: u16 = 0x0200;
 const FHD_SALT: u16 = 0x0400;
 const FHD_EXTTIME: u16 = 0x1000;
 const FHD_DIRECTORY_MASK: u16 = 0x00e0;
+const HOST_MSDOS: u8 = 0;
+const HOST_OS2: u8 = 1;
+const HOST_WIN32: u8 = 2;
+const DOS_ATTR_DIRECTORY: u32 = 0x10;
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -420,7 +424,17 @@ impl FileHeader {
     }
 
     pub fn is_directory(&self) -> bool {
-        self.block.flags & FHD_DIRECTORY_MASK == FHD_DIRECTORY_MASK
+        if self.block.flags & FHD_DIRECTORY_MASK == FHD_DIRECTORY_MASK {
+            return true;
+        }
+        // A genuine DOS RAR 1.55 does not set the directory window bits:
+        // its directory headers carry flags 0x8000 only, unpack version 15,
+        // and mark the entry by the DOS directory attribute alone. Honour
+        // that attribute for pre-2.0 entries from hosts that store DOS
+        // attributes (MS-DOS, OS/2, Win32).
+        self.unp_ver < 20
+            && matches!(self.host_os, HOST_MSDOS | HOST_OS2 | HOST_WIN32)
+            && self.attr & DOS_ATTR_DIRECTORY != 0
     }
 
     pub fn has_ext_time(&self) -> bool {
@@ -494,12 +508,21 @@ impl FileHeader {
     pub(crate) fn unpacked_data_with_rar29(
         &self,
         archive: &Archive,
-        decoder: &mut Unpack29,
+        decoder: &mut Rar29Decoder,
         solid: bool,
     ) -> Result<Vec<u8>> {
         if self.is_stored() {
             return self.stored_data(archive);
         }
+        // NOT the encrypted path, and not a gap either: every caller of
+        // this helper - `DecoderSession`'s `CodecState` is the only one -
+        // tests `is_encrypted()` FIRST and drives the cipher itself,
+        // through `packed_reader_for_decode`, exactly as the RAR 1.5 and
+        // RAR 2.0 arms beside it do. Encrypted compressed RAR 2.9-4.x
+        // members extract here today (the `rar300` and third-party
+        // encrypted fixtures pin them, single-volume and split). This
+        // refusal is the guard on a caller that forgets, so it must stay
+        // and must not be read as "the codec cannot do it".
         if self.is_encrypted() {
             return Err(self.unsupported_encryption());
         }
@@ -517,15 +540,16 @@ impl FileHeader {
         .map_err(Into::into)
     }
 
-    pub(crate) fn unpacked_data_with_unpack15(
+    pub(crate) fn unpacked_data_with_rar15(
         &self,
         archive: &Archive,
-        decoder: &mut Unpack15,
+        decoder: &mut Rar15Decoder,
         solid: bool,
     ) -> Result<Vec<u8>> {
         if self.is_stored() {
             return self.stored_data(archive);
         }
+        // Encrypted members never reach here: see `unpacked_data_with_rar29`.
         if self.is_encrypted() {
             return Err(self.unsupported_encryption());
         }
@@ -545,7 +569,7 @@ impl FileHeader {
     pub(crate) fn unpacked_data_with_unpack20(
         &self,
         archive: &Archive,
-        decoder: &mut Unpack20,
+        decoder: &mut Rar20Decoder,
         password: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
         if self.is_stored() {
@@ -757,12 +781,13 @@ impl FileHeader {
     fn write_rar29_to(
         &self,
         archive: &Archive,
-        decoder: &mut Unpack29,
+        decoder: &mut Rar29Decoder,
         out: &mut impl Write,
     ) -> Result<()> {
         if self.is_stored() {
             return self.write_stored_to(archive, None, out);
         }
+        // Encrypted members never reach here: see `unpacked_data_with_rar29`.
         if self.is_encrypted() {
             return Err(self.unsupported_encryption());
         }
@@ -795,10 +820,10 @@ impl FileHeader {
         }
     }
 
-    fn write_unpack15_to(
+    fn write_rar15_to(
         &self,
         archive: &Archive,
-        decoder: &mut Unpack15,
+        decoder: &mut Rar15Decoder,
         solid: bool,
         password: Option<&[u8]>,
         out: &mut impl Write,
@@ -813,13 +838,13 @@ impl FileHeader {
         let mut input = self
             .packed_reader_for_decode(archive, password)
             .map_err(|error| self.map_encrypted_payload_error(password, error))?;
-        self.write_unpack15_decoded(decoder, solid, &mut input, out, password)
+        self.write_rar15_decoded(decoder, solid, &mut input, out, password)
             .map_err(|error| self.map_encrypted_payload_error(password, error))
     }
 
-    fn write_unpack15_decoded(
+    fn write_rar15_decoded(
         &self,
-        decoder: &mut Unpack15,
+        decoder: &mut Rar15Decoder,
         solid: bool,
         input: &mut impl Read,
         out: &mut impl Write,
@@ -846,7 +871,7 @@ impl FileHeader {
     fn write_unpack20_to(
         &self,
         archive: &Archive,
-        decoder: &mut Unpack20,
+        decoder: &mut Rar20Decoder,
         password: Option<&[u8]>,
         out: &mut impl Write,
     ) -> Result<()> {
@@ -920,7 +945,7 @@ impl CommentHeader {
             }
             data
         } else if self.unp_ver == 15 {
-            Unpack15::default().decode_member(&self.packed_data(archive)?, target, false)?
+            Rar15Decoder::default().decode_member(&self.packed_data(archive)?, target, false)?
         } else {
             return Err(Error::UnsupportedCompression {
                 family: "RAR 1.5 comment",
@@ -1691,7 +1716,7 @@ impl Archive {
         // process"). The archive's own length is the ceiling: a comment
         // cannot honestly decode to more than the file it lives in.
         let budget = self.source.len()? as u64;
-        if u64::from(comment.file.pack_size).saturating_add(u64::from(comment.file.unp_size))
+        if comment.file.pack_size.saturating_add(comment.file.unp_size)
             > budget
         {
             return Err(Error::LegacyRepairTooLarge);
@@ -2109,7 +2134,7 @@ fn newsub_recovery_data(archive: &Archive, recovery: &NewSubHeader) -> Result<Ve
     // The archive's own length is the ceiling: a recovery record cannot
     // honestly decode to more than the file it protects.
     let budget = archive.source.len()? as u64;
-    if u64::from(recovery.file.pack_size).saturating_add(u64::from(recovery.file.unp_size)) > budget
+    if recovery.file.pack_size.saturating_add(recovery.file.unp_size) > budget
     {
         return Err(Error::LegacyRepairTooLarge);
     }
@@ -3713,11 +3738,49 @@ mod tests {
         let directory = file_header_with(FHD_DIRECTORY_MASK);
         assert!(directory.metadata().is_directory);
 
+        // RAR 1.5 from a DOS writer: no directory flag bits, DOS attribute only.
+        let mut dos15 = file_header_with(0x8000);
+        dos15.unp_ver = 15;
+        dos15.attr = 0x10;
+        assert!(dos15.is_directory());
+        let mut unix15 = dos15.clone();
+        unix15.host_os = 3;
+        assert!(!unix15.is_directory());
+        let mut dos20 = dos15.clone();
+        dos20.unp_ver = 20;
+        assert!(!dos20.is_directory());
+        let mut dos15_file = dos15.clone();
+        dos15_file.attr = 0x20;
+        assert!(!dos15_file.is_directory());
+
         // Garbage bytes still produce a String through lossy decoding.
         let mut garbage = file_header_with(0);
         garbage.name = vec![0xff, 0xfe, b'/', 0x80, b'x'];
         let lossy = garbage.name_lossy();
         assert!(lossy.ends_with("/\u{fffd}x"), "got {lossy:?}");
+    }
+
+    /// Written by a genuine DOS RAR 1.55: its directory headers carry flags
+    /// 0x8000 only, so the DOS directory attribute is the sole marking.
+    #[test]
+    fn dos_rar155_directories_are_marked_by_attribute_alone() {
+        let archive = Archive::parse_path(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/rar15_40/rar155_dos/dir_nested_155_m0.rar"
+        ))
+        .unwrap();
+        let entries: Vec<(Vec<u8>, bool, u16)> = archive
+            .files()
+            .map(|file| (file.name.clone(), file.is_directory(), file.block.flags))
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                (b"SUB".to_vec(), true, 0x8000),
+                (b"SUB\\NESTED".to_vec(), true, 0x8000),
+                (b"SUB\\NESTED\\DEEP.TXT".to_vec(), false, 0x8000),
+            ]
+        );
     }
 
     #[test]

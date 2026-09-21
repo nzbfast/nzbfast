@@ -49,7 +49,7 @@ pub struct MemberSurvey {
 /// incomplete original a repair consumed is now junk it should delete
 /// (`reconstructed`). Deciding which donor fed which target is a
 /// CHECKSUM question, and the only place it is answered is
-/// [`adopt::adopt_blocks`] - a caller that answered it again would be
+/// `adopt::adopt_blocks` - a caller that answered it again would be
 /// reading every candidate a second time to reach a conclusion this
 /// repair already holds. So the decision is reported, not re-derived.
 ///
@@ -65,22 +65,33 @@ pub struct ExtraFileMatch {
     /// out-relative vocabulary [`RepairReport::adopted_from`] speaks, so
     /// a nested candidate is a path a reader (or SABnzbd) can open.
     pub donor: String,
-    /// The target its blocks belong to, as the recovery set names it,
-    /// or `None` when they belong to MORE THAN ONE - the reference's
-    /// "several target files" line. That third shape is the one
-    /// SABnzbd's two rename regexes deliberately do not match, here as
-    /// there: the line names no single target to rename to.
+    /// The target its blocks belong to, as the recovery set names it -
+    /// the one it MOSTLY fed when it fed several, and `None` only when
+    /// two targets tie for that lead. That third shape is the
+    /// reference's "several target files" line and the one SABnzbd's
+    /// two rename regexes deliberately do not match, here as there: the
+    /// line names no single target to rename to. Why the plurality and
+    /// not "fed exactly one", what it is held against and what it cost
+    /// to get wrong are at `adopt::extra_file_matches`.
     pub target: Option<String>,
-    /// Blocks this repair took from this donor for that target.
+    /// Blocks this repair took from this donor FOR THAT TARGET - so a
+    /// donor named for the target it mostly fed does not carry the
+    /// blocks it also gave another one. Zero cross-target blocks is the
+    /// ordinary case and then this is simply what it donated.
     pub blocks: usize,
     /// Blocks the target has in total. Zero when `target` is `None`.
     pub target_blocks: usize,
     /// The donor IS that target, whole: same length, and every one of
     /// its blocks adopted at its own aligned offset. The reference
     /// reaches this by comparing the whole-file MD5, and
-    /// [`adopt::adopt_blocks`]'s fast path is that same comparison - a
+    /// `adopt::adopt_blocks`'s fast path is that same comparison - a
     /// sliding-scan hit cannot reach it, because a file that hashed
     /// equal would have been claimed by the fast path first.
+    ///
+    /// Never true for a donor that fed a SECOND target, even when it is
+    /// named for the first: this flag is what a caller prints
+    /// `is a match for` off and what the engine's own rename path acts
+    /// on, and those two must not part company.
     pub whole_file: bool,
 }
 
@@ -96,6 +107,9 @@ pub struct PacketSeen {
     /// The packet MD5 from its header - the identity duplicates across
     /// volumes share, and what a per-file "new packets" census dedupes on.
     pub md5: [u8; 16],
+    /// The recovery set id the packet declares. Packets from a
+    /// DIFFERENT set can sit in the same directory, so this is what
+    /// tells a census which ones belong to the job in hand.
     pub set_id: [u8; 16],
     /// `Some` for a structurally valid recovery slice (a RecvSlic body
     /// carrying its 4-byte exponent), the rule the parser's own census
@@ -106,6 +120,9 @@ pub struct PacketSeen {
 /// The two things about a recovery slice a count needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecoverySeen {
+    /// The slice's RS exponent, from the first 4 bytes of the body.
+    /// Duplicates across volumes are ordinary; the smallest exponents
+    /// are the ones a solve reaches for.
     pub exponent: u32,
     /// The slice payload length, past the exponent - what
     /// [`crate::par2::slice_fits_block`] judges.
@@ -116,7 +133,12 @@ pub struct RecoverySeen {
 /// in file order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PacketFileScan {
+    /// The packet file as the scan found it on disk.
     pub path: PathBuf,
+    /// Packets that VALIDATED in this file, in file order. A packet
+    /// whose own MD5 failed is absent rather than marked, exactly as
+    /// the reference loader skips it - so this list cannot be used to
+    /// count corruption.
     pub packets: Vec<PacketSeen>,
 }
 
@@ -124,6 +146,7 @@ pub struct PacketFileScan {
 /// (sorted) order - see [`SurveyObserver::packets_scanned`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScanReport {
+    /// One entry per packet file read, in the catalog's sorted order.
     pub files: Vec<PacketFileScan>,
 }
 

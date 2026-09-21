@@ -410,6 +410,38 @@ env:
   # name the version they got.
   PAR2REF_TAG: "v1.3.0"
   PAR2REF_KEY_SUFFIX: "v1"
+  # THE WINDOWS HALF OF THAT SAME REFERENCE, added 17 Sep 2026 because
+  # `windows-unit` had none at all. Its six shards run the same
+  # unfiltered archive the Linux shards do, so the four par2 modules
+  # under crates/nzbkit/tests/integration/ and the four par2 tests in
+  # nzbfast's `integration` target were IN it - and with no par2 on the
+  # runner every one of them took its `have_par2()` skip arm and was
+  # counted green. 38 tests reporting a pass without running, on the one
+  # platform whose file-sharing semantics several of them exist to check
+  # (read the module header of tests/integration/stream_repair.rs).
+  # Census: WINDOWS-PAR2-SKIP-CENSUS-2026-09-17.md - the directory is
+  # left off on purpose, because this file is published verbatim and
+  # the strip refuses a surviving private tree name.
+  #
+  # THE SAME TAG AS THE LINUX SIDE, and that is the load-bearing half:
+  # `native_repair_matches_par2cmdline_byte_for_byte` and
+  # `beyond_capacity_fails_on_both_engines` compare our engine against
+  # THIS binary, so a different reference on Windows would be comparing
+  # against a different oracle and calling the answer parity. It is the
+  # upstream release ASSET rather than a build from source only because
+  # par2cmdline's autotools build is not a thing windows-latest does in
+  # a reasonable number of minutes; the bits are the same project at the
+  # same tag.
+  #
+  # NOT pr-check.yml's par2cmdline-turbo: that job installs a FORK, for
+  # a leg whose par2 is a fixture creator, where any conforming par2
+  # will do. Here it is the parity oracle.
+  #
+  # The version string is derived from PAR2REF_TAG by dropping the `v`,
+  # so the tag stays single-source - but THE SHA256 BELOW MOVES WITH IT.
+  # Bump both in the same commit or the step fails closed on a mismatch,
+  # which is the intended direction.
+  PAR2REF_WIN_X64_SHA256: "4164d2e689b6bca6a14c4d4a303582ff40307b5739737f1d29695b65002b13ea"
   # Pinned once, consumed by six jobs. Both the version and the two
   # SHA256s move together.
   NT_VERSION: "0.9.140"
@@ -1228,11 +1260,63 @@ jobs:
           # build that was needed. Caught by a table of ten path shapes
           # run against this exact loop before it landed; every one
           # answered `false`.
+          # tools/ IS INERT BY EXTENSION SINCE 18 Sep 2026, and the two
+          # FORCED arms above the inert one are the whole of the care
+          # this took. Measured over the 299 pushes to main ending
+          # 2026-09-18T01:32Z: 85 forced a build and 21 of them (7.0% of
+          # all pushes, 24.7% of all builds) were forced by a path under
+          # tools/ and nothing else. Every one of those 21 was a gate
+          # script or a roster generator - ci-verdict.py ten times,
+          # preflight.py three, one-process-roster.py twice.
+          #
+          # WHY THAT IS SAFE, censused rather than assumed, because the
+          # arm above this block is the standing warning that "not
+          # compiled" does not imply "cannot change a test result":
+          #
+          #   - NO RUST SOURCE READS tools/ except one include_str!,
+          #     which is the first carve-out below. Grepped over
+          #     crates/, vendor/ and apps/: three hits, two of them
+          #     prose inside an assertion message.
+          #   - THE 19 BUILD-FREE GATES that this workflow's build-gated
+          #     `check` job runs out of tools/ ALL ALSO RUN in
+          #     size-gate.yml, whose trigger carries '**/*.py' and which
+          #     is gated on nothing. Checked mechanically: the set
+          #     difference is empty. So a gate script's own change is
+          #     still verified by the push that makes it, on every
+          #     branch, which is more coverage than it had here.
+          #
+          # THE INERT ARM IS SPELLED BY EXTENSION, NOT AS tools/*, ON
+          # PURPOSE. A future DATA file under tools/ - a fixture some
+          # test include_str!s or reads at runtime, which is exactly the
+          # neither tools/*.py nor tools/*.sh, falls through to the
+          # catch-all below, and FORCES. A blanket tools/* would adopt
+          # it silently and in the unsafe direction. Keep it that way:
+          # widen this to a directory only with a census behind it.
+          #
+          # WHAT THIS DOES NOT FIX, so nobody reads it as the answer to
+          # the 1.6.0 candidate losing its Windows verdict: the harm
+          # there is windows-build's concurrency group holding ONE
+          # pending run, and this edit makes eviction rarer rather than
+          # impossible. Simulated against these same 299 pushes at the
+          # measured 21.2-minute median service time, the share of
+          # build-forcing pushes that get a Windows verdict goes from
+          # 20% to 27%, and the number of Windows builds actually
+          # EXECUTED is 17 either way - the group, not the filter, is
+          # the throttle, so this saves no runner minutes at all. It is
+          # worth landing because the push that evicted the 1.6.0
+          # candidate was one of these 21 and would now classify inert.
+          # The rate, the census behind the two forced arms, the queue
+          # simulation and the priced options for the group itself are in
+          # CHANGES-FILTER-TOOLS-INERT-2026-09-18.md, with no directory
+          # named because the tree it sits in is not published.
           verdict=skip
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             case "$f" in
+              tools/conformance/*) echo "FORCE $f (compiled into a parfast test by include_str!, and par2-conformance reads this tree)"; verdict=build; break ;;
+              tools/dep-cache-key.py) echo "FORCE $f (a step in three build jobs, and its --selftest runs only in the build-gated check job)"; verdict=build; break ;;
               docs/*|website/*) ;;
+              tools/*.py|tools/*.sh) ;;
               */*)   echo "FORCE $f"; verdict=build; break ;;
               *.md)  ;;
               *)     echo "FORCE $f"; verdict=build; break ;;
@@ -2087,6 +2171,52 @@ jobs:
       - name: doctests
         if: ${{ !cancelled() && steps.archive.outcome == 'success' }}
         run: cargo test --doc --locked --no-fail-fast
+      # THE RUSTDOC GATE, and it is a SEPARATE claim from the doctest
+      # step above: a doctest runs the examples, this refuses a doc
+      # comment whose intra-doc link points at nothing, at a PRIVATE
+      # item, or whose prose contains an unclosed `<tag>` rustdoc reads
+      # as HTML. Nothing checked any of that before 20 Sep 2026 and
+      # nzbkit and nzbkit-base carried 273 such errors, every one of them
+      # invisible to `cargo build`, `cargo clippy -D warnings` and the
+      # whole nextest sweep, because rustdoc's lints only fire under
+      # rustdoc.
+      #
+      # IT NAMES THE TWELVE FIRST-PARTY PACKAGES since 21 Sep 2026, the
+      # same list as the clippy gate minus the two crates that ship no
+      # library docs (nzbtray, nzbfast-ffi). It began as the two the repo
+      # intends to put on crates.io (TODO 84), where a broken doc link
+      # becomes a public artefact on docs.rs; the other ten carried 65
+      # visible errors and a great many more hidden behind them, because
+      # a crate that fails to document stops its dependents being
+      # documented at all (the layering trap the clippy gate's comment
+      # describes, in rustdoc's axis). Naming all twelve in ONE
+      # invocation is also what turns `nzbkit-base`'s `digest-cache`
+      # feature on, through parfast, which is a second configuration of
+      # that crate's docs the two-package step never compiled. The fix
+      # for a new hit is at the site, never a dropped `-D warnings` and
+      # never a `pub` widened to make a link resolve: demote a link to an
+      # item the reader cannot reach to a plain code span.
+      #
+      # `-D warnings` and NOT a `#![deny(rustdoc::...)]` in each lib.rs:
+      # the deny attribute would fire in every lane's ordinary
+      # `cargo doc`, which is right, but it also has to be spelled once
+      # per lint and kept in step with rustdoc's list. One env var here
+      # takes the whole family, present and future.
+      #
+      # `missing_docs` is deliberately NOT part of this gate. Measured
+      # on the day it landed: 885 public items across the two crates
+      # carry no doc comment, and a gate that can only be satisfied by
+      # 885 doc comments written in one sitting buys filler prose. TODO
+      # 84 carries the census; turning the lint on is a later lane's
+      # ratchet, not this step's.
+      - name: rustdoc (twelve first-party packages)
+        if: ${{ !cancelled() && steps.archive.outcome == 'success' }}
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: >-
+          cargo doc -p nzbkit-base -p nzbkit -p nzbfast-core -p nzbfast-unpack
+          -p nzbfast-meta -p nzbfast-engine -p nzbfast-daemon -p nzbfast-tasks
+          -p nzbfast-api -p nzbfast -p postfast -p parfast --no-deps --locked
       # `always()`, and immediately after the build - see the restore
       # note above. A failed suite must not cost the next run its
       # dependency artifacts.
@@ -2453,8 +2583,10 @@ jobs:
   # (rars 19.4 s / 961 tests, lzma-rust2 1.7 s / 41, tiny_http 0.5 s /
   # 27) against a loop that is ~620 s on the runner, and they add NO
   # build: the archive already carried all three, built and thrown away.
-  # `rars` arrives with `parallel` on for free - four first-party crates
-  # depend on it with that feature, so workspace unification resolves it
+  # `rars` arrives with `parallel` on for free - nzbfast-unpack and
+  # postfast depend on it with that feature and the bin does as a
+  # dev-dependency (nzbfast-core's line went on 18 Sep 2026), so
+  # workspace unification resolves it
   # - which is the 38-test trap CONTRIBUTING.md's hand line has to name
   # explicitly and this job cannot fall into. `tiny_http` likewise
   # arrives with `ssl-rustls` on, so this runs MORE of that fork than
@@ -3072,6 +3204,63 @@ jobs:
           echo "$out"
           if ! grep -q "par2cmdline conformance:" <<<"$out"; then
             echo "::error::the guard printed no conformance line - the test name no longer resolves."
+            echo "::error::libtest exits 0 on a filter that matches nothing, so this step checks."
+            exit 1
+          fi
+      # THE SECOND LINE THIS JOB PUTS IN THE LOG, and it is here for the
+      # same reason as the one above: a verdict that cannot say WHAT it
+      # covered is not much of a verdict.
+      #
+      # `gf16`'s tests deliberately FORCE every SIMD kernel arm this cpu
+      # can run, so the test name pins which kernel failed - and each
+      # forced arm sits behind a runtime feature probe that skips it IN
+      # SILENCE when the part lacks the instruction. The suite therefore
+      # reported `ok` whether it exercised five kernels or one, and no
+      # log anywhere said which. On 18 Sep 2026 that made the 5 Sep
+      # `windows-one-process` red in
+      # `xor_mul_multi_matches_single_source_folds` nearly undiagnosable:
+      # the whole diagnosis turned on whether the runner had GFNI, and
+      # the job log could not answer it
+      # (GF16-AVX2-MULTI-5SEP-2026-09-18.md - the bare filename, because
+      # the directory holding it is stripped out of the published copy of
+      # this file and a surviving path would break the publish).
+      #
+      # A roster printed only on FAILURE would not have helped either -
+      # "which kernels has CI ever verified" is a question about GREEN
+      # runs, and this runner's answer is the inventory
+      # (GF16-KERNEL-ARM-COVERAGE-2026-09-18.md, bare filename for the
+      # same reason) that says which production kernels are exercised by
+      # nothing on this fleet.
+      #
+      # Same shape and same cost as the conformance step above: the
+      # binary is already extracted, `--nocapture` on the loop itself is
+      # not an option, so one named test is re-run for its output. And
+      # the same refusal - libtest exits 0 on a filter matching nothing,
+      # so a run whose output carries no roster line means the test name
+      # stopped resolving, which is the rubber stamp rather than the
+      # coverage.
+      #
+      # It is INSTRUMENTATION and NOT a gate: a `SKIPPED` row is a fact
+      # about the runner, not a defect, and this step does not read the
+      # rows. Whether an arm that nothing anywhere exercises should be a
+      # hard failure is a decision for the maintainer once the inventory
+      # is in hand; a gate
+      # that redded on every non-GFNI runner would be worse than the
+      # silence it replaces.
+      - name: show which gf16 kernel arms this runner exercised
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=$(awk -F'\t' '$1 == "nzbkit-base" { print $2 }' unit-binaries.tsv)
+          if [ -z "$bin" ]; then
+            echo "::error::no 'nzbkit-base' lib binary in the archive inventory."
+            echo "::error::The gf16 kernel arm roster cannot be shown, and may not have run."
+            exit 1
+          fi
+          out=$("$bin" --exact --nocapture gf16::tests::gf16_kernel_arm_roster 2>&1)
+          echo "$out"
+          if ! grep -q "gf16-kernel-roster:" <<<"$out"; then
+            echo "::error::the roster printed no line - the test name no longer resolves."
             echo "::error::libtest exits 0 on a filter that matches nothing, so this step checks."
             exit 1
           fi
@@ -4178,6 +4367,69 @@ jobs:
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ---------------------------------------------------------------
+      # THE PINNED par2cmdline REFERENCE, Windows edition. Without it
+      # every `have_par2()`-gated test in this archive printed
+      # "skipping: par2 not installed", returned, and was COUNTED GREEN
+      # on all six shards - 38 tests, four of them in a module written
+      # about Windows file sharing specifically. The full reasoning and
+      # the version pin live at PAR2REF_WIN_X64_SHA256 in `env:` above.
+      #
+      # `NZBFAST_REQUIRE_PAR2=1` is the other half and is not optional:
+      # it turns `have_par2()` from a skip into an assertion, so if this
+      # step ever stops putting a working par2 on PATH the shards say so
+      # instead of going quiet again. Six copies of have_par2() reach
+      # this archive and one of them - postproc_lane's - did not carry
+      # that assert when this landed; it was given one in the same
+      # commit, as were the three copies in the `daemon` target, where
+      # the job has set NZBFAST_REQUIRE_PAR2 all along and those three
+      # ignored it.
+      #
+      # Checked by SHA256 rather than trusted: it is a third-party
+      # download going on PATH. Retried five times because a runner that
+      # cannot reach github.com for 20 seconds is not a code defect.
+      # Not cached: 345 KB against a cache round trip is not a trade.
+      # ---------------------------------------------------------------
+      - name: install the pinned par2cmdline reference
+        shell: pwsh
+        run: |
+          $ver = $env:PAR2REF_TAG -replace '^v', ''
+          $url = "https://github.com/Parchive/par2cmdline/releases/download/$env:PAR2REF_TAG/par2cmdline-$ver-win-x64.zip"
+          $want = $env:PAR2REF_WIN_X64_SHA256
+          $ok = $false
+          foreach ($i in 1..5) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile par2.zip
+              $got = (Get-FileHash par2.zip -Algorithm SHA256).Hash.ToLower()
+              if ($got -eq $want) { $ok = $true; break }
+              Write-Host "attempt ${i}: sha256 mismatch (got $got, expected $want)"
+            } catch {
+              Write-Host "attempt ${i}: $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds (5 * $i)
+          }
+          if (-not $ok) { throw "par2cmdline $env:PAR2REF_TAG download failed after 5 attempts (expected sha256 $want)" }
+          New-Item -ItemType Directory -Force -Path C:\par2ref | Out-Null
+          Expand-Archive par2.zip -DestinationPath C:\par2ref -Force
+          Remove-Item par2.zip
+          & C:\par2ref\par2.exe -V
+          if ($LASTEXITCODE -ne 0) { throw "the par2 reference does not run" }
+          "C:\par2ref" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "NZBFAST_PAR2_BIN=C:\par2ref\par2.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "NZBFAST_REQUIRE_PAR2=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      # FAILING TO FIND IS FAILING: prove the bare `par2` these tests
+      # spawn resolves, in the SHELL they spawn it from, before the
+      # suite gets a chance to skip. The step above proves the file
+      # runs; this proves the PATH prepend took.
+      - name: prove `par2` resolves for the suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! par2 -V; then
+            echo "::error::the pinned par2cmdline reference is not on PATH."
+            echo "::error::the par2 tests would skip, which reads as a pass."
+            exit 1
+          fi
       - name: install cargo-nextest
         shell: pwsh
         run: |
@@ -4388,7 +4640,8 @@ jobs:
   # all its `cfg(windows)` code:
   #   - rapidyenc's C++ kernels are compiled here by cl.exe for ARM64
   #     rather than cl.exe for x64, taking the `_M_ARM64` arms of
-  #     vendor/rapidyenc/src/common.h that no other job compiles;
+  #     crates/nzbkit-base/vendor/rapidyenc/src/common.h that no other
+  #     job compiles;
   #   - nzbkit's own aarch64 paths (gf16's NEON kernels, the
   #     `is_aarch64_feature_detected!` probes in nntp.rs and
   #     sysbench.rs) meet Windows runtime feature detection for the
@@ -5328,6 +5581,222 @@ jobs:
       - name: drop-in - parfast against the same committed table
         if: ${{ !cancelled() && !(github.event_name == 'workflow_dispatch' && inputs.conformance_capture) }}
         run: tools/conformance/run.py par2 --reference ~/par2ref/par2 --candidate "$PWD/target/debug/parfast"
+      # ---------------------------------------------------------------
+      # STEP THREE OF THREE: IS OUR par2 A DROP-IN FOR *SABnzbd*, which
+      # is a different question from the two steps above and was run by
+      # no CI job at all until 18 Sep 2026.
+      #
+      # The two steps above compare parfast to par2cmdline. SABnzbd does
+      # not read par2cmdline's table: it reads the STDOUT of whatever
+      # binary it was pointed at, line by line, through a chain of
+      # `startswith` tests in `newsunpack.py::par2cmdline_verify`, and it
+      # never looks at the exit code. `tools/sab-parser-gate.py` is the
+      # check over THAT contract, and its SOURCE arm already runs on
+      # every push in size-gate.yml. Its FIXTURE arm - eight damaged par2
+      # sets built in a temp dir, run through a real binary with SAB's
+      # own argv shape, and the merged stdout+stderr fed through a
+      # transcription of SAB's own parser - needs a parfast, so a
+      # build-free job cannot host it. This job already has one, built by
+      # the step above, so the arm costs a second of runner time and no
+      # build at all.
+      #
+      # `--require-live` AND NOT A BARE RUN, which is the whole point of
+      # the line: without it a job where the binary failed to resolve
+      # prints "fixture arm: NOT RUN", passes on the source arm and reads
+      # as coverage. That is this repository's most repeated gate defect
+      # (leak-check's "0 public file(s) clean") and CLAUDE.md names it.
+      # `--require-live` REFUSES (exit 2) instead.
+      #
+      # `--parfast` EXPLICITLY rather than letting the resolver find it:
+      # the resolver prefers `target/release/parfast`, and the step above
+      # deliberately builds DEBUG, so a release binary left in the target
+      # dir by some future step would be the thing measured. Naming it
+      # also means the staleness check compares the right file.
+      #
+      # WHAT GATES IT: `needs.changes.outputs.build == 'true'` on the job,
+      # which is what `crates/parfast/**` and `crates/nzbkit-base/**` -
+      # the two trees the gate reads - already force. An edit to the GATE
+      # SCRIPT ITSELF classifies inert under the 18 Sep `tools/*.py` arm
+      # and does NOT force a build here; that is deliberate and not an
+      # oversight. The classifier's own census made tools/ inert on
+      # measured grounds, the gate's source arm and its `--selftest` both
+      # ride size-gate.yml on every push and every branch, and the next
+      # build-carrying push - 28% of pushes to main - re-runs this arm.
+      # Adding a FORCE arm for one gate script would buy a faster verdict
+      # on a rare edit at the price of a full pipeline each time, which
+      # is the trade that census declined.
+      #
+      # WHY HERE AND NOT parfast-gui.yml's `corpus` JOB, which also
+      # builds `-p parfast` and was the other candidate: that workflow is
+      # path-gated to `apps/parfast/**`, so reaching a `crates/parfast`
+      # edit means widening its `paths:` to the engine trees - and its
+      # own header prices exactly that and refuses it, because the PAR2
+      # campaign commits into those trees daily and the widening would
+      # spin a macOS runner and a Windows runner on very nearly every
+      # push in this repository to rebuild two app trees that did not
+      # change. This job is ubuntu, is already gated on the right
+      # classifier, and already has the binary.
+      # ---------------------------------------------------------------
+      - name: SABnzbd parser contract - the FIXTURE arm, against that same binary
+        if: ${{ !cancelled() && !(github.event_name == 'workflow_dispatch' && inputs.conformance_capture) }}
+        run: tools/sab-parser-gate.py --require-live --parfast "$PWD/target/debug/parfast"
+
+  # ===================================================================
+  # THE SAME TWO CLAIMS ON macOS, added 20 Sep 2026 (claim
+  # `par2-conformance-macos-leg-link-row-20sep`). The job above answers
+  # them on LINUX and on nothing else, and its own header says so:
+  # "A green run of this job is a statement about par2 on linux and
+  # about nothing else."
+  #
+  # WHY THE SECOND PLATFORM IS WORTH A RUNNER. The harness's README has
+  # the general form ("a table pair agrees on what the reference does
+  # and says nothing about what a drop-in owes") and the specific form:
+  # of the three cross-platform differences it records, all three were
+  # invisible to a single leg and two were live `parfast` defects only a
+  # second platform could see. The macOS table has existed since 3 Sep
+  # and was run by a dev Mac BY HAND, which is a verdict the tree gets
+  # when somebody happens to be at that Mac. The `parfast c -a` defect
+  # this whole job pair exists because of reached main and sat there
+  # until a lane ran exactly that command by hand.
+  #
+  # AND IT HAS ALREADY PAID. The `linkset` rows that landed with this
+  # job diverged on first run, on macOS, against a candidate the linux
+  # leg was green on - see run.py's LINK_PLATFORMS block and section 8
+  # of tools/conformance/allow/par2.txt.
+  #
+  # WHAT IT COSTS, MEASURED ON ITS FIRST RUN rather than estimated
+  # (run 35541869821, 20 Sep 2026, `macos-latest`, every cache COLD -
+  # no `~/par2ref` entry and no cargo cache of any kind):
+  #
+  #   build par2cmdline from tag        29 s
+  #   table freshness                    1 s
+  #   toolchain (rustup preinstalled)    1 s
+  #   build parfast, debug             109 s
+  #   drop-in                            2 s
+  #   whole job                        158 s
+  #
+  # So it is CHEAPER IN WALL than the linux job's own cold figures (171 s
+  # for the same debug build, 191 s for the job) on a faster runner, and
+  # every later run skips the 29 s on a cache hit. The `brew list` loop
+  # cost nothing: the image already ships autoconf, automake and libtool.
+  #
+  # AND IT IS THE DEAREST THING HERE PER MINUTE: GitHub
+  # bills a macOS runner at TEN TIMES a linux one. It is gated exactly
+  # as the linux job is (`needs.changes.outputs.build == 'true'`, about
+  # 28% of pushes to main by that job's own census) and it carries the
+  # same concurrency group, so a displaced run is one run and not a
+  # queue. The reference build is CACHED on the tag - `runner.os` is
+  # already in the linux job's key, so macOS takes its own entry off
+  # the same spelling with no new key invented, which matters because
+  # this repository sits at 11.85 GB against GitHub's 10 GB cache limit
+  # with LRU eviction active. NO TARGET-DIR CACHE here either, for the
+  # reason the linux job's step two states at length; read that
+  # paragraph before adding one.
+  #
+  # WHAT IT DELIBERATELY DOES NOT RUN. The SABnzbd parser fixture arm
+  # (step three of the job above) stays on linux alone: what it proves
+  # is a claim about SAB's own parser over our stdout, and SAB's parser
+  # is platform-independent Python. A second copy would be a second
+  # runner for the same verdict.
+  #
+  # IT IS A JOB AND NOT A STEP, which is the opposite of the choice the
+  # linux job's header argues for - and for the reason that header
+  # gives rather than against it. A step rides the job it is in; this
+  # needs a DIFFERENT RUNNER, so it cannot be one. `tools/ci-verdict.py`
+  # derives its rosters from the workflow files, so it picks this job up
+  # by reading them; a red here is its own row on the verdict, which is
+  # what a separate platform should be.
+  #
+  # ON A CAPTURE DISPATCH IT VERIFIES, and that is deliberate rather than
+  # a missing guard. Every step of the linux job carries
+  # `!(workflow_dispatch && conformance_capture)` because that dispatch
+  # is how the LINUX table is captured and its own comparison steps would
+  # be comparing against the file being rewritten. Nothing here is being
+  # rewritten - the macOS tables are captured on a dev Mac, by hand, with
+  # the README's command lines - so the right thing for this job to do on
+  # that dispatch is what it does on any other run: check that the macOS
+  # table still holds. A pin move is exactly when that is worth knowing.
+  #
+  # TURBO IS NOT HERE. `expected/par2-turbo-1.5.0-macos.json` is a
+  # second committed macOS table and this job runs neither half of it:
+  # par2cmdline-turbo is a FORK, the pin would be a second tag and a
+  # second cache entry, and the tree's answer to "which reference is
+  # parfast written to" is already recorded (section 6 of allow/par2.txt
+  # - parfast is written to the turbo dialect, and the 1.3.0 leg waives
+  # the Reed-Solomon progress lines for exactly that reason). Running
+  # the stricter-for-us leg is the right single choice; the turbo leg
+  # stays a dev-Mac line in README.md's leg table.
+  # ===================================================================
+  par2-conformance-macos:
+    needs: changes
+    if: ${{ github.repository != 'nzbfast/nzbfast' && needs.changes.outputs.build == 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 30
+    concurrency:
+      group: ci-par2-conformance-macos-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: harness selftest
+        run: tools/conformance/run.py --selftest
+      # THE SAME KEY SPELLING AS THE LINUX JOB, not a new one. `runner.os`
+      # is already in it, so this takes its own entry and the two never
+      # collide; inventing a key here would add a ninth cache to a repo
+      # already over the limit. Nothing keys on Cargo.lock in either job.
+      - name: cache the pinned par2cmdline reference
+        id: par2ref
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/par2ref
+          key: par2cmdline-${{ env.PAR2REF_TAG }}-${{ runner.os }}-${{ env.PAR2REF_KEY_SUFFIX }}
+      # BUILT FROM THE TAG, exactly as the linux job builds it, and NOT
+      # `brew install par2`: Homebrew's formula is par2cmdline 1.2.0 (the
+      # dev Mac's own `par2 --version` says so), which is not the pin, and
+      # the README's whole argument against Ubuntu's 0.8.1 is that a
+      # reference captured from "whatever answers to the name par2"
+      # inherits its defects. The committed macOS table is v1.3.0's.
+      - name: build par2cmdline from tag ${{ env.PAR2REF_TAG }}
+        if: steps.par2ref.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          # The autotools the tag's own automake.sh needs. `brew list`
+          # first so a runner image that already ships them pays nothing,
+          # and this stays a no-op the day the image gains them.
+          for f in autoconf automake libtool; do
+            brew list "$f" >/dev/null 2>&1 || brew install "$f"
+          done
+          git clone --depth 1 --branch "$PAR2REF_TAG" \
+            https://github.com/Parchive/par2cmdline.git "$RUNNER_TEMP/par2src"
+          cd "$RUNNER_TEMP/par2src"
+          ./automake.sh
+          ./configure
+          make -j"$(sysctl -n hw.ncpu)"
+          ./par2 --version
+          mkdir -p ~/par2ref
+          cp par2 ~/par2ref/par2
+      # NO `--platform macos` ON EITHER LINE, deliberately. The label is
+      # taken from the host, so a job moved to another runner by a later
+      # edit compares against THAT platform's table and fails loudly on a
+      # missing one, where a forced label would silently compare a linux
+      # run against the macOS table. The same reasoning as the linux job
+      # not forcing `--platform linux`.
+      - name: table freshness - par2cmdline v1.3.0 against its own committed table
+        run: tools/conformance/run.py par2 --reference ~/par2ref/par2 --candidate ~/par2ref/par2
+      - name: toolchain
+        if: ${{ !cancelled() }}
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      # DEBUG, for the reason measured on the linux job: every row is a
+      # behaviour comparison and not one of them is timed.
+      - name: build parfast (the drop-in under test)
+        if: ${{ !cancelled() }}
+        run: cargo build --locked -p parfast
+      # `!cancelled()` and not a bare guard, same as the linux job: a red
+      # freshness step must not be able to skip the drop-in step, or a
+      # stale table hides a live divergence in our binary, which is the
+      # strictly worse of the two reds.
+      - name: drop-in - parfast against the same committed table
+        if: ${{ !cancelled() }}
+        run: tools/conformance/run.py par2 --reference ~/par2ref/par2 --candidate "$PWD/target/debug/parfast"
 
   fuzz-gate:
     needs: changes
@@ -5385,6 +5854,52 @@ jobs:
       - name: clippy (parfast GUI workspace)
         if: ${{ !cancelled() }}
         run: cargo clippy --manifest-path apps/parfast/Cargo.toml --locked --all-targets --no-deps -- -D warnings
+      # THE THIRD DETACHED WORKSPACE, 20 Sep 2026, and the first that is
+      # RIG TOOLING rather than a build of the product.
+      # `bench/nested-corpus/nzbserve` is the loopback NNTP article
+      # server every disk-route bench round runs against - 15 round
+      # drivers in the private bench tree invoke it. It carries its own
+      # `[workspace]` on purpose so the root workspace does not pick up
+      # bench tooling, which is exactly what made it invisible: no `-p`
+      # list reaches it, `tools/preflight.py` reports "0 cargo step(s)"
+      # over a Rust-only diff inside it, and it sat fmt-dirty in three
+      # places with every gate in this file green.
+      #
+      # `--locked` IS on both and must stay: this crate commits a
+      # Cargo.lock, so it is the parfast case above and not the fuzz
+      # case. NO `-p` on the fmt line, and that is not the parfast
+      # omission repeated - this manifest has a `[package]` root, so
+      # `--manifest-path` alone resolves one target, where apps/parfast's
+      # root is VIRTUAL and names nothing.
+      #
+      # ITS SIBLING RIG, THE RAR4 FIXTURE WRITER, HAS NO STEP HERE AND
+      # CANNOT HAVE ONE. That crate lives in a tree whose name is on
+      # packaging/private-patterns.txt, and this workflow ships to the
+      # public repository verbatim, so naming its manifest path here
+      # trips the leak scan on the author's own commit. Stripping the
+      # step at export time was tried and is NOT a way round it: the
+      # vocabulary scan reads the STAGED bytes and the strip does not
+      # come into it. So that crate gets a documented hand line in
+      # CLAUDE.md that says openly it is not a CI job - the treatment
+      # the aarch64 build line already gets - rather than a step that
+      # cannot exist. Moving the crate under `bench/` beside this one
+      # would make a step possible; that is a repo-layout decision for
+      # the maintainer rather than a lane's, since two committed bench
+      # drivers and tools/bench-deploy-check.py name its current home.
+      #
+      # The ~48 OTHER detached workspaces in the tree are deliberately
+      # not here: about 45 are one-sitting PAR2 probes from 7-8 Sep 2026
+      # and the rest are archived scratch rounds, none of them invoked
+      # by any committed driver. The per-crate census is the handoff
+      # named in CLAUDE.md's block (directory omitted: it is in a tree
+      # that does not ship), and an archived scratch crate being
+      # fmt-dirty is not a defect.
+      - name: fmt (nzbserve bench rig)
+        if: ${{ !cancelled() }}
+        run: cargo fmt --manifest-path bench/nested-corpus/nzbserve/Cargo.toml --check
+      - name: clippy (nzbserve bench rig)
+        if: ${{ !cancelled() }}
+        run: cargo clippy --manifest-path bench/nested-corpus/nzbserve/Cargo.toml --locked --all-targets --no-deps -- -D warnings
 
   # ===================================================================
   # DID THE TEST SHARDS ACTUALLY RUN? One row that answers it.

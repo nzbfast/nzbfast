@@ -427,16 +427,10 @@ async fn compressed_split_is_rescued_after_the_chase_fails_on_the_parts() {
     }
     let mut fx = Fixture::new("rarsplitcomp");
     let inner = compressible(600_000);
-    let arch = rars::rar50::Rar50Writer::new(rars::rar50::WriterOptions::default())
-        .compressed_entries(&[rars::rar50::CompressedEntry {
-            name: b"film.mkv",
-            data: &inner,
-            mtime: None,
-            attributes: 0,
-            host_os: 0,
-        }])
-        .finish()
-        .unwrap();
+    let arch = crate::rarfixtures::compressed_archive(&[crate::rarfixtures::Member::bare(
+        b"film.mkv",
+        &inner,
+    )]);
     assert!(
         arch.len() < inner.len(),
         "the writer stored the entry instead of compressing it: {} bytes",

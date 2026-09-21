@@ -232,7 +232,7 @@ pub(crate) fn reopen_read_handle(primary: &File) -> io::Result<File> {
     Ok(unsafe { File::from_raw_handle(h as _) })
 }
 
-/// The verdict BOTH bomb guards raise - [`WriteBudget::charge`] on the
+/// The verdict BOTH bomb guards raise - `WriteBudget::charge` on the
 /// in-stream path and nzbfast's `BombGuardWriter` on the disk one.
 ///
 /// One constant because the text is a CONTRACT, not a message: the
@@ -983,7 +983,7 @@ impl FileWriter {
     }
 
     /// [`FileWriter::create`] with a ceiling on the RESERVATION only (see
-    /// [`preallocate_capped`]). `size` is stored unchanged.
+    /// `preallocate_capped`). `size` is stored unchanged.
     pub fn create_capped(path: &Path, size: u64, prealloc_cap: u64) -> io::Result<FileWriter> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -1006,7 +1006,7 @@ impl FileWriter {
 
     /// [`FileWriter::create_resume`] with a ceiling on the RESERVATION
     /// only. The cap never shrinks a resumed file below the bytes it
-    /// already holds - see [`preallocate_capped`].
+    /// already holds - see `preallocate_capped`.
     pub fn create_resume_capped(
         path: &Path,
         size: u64,
@@ -1147,7 +1147,7 @@ impl FileWriter {
         self.feeding.load(Ordering::Relaxed)
     }
 
-    /// Arm the rolling prefix checksum (see [`PrefixHash`]). Builder-style
+    /// Arm the rolling prefix checksum (see `PrefixHash`). Builder-style
     /// like [`FileWriter::with_budget`], and armed on the same writers:
     /// the extraction outputs a chase forfeit may hand to the resume
     /// ledger. Never armed on level-0 downloads - the per-byte download
@@ -2043,7 +2043,7 @@ impl FileWriter {
     /// Syncs first: buffered pwrites that never reached disk would otherwise
     /// hand par2 a stale file and it would "repair" bytes we were about to
     /// write. A sync failure is returned, not swallowed - same contract as
-    /// [`Extractor::finish`](crate::extract::Extractor::finish).
+    /// `Extractor::finish`.
     ///
     /// Parking works through the writer's own shared state, NOT by dropping an
     /// `Arc`: releasing one reference cannot close anything while the daemon's
@@ -2068,7 +2068,7 @@ impl FileWriter {
     /// END OF JOB: give the OS this file's handle back, whatever the
     /// sync says.
     ///
-    /// [`park`] is the wrong contract for the end of a download, and the
+    /// `park` is the wrong contract for the end of a download, and the
     /// difference is the whole point of this method. Park exists so an
     /// external tool can take the bytes over, so a failed flush or sync
     /// there MUST keep the handle - we would otherwise hand par2cmdline
@@ -2141,7 +2141,7 @@ impl FileWriter {
     ///
     /// [`note_renamed`]: FileWriter::note_renamed
     /// The `root`-relative output name of the CREATION path, resolved
-    /// once and memoized - see [`out_name`](FileWriter::out_name) for why
+    /// once and memoized - see `out_name` for why
     /// that is sound and for the walk it exists to remove.
     ///
     /// Borrowed on the memoized root, owned on any other: a caller in a
@@ -2242,7 +2242,7 @@ impl FileWriter {
     /// Every by-path live reader goes through here: the lease is what
     /// makes an external repair able to see, and on Windows revoke, the
     /// handles standing in its way. Waits out an in-progress repair
-    /// (bounded by [`REPAIR_ADMIT_WAIT`]) rather than failing
+    /// (bounded by `REPAIR_ADMIT_WAIT`) rather than failing
     /// immediately - par2cmdline on a repairable set is seconds, and a
     /// player that seeks into one should get its bytes, not a 410.
     ///
@@ -2262,7 +2262,7 @@ impl FileWriter {
     /// abandons the extracted media file - `fallback_group` drains the
     /// group's routed members and `abandon_slot` takes the child slot's
     /// writer and unlinks it. By the time
-    /// [`Extractor::park_outputs_for_repair`] walks the tree, the media
+    /// `Extractor::park_outputs_for_repair` walks the tree, the media
     /// writer is no longer in any slot, so it is claimed by nothing;
     /// par2's targets are the VOLUMES and the file the player is
     /// holding is not even on disk. Nothing revokes, nothing bumps a
@@ -2284,8 +2284,6 @@ impl FileWriter {
     /// once-only, so the sticky flag stays idempotent. A write racing
     /// this refund re-charges bytes that no longer exist, which is the
     /// conservative direction and cannot outlive the job.
-    ///
-    /// [`Extractor::park_outputs_for_repair`]: crate::extract::Extractor::park_outputs_for_repair
     pub fn abandon(&self) {
         self.abandoned.store(true, Ordering::Release);
         if let Some(b) = &self.budget {

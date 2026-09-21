@@ -787,7 +787,12 @@ impl Extractor {
         if is_rar {
             inner.slots[slot].mode = SlotMode::Rar;
             routed_rar = true;
-            let size = inner.slots[slot].size;
+            // TODO 118.2: the bound is the CORROBORATED
+            // size, 0 (open-ended) until the claim is -
+            // see `SizeTrust`. `split_attach_head` keeps
+            // reading the claim: a split's parts corroborate
+            // each other through its own size table.
+            let size = inner.slots[slot].mapper_size();
             // TODO 211 (b): part 1 of a declared byte
             // split maps the whole joined volume, its
             // size closed once every part has reported.
@@ -829,6 +834,26 @@ impl Extractor {
                 self.split_park_span(inner, slot, offset, data)?;
                 return Ok(Sniffed::Parked);
             }
+        } else if !payload_name
+            && (sevenz_base > 0 || archive_sniff_eligible_name(&inner.slots[slot].name))
+            && self.sevenz_awaits_size(inner, slot, data, sevenz_base)
+        {
+            // TODO 118.2 (b): a 7z head whose size is a bare claim parks
+            // with the slot's other holds until the claim is corroborated
+            // - the chase needs the container's TRUE end to open it, and
+            // the random-`size=` poster gives it a fresh false one per
+            // article. Same name gate as the attach arm below, so a slot
+            // this arm never sees is one that arm never chased either.
+            // Charged like any pre-sniff hold, without the offset-0
+            // probe (the head is what arrived) and without the spill
+            // ladder (one span; the next hold re-asks it).
+            inner.budget.add(data.len());
+            inner.slots[slot].pre_bytes += data.len();
+            inner.slots[slot]
+                .holds
+                .push((offset, HoldSpan::Ram(data.to_vec())));
+            inner.slots[slot].head_awaits_size = true;
+            return Ok(Sniffed::Parked);
         } else if !payload_name
             // M4-90's other half, and the reason both rows are one lane:
             // this arm had no name rule either. `sevenz_base > 0` is the
@@ -933,6 +958,43 @@ impl Extractor {
 
 /// What [`Extractor::sniff_and_route`] decided for a still-Unknown slot,
 /// for a caller that holds the routing lock it must not.
+impl Extractor {
+    /// TODO 118.2 (b): re-run the offset-0 sniff for a slot whose 7z head
+    /// was parked awaiting a trusted size (`head_awaits_size`), now that
+    /// the size is trusted. The head leaves the holds and goes through
+    /// [`Self::sniff_and_route`] exactly as it would have on arrival -
+    /// no article CRC, as with any re-fed hold - and whatever mode that
+    /// picks then drains the rest of the holds. Returns the sniff's
+    /// `rar` flag. A head that is no longer in the holds (a spill or a
+    /// settle drained it as plain) is nothing to re-sniff.
+    pub(super) fn resniff_parked_head(
+        &self,
+        inner: &mut Inner,
+        slot: usize,
+        jobs: &mut Vec<WriteJob>,
+        fwd: &mut Vec<FwdSpan>,
+    ) -> io::Result<bool> {
+        inner.slots[slot].head_awaits_size = false;
+        let Some(i) = inner.slots[slot].holds.iter().position(|(o, _)| *o == 0) else {
+            return Ok(false);
+        };
+        let (_, span) = inner.slots[slot].holds.remove(i);
+        let len = match &span {
+            HoldSpan::Ram(b) => b.len(),
+            HoldSpan::Paged { len, .. } => *len,
+        };
+        inner.slots[slot].pre_bytes = inner.slots[slot].pre_bytes.saturating_sub(len);
+        let bytes = Self::reclaim_span(inner, span)?;
+        match self.sniff_and_route(inner, slot, 0, &bytes, jobs, fwd, false, None)? {
+            Sniffed::Routed { rar } => {
+                self.drain_holds(inner, slot)?;
+                Ok(rar)
+            }
+            Sniffed::Parked | Sniffed::Discarded => Ok(false),
+        }
+    }
+}
+
 pub(super) enum Sniffed {
     /// Classified and routed under the lock. `rar` is true when the span
     /// went down a RAR path, which the caller re-checks against a

@@ -4,7 +4,7 @@
 //! the gate classifies these fns as test code).
 
 use super::*;
-use rars::recovery::rar5::encode_parity_shards;
+use crate::rarfixtures as rf;
 use std::path::Path;
 
 fn temp_dir(tag: &str) -> PathBuf {
@@ -68,7 +68,7 @@ fn build_named_set(
         })
         .collect();
     let refs: Vec<&[u8]> = padded.iter().map(Vec::as_slice).collect();
-    let mut parity = encode_parity_shards(&refs, recovery_count).unwrap();
+    let mut parity = rf::rev_parity_rows(&refs, recovery_count);
     if mangle_parity {
         for row in &mut parity {
             row[0] ^= 0xff;

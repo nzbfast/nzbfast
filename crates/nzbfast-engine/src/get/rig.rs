@@ -83,20 +83,37 @@ pub(super) fn install_password_probe(
                 .as_ref()
                 .and_then(|h| h.pw_assoc_site_for(&owner))
                 .unwrap_or_default();
-            for (i, pw) in crate::smart::order_passwords(
+            // Indexed, so the winner's log line can name WHICH entry
+            // of the file answered - the number is the operator's own
+            // and is the only thing about a password that is safe to
+            // print. The two numbers are different facts and both are
+            // logged: the ENTRY is where the line sits in the file, so
+            // it means the same thing to the operator on every job; the
+            // POSITION is where the try-order put it today, so 1 says
+            // the association earned its keep and the file's own order
+            // says it did not. They disagree exactly when §99 did
+            // something. Position and not "attempt": the walk below
+            // skips a candidate already tried, one over the KDF-depth
+            // gate and everything past the wall-clock budget, so this
+            // is where the probe was HANDED it, not how many verifies
+            // it paid for.
+            let numbered = crate::smart::order_passwords_indexed(
                 crate::smart::read_password_file(&path),
                 &path,
                 &site,
                 &poster,
-            )
-            .into_iter()
-            .enumerate()
-            {
+            );
+            let total = numbered.len();
+            for (i, (entry, pw)) in numbered.into_iter().enumerate() {
                 cands.insert(
                     i,
                     PwCandidate {
                         value: pw,
-                        source: "passwords file".into(),
+                        source: format!(
+                            "the passwords file, entry {entry} of {total}, \
+                             try-order position {}",
+                            i + 1
+                        ),
                         structured: true,
                     },
                 );

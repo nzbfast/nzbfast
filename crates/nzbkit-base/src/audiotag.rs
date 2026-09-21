@@ -110,7 +110,7 @@ enum Key {
 ///
 /// Refuses the empty string, anything carrying a control character (a
 /// tag is attacker-chosen and a newline in a filename is somebody's
-/// terminal), and anything past [`VALUE_MAX`]. Trailing NULs are
+/// terminal), and anything past `VALUE_MAX`. Trailing NULs are
 /// stripped first: fixed-width tag fields pad with them.
 pub fn clean(s: &str) -> Option<String> {
     let t = s.trim_matches('\0').trim();
@@ -642,7 +642,7 @@ fn ilst_tags(moov: &[u8]) -> Option<AudioTags> {
 
 /// Minimal, valid-enough files for the four supported formats.
 ///
-/// Public for the same reason [`crate::mediaprobe::testmux`] is: the
+/// Public for the same reason `crate::mediaprobe::testmux` is: the
 /// naming pass that consumes these tags lives in the other crate, and
 /// its tests need the same bytes rather than a second hand-rolled
 /// approximation of them.

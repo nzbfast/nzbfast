@@ -163,7 +163,7 @@ fn names_in(dir: &Path) -> Vec<String> {
 /// A target the repair had to rename is reported with the path it
 /// LANDED at, and every path in the census is a file that exists.
 ///
-/// The set declares TWO files whose names differ by a TRAILING DOT, so
+/// The set declares TWO files whose names differ by a LEADING DOT, so
 /// both are real files on every volume and both `sanitize_out_name` to
 /// one destination - the collision the claim loop exists to resolve.
 ///
@@ -182,15 +182,37 @@ fn names_in(dir: &Path) -> Vec<String> {
 /// by reproducing it byte-identically on a case-sensitive APFS image
 /// (`research/NIGHTLY-RED-2026-08-31-1800Z-TRIAGE.md`).
 ///
-/// The trailing dot is portable because the fold is: the trailing
-/// dot-and-space trim in `sanitize_filename_for` is NOT gated on
-/// `windows` - it runs everywhere, deliberately, so a published name is
-/// stable across platforms - so both spellings reach one out name
-/// whatever the volume, and the destinations collide with no dependence
-/// on `fold`. A trailing space and a zero-width format character reach
-/// the same arm; the dot is simply the one that survives a shell, a
-/// diff and this comment intact. Do NOT "simplify" this back to a case
-/// pair: it passes on a developer Mac and cannot pass in CI.
+/// THE TRAILING-DOT FIXTURE THAT REPLACED IT WAS NOT PORTABLE EITHER,
+/// in the other direction, and nothing could see that until 17 Sep 2026.
+/// It reasoned that the trailing dot-and-space trim in
+/// `sanitize_filename_for` is ungated, so both spellings reach one out
+/// name whatever the volume - true, and beside the point: the premise it
+/// also needed was that both spellings are REAL FILES, and on Windows
+/// they are one file. Win32 strips a trailing dot from a leaf name, so
+/// `Res.Two.bin.` IS `Res.Two.bin` there - the second `fs::write`
+/// overwrote the first, `par2 create` said "Skipping duplicate
+/// filename" and declared ONE descriptor, and the second `remove_file`
+/// panicked NotFound. Measured on `windows-unit` shard 3 of run
+/// 35297100923, the first run of this suite ever to have a par2 binary
+/// on a Windows runner; the hole that hid it is the one that hid the
+/// case-pair version above, one platform over
+/// (research/WINDOWS-PAR2-SKIP-CENSUS-2026-09-17.md).
+///
+/// THE LEADING DOT IS PORTABLE BECAUSE BOTH HALVES HOLD. The fold is
+/// ungated - `sanitize_filename_for` maps a leading dot run to one `_`
+/// each on every platform - and the two names are distinct legal files
+/// on NTFS, ext4 and APFS alike, because Windows folds TRAILING dots
+/// and not leading ones. `disk/sanitize.rs` says exactly that at the
+/// arm, and the residue this pair leans on is the one it names there:
+/// the mapping is not injective against a poster's literal
+/// `_movie.mkv`. Pure ASCII, so it survives a shell, a diff and this
+/// comment intact.
+///
+/// Do NOT "simplify" this to a case pair (passes on a developer Mac,
+/// cannot pass in CI) and do NOT put the dot back on the end (passes on
+/// the Mac and on Linux, cannot pass on Windows). Two of the three
+/// obvious spellings of this fixture are known wrong already, each for a
+/// platform somebody only found by running it there.
 ///
 /// The assertion is deliberately not "the second entry ends in
 /// `.dup-`": what a caller needs is that `path` names a file the repair
@@ -208,12 +230,22 @@ fn a_disambiguated_target_reports_the_path_it_landed_at() {
     // Two DIFFERENT payloads, so a run that landed both descriptors on
     // one path would destroy one of them rather than merely overwrite a
     // file with its own bytes - the data loss the claim loop prevents.
-    std::fs::write(dir.join("Res.Two.bin"), payload(100_000, 0x5eed_0001)).unwrap();
-    std::fs::write(dir.join("Res.Two.bin."), payload(100_000, 0x5eed_0002)).unwrap();
-    par2_create(dir, "setc", &["Res.Two.bin", "Res.Two.bin."]);
+    std::fs::write(dir.join("_Res.Two.bin"), payload(100_000, 0x5eed_0001)).unwrap();
+    std::fs::write(dir.join(".Res.Two.bin"), payload(100_000, 0x5eed_0002)).unwrap();
+    par2_create(dir, "setc", &["_Res.Two.bin", ".Res.Two.bin"]);
+    // The premise, asserted rather than assumed: the whole defect this
+    // fixture walked into was two names silently being ONE file, and
+    // what noticed was the second remove_file below, with a bare
+    // NotFound that says nothing about which premise failed.
+    assert!(
+        dir.join("_Res.Two.bin").is_file() && dir.join(".Res.Two.bin").is_file(),
+        "the two spellings are one file on this volume, so the fixture \
+         cannot pose the collision it is about - dir holds {:?}",
+        names_in(dir)
+    );
     // Both spellings gone: only the parity can produce them.
-    std::fs::remove_file(dir.join("Res.Two.bin")).unwrap();
-    std::fs::remove_file(dir.join("Res.Two.bin.")).unwrap();
+    std::fs::remove_file(dir.join("_Res.Two.bin")).unwrap();
+    std::fs::remove_file(dir.join(".Res.Two.bin")).unwrap();
 
     let reports = apply_every_set(dir);
     assert_eq!(reports.len(), 1, "one set, one report");
@@ -252,11 +284,12 @@ fn a_disambiguated_target_reports_the_path_it_landed_at() {
     // is what the module header says the repair lands a target at BEFORE
     // the claim loop disambiguates it - so the one miss is the RENAME and
     // nothing else. Without the `sanitize_out_name` the count depends on
-    // which descriptor the claim loop reaches first: `Res.Two.bin` sorts
-    // ahead of `Res.Two.bin.` and so takes the plain destination, leaving
-    // exactly one miss, but in the other order BOTH guesses miss and this
-    // reads 2 - and the extra miss is the TRIM, not the rename, which is
-    // the weaker question wearing the same number. Sanitizing makes it
+    // which descriptor the claim loop reaches first: `_Res.Two.bin` is
+    // already its own out name, so it takes the plain destination when it
+    // gets there first, leaving exactly one miss - but in the other order
+    // BOTH guesses miss and this reads 2, and the extra miss is the
+    // leading-dot MAPPING rather than the rename, which is the weaker
+    // question wearing the same number. Sanitizing makes it
     // order-independent and keeps it about the claim loop.
     let guessed_wrong = r
         .per_file

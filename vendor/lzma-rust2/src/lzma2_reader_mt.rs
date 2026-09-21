@@ -66,9 +66,14 @@ fn workers_for_dict(asked: u32, dict_size: u32) -> u32 {
 /// too large to meet aborts the process on Linux but is granted lazily on
 /// macOS, so a test that decodes a hostile stream passes on this fleet's
 /// own boxes with the cap removed.
-const fn prealloc_for(decoded_len: usize) -> usize {
-    if decoded_len < PREALLOC_CAP {
-        decoded_len
+///
+/// `u64` IN, `usize` OUT, and that asymmetry is the point: the argument
+/// is a figure the STREAM declares about itself, which no target's
+/// pointer width bounds, while the return is a real reservation on this
+/// target and is capped well inside it.
+const fn prealloc_for(decoded_len: u64) -> usize {
+    if decoded_len < PREALLOC_CAP as u64 {
+        decoded_len as usize
     } else {
         PREALLOC_CAP
     }
@@ -87,7 +92,7 @@ use crate::{
 /// own uncompressed size, so the dispatcher already knows what a unit decodes
 /// to and the worker can size its output buffer once instead of letting
 /// `read_to_end` double a 64 MiB `Vec` out of a 1 MiB seed.
-type WorkUnit = (u64, Vec<u8>, usize);
+type WorkUnit = (u64, Vec<u8>, u64);
 
 /// A result unit from a worker thread.
 /// Contains the sequence number and the decompressed data.
@@ -112,7 +117,12 @@ pub struct Lzma2ReaderMt<R: Read> {
     result_tx: SyncSender<ResultUnit>,
     current_work_unit: Vec<u8>,
     /// nzbfast: decoded length declared by the chunks in `current_work_unit`.
-    current_work_unit_decoded: usize,
+    ///
+    /// `u64` and NOT `usize`: this is a sum of sizes the LZMA2 stream
+    /// declares about ITSELF, so its magnitude is set by the input rather
+    /// than by the target. See the accumulation sites in
+    /// `read_and_dispatch_chunk` for what a `usize` did on a 32-bit one.
+    current_work_unit_decoded: u64,
     next_sequence_to_dispatch: u64,
     next_sequence_to_return: u64,
     /// nzbfast: how many results have come back off the channel, in any
@@ -261,9 +271,25 @@ impl<R: Read> Lzma2ReaderMt<R> {
             // nzbfast: the chunk's own declared decoded size. Control bits
             // 0..4 are bits 16..20 of `unpackSize - 1`; the first two header
             // bytes are its low half, big-endian.
-            self.current_work_unit_decoded += (((control & 0x1F) as usize) << 16)
-                + u16::from_be_bytes([header_buf[0], header_buf[1]]) as usize
-                + 1;
+            //
+            // ACCUMULATED IN u64 AND SATURATING, because this is untrusted
+            // input: a compressed chunk costs six bytes on the wire and may
+            // declare 2 MiB, so a crafted stream reaches 2^32 in ~12 KB of
+            // input. As a `usize` that was a 32-bit PANIC under the pinned
+            // `overflow-checks` (armv7-cross, run 35256109460) and, worse,
+            // a silent WRAP in a release build - `send_work_unit` would
+            // then hand a wrapped, far-too-SMALL length on as the unit's
+            // decoded size, which is the bound the worker's `Read::take`
+            // holds the decode to. `u64` is what makes the figure the same
+            // on every target; the saturation is what makes the sum total
+            // rather than merely wide, and capping is harmless because the
+            // only two consumers are a reservation already clamped to
+            // `PREALLOC_CAP` and an upper bound no `Vec` length can reach.
+            self.current_work_unit_decoded = self.current_work_unit_decoded.saturating_add(
+                (u64::from(control & 0x1F) << 16)
+                    + u64::from(u16::from_be_bytes([header_buf[0], header_buf[1]]))
+                    + 1,
+            );
             u16::from_be_bytes([header_buf[2], header_buf[3]]) as usize + 1
         } else if control == 0x01 || control == 0x02 {
             // Uncompressed chunk.
@@ -271,7 +297,9 @@ impl<R: Read> Lzma2ReaderMt<R> {
             self.inner.read_exact(&mut size_buf)?;
             self.current_work_unit.extend_from_slice(&size_buf);
             let size = u16::from_be_bytes(size_buf) as usize + 1;
-            self.current_work_unit_decoded += size;
+            // Same rule as the compressed arm above, same reason.
+            self.current_work_unit_decoded =
+                self.current_work_unit_decoded.saturating_add(size as u64);
             size
         } else {
             return Err(io::Error::new(
@@ -578,10 +606,10 @@ fn worker_thread_logic(
         // and the whole unit is materialized here before the consumer
         // sees one byte of it, so a write-side bomb guard is not what can
         // stop it.
-        let result = match Read::take(&mut reader, decoded_len as u64 + 1)
+        let result = match Read::take(&mut reader, decoded_len.saturating_add(1))
             .read_to_end(&mut decompressed_data)
         {
-            Ok(_) if decompressed_data.len() > decoded_len => {
+            Ok(_) if decompressed_data.len() as u64 > decoded_len => {
                 set_error(
                     io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -926,23 +954,22 @@ mod tests {
         // 35203995207). The 64-bit boxes never saw it, because there
         // the constant simply fits.
         //
-        // u64 is the only width that can hold what the headers CLAIM,
-        // so the claim is computed there and the assertion below is
-        // about the claim. What `prealloc_for` is then handed is the
-        // largest declaration THIS TARGET can represent: on 64-bit that
-        // is the claim itself, and on 32-bit it is `usize::MAX`, which
-        // is the strongest over-declaration a 32-bit stream could ever
-        // reach. Either way the property under test is the same one -
-        // a declaration far past the cap is reserved AT the cap - and
-        // it is now tested on both widths instead of neither.
+        // Fixing the fixture then exposed the PRODUCTION half, on the
+        // next armv7 run that got far enough to execute anything
+        // (35256109460): the reader's own accumulator was a `usize`
+        // too, so `decode_mt` below panicked on 32-bit at about the
+        // 2,048th chunk instead of ever reaching a refusal. Both the
+        // accumulator and `prealloc_for`'s argument are `u64` now, so
+        // the claim this test computes is the claim the reader sums,
+        // on every target, and no `usize::try_from` dance stands
+        // between them.
         let declared_by_headers: u64 = 200_001 * (1 << 21);
         assert!(
             declared_by_headers > 16 * PREALLOC_CAP as u64,
             "the fixture must declare far more than the cap, not {declared_by_headers}"
         );
-        let declared = usize::try_from(declared_by_headers).unwrap_or(usize::MAX);
         assert_eq!(
-            prealloc_for(declared),
+            prealloc_for(declared_by_headers),
             PREALLOC_CAP,
             "the worker must reserve the cap, not the ~400 GB the headers claim"
         );
@@ -965,16 +992,20 @@ mod tests {
         assert_eq!(prealloc_for(0), 0);
         assert_eq!(prealloc_for(1 << 20), 1 << 20, "a 1 MiB unit is exact");
         assert_eq!(
-            prealloc_for(PREALLOC_CAP - 1),
+            prealloc_for(PREALLOC_CAP as u64 - 1),
             PREALLOC_CAP - 1,
             "just under the cap is still exact"
         );
-        assert_eq!(prealloc_for(PREALLOC_CAP), PREALLOC_CAP);
+        assert_eq!(prealloc_for(PREALLOC_CAP as u64), PREALLOC_CAP);
         assert_eq!(
-            prealloc_for(usize::MAX),
+            prealloc_for(u64::MAX),
             PREALLOC_CAP,
             "the largest declaration expressible must still reserve the cap"
         );
+        // And the saturation ceiling the accumulator can actually hand
+        // it, which on a 32-bit target is past `usize::MAX` - the case
+        // that used to be unrepresentable rather than merely untested.
+        assert_eq!(prealloc_for(usize::MAX as u64), PREALLOC_CAP);
     }
     /// nzbfast: an EMPTY LZMA2 pack stream. A 7z folder may declare
     /// `pack_size` 0, so the very first control byte read is already EOF

@@ -130,15 +130,25 @@ gen_r2() {
 
 gen_r2c() {
     leg_init realistic r2c-depth2-store-compressed
-    rand_file "$L/work/movie.bin" $SZ_REAL
+    # compressible_file AND NOT rand_file, and require_compressed below
+    # is what keeps it that way: -m3 over /dev/urandom is recorded -m0
+    # by RAR, which is how this leg spent its whole life as a second
+    # copy of r2-depth2-store-store. See lib.sh compressible_file.
+    compressible_file "$L/work/movie.bin" $SZ_REAL
     passed_file "$L/work" r2c-depth2-store-compressed
     add_payload "$L/work/movie.bin" 2
     add_payload "$L/work/$_pf" 2
-    ( cd "$L/work" && rar_a inner.rar -m3 -- movie.bin "$_pf" && rm movie.bin "$_pf" )
+    ( cd "$L/work" && rar_a inner.rar -m3 -- movie.bin "$_pf" )
+    # The INNER level compresses; outer_post keeps the OUTER level at
+    # -m0. That order is the whole shape - compression composes
+    # downwards only, so a compressed outer over this would be a store
+    # fallback again one level up.
+    require_compressed "$L/work/inner.rar" movie.bin
+    rm "$L/work/movie.bin" "$L/work/$_pf"
     outer_post r2c inner.rar
     finish_leg "rar(store,vols)+par2 > rar(m3) > payload" 2 \
         '{"nzbfast":"auto-complete","nzbget":"manual-intervention","sabnzbd":"auto-complete","rustnzb":"manual-intervention"}' \
-        "Depth-2 with a COMPRESSED inner layer - the shape the chasing-decompressor work targets."
+        "Depth-2 with a COMPRESSED inner layer - the shape the chasing-decompressor work targets. The inner RAR really is -m3 since 20 Sep 2026; before that the payload was /dev/urandom, RAR recorded -m0, and this leg was a second copy of r2-depth2-store-store. Every expected class here is therefore a HYPOTHESIS about a shape no client has ever been run against - every class published for r2c up to that date was measured on the store-in-store shape, and is identical to r2's for every client in every round, which is how the defect was corroborated. Re-race before quoting them."
 }
 
 gen_r3() {
@@ -147,6 +157,16 @@ gen_r3() {
     passed_file "$L/work" r3-rar-wrap-7z
     add_payload "$L/work/movie.bin" 2
     add_payload "$L/work/$_pf" 2
+    # No require_compressed arm here, and that is measured rather than
+    # assumed (20 Sep 2026, checking the r2c defect's blast radius): 7z
+    # does NOT do RAR's silent per-entry store fallback. Over the same
+    # urandom payload it records `Method = LZMA2:18` and a packed size
+    # of 8,000,505 against a size of 8,000,000 - LZMA2's uncompressed
+    # chunks, slightly larger and honestly labelled. So this leg's
+    # "7z(lzma2)" label is accurate at the codec level; what it does not
+    # carry is real compression WORK, which is fine because the shape
+    # this leg exists for is 7z's end-loaded content map, not the
+    # decompressor. Same reasoning at gen_x3.
     ( cd "$L/work" && "$SEVENZ" a -bso0 -bsp0 -mx1 payload.7z movie.bin "$_pf" \
         && rm movie.bin "$_pf" ) || die "7z a failed"
     outer_post r3 payload.7z
@@ -210,6 +230,10 @@ gen_x3() {
     add_payload "$L/work/payload.bin" 3
     add_payload "$L/work/$_pf" 3
     ( cd "$L/work" && rar_a inner.rar -m0 -- payload.bin "$_pf" && rm payload.bin "$_pf" )
+    # LZMA2 over a stored RAR is incompressible in the same way; see the
+    # measurement at gen_r3. The mid layer is a real LZMA2 stream of
+    # uncompressed chunks, which is what this leg's mixed-format claim
+    # needs - it is not a silent store the way r2c's -m3 was.
     ( cd "$L/work" && "$SEVENZ" a -bso0 -bsp0 -mx1 mid.7z inner.rar \
         && rm inner.rar ) || die "7z a failed"
     outer_post x3 mid.7z

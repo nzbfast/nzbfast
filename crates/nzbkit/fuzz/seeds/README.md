@@ -205,9 +205,9 @@ Note either below.
   it, the CRC pin having landed the day before (`db85dff50`). The
   128-bit sibling carried the identical defect at four tail sites and is
   fixed in the same commit. Fixed in
-  `vendor/rapidyenc/src/crc_folding_256.cc` and `crc_folding.cc`; the
+  `crates/nzbkit-base/vendor/rapidyenc/src/crc_folding_256.cc` and `crc_folding.cc`; the
   reasoning, the five sites and the honest limit (no box on this fleet
-  can execute either kernel) are in `vendor/rapidyenc/VENDOR.txt` under
+  can execute either kernel) are in `crates/nzbkit-base/vendor/rapidyenc/VENDOR.txt` under
   Local patches. The value oracle is
   `yenc_simd::tests::every_reachable_crc_kernel_matches_the_oracle`,
   which already sweeps every tail residue at four alignments with each
@@ -227,8 +227,10 @@ Note either below.
   kernels loaded a whole 16-byte vector for a 4-byte lookahead that
   `_do_decode_simd`'s `lenBuffer` reserves exactly 4 bytes for; the x86
   kernels load exactly 4, which is why the ubuntu smoke run was green
-  over these same seeds. Fixed in `vendor/rapidyenc/src/decoder_neon64.cc`
-  and `decoder_neon.cc` the same day (see `../../../../vendor/rapidyenc/VENDOR.txt`
+  over these same seeds. Fixed in
+  `crates/nzbkit-base/vendor/rapidyenc/src/decoder_neon64.cc`
+  and `decoder_neon.cc` the same day (see
+  `../../../nzbkit-base/vendor/rapidyenc/VENDOR.txt`
   and `research/YENC-NEON-OVERREAD-2026-09-02.md`).
 
   Read the pairing rule above with care here: a plain `cargo test` over

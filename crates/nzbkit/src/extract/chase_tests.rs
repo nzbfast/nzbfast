@@ -25,7 +25,7 @@ use crate::extract::testutil::*;
 fn chase_compressed_inner_one_pass() {
     let dir = tmpdir("chase1");
     let f = payload(300_000, 91);
-    let inner_arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let inner_arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&inner_arch);
     let outer = fixtures::rar5_volume(&[(
         "inner.rar",
@@ -65,7 +65,7 @@ fn chase_compressed_inner_one_pass() {
 fn gated_chase_waits_for_verification_then_completes() {
     let dir = tmpdir("chase-gate");
     let f = payload(300_000, 96);
-    let inner_arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let inner_arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&inner_arch);
     let outer = fixtures::rar5_volume(&[(
         "inner.rar",
@@ -108,7 +108,7 @@ fn chase_blocks_at_frontier_until_gap_fills() {
     // noisy: the packed inner archive stays ~150 KB, so the outer
     // really spans many articles and the gap sits mid-bitstream.
     let f = noisy(300_000, 92);
-    let inner_arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let inner_arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&inner_arch);
     let outer = fixtures::rar5_volume(&[(
         "inner.rar",
@@ -150,7 +150,7 @@ fn chase_blocks_at_frontier_until_gap_fills() {
 fn chase_unblocks_on_patched_volume_span() {
     let dir = tmpdir("chase-patch");
     let f = noisy(300_000, 93);
-    let inner_arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let inner_arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&inner_arch);
     let outer = fixtures::rar5_volume(&[(
         "inner.rar",
@@ -202,7 +202,7 @@ fn chase_unblocks_on_patched_volume_span() {
 fn gated_child_chase_takes_a_differing_repair_without_forfeit() {
     let dir = tmpdir("chase-row27");
     let f = noisy(2_400_000, 127);
-    let inner_arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let inner_arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&inner_arch);
     let outer = fixtures::rar5_volume(&[(
         "inner.rar",
@@ -315,7 +315,7 @@ fn chase_budget_breach_demotes() {
     let dir = tmpdir("chase-budget");
     // ~1.2 MB packed (half-entropy input bounds it near half size).
     let f = noisy(2_400_000, 95);
-    let inner_arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let inner_arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&inner_arch);
     assert!(
         inner_arch.len() > 900_000,
@@ -413,7 +413,7 @@ pub(in crate::extract) fn chase_volume_set() -> &'static (Vec<u8>, Vec<Vec<u8>>,
         std::sync::OnceLock::new();
     SET.get_or_init(|| {
         let f = noisy(5 << 20, 140);
-        let vols = rars_compressed_volumes("F.bin", &f, 200_000);
+        let vols = compressed_volume_set("F.bin", &f, 200_000);
         assert!(vols.len() >= 8, "want many volumes, got {}", vols.len());
         for v in &vols {
             assert_not_store(v);
@@ -474,6 +474,8 @@ fn chase_volume_set_cases() {
     chase_decodes_a_volume_before_its_tail_arrives();
     holds_backpressure_parks_near_the_cap_and_reopens_as_the_engine_catches_up();
     an_sfx_first_volume_chases_and_trims_in_file_coordinates();
+    a_nested_chase_under_the_cap_trims_on_engine_progress();
+    a_top_level_chase_under_the_cap_does_not_progress_trim();
     // Not an assert on purpose: a paced-feed expiry is contention, not
     // a defect, and the per-expiry line from the helper already names
     // the volume. This just leaves the tally where a reader looks.
@@ -1216,6 +1218,229 @@ fn a_nested_chase_over_the_cap_spills_its_trim_and_streams() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// One leg of the stage 2 A/B: a nested chase whose whole input FITS
+/// under the holds cap, run with the progress trim on or off.
+///
+/// Returns `(trimmed, dropped, holds peak)`. Panics on anything that
+/// would make the numbers unreadable - a fallback, a wrong payload, a
+/// leftover spill file - so a caller only has to read the three.
+///
+/// The feed is the one `a_nested_chase_over_the_cap_spills_its_trim_and_streams`
+/// uses and paced for the same reason: in-order, because the inner
+/// volumes sit in the outer in volume order, and held to the CHILD's
+/// own progress, because an unpaced feed outruns the decode and the
+/// resulting retention is a runaway feed's rather than the shape the
+/// margin is being measured against.
+fn nested_under_cap_leg(tag: &str, progress_on: bool, margin: u64) -> (u64, u64, usize) {
+    let dir = tmpdir(tag);
+    let (f, vols, names) = chase_volume_set();
+    let outer_entries: Vec<(&str, u64, &[u8], bool, bool)> = names
+        .iter()
+        .zip(vols.iter())
+        .map(|(n, v)| (n.as_str(), v.len() as u64, v.as_slice(), false, false))
+        .collect();
+    let outer = fixtures::rar5_volume(&outer_entries);
+
+    let ex = Arc::new(Extractor::new(&dir, 4, true));
+    ex.anchor();
+    // The cap floors at 8 MB and NOTHING eats into it - that is the
+    // whole point of this leg. The over-cap nested case beside it calls
+    // `eat_budget_to` to manufacture a breach; here the set must fit,
+    // so the two pressure call sites can never fire and a trim that
+    // happens is the progress one by elimination. The control leg
+    // asserts the peak really did stay under the cap.
+    ex.set_holds_cap(1);
+    ex.set_extract_budget(64 << 20);
+    ex.set_chase_progress_trim(progress_on);
+    ex.set_chase_progress_margin(margin);
+
+    let cum: Vec<usize> = vols
+        .iter()
+        .scan(0usize, |t, v| {
+            *t += v.len();
+            Some(*t)
+        })
+        .collect();
+    let (art, lead) = (7000usize, 2usize);
+    for i in 0..outer.len().div_ceil(art) {
+        let s = i * art;
+        let e = (s + art).min(outer.len());
+        ex.write(0, "v.rar", outer.len() as u64, s as u64, &outer[s..e])
+            .unwrap();
+        let arrived = cum.iter().take_while(|&&c| c <= e).count();
+        let lagging = || {
+            arrived >= lead
+                && ex.chase_consumed_volumes() + lead <= arrived
+                && ex.chase_retained_bytes() > 0
+        };
+        let deadline = std::time::Instant::now() + NO_PROGRESS;
+        while lagging() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if lagging() {
+            eprintln!(
+                "PACED FEED DEADLINE EXPIRED in {tag}: chunk {i} fed but the engine consumed \
+                 only {} volumes (lead {lead}) after {}s - the rest of this leg measures a \
+                 runaway feed, not the paced shape the margin was written for",
+                ex.chase_consumed_volumes(),
+                NO_PROGRESS.as_secs()
+            );
+        }
+    }
+    let peak = ex.holds_peak();
+    let rep = ex.finish().unwrap();
+    assert!(rep.fallbacks.is_empty(), "{tag}: {:?}", rep.fallbacks);
+    assert_eq!(
+        &std::fs::read(dir.join("F.bin")).unwrap(),
+        f,
+        "{tag}: the payload came out wrong"
+    );
+    assert_eq!(
+        dir_files(&dir),
+        vec!["F.bin".to_string()],
+        "{tag}: a spilled inner volume survived the successful nested chase"
+    );
+    let out = (ex.chase_trimmed_bytes(), ex.chase_dropped_bytes(), peak);
+    std::fs::remove_dir_all(&dir).unwrap();
+    out
+}
+
+/// TODO 13 STAGE 2, the model case: a nested chase whose input fits
+/// UNDER the holds cap releases its consumed prefix as the engine's
+/// read frontier passes it, instead of holding the whole thing.
+///
+/// Both arms out of one binary, because this is a measured trade and
+/// not a fix. Stage 1 (`research/NESTED-CHASE-HOLDS-2026-09-20.md`)
+/// measured the OFF arm on the loopback rig at `holds peak 589 MB`
+/// against a 589,182,122 B input with the trim running zero passes,
+/// reproduced three times across two fixtures. The reason is
+/// structural rather than incidental, which is why a test can pin it:
+/// the two trim call sites that existed both fire under PRESSURE
+/// (`chase_span` on `budget.over()`, `park_reeval` at three quarters
+/// of the cap), and a set that fits under the cap reaches neither.
+///
+/// So the control arm is doing two jobs. It shows the escape hatch
+/// works, and it shows the ON arm is measuring the PROGRESS trim
+/// rather than a budget that was quietly tight - its `holds peak`
+/// under the cap is what rules the pressure sites out by elimination.
+fn a_nested_chase_under_the_cap_trims_on_engine_progress() {
+    // Opt-IN, unlike every other gate in `config.rs` - see
+    // `chase_progress_trim_env_on` for the measurement that inverted it.
+    assert!(chase_progress_trim_env_on_value(Some("1")));
+    assert!(!chase_progress_trim_env_on_value(Some("0")));
+    assert!(!chase_progress_trim_env_on_value(None));
+
+    // A margin well under the set, so the arm has something to do;
+    // `nested_under_cap_leg`'s own asserts cover correctness.
+    const MARGIN: u64 = 512_000;
+    let (off_trimmed, off_dropped, off_peak) =
+        nested_under_cap_leg("chase-progress-off", false, MARGIN);
+    let (on_trimmed, on_dropped, on_peak) = nested_under_cap_leg("chase-progress-on", true, MARGIN);
+
+    // The control is the stage 1 shape: nothing asked, nothing
+    // released, and the peak is the input.
+    assert_eq!(
+        off_trimmed, 0,
+        "the progress trim released bytes with its gate OFF"
+    );
+    assert!(
+        off_peak < HOLDS_CAP_FLOOR,
+        "the control leg BREACHED the cap ({off_peak} B against a {HOLDS_CAP_FLOOR} B floor), \
+         so a pressure trim could have fired and the ON arm below proves nothing about \
+         engine progress"
+    );
+
+    assert!(
+        on_trimmed > 0,
+        "the progress trim never fired: {on_peak} B held under a {HOLDS_CAP_FLOOR} B cap \
+         against a {MARGIN} B margin"
+    );
+    // The depth gate on the DROP arm, stated as an assertion rather
+    // than a comment: a child slot's bytes are inner members of an
+    // outer archive and nothing on the wire can restore them, so every
+    // byte this releases is spilled into the inner volume's own file.
+    assert_eq!(
+        off_dropped, 0,
+        "a child slot dropped bytes with the progress trim off"
+    );
+    assert_eq!(
+        on_dropped, 0,
+        "the progress trim DROPPED a child slot's bytes - nothing on the wire can restore them"
+    );
+    // What the trade actually buys, which is the quantity the ladder in
+    // section 6 of the stage 1 note prices. Deliberately a strict
+    // inequality and nothing tighter: the exact peak depends on how far
+    // the engine has run when each span lands, which is a loaded box's
+    // business. The MEASUREMENT lives in that note; this pins the sign.
+    assert!(
+        on_peak < off_peak,
+        "the progress trim released {on_trimmed} B and bought no peak at all: \
+         {on_peak} B against the control's {off_peak} B"
+    );
+}
+
+/// The depth gate on the PROGRESS trim, which points the opposite way
+/// to the depth gate on the drop arm and is policy rather than safety.
+///
+/// A TOP-LEVEL chase under the cap must not progress-trim. There a
+/// trim can DROP outright at no disk cost - a top-level slot is an NZB
+/// file the caller can re-fetch - so trimming eagerly would convert
+/// free drops into spilled writes and be strictly worse than what
+/// ships. Stage 2's subject is the nested residual, and the ladder that
+/// prices it has to move one thing.
+fn a_top_level_chase_under_the_cap_does_not_progress_trim() {
+    let dir = tmpdir("chase-progress-depth0");
+    let (f, vols, names) = chase_volume_set();
+
+    let ex = Arc::new(Extractor::new(&dir, vols.len(), true));
+    ex.anchor();
+    ex.set_holds_cap(1); // floors at 8 MB, and nothing eats into it
+    // Switched ON, or this case passes on the shipped default and
+    // proves nothing about the DEPTH gate it is here to pin.
+    ex.set_chase_progress_trim(true);
+    ex.set_chase_progress_margin(512_000);
+    let trimmed = feed_chase_volumes_paced(&ex, names, vols, 7000, 2);
+    let peak = ex.holds_peak();
+    let rep = ex.finish().unwrap();
+
+    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    assert!(
+        peak < HOLDS_CAP_FLOOR,
+        "the set BREACHED the cap ({peak} B against {HOLDS_CAP_FLOOR} B), so a PRESSURE trim \
+         is a legitimate explanation for anything released below and this case proves nothing"
+    );
+    assert_eq!(
+        trimmed, 0,
+        "a top-level chase progress-trimmed: {trimmed} B released with the budget never over, \
+         which turns a free drop into a spilled write"
+    );
+    assert_eq!(&std::fs::read(dir.join("F.bin")).unwrap(), f);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The ladder rung parses the way the rest of the fleet's byte-size
+/// knobs do, so a leg reads the same in the environment, in the log and
+/// in the table. DECIMAL suffixes, matching `--mem-limit` and
+/// `NZBFAST_HOLDS_CAP`: `256M` is 256,000,000 and not a mebibyte.
+#[test]
+fn the_chase_trim_margin_parses_decimal_suffixes() {
+    use crate::extract::config::chase_progress_margin_env_value as p;
+    assert_eq!(p(Some("256M")), Some(256_000_000));
+    assert_eq!(p(Some("1G")), Some(1_000_000_000));
+    assert_eq!(p(Some("64m")), Some(64_000_000));
+    assert_eq!(p(Some("512k")), Some(512_000));
+    assert_eq!(p(Some("1048576")), Some(1_048_576));
+    // Zero is the far end of the ladder - release everything the
+    // engine has read past - and NOT an off switch.
+    assert_eq!(p(Some("0")), Some(0));
+    // Unset and unparseable both leave the default alone.
+    assert_eq!(p(None), None);
+    assert_eq!(p(Some("")), None);
+    assert_eq!(p(Some("lots")), None);
+    assert_eq!(p(Some("-1")), None);
+    assert_eq!(p(Some("99999999999999999999G")), None);
+}
+
 /// A held-bytes breach that an OUTER slot notices must not take the
 /// outer group down while a child chase is holding the budget.
 ///
@@ -1847,7 +2072,7 @@ fn a_chase_beside_a_doubted_article_spills_instead_of_dropping() {
 fn chase_differing_rewrite_forfeits_and_materializes_repaired() {
     let dir = tmpdir("chase-rewrite");
     let f = noisy(2_400_000, 121);
-    let inner_arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let inner_arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&inner_arch);
     let outer = fixtures::rar5_volume(&[(
         "inner.rar",
@@ -1918,7 +2143,7 @@ fn chase_differing_rewrite_forfeits_and_materializes_repaired() {
 fn chase_abort_on_finish_with_missing_bytes() {
     let dir = tmpdir("chase-missing");
     let f = noisy(300_000, 97);
-    let inner_arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let inner_arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&inner_arch);
     let outer = fixtures::rar5_volume(&[(
         "inner.rar",
@@ -2140,7 +2365,7 @@ fn chase_read_defers_its_paged_preads_off_the_extractor_lock() {
 fn stalled_chase_resumes_from_paged_spans_when_the_gap_fills() {
     let dir = tmpdir("chase-stall-resume");
     let f = noisy(2_400_000, 153);
-    let inner_arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let inner_arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&inner_arch);
     assert!(
         inner_arch.len() > 900_000,
@@ -2310,7 +2535,7 @@ fn a_hole_ahead_of_the_engine_pages_beyond_it_and_still_resumes() {
 fn failed_reclaim_at_attach_leaves_the_slot_chased() {
     let dir = tmpdir("chase-attach-reclaim-fail");
     let f = noisy(300_000, 137);
-    let arch = rars_compressed_volume(&[("F.bin", &f)]);
+    let arch = compressed_archive(&[("F.bin", &f)]);
     assert_not_store(&arch);
     let art = 7000usize;
     let n = arch.len().div_ceil(art);
@@ -2529,4 +2754,180 @@ fn a_top_level_breach_relieves_the_chase_before_demoting_a_volume() {
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
+}
+
+/// A clean chase reports ZERO loss vetoes, whatever else stopped its
+/// drop.
+///
+/// The counter this pins lied until 20 Sep 2026. `rar_trim_set` decides
+/// `healthy` as one conjunction over four conditions - the drop switch,
+/// the depth gate, a terminal loss verdict and [`LossDoubt`] - and the
+/// bench instrument classified every `!healthy` pass as a LOSS. So every
+/// over-cap leg of the nested holds round printed `1 vetoed by loss` on
+/// a job with no lost article and no refusal anywhere in it
+/// (`research/NESTED-CHASE-HOLDS-2026-09-20.md` section 4.5). It changed
+/// no outcome - the depth gate shuts the drop arm regardless - but a
+/// LOSS reading sends the next reader hunting damage that is not there,
+/// which is the same misread one layer down as memory topic
+/// `nzbfast-retry-propagation-trap`.
+///
+/// Reached through [`Extractor::trim_veto_for`] rather than through a
+/// chase, because the instrument is off in a unit-test build BY
+/// CONSTRUCTION (`chasestat::off_by_default_and_free` asserts the env
+/// var cannot leak in), so the counters themselves never move here and
+/// a test that read them would pass against any classifier at all.
+#[test]
+fn a_clean_set_reports_no_loss_veto() {
+    use crate::extract::chasestat::TrimVeto;
+    // `nested`, `lost` and the pace closure in the argument order
+    // `trim_veto_for` takes them: (dropped, drop_on, nested, lost, pace).
+    let clean_nested = Extractor::trim_veto_for(false, true, true, false, || true);
+    assert_eq!(
+        clean_nested,
+        TrimVeto::Nested,
+        "a nested chase on a clean job is vetoed by its DEPTH, not by loss"
+    );
+    assert_eq!(
+        Extractor::trim_veto_for(false, false, false, false, || true),
+        TrimVeto::Off,
+        "the drop switch being off is an operator's choice, not a loss"
+    );
+    // The three arms that are genuinely about this job, unchanged.
+    assert_eq!(
+        Extractor::trim_veto_for(false, true, false, true, || true),
+        TrimVeto::Loss,
+        "a real loss verdict is still a loss"
+    );
+    assert_eq!(
+        Extractor::trim_veto_for(false, true, false, false, || false),
+        TrimVeto::Pace,
+        "clean and top-level, but the engine is behind"
+    );
+    assert_eq!(
+        Extractor::trim_veto_for(false, true, false, false, || true),
+        TrimVeto::Size,
+        "clean, top-level and keeping pace: the set is simply too big"
+    );
+    assert_eq!(
+        Extractor::trim_veto_for(true, true, true, true, || false),
+        TrimVeto::None,
+        "a pass that DROPPED is not a veto, whatever the conditions read"
+    );
+
+    // Precedence is the shipped conjunction's evaluation order, not a
+    // ranking of severity: a nested chase that also has a lost article
+    // names the gate the expression stopped at, which is the one nothing
+    // about the job can move.
+    assert_eq!(
+        Extractor::trim_veto_for(false, true, true, true, || true),
+        TrimVeto::Nested,
+        "the depth gate is reached first and is the permanent one"
+    );
+
+    // And the pace walk is never paid by an arm that decided earlier -
+    // the reason the parameter is a closure.
+    let asked = std::cell::Cell::new(0);
+    let _ = Extractor::trim_veto_for(false, true, true, false, || {
+        asked.set(asked.get() + 1);
+        true
+    });
+    assert_eq!(asked.get(), 0, "the nested arm paid for the set-wide walk");
+}
+
+/// TODO 118.2 (b): the random-`size=` poster on a COMPRESSED set. Every
+/// article of every volume carries a fresh false `size=` claim (none the
+/// truth, none repeated), and the engine's exact witness - the last
+/// segment's `=ypart end` - reaches the extractor just before that
+/// segment's span, as `get::workers` sends it. The chase must not bound
+/// a volume's frontier by the first claim it saw: before this landed the
+/// frontier was born with the first article's random total, so a claim
+/// short of the volume dropped every byte past it and the decode read a
+/// false EOF; a claim past it parked the decode on bytes that never come.
+/// Either way the set demoted and the volumes materialized. Now the
+/// frontier opens unbounded and closes on the corroborated length, and
+/// the set streams one-pass.
+#[test]
+fn a_compressed_set_with_random_false_sizes_chases_one_pass_once_corroborated() {
+    let dir = tmpdir("chase-random-size-corroborated");
+    let f = noisy(400_000, 143);
+    let vols = compressed_volume_set("F.bin", &f, 90_000);
+    assert!(
+        vols.len() >= 3,
+        "want a multi-volume set, got {}",
+        vols.len()
+    );
+    for v in &vols {
+        assert_not_store(v);
+    }
+    let names: Vec<String> = (0..vols.len())
+        .map(|i| format!("release.part{}.rar", i + 1))
+        .collect();
+    let ex = Arc::new(Extractor::new(&dir, vols.len(), true));
+    ex.anchor();
+    let art = 7000usize;
+    for (i, v) in vols.iter().enumerate() {
+        let n = v.len().div_ceil(art);
+        for k in 0..n {
+            let s = k * art;
+            let e = (s + art).min(v.len());
+            // A different false claim on every article: some short of the
+            // volume, some past it, none equal to it and none repeated.
+            let lie = 3_000 + ((k * 7_919 + i * 131) % 200_000) as u64;
+            assert_ne!(lie, v.len() as u64);
+            if k + 1 == n {
+                ex.corroborate_size(i, v.len() as u64).unwrap();
+            }
+            ex.write(i, &names[i], lie, s as u64, &v[s..e]).unwrap();
+        }
+    }
+    let rep = finish_within(&ex, 60).unwrap();
+    assert!(
+        rep.fallbacks.is_empty(),
+        "a random size= claim bounded the chase: {:?}",
+        rep.fallbacks
+    );
+    assert_eq!(std::fs::read(dir.join("F.bin")).unwrap(), f);
+    assert_eq!(dir_files(&dir), vec!["F.bin".to_string()]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The same random claims with NO exact witness ever arriving. A
+/// contested claim never bounds the frontier, not even at finish - a
+/// known-false bound is worse than none - and a RAR5 volume carries its
+/// own end block, so the decode reaches every END header on the bytes
+/// alone and the set still streams. The mapper's twin is
+/// `per_article_random_false_sizes_map_one_pass_on_the_end_block_alone`.
+#[test]
+fn a_compressed_set_with_random_false_sizes_chases_one_pass_on_the_end_blocks_alone() {
+    let dir = tmpdir("chase-random-size-uncorroborated");
+    let f = noisy(400_000, 144);
+    let vols = compressed_volume_set("F.bin", &f, 90_000);
+    assert!(
+        vols.len() >= 3,
+        "want a multi-volume set, got {}",
+        vols.len()
+    );
+    let names: Vec<String> = (0..vols.len())
+        .map(|i| format!("release.part{}.rar", i + 1))
+        .collect();
+    let ex = Arc::new(Extractor::new(&dir, vols.len(), true));
+    ex.anchor();
+    let art = 7000usize;
+    for (i, v) in vols.iter().enumerate() {
+        for (k, s) in (0..v.len()).step_by(art).enumerate() {
+            let e = (s + art).min(v.len());
+            let lie = 3_000 + ((k * 7_919 + i * 131) % 200_000) as u64;
+            assert_ne!(lie, v.len() as u64);
+            ex.write(i, &names[i], lie, s as u64, &v[s..e]).unwrap();
+        }
+    }
+    let rep = finish_within(&ex, 60).unwrap();
+    assert!(
+        rep.fallbacks.is_empty(),
+        "contested claims must not bound the chase: {:?}",
+        rep.fallbacks
+    );
+    assert_eq!(std::fs::read(dir.join("F.bin")).unwrap(), f);
+    assert_eq!(dir_files(&dir), vec!["F.bin".to_string()]);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

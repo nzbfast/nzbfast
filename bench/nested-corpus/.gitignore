@@ -1,5 +1,6 @@
 corpus/
-corpus-run/
+corpus-run*/
+evidence-*/
 nzbserve/target/
 bin/
 *.log

@@ -866,7 +866,8 @@ fn a_prefixed_volume_is_not_offered_as_an_adoption_source() {
     // nominates, the content decides, and this content denies.
     std::fs::write(dir.join("9f3a1c40b2.par2"), vec![7u8; 210_000]).unwrap();
 
-    let (cands, _) = adoption_candidates(&dir, &[], &targets, &HashSet::new()).expect("walk");
+    let (cands, _) =
+        adoption_candidates(&dir, &[], &targets, &HashSet::new(), &HashSet::new()).expect("walk");
     let names: Vec<String> = cands
         .iter()
         .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -1623,6 +1624,69 @@ fn the_extra_file_announcement_names_donor_target_and_shape() {
         }]
     );
 
+    // ...and one feeding two members UNEQUALLY is named for the one it
+    // mostly fed, which is what the reference does and what SABnzbd's
+    // `PAR2_BLOCK_FOUND_RE` needs to delete a consumed donor. Same
+    // `spanning` candidate, one more alpha block: 2 of alpha against 1
+    // of beta breaks the tie above.
+    //
+    // The COUNT is alpha's two and not the donor's three: a line naming
+    // one target carries that target's blocks. See
+    // `extra_file_matches`.
+    let mut dominant: HashMap<usize, AdoptSrc> = HashMap::new();
+    dominant.insert(0, AdoptSrc { cand: 2, offset: 0 });
+    dominant.insert(
+        1,
+        AdoptSrc {
+            cand: 2,
+            offset: 700,
+        },
+    );
+    dominant.insert(
+        3,
+        AdoptSrc {
+            cand: 2,
+            offset: 100,
+        },
+    );
+    assert_eq!(
+        extra_file_matches(dir, &cands, 5, &targets, &dominant, bs, &claimed),
+        vec![ExtraFileMatch {
+            donor: "spanning".into(),
+            target: Some("alpha.bin".into()),
+            blocks: 2,
+            target_blocks: 3,
+            whole_file: false,
+        }]
+    );
+
+    // A dominant donor is never `is a match for`, however well the
+    // whole-file derivation reads: `whole_file` is what the rename path
+    // acts on and it gates on a SOLE target. Here `whole` is alpha
+    // entire at aligned offsets - the row at the top of this test makes
+    // it `whole_file: true` - plus one block of beta.
+    let mut whole_plus: HashMap<usize, AdoptSrc> = HashMap::new();
+    for i in 0..3 {
+        whole_plus.insert(
+            i,
+            AdoptSrc {
+                cand: 0,
+                offset: i as u64 * 100,
+            },
+        );
+    }
+    whole_plus.insert(3, AdoptSrc { cand: 0, offset: 0 });
+    assert_eq!(
+        extra_file_matches(dir, &cands, 5, &targets, &whole_plus, bs, &claimed),
+        vec![ExtraFileMatch {
+            donor: "whole".into(),
+            target: Some("alpha.bin".into()),
+            blocks: 3,
+            target_blocks: 3,
+            whole_file: false,
+        }]
+    );
+
     // Every slice, aligned, but the file is LONGER than the member: the
     // reference compares the whole-file MD5 and this cannot pass it.
     let mut longer: HashMap<usize, AdoptSrc> = HashMap::new();
@@ -1685,4 +1749,124 @@ fn the_extra_file_announcement_names_donor_target_and_shape() {
          RENAMES on this would skip the verify that catches a set lying \
          about its own MD5"
     );
+}
+
+/// Claim `parfast-donor-attribution-several-vs-reference-20sep`: the
+/// corpus shape that cost a shipped file, end to end through the real
+/// [`adopt_blocks`] rather than over a hand-built adoption map.
+///
+/// TWO MEMBERS OF ONE SET SHARING A LEADING HEADER, both landing under
+/// obfuscated names with the same hole punched in each - an ordinary
+/// posting shape, not an exotic one. The shared prefix means a donor's
+/// leading blocks carry the block checksums of BOTH members, so the
+/// earlier candidate in scan order takes them for both and the tally
+/// for it is two-target. Before 20 Sep 2026 that printed the reference's
+/// `several target files` line, which matches NEITHER of SABnzbd's two
+/// regexes (`newsunpack.py:84-85`), so SAB never learned the donor was
+/// consumed and shipped it into the completed folder as junk.
+///
+/// What is pinned is that BOTH donors come back with a target named -
+/// the shape `PAR2_BLOCK_FOUND_RE` matches - and that the counts are
+/// each target's own blocks. par2cmdline-turbo 1.4.0 over this corpus
+/// says `928 of 1000` for both; the dominant donor agrees to the block,
+/// and the other is short by exactly the blocks the first one took.
+#[test]
+fn two_donors_sharing_a_header_are_each_named_for_the_member_they_mostly_fed() {
+    let bs = 1024usize;
+    let dir = tmpdir("shared-header-donors");
+    let d: &Path = &dir;
+    let mut rng = Rng(0x5eed_1234_9abc_def0);
+    let len = bs * 40;
+    // The shared header is 6 whole blocks, so blocks 0..6 of the two
+    // members carry identical checksums and blocks 6.. do not.
+    let shared: Vec<u8> = (0..bs * 6).map(|_| rng.below(256) as u8).collect();
+    let mut bodies: Vec<Vec<u8>> = Vec::new();
+    for _ in 0..2 {
+        let mut b: Vec<u8> = (0..len).map(|_| rng.below(256) as u8).collect();
+        b[..shared.len()].copy_from_slice(&shared);
+        bodies.push(b);
+    }
+
+    let names = ["Show.part1.mkv", "Show.part2.mkv"];
+    let mut targets: Vec<Target> = Vec::new();
+    for (ti, (name, body)) in names.iter().zip(&bodies).enumerate() {
+        let n_slices = body.len().div_ceil(bs);
+        let blocks = (0..n_slices)
+            .map(|i| {
+                let blk = &body[i * bs..(i + 1) * bs];
+                BlockCheck {
+                    md5: md5_of(blk),
+                    crc32: crc32_of(blk),
+                }
+            })
+            .collect();
+        targets.push(Target {
+            file: Par2File {
+                file_id: [ti as u8; 16],
+                name: (*name).into(),
+                length: body.len() as u64,
+                md5: md5_of(body),
+                md5_16k: md5_of(&body[..body.len().min(16384)]),
+                blocks,
+            },
+            path: d.join(name),
+            first_slice: ti * n_slices,
+            n_slices,
+            present: vec![false; n_slices],
+            intact: false,
+            exists: false,
+            resume: None,
+            md5_unfinished: false,
+        });
+    }
+
+    // Each donor is its member with blocks 10..14 zeroed - the missing
+    // article - so neither can clear the whole-file fast path and both
+    // reach the sliding scan, which is the path the defect lived on.
+    let tokens = ["3f8a1c9d2b7e4f60", "b41d7e05c9a26f38"];
+    for (tok, body) in tokens.iter().zip(&bodies) {
+        let mut damaged = body.clone();
+        damaged[bs * 10..bs * 14].fill(0);
+        std::fs::write(d.join(tok), &damaged).unwrap();
+    }
+
+    let missing: Vec<usize> = (0..targets.iter().map(|t| t.n_slices).sum()).collect();
+    let (cands, donor_from, adopted, whole_claims) = adopt_blocks(
+        d,
+        &super::super::DirContext::default(),
+        &targets,
+        &missing,
+        bs,
+        &HashSet::new(),
+    )
+    .unwrap();
+    let matches = extra_file_matches(d, &cands, donor_from, &targets, &adopted, bs, &whole_claims);
+
+    // The blocks are adopted either way - this was never a repair
+    // defect. 36 good blocks per member, and the 6 shared leading ones
+    // can only be taken once, so one donor feeds 36 and the other 30.
+    assert_eq!(adopted.len(), 72, "every good block is still adopted");
+
+    let named: Vec<(&str, Option<&str>, usize, usize)> = matches
+        .iter()
+        .map(|m| {
+            (
+                m.donor.as_str(),
+                m.target.as_deref(),
+                m.blocks,
+                m.target_blocks,
+            )
+        })
+        .collect();
+    assert_eq!(
+        named,
+        vec![
+            ("3f8a1c9d2b7e4f60", Some("Show.part1.mkv"), 36, 40),
+            ("b41d7e05c9a26f38", Some("Show.part2.mkv"), 30, 40),
+        ],
+        "both donors name a target, so both lines match PAR2_BLOCK_FOUND_RE"
+    );
+    // Neither is `is a match for`: both are damaged, so no whole-file
+    // claim, and the rename path must not be told otherwise.
+    assert!(matches.iter().all(|m| !m.whole_file));
 }

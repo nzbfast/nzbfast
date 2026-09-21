@@ -26,6 +26,9 @@ const NZBIMPORT_CURSOR_LEGACY_ID: &str = "nzbimport_cursor";
 /// small NZB, and its payload message-ids can name dark rows exactly.
 #[derive(Debug, Clone)]
 pub struct PostedNzbCandidate {
+    /// The row this `.nzb` was posted as. For the fetch and the later
+    /// write; do NOT use it as a walker cursor - see
+    /// [`Self::arrival_seq`].
     pub release_id: i64,
     /// This row's wall-arrival ordinal - the walker's cursor value.
     /// `release_id` is not: SQLite hands a deleted row's id to the next
@@ -33,10 +36,16 @@ pub struct PostedNzbCandidate {
     pub arrival_seq: i64,
     /// The stem the `.nzb` was posted under - the primary name claim.
     pub stem: String,
+    /// The newsgroup the `.nzb` was posted to.
     pub grp: String,
+    /// The row's junk score, 0-100. Carried so the caller can spend
+    /// its fetch budget on the rows most likely to be worth naming
+    /// rather than re-reading the score per candidate.
     pub junk: i64,
     /// `(part_no, message_id)` in stored (bracketed) form, part order.
     pub segs: Vec<(u32, String)>,
+    /// Declared on-wire size of the `.nzb` article itself, used to
+    /// price the fetch. Not the size of what the NZB describes.
     pub bytes: u64,
 }
 
@@ -59,7 +68,10 @@ pub struct MsgidRow {
 /// [`crate::nzbimport::group_hits`] from [`MsgidRow`]s).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MsgidHit {
+    /// The release row the ids landed in.
     pub release_id: i64,
+    /// That row's posted stem - the name a successful claim would
+    /// replace.
     pub stem: String,
     /// Distinct message-ids of THIS NZB found in the row.
     pub matched: usize,

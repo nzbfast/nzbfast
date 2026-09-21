@@ -2,7 +2,7 @@
 name = "nzbtray"
 # Keep in lockstep with crates/nzbfast (the version source of truth) -
 # the installer stamps that string on both exes' packaging.
-version = "1.6.0"
+version = "1.7.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -18,10 +18,13 @@ workspace = true
 # The daemon is always 127.0.0.1, but it is not always plain HTTP: with
 # tls_cert/tls_key set it binds HTTPS, and a tray without a TLS stack
 # could not probe, open, stop, upgrade or quit its own engine (M1). So
-# `tls` is on - it brings rustls with RING only (ureq pins it
-# default-features = false), not aws-lc-sys, so nothing new has to build
-# for the Windows target.
-ureq = { version = "2", default-features = false, features = ["tls"] }
+# a TLS feature is on - `rustls` brings rustls with RING only (via
+# ureq's own `_ring`), not aws-lc-sys, so nothing new has to build for
+# the Windows target. It was `tls` on ureq 2 until TODO 326: 3.4.0
+# renamed that feature, which is what stalled the weekly dependabot
+# cargo run for a fortnight. Check `cargo tree -p nzbtray --target
+# x86_64-pc-windows-gnu` for aws-lc-sys before taking any bump here.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 # Declared directly for the custom loopback verifier in `loopback_tls` -
 # same version and the same ring-only feature set ureq asks for, so this
 # adds no crate the `tls` feature above did not already pull in.

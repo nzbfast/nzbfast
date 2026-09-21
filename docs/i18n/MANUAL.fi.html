@@ -112,12 +112,13 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
     <li><a href="#automation">10 · Automaatio</a></li>
     <li><a href="#arr">11 · Sonarr, Radarr &amp; kumppanit</a></li>
     <li><a href="#remotes">12 · Puhelin- &amp; etäsovellukset</a></li>
-    <li><a href="#performance">13 · Suorituskykytyökalut</a></li>
-    <li><a href="#updates">14 · Päivitykset</a></li>
-    <li><a href="#cli">15 · Komentorivi</a></li>
-    <li><a href="#api">16 · API-yleiskatsaus</a></li>
-    <li><a href="#files">17 · Tiedostot &amp; sijainnit</a></li>
-    <li><a href="#troubleshooting">18 · Vianmääritys</a></li>
+    <li><a href="#security">13 · Suojaus ja pääsy</a></li>
+    <li><a href="#performance">14 · Suorituskykytyökalut</a></li>
+    <li><a href="#updates">15 · Päivitykset</a></li>
+    <li><a href="#cli">16 · Komentorivi</a></li>
+    <li><a href="#api">17 · API-yleiskatsaus</a></li>
+    <li><a href="#files">18 · Tiedostot &amp; sijainnit</a></li>
+    <li><a href="#troubleshooting">19 · Vianmääritys</a></li>
   </ol>
 </nav>
 <main>
@@ -639,7 +640,7 @@ sen julkaisut alla. Avaa se painikkeella <b>&#9656;</b> tai napsauttamalla rivi�
 nimikkeen valintaruutu valitsee näytetyt julkaisut. Ryhmittely koskee vain <b>Tätä
 indeksiä</b>; jos valitset <b>Indeksoijat</b> tai <b>Molemmat</b>, taulukko palaa
 litteäksi ja kertoo sen.</li>
-<li><b>Yksi keskusteluryhmä kerrallaan.</b> Napsauta julkaisun alla olevaa ryhmän nimeä, niin sivu rajautuu siihen lähetettyihin julkaisuihin; taulukon yläpuolinen pilleri kertoo ryhmän, kunnes tyhjennät sen. Se rajaa sekä seinän että taulukon, joten näkymien välillä vaihtaminen säilyttää sen. Toinen tie sisään on Asetukset &rarr; Järjestäminen &rarr; <b>Indeksointi</b> &rarr; <b>Skannattavat ryhmät</b> &rarr; <b>Etsi…</b>: avaa ryhmä, jota jo skannaat, ja paina <b>Indeksoidut julkaisut</b>.</li>
+<li><b>Yksi keskusteluryhmä kerrallaan.</b> Taulukon yläpuolinen <b>Ryhmä</b>-valikko luettelee ryhmät, joita indeksoit; valitse yksi, niin sivu rajautuu siihen lähetettyihin julkaisuihin, ja osoiterivi kantaa sen, joten uudelleenlataus tai jaettu linkki säilyttää sen. Julkaisun alla olevan ryhmän nimen napsautus valitsee saman ryhmän. Se rajaa sekä seinän että taulukon, joten näkymien välillä vaihtaminen säilyttää sen. Toinen tie sisään on Asetukset &rarr; Järjestäminen &rarr; <b>Indeksointi</b> &rarr; <b>Skannattavat ryhmät</b> &rarr; <b>Etsi…</b>: avaa ryhmä, jota jo skannaat, ja paina <b>Indeksoidut julkaisut</b>.</li>
 <li><b>Nimikkeen kaikki julkaisut</b> luetellaan kun avaat sen kortin, mukana
 tarkkuus, koodekki, äänimuoto ja dynamiikka-alue (Dolby Vision, HDR10) julkaisun
 nimestä luettuna, sekä koko, ikä ja se onko jokainen osa yhä palveluntarjoajallasi.
@@ -683,7 +684,7 @@ napsautuksella (”Piilotetaanko kaikki Reality-nimikkeet tästä lähtien?”).
 piilottamasi ja jokainen opittu suodatin on kohdassa <b>Piilotetut &amp;
 suodattimet</b>, ja ne voi perua sieltä.</li>
 <li>Pieni <b>saatavuuspiste</b> kortissa on oraakkelin tuomio
-(<a href="#performance">§13</a>): keltainen ”?” tarkoittaa epävarmaa omilla
+(<a href="#performance">§14</a>): keltainen ”?” tarkoittaa epävarmaa omilla
 palveluntarjoajillasi, punainen että sen osat puuttuvat toistuvasti. Kokonaiset ryhmät,
 joita parhaillaan tyhjennetään, saavat <b>siivottu</b>-merkin.</li>
 </ul>
@@ -769,12 +770,12 @@ tahansa palvelin mukaan pooliin tai pois siitä. Jokaisella palvelimella on:</p>
 <tr><th>Kenttä</th><th>Huomiot</th></tr>
 <tr><td>Osoite / portti</td><td>Käytä SSL-porttia <b>563</b>. TLS ei maksa mitattavasti mitään - nzbfast salaa aina.</td></tr>
 <tr><td>Käyttäjänimi / salasana</td><td>Tallennetaan paikallisesti tiedostoon <code>config.local.json</code>, ei koskaan näytetä takaisin selaimelle. Salasanan jättäminen tyhjäksi muokatessa säilyttää tallennetun. Salasanat ovat <a href="#passwords">levyllä hämärrettyjä, ei salattuja</a>.</td></tr>
-<tr><td>Yhteydet</td><td>Palvelinkohtaiset samanaikaiset yhteydet. Käytä <b>Yhteyksien viritystä</b> (<a href="#performance">§13</a>) löytääksesi kunkin palveluntarjoajan makeimman kohdan sen sijaan, että arvaisit korkealta.</td></tr>
+<tr><td>Yhteydet</td><td>Palvelinkohtaiset samanaikaiset yhteydet. Käytä <b>Yhteyksien viritystä</b> (<a href="#performance">§14</a>) löytääksesi kunkin palveluntarjoajan makeimman kohdan sen sijaan, että arvaisit korkealta.</td></tr>
 <tr><td>Taso / porras</td><td>0 = ensisijainen; korkeammat tasot ovat täyttöpalvelimia, joilta kysytään vain artikkeleita, jotka jokainen alempi taso jätti väliin. Aseta rajoittamattomat tilit tasolle 0, lohkotilit tasolle 1+.</td></tr>
 <tr><td>Lohkon koko (GB)</td><td>Lohko- (maksa-per-GB) tileille: nzbfast seuraa elinaikaista käyttöä tätä vasten ja lakkaa käyttämästä palvelinta, kun se on käytetty loppuun (varoitus 85%:ssa).</td></tr>
-<tr><td>Jokainen tavu laskutetaan</td><td>Kytke päälle mitatulle tilille. Latauksesi käyttävät palvelinta täsmälleen kuten ennenkin; se mikä loppuu on nzbfastin oman liikenteen lähettäminen sille - automaattinen yhteysviritin, järjestelmän suorituskykytestin verkko-osuus ja sisäänrakennetun indeksin otsakeskannaukset ohittavat sen kaikki. Riippumaton tasosta ja lohkon koosta, koska mitattu tili voi olla ainoa palveluntarjoajasi ja rajoittamaton voi istua tasolla 2. Oletuksena pois. Manuaalinen <b>Test</b> kohdassa <b>Yhteyksien viritys</b> (<a href="#performance">§13</a>) toimii yhä merkityllä palvelimella ja kysyy ensin, koska siinä sinä itse valitset kuluttamisen.</td></tr>
+<tr><td>Jokainen tavu laskutetaan</td><td>Kytke päälle mitatulle tilille. Latauksesi käyttävät palvelinta täsmälleen kuten ennenkin; se mikä loppuu on nzbfastin oman liikenteen lähettäminen sille - automaattinen yhteysviritin, järjestelmän suorituskykytestin verkko-osuus ja sisäänrakennetun indeksin otsakeskannaukset ohittavat sen kaikki. Riippumaton tasosta ja lohkon koosta, koska mitattu tili voi olla ainoa palveluntarjoajasi ja rajoittamaton voi istua tasolla 2. Oletuksena pois. Manuaalinen <b>Test</b> kohdassa <b>Yhteyksien viritys</b> (<a href="#performance">§14</a>) toimii yhä merkityllä palvelimella ja kysyy ensin, koska siinä sinä itse valitset kuluttamisen.</td></tr>
 </table></div>
-<p><b>Jätä hieman pelivaraa tilisi yhteysrajan alle.</b> Yhteysmäärän asettaminen hieman rajan alle ei maksa mitään: siirtonopeus tasaantuu jo hyvissä ajoin ennen viimeistä paria yhteyttä, ja <b>Yhteyksien viritys</b> (<a href="#performance">§13</a>) päätyy joka tapauksessa sen alle. Juuri nuo vapaat paikat päästävät toisen laitteen, toisen ohjelman tai katkenneen yhteyden uusintayrityksen silti sisään sen sijaan, että ne torjuttaisiin tämän varatessa jokaisen paikan.</p>
+<p><b>Jätä hieman pelivaraa tilisi yhteysrajan alle.</b> Yhteysmäärän asettaminen hieman rajan alle ei maksa mitään: siirtonopeus tasaantuu jo hyvissä ajoin ennen viimeistä paria yhteyttä, ja <b>Yhteyksien viritys</b> (<a href="#performance">§14</a>) päätyy joka tapauksessa sen alle. Juuri nuo vapaat paikat päästävät toisen laitteen, toisen ohjelman tai katkenneen yhteyden uusintayrityksen silti sisään sen sijaan, että ne torjuttaisiin tämän varatessa jokaisen paikan.</p>
 <p><b>Sinun ei tarvitse huolehtia koneesi avointen tiedostojen rajasta.</b> Järjestelmä
 laskee jokaisen yhteyden avoimeksi tiedostoksi, ja macOS käynnistää ohjelman 256 tiedoston
 rajalla, jonka täysi yhteysmäärä usealla palvelimella voi ylittää. macOS:ssä ja Linuxissa
@@ -831,7 +832,7 @@ löytyi ja kopioi palvelimet (duplikaatit ohittaen).</li>
 <li>Palvelinmuutokset astuvat voimaan <em>seuraavasta</em> latauksesta - ei uudelleenkäynnistystä.</li>
 </ul>
 <div class="tip"><b>Suositus</b>Kaksi palveluntarjoajaa <em>eri</em> backboneilla
-voittaa kolme samalla backbonella. Aja <b>Palvelinten monimuotoisuus</b> (<a href="#performance">§13</a>)
+voittaa kolme samalla backbonella. Aja <b>Palvelinten monimuotoisuus</b> (<a href="#performance">§14</a>)
 nähdäksesi, mitkä palveluntarjoajistasi todella monipuolistavat kattavuuttasi ja mitkä ovat
 toistensa redundantteja kopioita.</div>
 
@@ -848,9 +849,9 @@ voittavat komentorivivalitsimet).</p>
 <tr><th>Asetus</th><th>Mitä se tekee</th></tr>
 <tr><td>Nopeusrajoitus</td><td>Katto tavuina/s (<code>50M</code>, <code>1G</code>, 0 = rajoittamaton). Etäsovellukset voivat lähettää prosentteja - aseta <i>Linjanopeus</i>, jotta ne kääntyvät oikein. Otsikkopalkin <b>oma arvo…</b> asettaa saman katon avaamatta Asetuksia.</td></tr>
 <tr><td>Autonopeus</td><td>RTT-ohjattu katto, joka väistää muuta kotitalousliikennettä ja laajenee uudelleen, kun linja on hiljainen.</td></tr>
-<tr><td>Lykkää hitaat lataukset automaattisesti</td><td>Yhteen hitaaseen palvelimeen jumittunut työ muiden odottaessa siirretään jonon perälle (edistyminen säilyy). Katso <a href="#performance">§13</a>.</td></tr>
-<tr><td>Esihaku jouten olevilla palvelimilla</td><td>Aktiiviselle työlle hyödyttömät palvelimet aloittavat seuraavan jonossa olevan. Katso <a href="#performance">§13</a>.</td></tr>
-<tr><td>Automaattipäivitys / Päivitystarkistuksen URL</td><td>Katso <a href="#updates">§14</a>.</td></tr>
+<tr><td>Lykkää hitaat lataukset automaattisesti</td><td>Yhteen hitaaseen palvelimeen jumittunut työ muiden odottaessa siirretään jonon perälle (edistyminen säilyy). Katso <a href="#performance">§14</a>.</td></tr>
+<tr><td>Esihaku jouten olevilla palvelimilla</td><td>Aktiiviselle työlle hyödyttömät palvelimet aloittavat seuraavan jonossa olevan. Katso <a href="#performance">§14</a>.</td></tr>
+<tr><td>Automaattipäivitys / Päivitystarkistuksen URL</td><td>Katso <a href="#updates">§15</a>.</td></tr>
 <tr><td>Linjanopeus</td><td>Yhteytesi nimellisnopeus - mahdollistaa prosenttirajat SABnzbd-yhteensopivista sovelluksista.</td></tr>
 <tr><td>Viikkoajastus</td><td>Rivieditori viikonaika-säännöille: keskeytä, jatka tai aseta nopeusrajoitus annettuina päivinä/aikoina (paikallinen aika). Esim. rajoita 20&nbsp;MB/s arkisin 9–17, muuten rajoittamaton.</td></tr>
 </table></div>
@@ -1067,7 +1068,7 @@ jokaiseen laitteeseen, joka katsoo tätä asennusta.</p>
 <h3>Lisäasetukset: säätimet ilmeisten takana</h3>
 <p>Kuusi asetusta, joilla ei ole komentorivivalitsinta. Kullakin on nyt lisäasetusrivi
 sillä asetuskortilla, jolle se kuuluu, ja kunkin voi yhä asettaa API:n kautta
-(<a href="#api">§16</a>), esim.
+(<a href="#api">§17</a>), esim.
 <code>/api?mode=config&amp;name=verify_mode&amp;value=lean&amp;apikey=…</code>. Kuten
 kaikki muutkin, ne tallentuvat tiedostoon <code>settings.json</code>.</p>
 <div class="tblwrap"><table>
@@ -1075,7 +1076,7 @@ kaikki muutkin, ne tallentuvat tiedostoon <code>settings.json</code>.</p>
 <tr><td><code>verify_mode</code></td><td><code>full</code> | <code>fast</code> | <code>lean</code> (oletus <code>fast</code>). <code>lean</code> on vauhtia hitaille suorittimille: kuten fast, mutta ohittaa lisäksi artikkelikohtaisen yEnc-CRC:n heti kun PAR2 kattaa tiedoston, jolloin CRC32-kerroksia on yksi kahden sijaan. Ilman PAR2:ta ladatut säilyttävät artikkelien CRC:t, ja työn lopun varmistus ja korjaus pysyvät kummassakin tapauksessa ennallaan. Yllä oleva valitsin <b>Tarkistus latauksen aikana</b> on tämä asetus.</td></tr>
 <tr><td><code>auto_retry_mins</code></td><td>Odotusaika ennen sitä <em>yhtä</em> automaattista uusintayritystä, jonka ensimmäinen puuttuviin artikkeleihin kaatunut yritys saa (oletus 20). Levitysviive on todellinen syy puuttuviin artikkeleihin ja korjaantuu itsestään; päiväkirjan ansiosta uusinta hakee vain sen mikä yhä puuttuu. Salasana- ja poistovirheet eivät kelpaa koskaan.</td></tr>
 <tr><td><code>index_scan_par</code></td><td>Montako ryhmää indeksoija skannaa rinnakkain (oletus 3, rajattu välille 1-8).</td></tr>
-<tr><td><code>oracle_sample</code></td><td>Saatavuusoraakkelin STAT-budjetti joutokäynnillä (<a href="#oracle">§13</a>), luotauksia tunnissa palvelinta kohti. Oletus 300, enintään 3600, <code>0</code> poistaa otannan kokonaan käytöstä.</td></tr>
+<tr><td><code>oracle_sample</code></td><td>Saatavuusoraakkelin STAT-budjetti joutokäynnillä (<a href="#oracle">§14</a>), luotauksia tunnissa palvelinta kohti. Oletus 300, enintään 3600, <code>0</code> poistaa otannan kokonaan käytöstä.</td></tr>
 <tr><td><code>predb_max_rows</code></td><td>Kuinka monta pre-ilmoitusta syötetaulu säilyttää (oletus 250000, rajattu välille 10000-5000000). Tunnittainen karsinta leikkaa tähän lukuun, ja historiallinen tuonti kieltäytyy käynnistymästä, jos se ylittäisi sen, joten tuonti ei koskaan lisää rivejä, jotka seuraava karsinta poistaa.</td></tr>
 <tr><td><code>predb_seed_days</code></td><td>Kuinka kauas taaksepäin ilman omaa ikkunaa käynnistetty historiallinen tuonti ulottuu (oletus 180 päivää, enintään 366). Laajempi ikkuna tarkoittaa enemmän pyyntöjä pre-lähteeseen, joka etenee tahtiin yksi kahden sekunnin välein.</td></tr>
 </table></div>
@@ -1268,7 +1269,7 @@ koontinäytöllä ja seinällä on kosketusasettelu. Asetukset → Etäkäyttö 
 tarkat URL:t ja skannattavan QR-koodin.</p>
 
 <h3 id="remote-proxy">nzbfastin tavoittaminen kodin ulkopuolelta</h3>
-<p>Kirjautumissivua ei ole, ja se on tarkoituksellista. Istuntoevästeeseen perustuva kirjautuminen on tietoturvapinta, jota pitäisi ylläpitää ikuisesti, ja se olisi silti heikoin lukko missä tahansa avoimeen internetiin näkyvässä. nzbfast todentaa sen sijaan API-avaimellasi, ja ottaa avaimen vastaan sekä pyynnön otsakkeessa että osoitteessa (<code>X-Api-Key</code> tai <code>Authorization: Bearer</code>) - juuri se antaa edessä olevan palvelun hoitaa kirjautumisen kunnolla.</p>
+<p>nzbfast tunnistautuu API-avaimellasi, ja se ottaa avaimen vastaan pyynnön otsakkeessa yhtä lailla kuin osoitteessa (<code>X-Api-Key</code> tai <code>Authorization: Bearer</code>), ja juuri se antaa sen edessä olevan palvelun hoitaa kirjautumisen kunnolla. Lisäksi on valinnainen käyttäjätunnus ja salasana hallintapaneelin edessä selaimessa, mikä ei muuta mitään Sonarrille, Radarrille tai puhelinsovelluksille; <a href="#security">§13</a> vertaa näitä kahta ja kertoo, milloin kumpikin on oikea vastaus.</p>
 <p><b>Yksinkertaisinta on olla julkaisematta sitä lainkaan.</b> Asenna <b>Tailscale</b> tähän koneeseen ja puhelimeesi, niin molemmat liittyvät samaan yksityisverkkoon: mitään ei altisteta, reitittimeen tai varmenteisiin ei tarvitse koskea, ja Asetukset → Etäkäyttö näyttää kaikkialta toimivan osoitteen heti kun Tailscale on käynnissä. Valitse tämä, ellet nimenomaan tarvitse julkista verkkotunnusta.</p>
 <p><b>nzbfast osaa myös tarjota HTTPS:n itse.</b> Osoita Asetukset → Suojaus →
 HTTPS-varmenne / HTTPS-yksityisavain PEM-varmenteeseen ja sen avaimeen (tai
@@ -1311,7 +1312,139 @@ reitillä olevan luettavissa, ja asennus, jossa avainta ei ole asetettu lainkaan
 on avoin kenelle tahansa sen löytävälle. Jos ohjaat portin silti, aseta ensin
 API-avain ja kytke HTTPS päälle.</div>
 
-<h2 id="performance">13 · Suorituskykytyökalut</h2>
+<h2 id="security">13 · Suojaus ja pääsy</h2>
+<p>nzbfastissa on neljä tapaa hallita sitä, kuka siihen pääsee, ja ne tekevät eri
+työtä. Kaksi on tunnuksia, jotka se tarkistaa itse: <b>API-avain</b>, jonka
+jokainen sen kanssa puhuva ohjelma esittää, ja valinnainen
+<b>hallintapaneelin kirjautuminen</b>, käyttäjätunnus ja salasana sivujen edessä
+selaimessa. Kaksi muuta koskevat verkkoa eivätkä ihmistä: mihin osoitteeseen
+palvelu vastaa, ja päättääkö jokin sen edessä, kuka pääsee sisään. Mikään ei
+korvaa toista. Kotiasennus luotetussa verkossa tarvitsee vain ensimmäisen;
+internetiin julkaistu asennus haluaa kolme neljästä.</p>
+<div class="tblwrap"><table>
+<tr><th>Kerros</th><th>Mitä se pysäyttää</th><th>Missä</th></tr>
+<tr><td>API-avain</td><td>kaiken, mikä kutsuu rajapintaa ilman sitä: toinen kone, toinen ohjelma, verkkosivu jolla satut käymään</td><td>Asetukset → Suojaus. Luodaan ensimmäisellä käynnistyksellä</td></tr>
+<tr><td>NZB-avain</td><td>ei mitään yksin. Se on heikompi avain jaettavaksi, ja se saa lisätä latauksia eikä muuta</td><td>Asetukset → Suojaus. Valinnainen</td></tr>
+<tr><td>Hallintapaneelin kirjautuminen</td><td>selaimen ääressä olevan ihmisen, joka ei tiedä salasanaa</td><td>Asetukset → Suojaus. Oletuksena pois</td></tr>
+<tr><td>Edessä oleva verkko</td><td>kokonaisia verkkoja kerralla: kuunteluosoite, palomuurisi, käänteisvälityspalvelin, VPN</td><td>Asetukset → Suojaus, ja nzbfastin ulkopuolella</td></tr>
+</table></div>
+
+<h3 id="sec-apikey">API-avain</h3>
+<p>API-avain on tärkein tunnus. Se vartioi koko SAB-yhteensopivaa rajapintaa
+(<a href="#api">§17</a>), eli koko ohjauspintaa: jonoa, historiaa, jokaista
+asetusta, palvelintesi salasanoja, sammutuskutsua. Kaikki, mikä puhuu nzbfastin
+kanssa, käyttää sitä. Sonarr, Radarr ja muu *arr-perhe (<a href="#arr">§11</a>),
+nzb360 ja LunaSea puhelimessa (<a href="#remotes">§12</a>) sekä selainlaajennukset
+kuten NZB Unity ja NZB Donkey esittävät kaikki saman avaimen.</p>
+<p>Sinun ei tarvitse luoda sitä. Ensimmäisellä käynnistyksellä nzbfast arpoo
+avaimen, tallentaa sen asetustesi viereen tiedostoon nimeltä <code>apikey</code>
+(<a href="#files">§18</a>), tulostaa sen kerran päätteeseen ja säilyttää sen
+käynnistysten yli, mikä on juuri se, minkä varassa *arr-ohjelmat pitävät sitä.
+Asetukset → Suojaus näyttää sen uudelleen: kenttä on tyhjä tarkoituksella, joten
+napsauta <b>Näytä</b> lukeaksesi sen ja <b>Luo uusi</b> vaihtaaksesi sen. Vaihto
+astuu voimaan heti, ja jokainen määrittämäsi sovellus lakkaa toimimasta, kunnes
+liität uuden niihin.</p>
+<p>Asiakasohjelmat voivat lähettää avaimen osoitteessa muodossa
+<code>apikey=…</code> tai otsakkeessa, <code>X-Api-Key</code> tai
+<code>Authorization: Bearer</code>. Otsake on parempi heti kun jokin kirjaa
+osoitteesi lokiin, ja juuri se antaa käänteisvälityspalvelimen lisätä avaimen
+takanaan olevien asiakkaiden puolesta.</p>
+
+<h3 id="sec-nzbkey">NZB-avain, vain lisäämiseen</h3>
+<p>NZB-avain on toinen, tarkoituksella heikompi avain kaikelle, jonka ainoa
+tehtävä on ojentaa lataus nzbfastille. Sen esittäjä saa lisätä NZB:n, kysyä
+version, lukea tauko-, levy- ja varoitusyhteenvedon sekä hakea luokkien nimet,
+mikä on täsmälleen se, mitä lähetyslaajennus tarvitsee lisätäkseen julkaisun ja
+näyttääkseen sinulle luokkaluettelon. Se ei saa lukea jonoa eikä historiaa, ei
+nähdä eikä muuttaa yhtäkään asetusta, eikä keskeyttää, poistaa, yrittää uudelleen
+tai sammuttaa mitään. Se ei ole kevennetty API-avain, joka asetettaisiin oikean
+sijaan: se on jotain, jonka liität selainlaajennukseen, jotta kone johon et
+täysin luota ei voi lukea asetuksiasi takaisin.</p>
+
+<h3 id="sec-login">Hallintapaneelin kirjautuminen</h3>
+<p>Aseta käyttäjätunnus ja salasana kohdassa Asetukset → Suojaus, niin nzbfast
+asettaa kirjautumissivun hallintapaneelin ja julistemuurin eteen. Se on oletuksena
+pois, ja niin kauan kuin jompikumpi kentistä on tyhjä, mikään ei muutu missään.
+Se on olemassa yhtä tilannetta varten: asennus, jonka olet julkaissut oman
+verkkosi ulkopuolelle, jossa avain osoitteessa ei ole se, mitä haluat ihmisen
+naputtelevan.</p>
+<p>Salasanassa on oltava vähintään kahdeksan merkkiä, ja neljä muuta muotoa
+hylätään, koska arvaaja kokeilee niitä ensin: itse käyttäjätunnus, jokin
+yleisimmin arvatuista salasanoista kuten <code>password123</code>, yksi
+toistettu merkki kuten <code>aaaaaaaa</code> ja peräkkäinen jono kuten
+<code>abcdefgh</code>. Hylkäys kertoo, mikä sääntö se oli. Se tallennetaan
+Argon2id- tiivisteenä, mikä tarkoittaa, ettei nzbfast voi näyttää sitä sinulle
+takaisin, vain korvata sen: jätä kenttä tyhjäksi säilyttääksesi jo tallennetun,
+ja kirjoita yksi välilyönti poistaaksesi sen. Kummankin kentän muuttaminen
+kirjaa jokaisen selaimen ulos, tämä mukaan lukien, ja <b>Kirjaa kaikki selaimet
+ulos</b> tekee saman pyynnöstä. Kirjautunut selain pysyy kirjautuneena
+neljätoista käyttöpäivää.</p>
+<p><b>Se ei muuta mitään Sonarrille, Radarrille, nzb360:lle, LunaSealle tai
+laajennuksillesi.</b> Tämän kaikki kysyvät, ja vastaus on, että tämä kirjautuminen
+on pelkkä selaintunnus. Nuo ohjelmat käyttävät API-avainta täsmälleen kuten ennen,
+eikä yhdenkään ohjelman tarvitse täyttää kirjautumissivua. Kirjautuminen kattaa
+ihmisen, jolla on selain: hallintapaneelin, muurin ja ne rajapintakutsut, jotka
+nämä sivut tekevät sen jälkeen kun olet kirjautunut.</p>
+<p>Ainoa asia, jota se ei tee, on suojata asennusta, jolla ei ole API-avainta.
+Kirjautuminen vartioi sivuja, ei rajapintaa: ilman avainta oleva palvelu vastaa
+yhä kaikelle, mikä kysyy siltä suoraan, kirjautumissivusta huolimatta. Aseta myös
+avain. Julkaistussa asennuksessa aseta molemmat.</p>
+
+<h3 id="sec-outside">Sen tavoittaminen verkkosi ulkopuolelta</h3>
+<p>Kolme vastausta toimii, eivätkä ne ole samanarvoisia.
+<a href="#remote-proxy">§12</a> sisältää kunkin määritykset; tässä on kyse siitä,
+miten valita.</p>
+<div class="tblwrap"><table>
+<tr><th>Tapa</th><th>Mitä se antaa</th><th>Mitä se maksaa</th></tr>
+<tr><td><b>Yksityisverkko</b> (Tailscale, WireGuard)</td><td>Mitään ei julkaista lainkaan. Ei ole julkista osoitetta löydettäväksi, skannattavaksi tai arvattavaksi, joten kysymystä siitä kuka saa kirjautua ei synny koskaan</td><td>VPN:n on oltava käynnissä jokaisessa laitteessa, jota haluat käyttää. Ei julkista verkkotunnusta, joten mikään, johon et voi asentaa ohjelmistoa, ei tavoita sitä</td></tr>
+<tr><td><b>Tunnistava käänteisvälityspalvelin</b> (Caddy, nginx tai Apache, basic auth, Authelia, Authentik tai oauth2-proxy)</td><td>Oikea etuovi oikeassa verkkotunnuksessa, varmenteella jonka uusit muutenkin, yksi kirjautuminen jaettuna muiden palveluidesi kanssa, sekä pyyntörajat ja lokit siellä missä näet ne</td><td>Toinen asia, joka pitää määrittää ja pitää käynnissä. *arr-ohjelmasi ja puhelinsovelluksesi eivät voi täyttää kirjautumissivua, joten välityspalvelimen on päästettävä läpi pyyntö, jossa on kelvollinen API-avain</td></tr>
+<tr><td><b>nzbfast omillaan</b> (<code>tls_cert</code> ja <code>tls_key</code> sekä hallintapaneelin kirjautuminen)</td><td>Yksi ohjelma, ei välityspalvelinta. HTTPS päästä päähän ja kirjautumissivu ihmisille</td><td>Varmenteen uusiminen on sinun järjestettävä. Saat nzbfastin oman kirjautumisen talouden yhteisen sijaan, ja väärien salasanojen raja lasketaan osoitekohtaisesti</td></tr>
+</table></div>
+<p>Valitsit minkä tahansa, <b>aseta myös API-avain</b>. Välityspalvelin on kerros
+edessä, ei lukko takana olevassa ovessa: kaikki, mikä tavoittaa palvelun suoraan,
+lähiverkossa tai välityspalvelimen määritysvirheen kautta, kohtaa sen, mitä
+nzbfast itse vaatii. Avaimeton alkuperä tunnistavan välityspalvelimen takana on
+yhden väärin ohjautuneen pyynnön päässä siitä, että se on auki.</p>
+<p>Jos päätät varmenteen välityspalvelimella, käynnistä nzbfast valitsimella
+<code>--bind 127.0.0.1</code>, jotta välityspalvelin on todella ainoa tie sisään.
+Jos haluat mieluummin nzbfastin tarjoavan HTTPS:n itse, osoita Asetukset → Suojaus
+PEM-varmenteeseen ja sen yksityiseen avaimeen ja käynnistä uudelleen. Ainoa
+vältettävä asia on portin ohjaaminen reitittimessä ilman kumpaakaan: se julkaisee
+pelkkää HTTP:tä, ja avaimesi ja kaikki mitä sillä teet kulkevat internetin läpi
+luettavina kenelle tahansa matkan varrella.</p>
+
+<h3 id="sec-cors">Selainlaajennukset ja mihin <code>cors_origin</code> on</h3>
+<p><code>cors_origin</code> ei ole tunnistuskerros, ja se kannattaa sanoa selvästi,
+koska asetus on samassa kortissa. Se päättää, mitkä <i>verkkosivut</i> selain
+päästää lukemaan tätä rajapintaa, eikä muuta. Jokainen tällainen pyyntö tarvitsee
+yhä API-avaimen; tämä asetus muuttaa sen, antaako selain vastauksen takaisin
+sivulle joka kysyi.</p>
+<p>Oletus on <code>*</code>, kuten SABnzbd:ssä. Siksi laajennukset kuten NZB Unity
+ja NZB Donkey toimivat heti kun liität niihin avaimen, ilman mitään määrittelyä
+täällä. Tiukemmaksi: korvaa se sallimillasi alkuperillä
+(<code>https://example.com</code>), pilkuin eroteltuina. Tyhjä ei lähetä otsaketta
+lainkaan, mikä estää jokaisen laajennuksen.</p>
+
+<h3 id="sec-open">Mitä mikään näistä ei suojaa</h3>
+<p><b>Asennus ilman API-avainta on auki.</b> Ilman avainta ei ole tunnusta
+tarkistettavaksi, joten jokaisella koneella joka yltää porttiin on täysi hallinta,
+samoin jokaisella verkkosivulla jolla käyt, sillä palvelu ei erota niiden pyyntöjä
+omaan lähiverkko-osoitteeseesi sinun omistasi. nzbfast sanoo tämän
+käynnistyksessä, lokissa ja hallintapaneelissa aina kun se pitää paikkansa. Yksi
+kenttä riittää korjaamaan sen.</p>
+<p><b>Avain suojaa rajapinnan, ei konetta.</b> Asetukset → Suojaus →
+<b>Kuuntele osoitteessa</b> päättää, mitkä osoitteet ylipäätään vastaavat.
+<code>0.0.0.0</code>, oletus, vastaa jokaisessa verkossa jossa tämä kone on, mitä
+NAS tai kontti tarvitsee. <code>127.0.0.1</code> vastaa vain tällä koneella, joten
+mikään muu verkossasi ei yllä siihen edes avaimella. Varo: osoite jota tällä
+koneella ei ole estää seuraavaa käynnistystä nousemasta lainkaan, ja ainoa paluutie
+on korjata <code>settings.json</code> käsin.</p>
+<p><b>Asetusten varmuuskopio sisältää kaiken.</b> Saman kortin varmuuskopiotiedosto
+kantaa jokaisen asetuksen, molemmat avaimet ja Usenet-palvelintesi salasanat
+selkokielisinä. Pidä se yksityisessä paikassa, ja ajattele sen lähettämistä
+jollekulle samana asiana kuin tiliesi lähettämistä.</p>
+
+<h2 id="performance">14 · Suorituskykytyökalut</h2>
 <h3 id="perf-benchmark">Järjestelmän mittaus</h3>
 <p>Yksi napsautus mittaa kolme kattoasi - verkon nopeuden (aito 8-sekuntinen
 moniyhteysluotain), CPU:n varmistusnopeuden ja levylle kirjoitusnopeuden - ja johtaa
@@ -1364,7 +1497,7 @@ poisteta, joten väärä arvio maksaa hieman aikaa eikä latausta.</li>
 </ul>
 <p class="dim">Tuomio on aihetodisteisiin perustuva ennuste, ei takuu. Yhtä NZB:tä
 koskevan varman vastauksen antaa <code>nzbfast check</code>
-(<a href="#cli">§15</a>), joka laskee todelliset artikkelit. Molemmat laskevat vastauksia, eivät sisältöä. Puhdas tarkistus tarkoittaa, että
+(<a href="#cli">§16</a>), joka laskee todelliset artikkelit. Molemmat laskevat vastauksia, eivät sisältöä. Puhdas tarkistus tarkoittaa, että
 artikkelit olivat siellä kysyttäessä, ei sitä, että niiden sisältö on vahingoittumaton:
 pieni joukko palveluntarjoajia vastaa poistettujen artikkelien puolesta valedatalla sen
 sijaan, että kieltäytyisi niistä, ja se paljastuu vasta itse latauksen aikana, jossa
@@ -1423,7 +1556,7 @@ se ei vain liota linjaa.</p>
 <p class="dim">Mittaukset ajetaan uudelleen kutakin julkaisua varten; menetelmä ja konekohtaiset
 luvut julkaistaan tulosten rinnalla.</p>
 
-<h2 id="updates">14 · Päivitykset</h2>
+<h2 id="updates">15 · Päivitykset</h2>
 <ul>
 <li>Päivitykset ovat <b>vain ilmoituksia</b>: nzbfast ei koskaan lataa eikä
 korvaa omaa binääriään, eikä siinä ole koodia joka pystyisi siihen. Kun uusi
@@ -1439,12 +1572,12 @@ yhteyttä; tyhjä tarkistus-URL tekee saman.</li>
 <h3 id="updating">Päivittäminen menettämättä asetuksiasi</h3>
 <p>Yksi sääntö kattaa jokaisen asennuksen: <b>päivitys korvaa ohjelman, ei
 koskaan asetuksiasi.</b> Kaikki määrittämäsi - palvelimet, polut, API-avain,
-jono - asuu kourallisessa tiedostoja yhdessä kansiossa (<a href="#files">§17</a>),
+jono - asuu kourallisessa tiedostoja yhdessä kansiossa (<a href="#files">§18</a>),
 eikä mikään asennusohjelma, imagen nouto tai paketin päivitys koske siihen
 kansioon. Kun asetukset näyttävät kadonneen päivityksen jälkeen, syy on lähes
 aina se, että uusi asennus lukee <em>eri, tyhjää</em> kansiota - ei se, että
 mitään olisi poistettu; vanhat tiedostot ovat yhä siellä, missä ne ovat aina
-olleet. <a href="#settings-gone">§18</a> kertoo palautusaskeleet.</p>
+olleet. <a href="#settings-gone">§19</a> kertoo palautusaskeleet.</p>
 <div class="tblwrap"><table>
 <tr><th>Asennus</th><th>Näin päivität</th></tr>
 <tr><td>macOS-sovellus</td><td>Avaa uusi DMG ja vedä <b>NzbFast</b> kansioon
@@ -1481,7 +1614,7 @@ mukanaan.</td></tr>
 <tr><td>Debian / Ubuntu (.deb)<br>Fedora / RHEL (.rpm)</td><td>Asenna uusi paketti vanhan päälle: <code>sudo dpkg -i nzbfast_*.deb</code> tai <code>sudo rpm -U nzbfast-*.rpm</code>. Asetuskansiosi ei kuulu pakettiin, joten päivitys ei voi korvata siellä mitään, ja omat muutoksesi tiedostoon <code>/etc/nzbfast/nzbfast.env</code> säilyvät. Palvelu käynnistetään uudelleen vain, jos se oli jo käynnissä.</td></tr>
 <tr><td>Homebrew</td><td><code>brew upgrade nzbfast</code></td></tr>
 <tr><td>Pelkkä binääri</td><td>Korvaa binääri. Määrityksesi pysyy siellä, minne
-sen teit (<a href="#files">§17</a>).</td></tr>
+sen teit (<a href="#files">§18</a>).</td></tr>
 </table></div>
 <div class="tip"><b>Vinkki</b>Docker-käyttäjät, jotka kytkevät Sonarrin tai
 Radarrin: laita API-avain itse kontin määrittelyyn
@@ -1491,7 +1624,7 @@ kommelluksesta, koska se asuu isäntäkoneella, määrittelyssä, ja otetaan kä
 uudelleen jokaisessa käynnistyksessä. Myöhemmin Asetuksissa asettamasi avain
 voittaa sen silti.</div>
 
-<h2 id="cli">15 · Komentorivi</h2>
+<h2 id="cli">16 · Komentorivi</h2>
 <p>Kaikki, mitä daemon tekee, on myös skriptattavissa. Jokapäiväiset komennot:</p>
 <div class="tblwrap"><table>
 <tr><th>Komento</th><th>Tarkoitus</th></tr>
@@ -1514,7 +1647,7 @@ yEnc-artikkeleina ja kirjoittaa niitä vastaavan NZB:n. Ylläpitotyökalu; se va
 nimenomaisen <code>--post-server</code>-valitsimen eikä valitse palvelinta koskaan
 puolestasi.</p>
 
-<h2 id="api">16 · API-yleiskatsaus</h2>
+<h2 id="api">17 · API-yleiskatsaus</h2>
 <p>Peruspäätepiste: <code>http://host:6789/api?mode=…&amp;apikey=…&amp;output=json</code> -
 SABnzbd-yhteensopiva, joten olemassa olevat SAB-integraatiot toimivat muuttumatta. Kaksi avainta:
 <b>API-avain</b> (täysi hallinta) ja <b>NZB-avain</b> (vain lisäävä:
@@ -1533,7 +1666,7 @@ SABnzbd-yhteensopiva, joten olemassa olevat SAB-integraatiot toimivat muuttumatt
 <tr><td>Valvonta</td><td><code>/metrics</code> vastaa Prometheus-tekstimuodossa 0.0.4: latausnopeus, jonon syvyys ja tavut, yhteydet palveluntarjoajaa kohden, katkokset ja artikkelilaskurit, muisti osajärjestelmittäin sekä käyttöaika. Perusyksiköt kauttaaltaan (tavut, sekunnit), joten kojelauta muuntaa eikä mikään saavu valmiiksi pyöristettynä. Vain GET, ja oletuksena tarvitaan täysi API-avain. Aseta <code>metrics_open</code> tarjotaksesi sen ilman avainta, mikä on tavanomainen Prometheus-järjestely: se ei sisällä työn nimiä eikä polkuja, mutta julkaisee jokaisen määritetyn palveluntarjoajan isäntänimen kaikille, jotka yltävät porttiin.</td></tr>
 </table></div>
 
-<h2 id="files">17 · Tiedostot &amp; sijainnit</h2>
+<h2 id="files">18 · Tiedostot &amp; sijainnit</h2>
 <p>Missä asetuskansio on, riippuu siitä, miten nzbfast asennettiin. Tämä yksi
 kansio sisältää kaiken varmuuskopioimisen arvoisen:</p>
 <div class="tblwrap"><table>
@@ -1564,20 +1697,20 @@ tai minne <code>--config</code> / <code>$NZBFAST_CONFIG</code> osoittaa.</td></t
 <tr><td>Ulkoiset työkalut</td><td>Ei tarvita - RAR-purku ja PAR2-korjaus ovat natiiveja. Jos jokin eksoottinen sarja koskaan tarvitsee ulkoista <code>unrar</code>- tai <code>par2</code>-työkalua varajärjestelynä, nzbfast etsii sen suoritettavansa vierestä, sitten polusta <code>$PATH</code>.</td></tr>
 </table></div>
 
-<h2 id="troubleshooting">18 · Vianmääritys</h2>
+<h2 id="troubleshooting">19 · Vianmääritys</h2>
 <div class="tblwrap"><table>
 <tr><th>Oire</th><th>Tarkista</th></tr>
 <tr><td>Hitaat lataukset</td><td>Kysy ensin lataukselta itseltään: sen käydessä edistymispalkin alla oleva rivi nimeää kerroksen, joka hidastaa <i>tätä</i> työtä, ja tuomiota napsauttamalla rivi avautuu sen todisteisiin (katso <a href="#dash-queue">Jono</a>). Aja <b>Järjestelmän mittaus</b> - se nimeää pullonkaulan suoraan. Jos se on verkko: aja <b>Yhteyksien viritys</b>, tarkista palvelinkohtaiset yhteysmäärät ja varmista, etteivät palveluntarjoajasi ole kaikki yhtä backbonea (<b>Palvelinten monimuotoisuus</b>).</td></tr>
 <tr><td>Hidas vain hyvin suurissa töissä<br>(NAS tai vähämuistinen kone)</td><td>Odotettua, ja mitattavissa: näännytetty muistibudjetti valuttaa välimuistit levylle ja maksaa 20–40% yli ~87 GB. Katso <a href="#memory">Muistibudjetti</a> luvuista ja siitä, kuinka paljon RAM:ia sille antaa. Pienemmät työt ovat vaikuttamattomia.</td></tr>
 <tr><td>Lataus epäonnistuu ”artikkelit puuttuvat”</td><td>Julkaisu on vanhentunut tai poistettu palveluntarjoajiltasi. Toinen palveluntarjoaja eri backbonella pelastaa useimmat näistä. <code>nzbfast check</code> ennustaa tämän ennen lataamista. Ja seinä merkitsee todennäköisesti kadonneet etukäteen
-saatavuuspisteellään (<a href="#oracle">§13</a>). Tämänmuotoinen ensimmäinen
+saatavuuspisteellään (<a href="#oracle">§14</a>). Tämänmuotoinen ensimmäinen
 epäonnistuminen uusitaan itsestään kerran odotuksen jälkeen, sillä levitysviive näyttää
 täsmälleen samalta ja korjaantuu itsestään.</td></tr>
 <tr><td>Valmis arkisto haluaa salasanan</td><td>Historiarivi näyttää 🔑 - syötä salasana siihen; työ valmistuu paikan päällä. </td></tr>
 <tr><td>Arkisto ei purkaudu</td><td>Salasana- ja korjausvirheet nimeävät itsensä historiarivillä. Kaikelle muulle on hätäluukku: Asetukset → Valvontakansio &amp; jälkikäsittely → <b>Pura ulkoisella unrarilla</b> (lisäasetus) antaa purkamisen koneellesi asennetulle <code>unrar</code>-ohjelmalle sisäänrakennetun purkajan sijasta. Pidä se muuten pois päältä: sisäänrakennettu polku on nopeampi kaikissa mittaamissamme muodoissa, ja hash-nimiset obfuskoidut julkaisut käyttävät sitä joka tapauksessa aina, koska unrar ei voi seurata niiden uudelleennimeämistä. Sama kytkin <code>nzbfast get</code>-ajoille on ympäristömuuttuja <code>NZBFAST_NO_NATIVE_UNRAR=1</code>. Jos unrar purkaa arkiston, jonka sisäänrakennettu purkaja hylkäsi, ilmoita siitä, jotta voimme korjata sisäänrakennetun polun.</td></tr>
 <tr><td>Sonarr/Radarr ei saa yhteyttä</td><td>Onko portti 6789 tavoitettavissa? API-avain oikein (täysi avain, ei NZB-avain)? Asiakastyyppi asetettu SABnzbdiksi?</td></tr>
 <tr><td>Koontinäyttö kysyy API-avainta, jota en koskaan asettanut</td><td>Uusi asennus tekee sellaisen itselleen ja tulostaa sen kerran käynnistyksessä (<a href="#firstrun-key">§2</a>). Se on <code>apikey</code>-tiedostossa määrityksesi vieressä ja käynnistystulosteessa. Tai kirjoita oma avaimesi kohtaan Asetukset → Suojaus selaimesta, joka on jo kirjautuneena.</td></tr>
-<tr id="settings-gone"><td>Kaikki asetukseni näyttävät kadonneen päivityksen jälkeen<br>(palvelimet, polut, API-avain)</td><td>Mikään päivityksessä ei poista asetuksia; tämä tarkoittaa, että nzbfast lukee eri, tyhjää kansiota. Ensin: API-avainkenttä Asetuksissa näyttää tyhjältä tarkoituksella - napsauta <b>Show</b> ennen kuin päättelet avaimen kadonneen. Dockerissa vertaa uuden kontin <code>/config</code>-liitosta vanhaan: muuttunut isäntäkoneen polku, suhteellinen polku eri hakemistosta ajettuna tai tuore appdata-kansio käynnistävät kaikki nzbfastin puhtaalta pöydältä, kun oikeat asetuksesi lepäävät koskemattomina entisessä polussa. Etsi vanha kansio (etsi tiedostoja <code>settings.json</code>, määritystiedostosi ja <code>apikey</code> - sijainnit kohdassa <a href="#files">§17</a>), ja osoita sitten liitos takaisin siihen tai kopioi nuo tiedostot uuteen kansioon ja käynnistä uudelleen. Käynnistysloki nimeää käytössä olevan asetustiedoston täsmälleen: <code>[settings] applying saved settings from …</code></td></tr>
+<tr id="settings-gone"><td>Kaikki asetukseni näyttävät kadonneen päivityksen jälkeen<br>(palvelimet, polut, API-avain)</td><td>Mikään päivityksessä ei poista asetuksia; tämä tarkoittaa, että nzbfast lukee eri, tyhjää kansiota. Ensin: API-avainkenttä Asetuksissa näyttää tyhjältä tarkoituksella - napsauta <b>Show</b> ennen kuin päättelet avaimen kadonneen. Dockerissa vertaa uuden kontin <code>/config</code>-liitosta vanhaan: muuttunut isäntäkoneen polku, suhteellinen polku eri hakemistosta ajettuna tai tuore appdata-kansio käynnistävät kaikki nzbfastin puhtaalta pöydältä, kun oikeat asetuksesi lepäävät koskemattomina entisessä polussa. Etsi vanha kansio (etsi tiedostoja <code>settings.json</code>, määritystiedostosi ja <code>apikey</code> - sijainnit kohdassa <a href="#files">§18</a>), ja osoita sitten liitos takaisin siihen tai kopioi nuo tiedostot uuteen kansioon ja käynnistä uudelleen. Käynnistysloki nimeää käytössä olevan asetustiedoston täsmälleen: <code>[settings] applying saved settings from …</code></td></tr>
 <tr><td>Mikään verkossa ei tavoita daemonia</td><td>Tarkista <code>--bind</code>: <code>127.0.0.1</code> palvelee vain sitä konetta, jolla nzbfast ajaa. Oletus, <code>0.0.0.0</code>, palvelee jokaista liitäntää. Tarkista sitten koneen oma palomuuri portin 6789 osalta.</td></tr>
 <tr><td>Selaa-kortti pysyy pienenä</td><td>Indeksoija kasvaa taustalla - tarkista, että Asetukset → Indeksointi -ryhmät on asetettu, ja anna Syvennä per skannaus -asetukselle aikaa kerätä historiaa. ”Skannaa nyt” pakottaa kierroksen; tilarivi näyttää live-edistymisen.</td></tr>
 <tr><td>Seinä näyttää väärän/ei kuvitusta</td><td>Tietosivu → ✎ Korjaa osuma tai ↻ Päivitä metatiedot. Elokuvahaut paranevat ilmaisella OMDb-avaimella.</td></tr>

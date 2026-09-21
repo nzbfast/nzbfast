@@ -227,7 +227,7 @@ fn a_password_shortlist_publishes_one_total_not_one_per_candidate() {
 /// - and because that one synthesises its own data volumes, where this
 /// has to cover a set that must really extract.
 fn rev_volumes_for(dir: &Path, release: &str, data: &[Vec<u8>]) {
-    use rars::recovery::rar5::encode_parity_shards;
+    use crate::rarfixtures as rf;
     let mut shard_len = data.iter().map(Vec::len).max().unwrap_or(0);
     shard_len += shard_len & 1;
     let padded: Vec<Vec<u8>> = data
@@ -239,7 +239,7 @@ fn rev_volumes_for(dir: &Path, release: &str, data: &[Vec<u8>]) {
         })
         .collect();
     let refs: Vec<&[u8]> = padded.iter().map(Vec::as_slice).collect();
-    let parity = encode_parity_shards(&refs, 1).unwrap();
+    let parity = rf::rev_parity_rows(&refs, 1);
     let payload = &parity[0];
     let mut body = vec![1u8];
     body.extend_from_slice(&(data.len() as u16).to_le_bytes());

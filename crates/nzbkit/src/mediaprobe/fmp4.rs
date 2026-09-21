@@ -43,10 +43,13 @@ pub struct BoxWriter {
 }
 
 impl BoxWriter {
+    /// An empty writer with no box open.
     pub fn new() -> Self {
         BoxWriter::default()
     }
 
+    /// Open a box, reserving four bytes for the size `close` patches in.
+    /// Every `open` needs a matching `close`.
     pub fn open(&mut self, fourcc: &[u8; 4]) {
         self.stack.push(self.buf.len());
         self.buf.extend_from_slice(&[0, 0, 0, 0]);
@@ -61,42 +64,63 @@ impl BoxWriter {
         self.buf.extend_from_slice(&flags.to_be_bytes()[1..]);
     }
 
+    /// Close the innermost open box and patch its size.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no box is open, which is a mux bug rather than
+    /// anything the input can cause.
     pub fn close(&mut self) {
         let at = self.stack.pop().expect("close without open");
         let len = (self.buf.len() - at) as u32;
         self.buf[at..at + 4].copy_from_slice(&len.to_be_bytes());
     }
 
+    /// Append one byte.
     pub fn u8(&mut self, v: u8) {
         self.buf.push(v);
     }
+    /// Append a big-endian `u16`.
     pub fn u16(&mut self, v: u16) {
         self.buf.extend_from_slice(&v.to_be_bytes());
     }
+    /// Append a big-endian `i16`.
     pub fn i16(&mut self, v: i16) {
         self.buf.extend_from_slice(&v.to_be_bytes());
     }
+    /// Append a big-endian `u32`.
     pub fn u32(&mut self, v: u32) {
         self.buf.extend_from_slice(&v.to_be_bytes());
     }
+    /// Append a big-endian `i32`.
     pub fn i32(&mut self, v: i32) {
         self.buf.extend_from_slice(&v.to_be_bytes());
     }
+    /// Append a big-endian `u64`.
     pub fn u64(&mut self, v: u64) {
         self.buf.extend_from_slice(&v.to_be_bytes());
     }
+    /// Append raw bytes verbatim.
     pub fn bytes(&mut self, v: &[u8]) {
         self.buf.extend_from_slice(v);
     }
+    /// Append `n` zero bytes.
     pub fn zeros(&mut self, n: usize) {
         self.buf.resize(self.buf.len() + n, 0);
     }
+    /// Bytes written so far, open boxes included.
     pub fn len(&self) -> usize {
         self.buf.len()
     }
+    /// True when nothing has been written.
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
     }
+    /// Take the finished buffer.
+    ///
+    /// Every box must be closed first; a debug build asserts it, since
+    /// an unclosed box means a zero size field and a file every parser
+    /// rejects differently.
     pub fn take(self) -> Vec<u8> {
         debug_assert!(self.stack.is_empty(), "unclosed box");
         self.buf
@@ -121,6 +145,8 @@ const MOVIE_TIMESCALE: u32 = 1000;
 // Init segment
 // ---------------------------------------------------------------------------
 
+/// The `ftyp` + `moov` header an fMP4 client primes a SourceBuffer
+/// with, plus what a caller needs to convert timings into it.
 pub struct InitSegment {
     pub(crate) bytes: Vec<u8>,
     /// Output timescale per selected track, in the tracks' own order.
@@ -509,6 +535,8 @@ pub struct FragmentWriter {
 }
 
 impl FragmentWriter {
+    /// A writer for `tracks`, in the order their trafs will appear.
+    /// The sequence number starts at 0 and advances per fragment.
     pub fn new(tracks: &[SelectedTrack]) -> Self {
         FragmentWriter {
             seq: 0,
@@ -517,6 +545,8 @@ impl FragmentWriter {
         }
     }
 
+    /// How many fragments have been written so far, which is also the
+    /// next fragment's `mfhd` sequence number.
     pub fn sequence(&self) -> u32 {
         self.seq
     }

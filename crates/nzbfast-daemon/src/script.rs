@@ -96,7 +96,7 @@ pub(super) fn run_capped_capture(
 
 /// §192: `run_capped`, but the NZBGet `[NZB] ` command channel is sieved
 /// out of stdout. One line per kept command, in the order the script
-/// said them; see [`NzbCommands::parse`].
+/// said them; see `NzbCommands::parse`.
 pub fn run_capped_sieve(
     cmd: std::process::Command,
     secs: u64,
@@ -404,8 +404,12 @@ pub fn drain(mut r: impl PipeRead, stop: &AtomicBool, mut sink: impl FnMut(&[u8]
 }
 
 /// The pre-§144 drain: ends only when the last writer closes the pipe.
-/// Windows keeps it (see [`run_capped_inner`]), and unix falls back to it
-/// if the descriptor cannot be made non-blocking.
+/// Windows keeps it (see `run_capped_inner`, which is private, so this
+/// is not an intra-doc link: the windows rustdoc leg of
+/// `tools/preflight.py` reds on a public item linking a private one, and
+/// this doc is compiled only there - the linux host job never sees it),
+/// and unix falls back to it if the descriptor cannot be made
+/// non-blocking.
 #[cfg(not(unix))]
 pub fn drain(r: impl PipeRead, _stop: &AtomicBool, sink: impl FnMut(&[u8])) {
     drain_blocking(r, sink)

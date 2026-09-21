@@ -1086,8 +1086,29 @@ fn fold_parallel_opts(
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or_else(unit_dst_budget);
-            let by_dst = (unit_dst / 2 / row_chunk.max(1)).max(MIN_COL_WORDS);
-            let by_src = (STRIPE_SRC_BUDGET / 2 / srcs.len().max(1)).max(MIN_COL_WORDS);
+            // THE `/ size_of::<u16>()` IS THE UNIT CONVERSION, and it is
+            // written that way since 20 Sep 2026 because the `/ 2` it
+            // replaces read as a unit MIX: both budgets are BYTES,
+            // `MIN_COL_WORDS` and the `words` these feed are GF(16)
+            // WORDS, and a reader who does not spot the divisor sees a
+            // byte count floored by a word count, which is what a
+            // review of the fold's work grid asked a reader to check on
+            // 20 Sep 2026. It is not a mix: the conversion
+            // happens BEFORE the floor, so both arms of each `max` are
+            // words, and the arithmetic is exact in both directions.
+            // A unit's destination slab is `row_chunk` rows of
+            // `col_chunk` u16 words, so it costs
+            // `row_chunk * col_chunk * 2` bytes and the widest column
+            // that fits `unit_dst` is `unit_dst / 2 / row_chunk` words.
+            // A column stripe's source window is every source's slice of
+            // ONE column range - `srcs.len() * col_chunk` words, the
+            // same 2 bytes each - so `by_src` divides the same way. No
+            // behaviour moves here: `size_of::<u16>()` IS 2, and the
+            // dsts are `Vec<u16>` (`words = dsts[0].len()`), which is
+            // what makes 2 the right constant rather than a coincidence.
+            let by_dst = (unit_dst / size_of::<u16>() / row_chunk.max(1)).max(MIN_COL_WORDS);
+            let by_src =
+                (STRIPE_SRC_BUDGET / size_of::<u16>() / srcs.len().max(1)).max(MIN_COL_WORDS);
             words
                 .div_ceil(by_dst.min(by_src))
                 .clamp(1, words.div_ceil(MIN_COL_WORDS).max(1))
@@ -1919,7 +1940,7 @@ pub(super) static UNATTENDED_UNSTRUCTURED_CEILING: std::sync::atomic::AtomicUsiz
 /// the doc said so from 12 Sep. The ceiling is not a guess at what a
 /// daemon can afford; it is a stand-in for "nobody can see this repair
 /// or stop it", and that question is answered per REPAIR rather than
-/// per process. So [`super::reconstruct::check_repair_dim_dense`] skips
+/// per process. So `super::reconstruct::check_repair_dim_dense` skips
 /// the ceiling entirely for a caller supplying BOTH halves of a
 /// [`RepairControl`](super::RepairControl) - see
 /// `RepairControl::is_attended` - and the work was to give every
@@ -1930,7 +1951,7 @@ pub(super) static UNATTENDED_UNSTRUCTURED_CEILING: std::sync::atomic::AtomicUsiz
 /// one taken THAT day, walked outwards from the two production solve
 /// drivers - `par2repair::repair_mapped_inner` and the disk driver's
 /// `repair_dir_set` body are the only two functions in the tree that
-/// construct a [`Reconstructor`](super::reconstruct::Reconstructor) -
+/// construct a `Reconstructor` -
 /// over every caller of every `pub` repair entry `par2repair` exposes:
 ///
 ///  - CONTROLLED, and all five are daemon-reachable:

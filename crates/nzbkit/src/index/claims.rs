@@ -83,6 +83,10 @@ impl NameEvidence {
         }
     }
 
+    /// The inverse of `tag`: read a stored evidence kind back.
+    /// `None` for anything this build does not know, so a row written
+    /// by a newer version is ignored rather than mis-read as the
+    /// nearest match.
     pub fn parse(tag: &str) -> Option<NameEvidence> {
         Some(match tag {
             "body-probe" => NameEvidence::BodyProbe,
@@ -130,6 +134,9 @@ impl NameEvidence {
 pub struct NameClaim {
     /// The real release name being claimed.
     pub name: String,
+    /// What kind of proof this is. Two claims corroborate each other
+    /// only when their [`Self::key`]s are independent, which is what
+    /// the evidence kind qualifies.
     pub evidence: NameEvidence,
     /// The proving value - set id hex, crc hex, hash16k hex, msgid-set
     /// digest. What makes two claims "independent" for corroboration.
@@ -201,7 +208,7 @@ pub const MSGID_KEYS_PER_FILE: usize = 3;
 
 /// The canonical `NameClaim.key` for a [`NameEvidence::MsgidSet`]
 /// claim: MD5 hex over the matched message-ids, each normalized the
-/// way [`msgid_hash`] normalizes (trimmed, one pair of angle brackets
+/// way `msgid_hash` normalizes (trimmed, one pair of angle brackets
 /// stripped), byte-sorted, joined with `\n`. One definition so every
 /// lane derives the same key for the same id set - two lanes proving
 /// the same join must corroborate, not look independent.
@@ -382,7 +389,7 @@ impl Index {
     /// maintenance lap. [`MsgidFillSlice::complete`] is true when
     /// nothing remains; the other two fields are the slice's own
     /// advance, for a caller that wants to log it. See
-    /// [`msgid_map_backfill_slice`] for why the open-time call alone
+    /// `msgid_map_backfill_slice` for why the open-time call alone
     /// never finished on a real index.
     pub fn msgid_map_backfill_slice(&mut self, budget: std::time::Duration) -> MsgidFillSlice {
         msgid_map_backfill_slice(&mut self.db, budget)

@@ -100,7 +100,7 @@ pub struct Target {
     #[serde(default)]
     pub token: String,
     /// `Webhook` only: the request body, with `{name}`-style placeholders
-    /// (see [`Ctx::render_body`]). Empty sends our own JSON payload.
+    /// (see `Ctx::render_body`). Empty sends our own JSON payload.
     #[serde(default)]
     pub body: String,
     /// A target you added is on unless you turn it off, so a list loaded
@@ -163,7 +163,7 @@ pub struct Outcome {
     /// The HTTP status the target answered with, or 0 when it never
     /// answered at all (DNS, refused, timeout).
     pub code: u16,
-    /// Empty on success. Otherwise the failure as [`send`] reports it,
+    /// Empty on success. Otherwise the failure as `send` reports it,
     /// which by construction never contains the url - see the transport
     /// arm at the bottom of `send`.
     pub error: String,
@@ -492,12 +492,15 @@ fn send(t: &Target, cx: &Ctx) -> Result<u16, String> {
         Kind::Kodi => {
             let req = a
                 .post(&format!("{base}/jsonrpc"))
-                .set("Content-Type", "application/json");
+                .header("Content-Type", "application/json");
             let req = match basic_auth(&t.token) {
-                Some(h) => req.set("Authorization", &h),
+                Some(h) => req.header("Authorization", &h),
                 None => req,
             };
-            req.send_string(r#"{"jsonrpc":"2.0","id":1,"method":"VideoLibrary.Scan"}"#)
+            crate::netfetch::send_keeping_refusal(
+                req,
+                r#"{"jsonrpc":"2.0","id":1,"method":"VideoLibrary.Scan"}"#,
+            )
         }
         // Refreshes every section. Plex has no "rescan what changed"
         // call that does not need the section id, and a section id is
@@ -506,9 +509,10 @@ fn send(t: &Target, cx: &Ctx) -> Result<u16, String> {
             if t.token.is_empty() {
                 return Err("Plex needs a token (X-Plex-Token)".into());
             }
-            a.get(&format!("{base}/library/sections/all/refresh"))
-                .set("X-Plex-Token", &t.token)
-                .call()
+            crate::netfetch::call_keeping_refusal(
+                a.get(&format!("{base}/library/sections/all/refresh"))
+                    .header("X-Plex-Token", &t.token),
+            )
         }
         // X-Emby-Token is honoured by both Emby and Jellyfin, so one
         // kind covers the pair.
@@ -516,10 +520,10 @@ fn send(t: &Target, cx: &Ctx) -> Result<u16, String> {
             if t.token.is_empty() {
                 return Err("Jellyfin/Emby needs an API key".into());
             }
-            a.post(&format!("{base}/Library/Refresh"))
-                .set("X-Emby-Token", &t.token)
-                .set("Content-Length", "0")
-                .send_string("")
+            crate::netfetch::send_empty_keeping_refusal(
+                a.post(&format!("{base}/Library/Refresh"))
+                    .header("X-Emby-Token", &t.token),
+            )
         }
         Kind::Webhook => {
             let url = cx.render_url(base);
@@ -528,28 +532,28 @@ fn send(t: &Target, cx: &Ctx) -> Result<u16, String> {
             } else {
                 cx.render_body(&t.body)
             };
-            let req = a.post(&url).set("Content-Type", "application/json");
+            let req = a.post(&url).header("Content-Type", "application/json");
             // §129 4a: a secret signs the notification sends too, so a
             // receiver can verify everything from this target one way.
             let req = if t.secret.is_empty() {
                 req
             } else {
-                req.set("X-NzbFast-Signature", &sign(&t.secret, body.as_bytes()))
+                req.header("X-NzbFast-Signature", &sign(&t.secret, body.as_bytes()))
             };
-            req.send_string(&body)
+            crate::netfetch::send_keeping_refusal(req, &body[..])
         }
         // §129 2e presets: `body` is the MESSAGE TEXT template here
         // (placeholders apply), never the raw request - the preset owns
         // the service's JSON shape so a quote in a release name cannot
         // break it.
-        Kind::Discord => a
-            .post(base)
-            .set("Content-Type", "application/json")
-            .send_string(&serde_json::json!({"content": preset_text(t, cx)}).to_string()),
-        Kind::Slack => a
-            .post(base)
-            .set("Content-Type", "application/json")
-            .send_string(&serde_json::json!({"text": preset_text(t, cx)}).to_string()),
+        Kind::Discord => crate::netfetch::send_keeping_refusal(
+            a.post(base).header("Content-Type", "application/json"),
+            &serde_json::json!({"content": preset_text(t, cx)}).to_string()[..],
+        ),
+        Kind::Slack => crate::netfetch::send_keeping_refusal(
+            a.post(base).header("Content-Type", "application/json"),
+            &serde_json::json!({"text": preset_text(t, cx)}).to_string()[..],
+        ),
         Kind::Telegram => {
             let Some((bot, chat)) = t.token.split_once('/') else {
                 return Err("Telegram needs token = <bot_token>/<chat_id>".into());
@@ -559,11 +563,11 @@ fn send(t: &Target, cx: &Ctx) -> Result<u16, String> {
             } else {
                 base.to_string()
             };
-            a.post(&format!("{api}/bot{bot}/sendMessage"))
-                .set("Content-Type", "application/json")
-                .send_string(
-                    &serde_json::json!({"chat_id": chat, "text": preset_text(t, cx)}).to_string(),
-                )
+            crate::netfetch::send_keeping_refusal(
+                a.post(&format!("{api}/bot{bot}/sendMessage"))
+                    .header("Content-Type", "application/json"),
+                &serde_json::json!({"chat_id": chat, "text": preset_text(t, cx)}).to_string()[..],
+            )
         }
         Kind::Pushover => {
             let Some((app, user)) = t.token.split_once('/') else {
@@ -574,24 +578,24 @@ fn send(t: &Target, cx: &Ctx) -> Result<u16, String> {
             } else {
                 base.to_string()
             };
-            a.post(&format!("{api}/1/messages.json"))
-                .set("Content-Type", "application/json")
-                .send_string(
-                    &serde_json::json!({
-                        "token": app, "user": user,
-                        "title": "nzbfast", "message": preset_text(t, cx),
-                    })
-                    .to_string(),
-                )
+            crate::netfetch::send_keeping_refusal(
+                a.post(&format!("{api}/1/messages.json"))
+                    .header("Content-Type", "application/json"),
+                &serde_json::json!({
+                    "token": app, "user": user,
+                    "title": "nzbfast", "message": preset_text(t, cx),
+                })
+                .to_string()[..],
+            )
         }
         Kind::Ntfy => {
-            let req = a.post(base).set("X-Title", "nzbfast");
+            let req = a.post(base).header("X-Title", "nzbfast");
             let req = if t.token.is_empty() {
                 req
             } else {
-                req.set("Authorization", &format!("Bearer {}", t.token))
+                req.header("Authorization", &format!("Bearer {}", t.token))
             };
-            req.send_string(&preset_text(t, cx))
+            crate::netfetch::send_keeping_refusal(req, &preset_text(t, cx)[..])
         }
         Kind::Gotify => {
             if t.token.is_empty() {
@@ -599,68 +603,50 @@ fn send(t: &Target, cx: &Ctx) -> Result<u16, String> {
             }
             // The token rides a header, not the query string, so it
             // stays out of access logs on the way.
-            a.post(&format!("{base}/message"))
-                .set("X-Gotify-Key", &t.token)
-                .set("Content-Type", "application/json")
-                .send_string(
-                    &serde_json::json!({
-                        "title": "nzbfast", "message": preset_text(t, cx),
-                        "priority": if cx.ok() { 4 } else { 7 },
-                    })
-                    .to_string(),
-                )
-        }
-        Kind::Apprise => a
-            .post(base)
-            .set("Content-Type", "application/json")
-            .send_string(
+            crate::netfetch::send_keeping_refusal(
+                a.post(&format!("{base}/message"))
+                    .header("X-Gotify-Key", &t.token)
+                    .header("Content-Type", "application/json"),
                 &serde_json::json!({
-                    "title": "nzbfast",
-                    "body": preset_text(t, cx),
-                    "type": if cx.ok() { "success" } else { "failure" },
+                    "title": "nzbfast", "message": preset_text(t, cx),
+                    "priority": if cx.ok() { 4 } else { 7 },
                 })
-                .to_string(),
-            ),
+                .to_string()[..],
+            )
+        }
+        Kind::Apprise => crate::netfetch::send_keeping_refusal(
+            a.post(base).header("Content-Type", "application/json"),
+            &serde_json::json!({
+                "title": "nzbfast",
+                "body": preset_text(t, cx),
+                "type": if cx.ok() { "success" } else { "failure" },
+            })
+            .to_string()[..],
+        ),
         // Handled above, before the HTTP scheme gate.
         Kind::Email => unreachable!("email returns before the scheme gate"),
     };
     match resp {
-        Ok(r) => Ok(r.status()),
+        Ok(r) => Ok(r.status().as_u16()),
         // A 2xx-shaped failure still carries a status worth reporting;
         // anything else (DNS, refused, timeout) only has a message.
-        Err(ureq::Error::Status(code, r)) => {
-            let detail = r.into_string().unwrap_or_default();
-            let detail = detail.trim();
-            let detail: String = detail.chars().take(200).collect();
-            Err(format!(
-                "HTTP {code}{}",
-                if detail.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {detail}")
-                }
-            ))
-        }
-        Err(ureq::Error::Transport(t)) => Err(transport_brief(&t)),
+        Err(e) => match e.code() {
+            Some(code) => {
+                let detail = e.body_text();
+                let detail = detail.trim();
+                let detail: String = detail.chars().take(200).collect();
+                Err(format!(
+                    "HTTP {code}{}",
+                    if detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {detail}")
+                    }
+                ))
+            }
+            None => Err(e.to_string()),
+        },
     }
-}
-
-/// A transport error's Display starts with the whole request URL,
-/// path and query included. For a Discord/ntfy/Gotify webhook that
-/// path IS the secret, and this string is logged. Rebuild the
-/// message from the parts that describe the failure instead: the
-/// kind, ureq's own message, and the underlying io/DNS error, which
-/// names host:port at worst. Shared with the §129 4a lifecycle
-/// dispatcher, which logs through the same rule.
-pub fn transport_brief(t: &ureq::Transport) -> String {
-    format!(
-        "{}{}{}",
-        t.kind(),
-        t.message().map(|m| format!(": {m}")).unwrap_or_default(),
-        std::error::Error::source(&t)
-            .map(|s| format!(": {s}"))
-            .unwrap_or_default(),
-    )
 }
 
 /// A preset's message text: the target's own `body` template rendered
@@ -1317,6 +1303,8 @@ mod tests {
             .expect("server saw a request")
     }
 
+    use crate::netfetch::raw_header_of as header_of;
+
     #[test]
     fn kodi_gets_a_jsonrpc_scan_with_basic_auth() {
         let (url, rx) = capture_one();
@@ -1327,8 +1315,9 @@ mod tests {
         let req = recv(&rx);
         assert!(req.starts_with("POST /jsonrpc "), "{req}");
         assert!(req.contains(r#""method":"VideoLibrary.Scan""#), "{req}");
-        assert!(
-            req.contains("Authorization: Basic a29kaTpzZWNyZXQ="),
+        assert_eq!(
+            header_of(&req, "Authorization"),
+            Some("Basic a29kaTpzZWNyZXQ="),
             "{req}"
         );
     }
@@ -1345,7 +1334,7 @@ mod tests {
             req.starts_with("GET /library/sections/all/refresh "),
             "{req}"
         );
-        assert!(req.contains("X-Plex-Token: tok123"), "{req}");
+        assert_eq!(header_of(&req, "X-Plex-Token"), Some("tok123"), "{req}");
     }
 
     #[test]
@@ -1357,7 +1346,7 @@ mod tests {
         assert_eq!(send(&t, &cx()).unwrap(), 200);
         let req = recv(&rx);
         assert!(req.starts_with("POST /Library/Refresh "), "{req}");
-        assert!(req.contains("X-Emby-Token: apikey"), "{req}");
+        assert_eq!(header_of(&req, "X-Emby-Token"), Some("apikey"), "{req}");
     }
 
     #[test]
@@ -1384,10 +1373,7 @@ mod tests {
         assert_eq!(send(&t, &cx()).unwrap(), 200);
         let req = recv(&rx);
         let (head, body) = req.split_once("\r\n\r\n").unwrap_or_default();
-        let sig = head
-            .lines()
-            .find_map(|l| l.strip_prefix("X-NzbFast-Signature: "))
-            .expect("signature header present");
+        let sig = header_of(head, "X-NzbFast-Signature").expect("signature header present");
         assert_eq!(sig, sign("hunter2", body.as_bytes()));
         // A known-answer pin so the scheme cannot silently change:
         // HMAC-SHA256("key", "body") in the sha256=<hex> dressing.

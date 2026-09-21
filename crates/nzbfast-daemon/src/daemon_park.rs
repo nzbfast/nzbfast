@@ -940,7 +940,7 @@ impl Daemon {
     /// (`tasks/stall.rs`: `requeue_cost`, `slow_keeps_its_slot`),
     /// so by the time a job reaches here the cost is already spelled out
     /// in its `defer_reason`.
-    pub fn park_gen(&self, job: Arc<Mutex<Job>>, gen0: Option<(u32, u64)>) {
+    pub fn park_gen(self: &Arc<Self>, job: Arc<Mutex<Job>>, gen0: Option<(u32, u64)>) {
         let (id, failed, key, nzb_path, demote, stale) = {
             let g = job.lock_ok();
             (
@@ -1212,7 +1212,9 @@ impl Daemon {
         // Coalesced: the record is already durable in history.jsonl (the
         // upsert above), and load_queue resolves a torn queue/history
         // pair in history's favour - the debounced rewrite only drops
-        // the queue row.
+        // the queue row. Unless history REFUSED it, in which case
+        // `hist_owed` keeps the row in this save as a terminal record
+        // rather than a tombstone.
         self.save_queue_soon();
         self.note_queue_idle();
     }
@@ -1269,7 +1271,13 @@ impl Daemon {
             // released above, so a delete can land right here and a raw
             // append would write the record back after its tombstone
             // (H6). `filed_cost` has the rest.
-            self.history_publish(job, || filed_cost(job));
+            if self.history_publish(job, || filed_cost(job)) == HistWrite::Refused {
+                // Neither the append nor the rewrite took it, and the
+                // queue save below would otherwise tombstone the only
+                // other durable copy. Carry it there as a terminal row
+                // instead - see `Daemon::hist_owed`.
+                self.hist_owe(job);
+            }
             // §76: the record is in history, so the media prober's final
             // on-disk pass has something to read. Owed HERE, as an event,
             // rather than inferred by that task noticing the job stop
@@ -1348,8 +1356,14 @@ impl Daemon {
             publish.take();
             if !already {
                 // The delete's OWN row - `deleted_cost` carries what a
-                // dropped answer costs, which is more than one row.
-                self.history_publish(job, || deleted_cost(job));
+                // dropped answer costs, which is more than one row. A
+                // refusal is carried in the queue store like any other
+                // park's (`Daemon::hist_owed`): the DELETED row is what
+                // the dupe check and the retry button read at the next
+                // start.
+                if self.history_publish(job, || deleted_cost(job)) == HistWrite::Refused {
+                    self.hist_owe(job);
+                }
                 self.history_enforce_retention();
             }
         } else if filed_early {
@@ -1396,7 +1410,7 @@ impl Daemon {
     /// meaningful question once the record has been filed and the
     /// lifecycle event has gone out.
     fn park_settle_spares(
-        &self,
+        self: &Arc<Self>,
         job: &Arc<Mutex<Job>>,
         id: &str,
         key: Option<String>,
@@ -1472,6 +1486,16 @@ impl Daemon {
         // minutes and its spares must be waiting when it does.
         if (!verdict.failed || verdict.tombstone) && !verdict.armed_auto_retry {
             self.drop_spares_for(id);
+            // The user-added half of the same sentence, for the one shape
+            // that is provably junk: a copy of the SAME POST that a Force
+            // or a resume has already released - queued, or already
+            // TRANSFERRING, in which case it is wound down and removed
+            // (`drop_released_twins_of`). Not a tombstone (the user
+            // deleted the original, and what they meant by that is not
+            // ours to guess) and not a failure (a twin fails identically).
+            if !verdict.failed && !verdict.tombstone {
+                self.drop_released_twins_of(id, nzb_path);
+            }
         }
         // §282 item 8: the job is dead and NOTHING was held for it, so
         // ask the hunt worker whether a replacement can be found. It
@@ -1764,7 +1788,7 @@ impl Daemon {
             // cancelled.
             (g.priority == -3 && g.paused && !g.tombstone && held_against(&g, id, key)).then(|| {
                 g.paused = false;
-                g.priority = 0;
+                g.set_priority(0, "a held duplicate promoted after the original failed");
                 // §282 item 14: the promotion is a SWITCH, and until now
                 // it said so nowhere the user could read. What they saw
                 // was a file arriving under a release name they never
@@ -1947,7 +1971,7 @@ impl Daemon {
 /// that tells a filed delete which episode in there is this record's.
 type DoomedDir = (String, std::path::PathBuf, bool, crate::smart::FiledTail);
 
-/// The BATCH form of [`Daemon::remove_files_in_custody`], for a caller
+/// The BATCH form of `Daemon::remove_files_in_custody`, for a caller
 /// that settles a whole delete REQUEST rather than one record.
 ///
 /// Same transaction, in two halves, and the halves are what the queue

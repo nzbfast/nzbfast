@@ -21,7 +21,7 @@
 //! earth. N8's tree materialisation is the RECOVERY plane's to prove
 //! (P1 and up carry `rel` in their FileDesc packets), which is chip 05.
 //!
-//! **What [`Plan::final_name`] must never become.** It is the name the
+//! **What `Plan::final_name` must never become.** It is the name the
 //! oracle asserts the client ends with, and it is derived from what the
 //! layout actually carries. The moment it is derived from what the
 //! client happens to do instead, the catalog stops being a set of
@@ -85,7 +85,7 @@ pub struct Plan {
     /// The release title a multi-file descriptive post prefixes its
     /// subjects with (`title [2/5] - "file" yEnc (1/4)`). `None`
     /// whenever a title would either say nothing or say too much; see
-    /// [`title_for`].
+    /// `title_for`.
     pub title: Option<String>,
     pub files: Vec<FileNaming>,
     /// N6: whether part indices are shuffled. Carried here rather than

@@ -379,7 +379,7 @@ fail = 0
 # lands; if a page is missing the arms stand down loudly rather than
 # passing silently.
 PAGES = []
-for page in ('web/dashboard.html', 'web/wall.html'):
+for page in ('web/dashboard.html', 'web/wall.html', 'web/login.html'):
     try:
         PAGES.append(open(page, encoding='utf-8').read())
     except OSError as e:

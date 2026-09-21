@@ -25,7 +25,7 @@
 //!
 //! ## The rule
 //!
-//! [`stamp_move`] bumps [`Job::move_seq`] on the way OUT of a store,
+//! `stamp_move` bumps [`Job::move_seq`] on the way OUT of a store,
 //! BEFORE the destination store's durable write. Both move paths already
 //! write the destination first (§158 reordered them so a tear reads "in
 //! both stores" rather than "in neither"), so the destination's copy is
@@ -36,7 +36,7 @@
 //! | park, before the queue rewrite | stale row, seq N | fresh row, seq N+1 | history |
 //! | retry, before the tombstone | fresh row, seq N+1 | stale row, seq N | queue |
 //!
-//! [`move_winner`] is that comparison and nothing more. The direction of
+//! `move_winner` is that comparison and nothing more. The direction of
 //! the last INTENDED move is recovered from the counter instead of being
 //! inferred from state, which is the whole of the fix.
 //!
@@ -48,7 +48,7 @@
 //!
 //! ## Cleaning up after the resolution
 //!
-//! [`reconcile_moves`] also reports which rows it dropped, and
+//! `reconcile_moves` also reports which rows it dropped, and
 //! `load_queue` makes that durable: a losing history row is tombstoned, a
 //! losing queue row is rewritten out of queue.json. Without it the loser
 //! sits in its store forever waiting to resurrect the job the moment its
@@ -60,7 +60,7 @@
 //!
 //! The window is a few hundred microseconds between two `fsync`s, so it
 //! is not reachable by racing threads. The cut comes from §158 item 7's
-//! [`storecut`](super::storecut), which is already installed at both
+//! `storecut`, which is already installed at both
 //! durable-write seams (`Daemon::save_queue`,
 //! `Daemon::history_write_locked`): `arm_cut(1)` lets a path's FIRST
 //! write land and drops the second, which is what a kill between them

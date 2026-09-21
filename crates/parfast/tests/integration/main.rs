@@ -52,3 +52,8 @@ mod skewed_set;
 // `-D warnings` refuses the target (windows-clippy red, 10 Sep 2026).
 #[cfg(unix)]
 mod engine_fold;
+// Unix-only for the same reason and gated the same way: it makes the
+// output DIRECTORY read-only with a chmod, which Windows has no
+// equivalent for.
+#[cfg(unix)]
+mod readonly_backup;

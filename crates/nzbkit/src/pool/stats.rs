@@ -55,10 +55,20 @@ pub(super) fn run_stats(
         .collect()
 }
 
+/// One server's statistics for a finished run.
 #[derive(Debug, Default)]
 pub struct PoolStats {
+    /// Body bytes this server served, on-wire (yEnc overhead
+    /// included), so it is comparable with a provider's own accounting
+    /// rather than with the decoded payload.
     pub bytes: u64,
+    /// Connections dialled to this server over the run, including the
+    /// initial fleet.
     pub connects: u64,
+    /// How many of those dials REPLACED a connection that had been
+    /// working. A run with few connects and many reconnects is a link
+    /// that keeps dropping, which reads very differently from a slow
+    /// start.
     pub reconnects: u64,
     /// Did ANY worker ever hold a usable connection to this server (fresh
     /// dial or warm-pool hand-me-down)? False means the server sat out

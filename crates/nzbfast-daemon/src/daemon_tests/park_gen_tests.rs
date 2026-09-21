@@ -449,6 +449,14 @@ fn a_deleted_active_jobs_final_record_reaches_a_store_that_refuses_the_append() 
 /// `hist_rescue_open`'s one-a-minute gate, so both filings behind it find
 /// it shut and report without an event; that is why the prewrite is the
 /// half that carries the sentence.
+///
+/// And since 21 Sep 2026 what the restart loses is NOTHING: the final
+/// filing's refusal registers the record in `Daemon::hist_owed`, the
+/// queue save park schedules then keeps its terminal row instead of
+/// tombstoning it, and the restart routes that row back into history
+/// (codex sweep P2-3). The event still goes out - history has not taken
+/// the record - but the last assertion here used to read the loss as
+/// the fixture's premise, and the loss was the defect.
 #[test]
 fn a_park_that_cannot_reach_either_store_says_what_the_restart_loses() {
     use crate::storecut::{Store, arm_store_cut, disarm};
@@ -483,14 +491,21 @@ fn a_park_that_cannot_reach_either_store_says_what_the_restart_loses() {
             told[0].contains("Lost.Park") && told[0].contains("history"),
             "the entry has to name the job and the store, got {told:?}"
         );
+        let back = restart(d);
         assert!(
-            restart(d)
-                .history
+            back.history
+                .lock_ok()
+                .iter()
+                .any(|j| j.lock_ok().nzo_id == "nzo-parkfile-2"),
+            "with both history writes refused, the queue store carries the \
+             terminal row and the restart files it into history"
+        );
+        assert!(
+            back.queue
                 .lock_ok()
                 .iter()
                 .all(|j| j.lock_ok().nzo_id != "nzo-parkfile-2"),
-            "the fixture's own premise: with both stores refused there is \
-             nothing on disk for the restart to find"
+            "...and not as a runnable job"
         );
     });
 }

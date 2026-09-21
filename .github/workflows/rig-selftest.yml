@@ -120,6 +120,12 @@ on:
       - 'tools/rig-selftest-gate.py'
       - '**/nic-media-flip.sh'
       - '**/box-state.sh'
+      # Added 21 Sep 2026 with the rig-gen driver roster (claim
+      # `bench-rig-gen-driver-coverage`). The selftest reads this one by NAME:
+      # it composes no leg-class literal of its own, so the roster's scanner
+      # cannot classify it, and the arm that holds it to handing its rig stamp
+      # down to the python helper that DOES write the line is a named pin.
+      - '**/m15b.sh'
       # The PowerShell harness and its selftest. Basename globs for the same
       # reason as every pattern above: the directory they live in is private
       # vocabulary this file may not spell, and this file ships to the public
@@ -138,6 +144,29 @@ on:
       - '**/deadline.ps1'
       - '**/deadline_selftest.ps1'
       - '**/wlaunch.ps1'
+      # THE POSIX RIG LOCK AND ITS TWO SELFTESTS, added 18 Sep 2026. Until that
+      # day NO workflow and NO gate script ran either of them - the same
+      # position plib_selftest.ps1 sat in until 16 Sep, one platform over - so
+      # every guard over the unix take path, the three orphan readings, the
+      # handover fairness and the bare-waiter wedge was one edit from being
+      # silently dead. Basename globs for the same reason as every pattern
+      # above. `mqueue.py` is named because its coordination reader and process
+      # census are arms of rig_lock_selftest.py now; `pdrv.py` and `ladder.py`
+      # because they carry the two RigLock classes it drives; `riglock*.py`
+      # because they are the take path itself; and bench-box-gate.py and the
+      # marker roster because the coordination arms fold real markers through
+      # them and a reclassification there moves what those arms assert.
+      - '**/riglock.py'
+      - '**/riglock_state.py'
+      - '**/rig_lock_selftest.py'
+      - '**/bare_waiter_selftest.py'
+      - '**/flock_fifo_probe.py'
+      - '**/mqueue.py'
+      - '**/pdrv.py'
+      - '**/ladder.py'
+      - 'tools/riglock-selftest-gate.py'
+      - 'tools/bench-box-gate.py'
+      - '.claude/tools/bench-accounts-parse.py'
       - '.github/workflows/rig-selftest.yml'
   workflow_dispatch:
 
@@ -273,3 +302,54 @@ jobs:
       # Its own step so a red names which of the two selftests failed.
       - name: deadline watcher selftest
         run: tools/rig-selftest-gate.py --run-deadline
+
+  riglock-selftest:
+    # THE POSIX HALF of what `plib-selftest` above is for Windows, and the two
+    # scripts it runs were run by NOTHING until 18 Sep 2026 - censused that day
+    # on origin/main, their only mentions outside themselves were a skill and
+    # some handoffs. `tools/riglock-selftest-gate.py`'s header carries the full
+    # argument, including why it is a separate wrapper from
+    # `rig-selftest-gate.py` (two lanes held open claims on that file when this
+    # landed) and why folding it in later is legitimate.
+    #
+    # ITS OWN JOB, not a step on `rig-selftest` above, for the reason that job
+    # gives for splitting `plib-selftest` out: a red should name WHICH selftest
+    # failed without reading a log, and these two race real flock handovers
+    # where the zsh job drives canned fixtures, so they fail for different
+    # reasons and want their own timeout.
+    #
+    # macOS for the same reason every job in this workflow is: `on: push:
+    # paths:` is per WORKFLOW, so the trigger that brings this one brings the
+    # others, and the boxes these guards protect are the Mac rigs. Both scripts
+    # are POSIX and would run on ubuntu; the platform that matches the fleet is
+    # the one worth the minutes.
+    #
+    # THE TIMEOUT IS NOT DECORATION. `bare_waiter_selftest.py` proves a wedge by
+    # letting a control waiter STAY wedged, and `rig_lock_selftest.py`'s
+    # fairness arms wait on real handovers - so the failure mode nearest to
+    # hand here is a hang, and a job that hangs to its cap concludes
+    # `cancelled`, which `tools/ci-verdict.py` reports as a RED naming the cap.
+    # Measured on the dev Mac 18 Sep 2026: 30 s and 46 s, 82 s through the
+    # wrapper. 15 minutes is ten times that and still finite.
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    concurrency:
+      group: riglock-selftest-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Recorded so a future failure can be read against a runner image bump
+      # rather than against the diff, exactly as the two jobs above record
+      # their shell and their pwsh. The `ps` line is this job's own: the census
+      # arm parses BSD `ps`'s cumulative-time column, and an image whose `ps`
+      # changed shape is the thing to look at first.
+      - name: host facts
+        run: python3 -VV && ps -Ao pid=,ppid=,time=,comm= | head -3
+
+      # `--selftest` FIRST, as every gate here does: this wrapper's whole value
+      # is that it REFUSES an exit-0 run that never printed its success marker,
+      # and a refusal that has stopped refusing reads as a clean tree for ever.
+      - name: posix rig lock selftests
+        run: tools/riglock-selftest-gate.py --selftest && tools/riglock-selftest-gate.py
