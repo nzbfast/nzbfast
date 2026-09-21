@@ -137,7 +137,17 @@ jobs:
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
           project-slug: nzbfast
           signing-policy-slug: ${{ inputs.policy }}
-          artifact-configuration-slug: installer
+          # `initial`, NOT `installer`: SignPath PRE-CREATES a default
+          # artifact configuration when it provisions an OSS project,
+          # named "Initial version" with the slug `initial`. Phase C in
+          # SIGNPATH.md assumed we would define one called `installer`
+          # and that assumption was never checked against the console -
+          # submitting `installer` fails the whole request with a bare
+          # "Invalid request to SignPath API" that names no field
+          # (run 35630584550, both jobs). Its type is already right:
+          # "Portable Executable or Windows device driver executable
+          # file", which is what an Inno Setup installer is.
+          artifact-configuration-slug: initial
           github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
           wait-for-completion: true
           output-artifact-directory: packaging/windows/out-signed
@@ -307,7 +317,17 @@ jobs:
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
           project-slug: nzbfast
           signing-policy-slug: ${{ inputs.policy }}
-          artifact-configuration-slug: installer
+          # `initial`, NOT `installer`: SignPath PRE-CREATES a default
+          # artifact configuration when it provisions an OSS project,
+          # named "Initial version" with the slug `initial`. Phase C in
+          # SIGNPATH.md assumed we would define one called `installer`
+          # and that assumption was never checked against the console -
+          # submitting `installer` fails the whole request with a bare
+          # "Invalid request to SignPath API" that names no field
+          # (run 35630584550, both jobs). Its type is already right:
+          # "Portable Executable or Windows device driver executable
+          # file", which is what an Inno Setup installer is.
+          artifact-configuration-slug: initial
           github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
           wait-for-completion: true
           output-artifact-directory: packaging/windows/out-signed
