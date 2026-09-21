@@ -176,6 +176,33 @@ function Get-ArmPins([string]$arm, [string]$label) {
   return @{ w = $pw; t = $pt }
 }
 
+# NO COORDINATION-FILE MATCHER LIVES IN THIS FILE, AND THAT IS THE FINDING
+# RATHER THAN THE ABSENCE OF ONE (18 Sep 2026, claim
+# `riglock-matcher-copy-gate-18sep`). This driver was named in
+# an internal note section 1 as one of
+# two LIVE harness drivers "carrying their own keyword list", to be repointed
+# at plib's `Get-OpenClaimants` / `Get-CoordFoldedState`. Re-derived on main:
+# it is not. Its only `DONE` / `ABORTED` / `CLAIM` literals are the `$done`
+# status variable and the `Coord` POSTS below, it already dot-sources plib,
+# and its only read of `$coordFile` is of the POINTER file that names the
+# coordination file - never of that file's contents. There was nothing to
+# repoint, and tools/coord-matcher-gate.py reports it clean.
+#
+# WHAT IT DOES HAVE is the blindness that handoff's section 1 is about, one
+# mechanism over: the ahead-list below is a list of PIDS read once from
+# wait.txt, so a lane that posts a CLAIM after this wait starts is invisible
+# to it, and `Take-RigLock` is called AFTER the loop exits, which is the gap
+# both dated instances happened in. plib's `Get-OpenClaimants` (no ahead-list
+# fixed at arm time) and `Take-RigLockWhenFree` (acquire FIRST, then ask
+# every other question with the handle already open) are the fix.
+#
+# DELIBERATELY NOT APPLIED HERE, and the reason is the rule this whole family
+# of incidents came from: this is a LIVE driver whose stand-down decides
+# whether a round takes a contended box, the change would make it refuse to
+# run where it now proceeds, and that path cannot be exercised from a Mac -
+# plib's selftest covers the FUNCTIONS (224 cases) and nothing covers this
+# call site. It wants a Windows box nobody is measuring on, which is the same
+# follow-on that handoff already names for the library's own Windows arm.
 # WAITING FOR A FREE BOX, when wait.txt sits beside the plan: line 1 a UTC
 # deadline, every further line the pid of a process queued AHEAD of this round.
 # Same rule and the same reasons as nttwork-i5.ps1's block: the lock alone is

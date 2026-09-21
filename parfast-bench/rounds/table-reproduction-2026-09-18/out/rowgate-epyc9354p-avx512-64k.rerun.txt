@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "<rig>/Claude/nzbfast/.claude/worktrees/youthful-edison-1a5d1a/harness/rowgate.py", line 465, in <module>
+    rows = load(_argv)
+  File "<rig>/Claude/nzbfast/.claude/worktrees/youthful-edison-1a5d1a/harness/rowgate.py", line 181, in load
+    rows += _wcomb_rows(p)
+            ~~~~~~~~~~~^^^
+  File "<rig>/Claude/nzbfast/.claude/worktrees/youthful-edison-1a5d1a/harness/rowgate.py", line 152, in _wcomb_rows
+    good, total = kv["restored"].split("/")
+                  ~~^^^^^^^^^^^^
+KeyError: 'restored'

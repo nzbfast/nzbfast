@@ -44,6 +44,22 @@ iso() { python3 -c 'import datetime;print(datetime.datetime.now(datetime.timezon
 load1() { python3 -c 'import os;print("%.2f"%os.getloadavg()[0])'; }
 
 log "ROUND $TAG start=$(iso) host=$(hostname -s) cores=$(sysctl -n hw.ncpu) rungs=$RUNGS reps=$REPS"
+
+# THE HARNESS'S OWN PROVENANCE, at round start: one `HARNESS` line per file
+# this round sources, then the `HARNESS-RIG` token that
+# `tools/jcross-position-audit.py`'s `driver_label()` reads. Without it a
+# banked log cannot be traced to the harness revision that wrote it months
+# later, from the log alone, and `driver_label()` calls it `(unstamped)`
+# (an internal note).
+#
+# THROUGH `log`, NOT straight to stdout: this driver tees, and the stamp has to
+# reach the BANKED file or it only looks fixed. `$HLIB` overrides the path for
+# a box this driver was copied to on its own, and a library that is not there
+# SAYS so rather than ending the round - a stamp must never be able to do that.
+HLIB=${HLIB:-$(cd "$(dirname "$0")" && pwd)/../../harness/hlib.sh}
+if [ -f "$HLIB" ]; then . "$HLIB"
+  harness_lines "$0" "$HLIB" | while IFS= read -r _hl; do log "$_hl"; done
+else log "HARNESS-UNAVAILABLE $HLIB"; fi
 log "BOX cpu=$(sysctl -n machdep.cpu.brand_string) cores=$(sysctl -n hw.ncpu) ram_gb=$(python3 -c "print(round($(sysctl -n hw.memsize)/1e9,1))") os=$(sw_vers -productVersion)"
 log "BIN parfast sha256=$(shasum -a 256 "$EXE" | cut -c1-16 | tr 'a-f' 'A-F') mtime=$(stat -f %Sm -t %FT%TZ "$EXE")"
 

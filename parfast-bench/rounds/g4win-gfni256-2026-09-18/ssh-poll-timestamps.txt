@@ -1,0 +1,33 @@
+2026-09-18T11:02:06Z poll=1 (lane gfni256-four-window-shape-1mib-18sep, from apple-m3-ultra-512gb)
+2026-09-18T11:22:07Z poll=2 (lane gfni256-four-window-shape-1mib-18sep, from apple-m3-ultra-512gb)
+2026-09-18T11:43:46Z poll=1 attempt2 (lane gfni256-four-window-shape-1mib-18sep, from apple-m3-ultra-512gb)
+2026-09-18T12:28:47Z poll=2 attempt2 (lane gfni256-four-window-shape-1mib-18sep, from apple-m3-ultra-512gb)
+2026-09-18T13:13:48Z poll=3 attempt2 (lane gfni256-four-window-shape-1mib-18sep, from apple-m3-ultra-512gb)
+2026-09-18T13:58:48Z poll=4 attempt2 (lane gfni256-four-window-shape-1mib-18sep, from apple-m3-ultra-512gb)
+2026-09-18T14:43:49Z poll=5 attempt2 (lane gfni256-four-window-shape-1mib-18sep, from apple-m3-ultra-512gb)
+2026-09-18T15:14:19Z poll=manual-eta (lane gfni256-four-window-shape-1mib-18sep, from apple-m3-ultra-512gb)
+2026-09-18T15:18:53Z poll=manual-handoff (lane gfni256-four-window-shape-1mib-18sep, from apple-m3-ultra-512gb)
+2026-09-18T15:23:04Z poll=manual-signoff (lane gfni256-four-window-shape-1mib-18sep, from apple-m3-ultra-512gb)
+2026-09-18T15:30:06Z poll=final (lane gfni256-four-window-shape-1mib-18sep)
+2026-09-18T16:51:26Z POLL (takeover session, round-completion watch)
+2026-09-18T17:36:27Z POLL (takeover session, round-completion watch)
+2026-09-18T17:51:28Z POLL (takeover session, round-completion watch)
+2026-09-18T18:01:30Z POLL (takeover session, round-completion watch)
+2026-09-18T18:11:31Z POLL (takeover session, round-completion watch)
+2026-09-18T18:21:31Z POLL (takeover session, round-completion watch)
+2026-09-18T18:31:34Z POLL (takeover session, round-completion watch)
+2026-09-18T18:33:34Z PULL (takeover session, scp of all ladder logs)
+2026-09-18T18:32:37Z POLL (takeover session, leg-count check, after the round ended)
+2026-09-18T18:33:04Z POLL (takeover session, per-ladder leg counts + pid, after the round ended)
+# NOTE, takeover session: the seven 16:51-18:31Z lines labelled "round-completion
+# watch" RETURNED NO DATA. The poll command mis-escaped its PowerShell '$'
+# variables under the local shell, so the remote parse failed and stderr was
+# suppressed; each printed an empty result and none of them ever reported a leg
+# count. They are recorded anyway BECAUSE THEY STILL COST THE BOX AN INBOUND SSH
+# POWERSHELL START, which is the perturbation this file exists to bank - an
+# inbound ssh reads 68-77% of one core on this class of box. A failed poll
+# perturbs exactly as much as a successful one and must not be quietly dropped
+# from the record because it taught the poller nothing. Six of the seven landed
+# during ladders D, E and F; the 18:31Z one landed after the run ended at
+# 18:28:41Z. The 16:05Z poll (first line of this session's block, before the
+# watch loop) and the two 18:32-18:33Z ones used a working form and did return.

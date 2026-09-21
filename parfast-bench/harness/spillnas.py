@@ -101,7 +101,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "reduce":
     sys.exit(0)
 
 import riglock  # noqa: E402
-from pdrv import apply_damage, damage_picks, restore_slices  # noqa: E402
+from pdrv import apply_damage, damage_picks, harness_facts, restore_slices  # noqa: E402
 
 S = os.environ["SCRATCH"]
 BINS = {"main": os.environ["BIN_MAIN"], "branch": os.environ["BIN_BRANCH"]}
@@ -168,6 +168,11 @@ def sha(path):
 # rounds are launched unattended behind queues that have run past three hours
 # on this fleet, so the default would turn a long wait into a round that
 # never ran. Either env dial still bounds it for a caller that wants one.
+# The HARNESS's own provenance, and the round-start twin of the
+# per-leg `rig=` token - see `pdrv.harness_facts`. Without it a
+# banked log cannot be traced to the harness revision that wrote
+# it (census an internal note).
+harness_facts()
 log("waiting for the rig lock")
 if os.environ.get("RIGLOCK_BUDGET_S") or os.environ.get("RIGLOCK_TRIES"):
     lock_fd = riglock.take("spillnas")      # take() reads both dials itself

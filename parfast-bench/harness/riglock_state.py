@@ -35,12 +35,27 @@ the failure bench-suite item 0e exists to prevent. There is NO age bound here
 and none may be added. A lock naming a pid that is alive on this box is HELD
 at any age; a lock that cannot say who holds it is an orphan at any age.
 
-  held   - a flock is held on it, OR its identity line names a live foreign
-           pid. Wait. This is the answer for everything we cannot disprove.
-  orphan - it parses to no pid (zero bytes, truncated, garbage), or names a
-           pid that is not alive, or names a pid younger than the lock itself
-           (a recycled number, not our holder). Provably nobody's.
-  absent - no file.
+  held     - a flock is held on it, OR its identity line names a live foreign
+             pid. Wait. This is the answer for everything we cannot disprove.
+  orphan   - it is non-empty but parses to no pid (a truncated or garbled
+             identity line), or names a pid that is not alive, or names a pid
+             younger than the lock itself (a recycled number, not our
+             holder). Provably nobody's, and worth an announcement.
+  released - exactly zero bytes. `riglock.py`'s `release()` deliberately
+             TRUNCATES rather than unlinks (its own header explains why), so
+             a zero-byte file is that function's normal, intended spelling
+             for "nobody holds this any more" - not a crash. Takeable
+             silently, with no announcement: tightened 20 Sep 2026 after
+             `take()` announced RIG-LOCK-ORPHAN for exactly this shape on two
+             ordinary hand-overs on apple-m3-ultra (22:32Z, 22:35Z), and the
+             lanes reading the coordination file took it as a double-booking
+             that never happened
+             (an internal note). Before
+             this, "zero bytes" and "orphan" were the same verdict, which was
+             right for the 02:17Z crash above (a file that had NEVER been
+             written) and wrong for the vastly more common case of a file
+             `release()` had just finished with on purpose.
+  absent   - no file.
 
 No `--force` anywhere, on purpose: an orphan the tool can PROVE is one needs
 no flag, and one it cannot prove is one is a human's call, not a flag's.
@@ -271,7 +286,8 @@ def _flock_free(path):
 
 
 def lock_state(path=LOCK, probe_flock=True, self_pid=None):
-    """('absent'|'held'|'orphan', description). See the module docstring.
+    """('absent'|'held'|'orphan'|'released', description). See the module
+    docstring.
 
     `probe_flock=False` is for a caller that has ALREADY won the flock on this
     file - take(), which knows no flock holder exists and must not ask again.
@@ -289,8 +305,18 @@ def lock_state(path=LOCK, probe_flock=True, self_pid=None):
         return "held", line or ("pid=%d" % pid)
     if probe_flock and not _flock_free(path):
         return "held", "an flock is held on it by an unnamed process (%s)" % (line or "empty file")
+    # Zero bytes is checked BEFORE "no parseable identity" and returns its own
+    # state rather than folding into "orphan": it is release()'s own spelling
+    # for an ordinary hand-over (see the module docstring), and every caller
+    # that gates an announcement on `state == "orphan"` must not fire for it.
+    try:
+        empty = os.path.getsize(path) == 0
+    except OSError:
+        empty = False
+    if empty:
+        return "released", "zero bytes - release()'s spelling for a normal hand-over, not a crash"
     if not line:
-        return "orphan", "zero bytes or no parseable identity - it names nobody"
+        return "orphan", "no parseable identity - it names nobody"
     if pid is None:
         return "orphan", "no pid in its identity line (%s)" % line
     if pid == self_pid:

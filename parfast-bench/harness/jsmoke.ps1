@@ -54,6 +54,10 @@ Remove-Item $legfile, $verdict -Force -EA SilentlyContinue
 # synthesised failures for each arm of the verdict.
 function Test-SmokeLegs([string]$path) {
   $fail = @()
+  # harness-rig-gate: a GATE over jcross.ps1, not a round driver. It runs
+  #   that driver and then assesses the log jcross.ps1 banked, which
+  #   carries jcross.ps1's own HARNESS-RIG line. A stamp here would name
+  #   the assessor rather than the harness that produced the legs.
   $legs = @(Get-Content $path -EA 0 | Where-Object { $_ -like 'LEG *' -and $_ -notmatch ' rep=0 ' })
   $script:smokeLegs = $legs
   if ($legs.Count -lt 12) { $fail += "only $($legs.Count) timed legs, expected 12" }

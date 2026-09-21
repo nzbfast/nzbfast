@@ -1,0 +1,2 @@
+NARROW-WAIT tag=narrow-rot-nibble rungs=256,288,304,312,320,384,448,512,640,768 reps=4 until=2026-09-20T06:00:00Z ahead=[codex-parfast-create-readers-18sep] cap_min=180 coord=<rig>\COORDINATION-intel-i5-10600kf.txt root=<rig>\narrow-nibble-15sep pid=2832 ts=2026-09-18T17:16:56.8301462Z
+NARROW-WAIT lock=held procs=1 ahead=[] free=False streak=0 box_cpu=11 ts=2026-09-18T17:16:58.0832915Z

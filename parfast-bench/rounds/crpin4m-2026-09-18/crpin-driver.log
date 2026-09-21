@@ -1,0 +1,42 @@
+2026-09-18T11:59:05.3189700+01:00 CRPIN-ROUND start root=<rig>\crpin-18sep bin=<rig>\crpin-18sep\src\target\release\parfast.exe budget=21474836480 coarse=3 fine=2 rungs_per_ladder=cpwarm:288,320,352,384,416 cpe8:288,320,352,384,416,448,480,512 cpp4:288,320,352,384,416,448,480,512
+2026-09-18T12:00:07.4648992+01:00 LOAD-GATE ok at=prebuild loads=4/12 waited_s=0
+2026-09-18T12:00:15.3360608+01:00 CLASS-PROBE P-core0 mask=0x1 got=0x1 wall_s=7.805 cpu_s=7.766 SPIN ms=7646 x=72000065999996.6 
+2026-09-18T12:00:28.8551918+01:00 CLASS-PROBE E-core4 mask=0x10 got=0x10 wall_s=13.513 cpu_s=13.422 SPIN ms=13304 x=72000065999996.6 
+2026-09-18T12:00:42.4126174+01:00 CLASS-PROBE E-core8 mask=0x100 got=0x100 wall_s=13.568 cpu_s=13.531 SPIN ms=13366 x=72000065999996.6 
+2026-09-18T12:00:55.8545075+01:00 CLASS-PROBE E-core11 mask=0x800 got=0x800 wall_s=13.434 cpu_s=13.391 SPIN ms=13235 x=72000065999996.6 
+2026-09-18T12:01:10.9169598+01:00 CLASS-PROBE LPE-core12 mask=0x1000 got=0x1000 wall_s=15.058 cpu_s=14.859 SPIN ms=14833 x=72000065999996.6 
+2026-09-18T12:01:16.6277740+01:00 EXTRACT rc=0 secs=5.7 into=<rig>\crpin-18sep\src
+2026-09-18T12:03:26.2740494+01:00 BUILD rc=0 secs=129.6 log=<rig>\crpin-18sep\build-crpin.log
+2026-09-18T12:03:26.3456578+01:00 BIN bytes=4173312 want_bytes=4173312 sha256=7A605BE5C09EE87A0316C159BF6F66EB46D3E37CC7E9524AAA04743514B6CE60 (a sha that matches no other round is EXPECTED and not a fault - the build embeds its own path; the byte count is the invariant across every build of 06d5734b7 on this fleet)
+2026-09-18T12:03:26.3461672+01:00 FIXTURE ABSENT - ladder 1 builds it, then waits out the settle <rig>\crpin-18sep\fix-4194304-1024
+2026-09-18T12:04:11.8211096+01:00 LOAD-GATE ok at=cpwarm loads=2 waited_s=0
+2026-09-18T12:04:11.8345945+01:00 LADDER cpwarm label=4mcp-warm aff=none (UNPINNED) threads=16 rungs=288,320,352,384,416 log=<rig>\crpin-18sep\harness\logs\cpwarm.log
+2026-09-18T12:04:11.8345945+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\crpin-18sep\harness\wcomb.ps1" -Root "<rig>\crpin-18sep" -Bin "<rig>\crpin-18sep\src\target\release\parfast.exe" -NoBuild -Phase create -Tag cpwarm -Label 4mcp-warm -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs "288,320,352,384,416" -Threads "16" -Reps 1 -Residency resident -NttBudget 21474836480
+2026-09-18T12:35:24.9524740+01:00 ARM-DONE cpwarm rc=0 legs=20 lock_waits=0
+2026-09-18T12:35:25.9901931+01:00 LOAD-GATE ok at=cpe8 loads=1 waited_s=0
+2026-09-18T12:35:25.9901931+01:00 LADDER cpe8 label=4mc-e8 aff=0xFF0 threads=8 rungs=288,320,352,384,416,448,480,512 log=<rig>\crpin-18sep\harness\logs\cpe8.log
+2026-09-18T12:35:25.9901931+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\crpin-18sep\harness\wcomb.ps1" -Root "<rig>\crpin-18sep" -Bin "<rig>\crpin-18sep\src\target\release\parfast.exe" -NoBuild -Phase create -Tag cpe8 -Label 4mc-e8 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs "288,320,352,384,416,448,480,512" -Threads "8" -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xFF0
+2026-09-18T12:59:18.7949394+01:00 AFFINITY-AUDIT cpe8 want=0xFF0 legs=32 with_affinity_field=32 readback_equal=32
+2026-09-18T12:59:18.7949394+01:00 ARM-DONE cpe8 rc=0 legs=32 lock_waits=0
+2026-09-18T12:59:19.8336737+01:00 LOAD-GATE ok at=cpp4 loads=1 waited_s=0
+2026-09-18T12:59:19.8336737+01:00 LADDER cpp4 label=4mc-p4 aff=0xF threads=4 rungs=288,320,352,384,416,448,480,512 log=<rig>\crpin-18sep\harness\logs\cpp4.log
+2026-09-18T12:59:19.8336737+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\crpin-18sep\harness\wcomb.ps1" -Root "<rig>\crpin-18sep" -Bin "<rig>\crpin-18sep\src\target\release\parfast.exe" -NoBuild -Phase create -Tag cpp4 -Label 4mc-p4 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs "288,320,352,384,416,448,480,512" -Threads "4" -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xF
+2026-09-18T13:24:39.5375122+01:00 AFFINITY-AUDIT cpp4 want=0xF legs=32 with_affinity_field=32 readback_equal=32
+2026-09-18T13:24:39.5375122+01:00 ARM-DONE cpp4 rc=0 legs=32 lock_waits=0
+2026-09-18T13:24:39.7855378+01:00 BANDPLAN cpe8f <- cpe8: BAND cpu=396 wall=415 width=19 rows  spacing=4
+2026-09-18T13:24:39.7855378+01:00 BANDPLAN cpe8f <- cpe8: RUNGS 392,396,400,404,408,412,416,420
+2026-09-18T13:24:39.8044764+01:00 BANDPLAN-OK cpe8f rungs=392,396,400,404,408,412,416,420 - placed from THIS sitting's cpe8.log, not from a banked band
+2026-09-18T13:24:39.9008285+01:00 BANDPLAN cpp4f <- cpp4: BAND cpu=396 wall=412 width=16 rows  spacing=4
+2026-09-18T13:24:39.9008285+01:00 BANDPLAN cpp4f <- cpp4: RUNGS 392,396,400,404,408,412,416
+2026-09-18T13:24:39.9008285+01:00 BANDPLAN-OK cpp4f rungs=392,396,400,404,408,412,416 - placed from THIS sitting's cpp4.log, not from a banked band
+2026-09-18T13:24:40.9568288+01:00 LOAD-GATE ok at=cpe8f loads=5 waited_s=0
+2026-09-18T13:24:40.9568288+01:00 LADDER cpe8f label=4mc-e8-fine aff=0xFF0 threads=8 rungs=392,396,400,404,408,412,416,420 log=<rig>\crpin-18sep\harness\logs\cpe8f.log
+2026-09-18T13:24:40.9568288+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\crpin-18sep\harness\wcomb.ps1" -Root "<rig>\crpin-18sep" -Bin "<rig>\crpin-18sep\src\target\release\parfast.exe" -NoBuild -Phase create -Tag cpe8f -Label 4mc-e8-fine -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs "392,396,400,404,408,412,416,420" -Threads "8" -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xFF0
+2026-09-18T13:48:53.9363992+01:00 AFFINITY-AUDIT cpe8f want=0xFF0 legs=32 with_affinity_field=32 readback_equal=32
+2026-09-18T13:48:53.9363992+01:00 ARM-DONE cpe8f rc=0 legs=32 lock_waits=0
+2026-09-18T13:48:54.9988171+01:00 LOAD-GATE ok at=cpp4f loads=3 waited_s=0
+2026-09-18T13:48:54.9988171+01:00 LADDER cpp4f label=4mc-p4-fine aff=0xF threads=4 rungs=392,396,400,404,408,412,416 log=<rig>\crpin-18sep\harness\logs\cpp4f.log
+2026-09-18T13:48:54.9988171+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\crpin-18sep\harness\wcomb.ps1" -Root "<rig>\crpin-18sep" -Bin "<rig>\crpin-18sep\src\target\release\parfast.exe" -NoBuild -Phase create -Tag cpp4f -Label 4mc-p4-fine -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs "392,396,400,404,408,412,416" -Threads "4" -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xF
+2026-09-18T14:11:32.1887836+01:00 AFFINITY-AUDIT cpp4f want=0xF legs=28 with_affinity_field=28 readback_equal=28
+2026-09-18T14:11:32.1887836+01:00 ARM-DONE cpp4f rc=0 legs=28 lock_waits=0
+2026-09-18T14:11:32.1887836+01:00 CRPIN-ROUND end rc=0

@@ -47,7 +47,7 @@ env: ARMS "name=path,name=path,..." (order is the base rotation)
 import hashlib, json, os, shutil, signal, socket, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pdrv import require_quiet_box, foreign_cpu  # noqa: E402
+from pdrv import require_quiet_box, foreign_cpu, harness_facts  # noqa: E402
 
 R = os.environ.get("R", "/root/dmem-16sep")
 REPS = int(os.environ.get("REPS", "5"))
@@ -265,6 +265,11 @@ def profile(cell, arm, path, nzb, cfg):
 
 def main():
     require_quiet_box("round-start")
+    # The HARNESS's own provenance, and the round-start twin of the
+    # per-leg `rig=` token - see `pdrv.harness_facts`. Without it a
+    # banked log cannot be traced to the harness revision that wrote
+    # it (census an internal note).
+    harness_facts()
     print("dmem round start %s R=%s reps=%d cells=%s arms=%s"
           % (utcnow(), R, REPS, ORDER, [a for a, _ in ARMS]), flush=True)
     for ci, cell in enumerate(ORDER):

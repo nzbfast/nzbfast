@@ -40,6 +40,28 @@ function Log([string]$s) { $s; Add-Content -Path (Join-Path $logd "$tag.log") -V
 
 $rungList = @($rungs -split ',' | ForEach-Object { [int]$_.Trim() })
 Log "ROUND $tag start=$((Get-Date).ToUniversalTime().ToString('o')) host=$env:COMPUTERNAME cores=$env:NUMBER_OF_PROCESSORS rungs=$rungs reps=$reps"
+
+# THE HARNESS'S OWN PROVENANCE, at round start: one `HARNESS` line per file
+# this round sources, then the `HARNESS-RIG` token that
+# `tools/jcross-position-audit.py`'s `driver_label()` reads. Without it a
+# banked log cannot be traced to the harness revision that wrote it months
+# later, from the log alone (an internal note).
+# plib adds ITSELF to the set, so this passes only its own path.
+#
+# GUARDED, because this driver dot-sources a BOX-LOCAL copy of plib.ps1 and
+# `$ErrorActionPreference = 'Stop'` at the top of that file makes an unknown
+# command a TERMINATING error - so a box whose deployed plib predates the
+# function would have this stamp END THE ROUND. A stamp is a nicety and must
+# never be able to do that; the absence is reported instead.
+#
+# THROUGH THIS DRIVER'S OWN `Log`, NOT `Write-HarnessFacts`: the round tees
+# its log through a helper that writes the banked FILE and stdout, and never
+# calls `Set-PlibLog`, so plib's own writer would put the stamp on the terminal
+# and leave the BANKED log unstamped - looking fixed. `Get-HarnessLines`
+# returns the lines and writes nothing, for exactly this case.
+if (Get-Command Get-HarnessLines -ErrorAction SilentlyContinue) {
+  foreach ($_hl in (Get-HarnessLines @($PSCommandPath))) { Log $_hl }
+} else { Log 'HARNESS-UNAVAILABLE this plib.ps1 predates Get-HarnessLines' }
 $cpuinfo = Get-CimInstance Win32_Processor
 Log ("BOX cpu=" + $cpuinfo.Name + " cores=" + $cpuinfo.NumberOfCores + " logical=" + $cpuinfo.NumberOfLogicalProcessors + " ram_gb=" + [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB,1))
 & cmd /c "attrib +I `"$tree\*`" /S /D" 2>&1 | Out-Null

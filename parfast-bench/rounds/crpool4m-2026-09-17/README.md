@@ -1,10 +1,8 @@
 # The CREATE's pool ladder at 4 MiB on GFNI-256, WITH PLACEMENT CONTROLLED
 
 <!-- claim:wcomb-run-create-affinity-assert-18sep -->
-> **CLAIMED 2026-09-18T01:26:49Z** by `<user>` on `apple-m3-ultra-512gb`, claim id `wcomb-run-create-affinity-assert-18sep`, gen `62841d4e`, lease to **2026-09-18T13:26:49Z**.
-> Nobody else should start this. Ledger: an internal note (`tools/claims.py list --open`).
-> **Past that lease with nothing closing it, READ origin/main FIRST** - an abandoned-looking claim is far more often work that
-> landed than work that is free (bench-suite item 0a1, TODO 229). Then post a RELEASE saying why, and claim it again.
+> **CLOSED - DONE 2026-09-18T01:37:46Z** by `<user>`, claim id `wcomb-run-create-affinity-assert-18sep`. Landed as `3bbe3d94d`.
+> This is the LOCK being released, not a statement that the work is right. Check origin/main for what actually landed.
 <!-- /claim:wcomb-run-create-affinity-assert-18sep -->
 
 Lane `parfast-create-pool-ladder-4mib-17sep`, item 4 of
@@ -468,16 +466,50 @@ at 0.3% and 0.4% - so its 394 stands on the stated test. The softest reading
 here is `4mc-t16`'s own, bracketed at 3.2% and 3.4%; the other four bracket at
 0.3-1.7%.
 
-### 7. One discrepancy I cannot resolve and am not hiding
+### 7. One discrepancy - one candidate REFUTED, and the divergence located
 
 My unpinned `-t16` reads **387** CPU where `crg4`'s read **365** - a **22-row
-swing on the same configuration, same binary, same fixture shape**. Candidates:
-a different rung grid (288..512 against 320..544, and the crossover is
-log-interpolated), a solo ladder against `crg4`'s two-pools-interleaved-in-one,
-and a different fixture instance. Not resolvable from one sitting.
+swing on the same configuration, same binary, same fixture shape**, and larger
+than the entire 16-row gap item 4 was written about. Three candidates were
+named: the rung grid (the crossover is log-interpolated), a solo ladder against
+`crg4`'s two-pools-interleaved-in-one, and a different fixture instance.
 
-It bounds what an UNPINNED reading is worth, and it is larger than the entire
-16-row gap item 4 was written about.
+**Attacked with no box time**, by re-reducing both banked logs:
+`regrid-and-arm-split.py` in this directory.
+
+**The rung grid is REFUTED, flatly.** Filtered to the common grid
+(320..512, seven rungs) every reading is *identical* to its own-grid reading -
+`crg4` `-t16` stays 365/393, `crg4` `-t4` stays 381/422, `4mc-t16` stays
+387/411. Dropping 544 and 288 changes nothing. **So this is not a reduction
+artefact**, which makes it more concerning, not less.
+
+**And the divergence is located: the two arms did not move together.** A
+crossover is where fold/force = 1, so symmetric noise cancels and cannot move
+it. Between the sittings:
+
+| | fold | force | differential |
+|---|---:|---:|---:|
+| CPU | **-5.8%** | -3.0% | **-2.8 pp** |
+| wall | **-6.1%** | -2.6% | **-3.5 pp** |
+
+The fold got relatively cheaper, so more rows are needed before the transform
+wins and the crossing moves up. That ~3 percentage-point differential *is* the
+22 rows. The gap is widest at the low rungs and closes as m rises (m=320: fold
+-12.6%, force -9.9%; m=480: fold -0.0%, force -0.3%) - and those low `crg4`
+rungs are its noisiest, at 22% and 47% foreign CPU against this round's 8%
+median.
+
+**What it does NOT settle**: *why* the fold moved more. Interleaved-vs-solo and
+a different fixture instance both survive, and a third is now visible - `crg4`'s
+sitting was noisier overall (foreign CPU median 12% against 8%) and the noise
+did not hit the two arms equally. Separating those needs a box.
+
+**The reason this matters beyond one number.** The repair lane replicated its
+**pinned** arms across two independent sittings: e4 344 -> 349, e8 378 -> 377,
+t16 398 -> 401 - **within 5 rows**. This **unpinned** arm moved **22**. So
+pinning buys *reproducibility* as well as removing the placement confound, and
+that is an argument for pinning which does not depend on the confound argument
+at all.
 
 ### What this licenses, and what it does not
 

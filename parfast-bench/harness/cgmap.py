@@ -39,6 +39,9 @@ ARMS, by env on ONE binary:
                                 thrash looks like here; = def wherever the
                                 gate does not refuse)
   nomap    NZBFAST_PAR2GEN_MAP=0      - the copied windows, the wall to beat
+  own0     NZBFAST_PAR2GEN_MAP_OWN_CHARGE=0 - the headroom term WITHOUT its
+                                own-charge credit: the pre-18-Sep
+                                composition, on the same binary
 
 XENV=NAME=VALUE[,NAME=VALUE] is set on every leg on top of the arm's env,
 for a round that moves the SHAPE rather than the arm (see the constant's own
@@ -76,6 +79,10 @@ import subprocess
 import sys
 import time
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import pdrv  # noqa: E402
+
 R = os.environ.get("R", "/root/cgmap-16sep")
 WORK = os.path.join(R, "work")
 BINNAME = os.environ.get("BINNAME", "parfast")
@@ -96,6 +103,14 @@ ARM_ENV = {
     "def": {},
     "fitoff": {"NZBFAST_PAR2GEN_MAP_FIT": "off"},
     "nomap": {"NZBFAST_PAR2GEN_MAP": "0"},
+    # own0 - the headroom term's OWN-CHARGE CREDIT off, added 18 Sep 2026 for
+    # claim cgroup-map-gate-reading-and-bands-m-ladder-18sep. It is the
+    # pre-credit composition on the SAME binary, which is the only way to walk
+    # one boundary both ways on one fixture: a second binary would move the
+    # recovery set's provenance as well as the arithmetic. On a binary that
+    # predates the credit this arm is identical to `def` and the round is void,
+    # so read the `create map headroom:` line - it names the credit it took.
+    "own0": {"NZBFAST_PAR2GEN_MAP_OWN_CHARGE": "0"},
 }
 
 # XENV (comma list of NAME=VALUE) is set on EVERY leg of the round, on top
@@ -316,6 +331,11 @@ def main():
     say("BOX %s" % subprocess.run(["uname", "-a"], capture_output=True,
                                   text=True).stdout.strip())
     say("BINARY %s sha256=%s" % (BIN, sha256(BIN)))
+    # The HARNESS's own provenance, and the round-start twin of the
+    # per-leg `rig=` token - see `pdrv.harness_facts`. Without it a
+    # banked log cannot be traced to the harness revision that wrote
+    # it (census an internal note).
+    pdrv.harness_facts()
     fixture()
     say("MEMAVAIL-HOST %s" % next(
         (l.split()[1] for l in open("/proc/meminfo") if l.startswith("MemAvailable")), "?"))

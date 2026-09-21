@@ -510,15 +510,23 @@ function Get-BoxHandover([string]$coordpath, [string]$id) {
   try { $lines = @(Get-Content -LiteralPath $coordpath -ErrorAction Stop) } catch { return $null }
   $hit = $null
   foreach ($line in $lines) {
-    if (-not $line) { continue }
-    # RemoveEmptyEntries so a run of spaces or a tab is one separator. A
-    # continuation line of a multi-line entry has an arbitrary first token and
-    # falls out at the field-0 test; one that somehow starts with the keyword
-    # falls out at field 2, because its third token is prose.
-    $f = $line.Split((" `t").ToCharArray(), [StringSplitOptions]::RemoveEmptyEntries)
-    if ($f.Count -lt 3) { continue }
-    if (-not $script:handover_close.Contains($f[0].ToUpperInvariant())) { continue }
-    if ($f[2] -ne $id) { continue }
+    # ONE GRAMMAR, TWO READERS. This used to test field 0 for a close keyword
+    # and field 2 for the id by hand; it asks `Get-CoordMarkerEvent` now, which
+    # is the same parse `Get-CoordFoldedState` uses and is where the shapes and
+    # the 19 Sep 2026 measurement are written down. A continuation line of a
+    # multi-line entry still falls out - its third token is prose - and so now
+    # does a whole PROSE SENTENCE that opens with a close keyword, which is the
+    # `DONE CONDITION: REL24_ALL_DONE` family this file's corpus carries.
+    #
+    # IT ALSO READS THE SECOND FIELD ORDER NOW, which is a widening and a fix:
+    # a lane that posted `<ts> DONE <id>` - 49 such lines on the fleet, the
+    # intel-i5-10600kf shape - was invisible here, so a waiter sat through a box that
+    # had been handed back. The fold one function down has read both orders
+    # since 18 Sep 2026 and this did not; they cannot disagree any more.
+    $ev = Get-CoordMarkerEvent $line $script:handover_open
+    if (-not $ev) { continue }
+    if (-not $script:handover_close.Contains($ev.Keyword)) { continue }
+    if ($ev.Subject -ne $id) { continue }
     $hit = $line
   }
   return $hit
@@ -532,6 +540,109 @@ function Get-BoxHandover([string]$coordpath, [string]$id) {
 # is about.
 function Write-BoxHandoverNote([string]$id, [string]$line) {
   Write-PlibLine "BOX-HANDOVER waiting_on=$id at=$((Get-Date).ToUniversalTime().ToString('o')) matched: $($line.Trim())"
+}
+
+# ---------------------------------------------------------------------------
+# THE LATE ARRIVAL: ANY OPEN CLAIM, NOT AN AHEAD-LIST FIXED AT ARM TIME
+# ---------------------------------------------------------------------------
+# A WAITER CANNOT QUEUE BEHIND A LANE THAT ARRIVES AFTER IT ARMED, and until
+# 18 Sep 2026 every waiter on this fleet was built so that it could not even
+# try. `Get-BoxHandover` above answers "has THIS id handed the box back", which
+# is the right question for a list of ids you already have - and the list is
+# taken once, at arm time, and never revisited. Two dated instances, both in
+# an internal note section 1:
+#
+#   - intel-i5-10600kf, 18 Sep. A waiter armed at 19:06:50Z on 17 Sep with two ids.
+#     A third lane took the box for ~90 s of ISCC at 00:57Z, posting a CLAIM
+#     and a DONE around it exactly as the convention asks. The waiter read
+#     FREE-1 at 00:56:57, FREE-2 at 00:57:57, and its driver took the rig lock
+#     at 00:57:57.76 - INSIDE that claimed window. The CLAIM was posted three
+#     seconds after FREE-1 and could not have been on an ahead-list decided
+#     fourteen hours earlier.
+#   - intel-core-ultra-9-386h, 18 Sep. `g4winrun2.ps1` attempt 1 read the coordination
+#     file once during recon at 10:53Z, built for two minutes, and posted its
+#     own CLAIM at 11:02Z - by which time another lane had claimed at 11:00:07Z
+#     and took the lock seven seconds before ladder A asked for it. That round
+#     ran zero legs and posted a completion NOTE over its own failure.
+#
+# Attempt 2 of that round fixed it BY HAND, in its own driver: re-read the file
+# immediately before taking and again between every ladder, and stand down on a
+# CLAIM that is not its own. It was right, and it was the fourth hand-rolled
+# copy of a coordination-file matcher on this fleet - the class the open claim
+# `plib-handover-matcher-helper-16sep` is about, where three lanes wrote the
+# handover test and all three got it wrong the same way. So it is lifted here.
+#
+# THE OPEN VOCABULARY IS EIGHTEEN WORDS AND EVERY HAND-ROLLED COPY KNEW ONE.
+# `g4winrun2.ps1` matched `^(DONE|CLAIM)\s`, cfwait.ps1 matched `CLAIM` alone.
+# A lane that posts TAKEOVER, LATE-CLAIM, RELAUNCHED or HOLD is holding the box
+# just as hard, and an open keyword this list does not carry reads as NOBODY
+# THERE - the same polarity of blindness `$script:handover_close` exists to
+# stop one keyword class over, and the worse one: a missed CLOSE costs a wait,
+# a missed OPEN costs somebody's round. Held equal to `OPEN_KW` in
+# `.claude/tools/bench-accounts-parse.py` by tools/rig-selftest-gate.py, on the
+# same terms as the close list below it: edit the ROSTER, and let the gate move
+# this line.
+$script:handover_open = [string[]]@('ACTIVATING', 'CLAIM', 'CLAIM-EXTENSION', 'CONTINUATION', 'CROSS-CLAIM', 'DIALED', 'EXTEND', 'HOLD', 'INTERIM', 'LATE-CLAIM', 'LAUNCHED', 'LIVE', 'PAUSED', 'PROGRESS', 'RELAUNCH', 'RELAUNCHED', 'RESULT', 'START', 'TAKEOVER')
+
+# Every id on this file whose most recent marker is an OPEN one, except our
+# own. File order is time order, so "most recent" is simply the last line that
+# named the id, which is the fold `tools/bench-box-gate.py` does in Python and
+# the strict reading `Get-BoxHandover`'s header points at.
+#
+# RETURNS, AND EMITS NOTHING ELSE, for the reason Get-BoxHandover's header
+# gives at length: PowerShell hands the caller every line a function emits, so
+# a status line here would arrive as part of the answer. `Write-LateArrivalNote`
+# is the logging half.
+#
+# AN UNREADABLE FILE IS NOT AN EMPTY ONE, and this is the one place in this
+# library where that distinction changes the returned VALUE rather than only
+# the log line. Everywhere else a failed read answers "no handover", which
+# reads as KEEP WAITING and is safe. Here "no open claim" reads as TAKE THE
+# BOX, so the same convention would turn an unreadable file into a green light.
+# A path that was GIVEN and could not be read therefore comes back as the
+# single pseudo-id `(unreadable:<path>)`: it can never equal a lane id, so it
+# can never equal $selfid, every caller blocks on it, and the reason is in the
+# text a stand-down NOTE quotes. An EMPTY $coordpath is the caller opting out
+# and returns nothing - a box with no coordination file is not a box with a
+# hidden claimant.
+#
+# EVERY RETURN IS COMMA-WRAPPED AND NO CALLER MAY WRAP IT IN `@()`. `,$open`
+# hands back the ARRAY as one object, so `.Count` is right at zero, one and
+# many and `$x[0]` is an id; an `@(...)` around the call re-wraps that one
+# object and gives an array whose single element is the array, where `.Count`
+# reads 1 for a file with four claimants on it. Assign it plainly:
+# `$c = Get-OpenClaimants $coord $me`. Same arrangement, same reason, as
+# `Get-OwnPidTree`'s `return ,$mine`.
+#
+# THE FOLD ITSELF IS `Get-CoordFoldedState`, BELOW, AND THIS DOES NOT CARRY A
+# SECOND COPY OF IT. That function landed for the box queue on the same day as
+# this one and the two were written as two loops over the same lines; the
+# vocabulary is a parameter there now, so the box queue keeps its "only CLAIM
+# is a hold" rule and this passes the roster's eighteen. Both field orders and
+# the third-token subject rule live there too - read its header.
+function Get-OpenClaimants([string]$coordpath, [string]$selfid) {
+  if (-not $coordpath) { return ,@() }
+  # THE READABILITY TEST IS HERE AND NOT IN THE FOLD, deliberately. The fold
+  # answers "not a holder" for a file it cannot read, which is right for its
+  # box-queue callers - their own preflight has already checked the file is
+  # there, and a waiter must not read a transient read failure as a permanent
+  # hold. It is exactly wrong here, where the same answer means TAKE THE BOX.
+  try { $null = Get-Content -LiteralPath $coordpath -TotalCount 1 -ErrorAction Stop }
+  catch { return ,@("(unreadable:$coordpath)") }
+  $f = Get-CoordFoldedState $coordpath $script:handover_open
+  $open = @()
+  foreach ($subject in $f.Order) {
+    if ($selfid -and $subject -eq $selfid) { continue }
+    if ($f.State[$subject]) { $open += $subject }
+  }
+  return ,$open
+}
+
+# THE REPORT HALF, the same seam as Write-BoxHandoverNote's and for the same
+# reason. A stand-down that prints only "STANDING DOWN" leaves the next reader
+# re-deriving whose box it was from the file by hand; this names them.
+function Write-LateArrivalNote([string]$where, [string[]]$claimants) {
+  Write-PlibLine "BOX-LATE-ARRIVAL at=$where ts=$((Get-Date).ToUniversalTime().ToString('o')) open_claims=[$($claimants -join ' ')]"
 }
 
 # THE TAKE THAT DOES NOT EXIT. Take-RigLock below is this plus `exit 17`, and the
@@ -737,6 +848,659 @@ function Release-RigLock([string]$lockpath) {
   if ($script:lockfs) { $script:lockfs.Close(); $script:lockfs = $null }
   Remove-Item $lockpath -Force -ErrorAction SilentlyContinue
   Write-PlibLine "RIG-LOCK-RELEASED $lockpath"
+}
+
+# ---------------------------------------------------------------------------
+# THE BOX QUEUE: Enter-BoxQueue / Exit-BoxQueue
+# ---------------------------------------------------------------------------
+# an internal note item 2: nothing in
+# `harness/` reads or writes a box's QUEUED/CLAIM/close-marker
+# queue, so every round driver hand-rolls its own gate, and on 16 Sep 2026
+# all five hand-rolled gates on apple-m3-ultra were wrong in a DIFFERENT way -
+# a QUEUED line read as a hold, a waiter that armed and never polled, a
+# `pgrep` on the round NAME that matched two idle watchers, a lane that
+# held the box for two rounds without ever posting a line, and two
+# collisions from read-then-append with no re-check. This pair is the
+# fix for the Windows/parfast-rig side of that item; `.claude/tools/
+# bench-box-gate.py` is the equivalent for the THROUGHPUT boxes (item
+# 0a5) and this pair deliberately mirrors its decisions rather than
+# reinventing them, because both read the SAME marker vocabulary.
+#
+# THE VOCABULARY IS DELIBERATELY NARROW: this pair only ever POSTS
+# `QUEUED`, `CLAIM` and one of the five close-class markers `DONE`,
+# `RELEASED`, `WITHDRAWN`, `ABORTED`, `STAND-DOWN` (RIG-QUEUE-VOCABULARY-
+# 2026-09-16.md and item 0a5's fifth bullet - "waiting rather than
+# running? Post QUEUED. Not CLAIM, not NOTE." / "leaving a queue? Post a
+# close-class marker, not a NOTE"). `NOTE` settles nothing: a lane that
+# posts a NOTE instead of a close-class marker is invisible to
+# `parfast-rigs-parse.py` rule 16 and to `$script:handover_close` here,
+# which is the exact defect this pair exists to stop introducing.
+#
+# ONLY `CLAIM` IS EVER TREATED AS A HOLD, per item 2's first rule ("A
+# QUEUED line is an INTENTION; only a CLAIM is a hold"). `Get-CoordOpenIds`
+# and `Test-CoordStillHolds` below fold the file exactly the way
+# `Get-BoxHandover` above already does for a single id - CLAIM opens,
+# a close-class keyword (the SAME `$script:handover_close` list, held
+# equal to `CLOSE_KW` by `tools/rig-selftest-gate.py`) closes, and LINE
+# ORDER decides, never the timestamp (parfast-rigs-parse.py rule 1). One
+# fold, three call sites, so a change to the rule cannot land in one and
+# not the other.
+#
+# THE RIG LOCK IS A SEPARATE MECHANISM FROM THE COORDINATION FILE, and
+# this pair does not blur them: the coordination file decides WHOSE TURN
+# IT IS (prose, hand-appended, read by every lane), the rig lock is the
+# OS-level mutex that actually excludes a second process on this box.
+# Taking the rig lock is deliberately NOT reimplemented here - see the
+# note on `Enter-BoxQueue`'s last step. an internal note-
+# RELEASE-NIGHT-FINDINGS.md` records a live gap in the CURRENT lock
+# waiters (`Wait-LockFree`, hand-rolled per round script in
+# `rounds/cf-load-term-*/`): their ahead-list is fixed at arm
+# time and their load census cannot see a non-cargo/parfast tool, so a
+# lane that arrives after the waiter armed is invisible to it. Claim
+# `riglock-waiter-blind-to-late-arrivals` (paths `plib.ps1`,
+# `cfwait.ps1`) is the fix for THAT gap, open on the ledger as this pair
+# was written. `Enter-BoxQueue` calls `Wait-LockFree` if that claim has
+# already landed one in this scope (`Get-Command`), because the box
+# queue's own ahead-list wait (which DOES re-read on every poll, so it
+# does not share the late-arrival blindness) has already established
+# whose turn it is by the time the lock is asked for - this function
+# must not grow a second copy of that waiter's retry/census logic while
+# it is still being fixed elsewhere.
+
+# `CLAIM` and the CLOSE vocabulary are folded over the file exactly once,
+# in line order (parfast-rigs-parse.py rule 1: never the timestamp). An
+# unreadable or missing file returns "not a holder" for every id, which
+# is the same direction `Get-BoxHandover` takes for the same reason: a
+# waiter that cannot read the file must not treat that as a permanent
+# hold either, and the caller's own preflight has already checked the
+# file is there.
+# ONE FOLD, TWO POLICIES, AND THE SECOND ONE ARRIVED THE SAME DAY. This
+# function landed for the BOX QUEUE with `CLAIM` hard-coded as the only opening
+# keyword, which is item 2's own decision and is preserved exactly - it is the
+# DEFAULT below and no box-queue caller passes anything else. The late-arrival
+# waiter (`Get-OpenClaimants`, beside `$script:handover_open` above) needs the
+# same fold over the roster's EIGHTEEN opening words instead, and it was written
+# as a second copy of this loop before the two met in a merge. A second copy of
+# a fold is the thing several gates in this repo exist to refuse, so the
+# vocabulary became a parameter rather than the loop becoming two loops.
+#
+# BOTH FIELD ORDERS, which is a widening of what landed and is a FIX rather
+# than a convenience: most lanes post `CLAIM <ts> <id>` and several post
+# `<ts> RELEASE <id>`, both observed on the live intel-i5-10600kf file, and the
+# SUBJECT is the third token under both - so only the keyword moves and it is
+# looked for in fields 1 and 2. cfwait.ps1 arrived at that rule by reading the
+# file; a fold that reads field 1 only misses every line of the second shape,
+# which for a CLOSE means a finished lane still reads as a holder.
+#
+# ---------------------------------------------------------------------------
+# AND A KEYWORD IN THOSE FIELDS IS NOT ENOUGH, MEASURED 19 Sep 2026
+# ---------------------------------------------------------------------------
+# The two field orders above were read off the files correctly and then applied
+# to EVERY line, with no test that the line was a marker at all. So any PROSE
+# sentence whose first or second word happened to be one of the twenty-four
+# roster keywords minted or closed a subject named by its THIRD word. That is
+# not a hypothetical: on windows-gaming-pc-b, line 8 of `%USERPROFILE%\COORDINATION-windows-gaming-pc-b.txt`
+# is a sentence beginning `ROUTE CLAIM CHECKED MECHANICALLY, ...`, which under
+# the rule above held a permanent open claim named `CHECKED` that nothing could
+# ever close - append-only file, and no lane would ever post a close for a
+# subject no lane had ever claimed. A correct round on 19 Sep took the rig
+# lock, saw that stranger, released the lock and sat in its wait loop for three
+# minutes; every later caller on that box would have done the same. Section 8
+# of an internal note is the write-up.
+#
+# THE OTHER DIRECTION IS THE DANGEROUS ONE AND IT IS REACHABLE. A prose
+# sentence can just as easily CLOSE a live lane: `NOTE DONE <their-id> ...`
+# and `the RELEASE m1-scout ...` both fold to a close of a real subject under
+# the old rule, which frees a held box and puts two rounds on it. Six live
+# instances of the shape (a keyword-bearing prose line closing a subject an
+# earlier line had opened) are on the fleet's own files today - on apple-m1-ultra-64gb
+# and the M5's `COORDINATION-m5-local-par.txt` - and it is only luck that the
+# subjects they closed were themselves phantoms rather than lane ids. The
+# account reader hit the same class one keyword class over and its
+# `_marker_shaped` docstring records a prose line that DID close a live claim.
+#
+# SO A LINE MUST BE MARKER-SHAPED, AND THE SHAPES ARE THESE THREE. Measured
+# over 5,171 coordination lines collected read-only on 19 Sep 2026 from nine
+# boxes (apple-m1-ultra-64gb, apple-m3-ultra, amd-epyc-vm, intel-i5-10600kf, intel-core-ultra-9-386h,
+# spinning-disk-nas-a, spinning-disk-nas-b, apple-m1-ultra-128gb and the M5's two files):
+#
+#   S1  `<KEYWORD> <stamp> <subject> ...`     1,511 instances - Write-CoordMarker
+#   S2  `<stamp> <KEYWORD> <subject> ...`        49 instances - the intel-i5-10600kf shape
+#   S3  `<KEYWORD> <tag> claim=<id> ...`          8 instances - the rarkit fleet
+#                                                               gate-tip driver
+#
+# and 99 keyword-bearing lines are refused, of which every one read by hand is
+# either prose or a line whose third token was never a subject (`CLAIM 23:16Z
+# 6 Aug mock-ceiling-AB` minted `6`; `CLAIM 09/09/2026 3:22:07.91 <id>` minted
+# the time). THE OPEN SET WAS COMPARED PER BOX BEFORE AND AFTER: 39 phantom
+# open subjects go away (34 -> 19 on apple-m1-ultra-64gb, 18 -> 1 on the M5's file,
+# 10 -> 5 on amd-epyc-vm, 2 -> 1 on intel-i5-10600kf) and NOT ONE box gains an open
+# subject it did not already have. That last half is the one that had to be
+# checked - a tightening that drops a real CLOSE reads a finished lane as a
+# holder, and a tightening that drops a real OPEN takes somebody's box.
+#
+# S3 IS IN THE GRAMMAR BECAUSE A LIVE WRITER EMITS IT, not to be generous. The
+# rarkit gate-tip driver posts `CLAIM gate-tip-19sep claim=<id> box=<box>
+# round=<round> pid=<n> started=<ts>` and the matching `DONE gate-tip-19sep
+# claim=<id> rc=0 at=<ts>`, with no stamp in field 1 at all, and it was posting
+# to apple-m3-ultra while this was written. Dropping it would make a live lane
+# invisible, which is the polarity that costs somebody's round. The SUBJECT for
+# that shape is the VALUE of `claim=`, so it is the real claim id rather than
+# the token - which is what `Test-CoordStillHolds` and `Get-OpenClaimants`
+# compare their callers' ids against. Only `claim=`, `round=` and `id=` name a
+# subject; `ACCOUNTS=none` sits in field 2 on ten lines of the M5's file and
+# naming it a subject is how that file grew a phantom called `ACCOUNTS=none`.
+#
+# WHAT IS DELIBERATELY NOT HERE. There is no fourth shape for `<KEYWORD> <id>
+# <stamp>` (six instances on the M5's file, one codex writer): it was built and
+# measured and it OPENS `par-incremental-full-7sep` without ever closing it,
+# because that lane's own close is `DONE par-incremental-full-7sep: results...`
+# with no stamp anywhere. A shape that adds an open and cannot add its close is
+# the defect above with a different first token. And there is no arm for
+# `<ts> DONE <ts> <id>`, one line on apple-m3-ultra where the stamp is written
+# twice; that line is why `digest-cache-enrol-threads-close-the-question-16sep`
+# reads as open on that box under the old rule AND the new one. It is a live
+# phantom, reported rather than parsed around: the file is append-only and the
+# fix is a corrective line from a lane that holds the box.
+
+# THE STAMP TEST, IN TWO HALVES, AND ONLY THE FIRST IS A COPY OF THE ROSTER'S.
+# `$script:coord_stamp_core` is `MARKER_TS_RE.pattern` in
+# `.claude/tools/bench-accounts-parse.py`, character for character, and
+# `tools/rig-selftest-gate.py` holds it equal on every push exactly as it
+# already holds the two keyword lists - same reason, same terms: a Windows
+# round has no Python between legs, so plib keeps the one unavoidable copy and
+# a gate stops the two readers splitting. Edit the roster, then move this line.
+$script:coord_stamp_core = '^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?|\d{8}T\d{4,6})(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?$'
+
+# THE SECOND HALF IS A DELIBERATE SUPERSET OF THE ROSTER'S, AND THE DIFFERENCE
+# IS ARGUED RATHER THAN ACCIDENTAL. `MARKER_TS_RE` refuses the fleet's
+# degenerate stamp spellings on purpose, and its own comment gives the reason:
+# there the stamp is the ONLY guard, so a pattern loose enough to swallow `$TS`
+# or a bare date is loose enough to swallow prose. Here it is one of three
+# anchors and the subject is checked too, so the trade is different - and it
+# has to be, because refusing them costs REAL CLOSES. Measured on the same
+# corpus: without this half, `codex-par2-create-race` on apple-m1-ultra-64gb reads as
+# OPEN FOREVER, because its close is `DONE $TS codex-par2-create-race` with the
+# shell variable unexpanded; four more August lanes lose their close the same
+# way. Every spelling below was read off the files:
+#
+#   `10:35Z` `03:0*Z` `3:22:07.91`   a time with no date
+#   `2026-08-02` `09/09/2026`        a date with no time
+#   `2026-09-03T~18:25Z`             an APPROXIMATE stamp
+#   `$TS` `"$T"` `%Y-%m-%dT%H:%M:%SZ`  a stamp that never rendered
+#
+# NONE OF THEM MATCHES ANY PROSE TOKEN IN THE CORPUS, which is the check that
+# makes this safe rather than merely convenient: over all 5,171 lines the
+# accepted set is 1,568 marker instances and zero prose, and the refused set is
+# 99 lines of which zero are markers with a usable subject. If you widen this,
+# re-run that separation; a shape that admits one English word admits the lot.
+$script:coord_stamp_degenerate = '^(?:\d{1,2}:[\d*]{2}[\d:*.]*Z?|\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2}T~[\d:]+Z?|"?\$\w+"?|%[-%\w:]*Z?)$'
+
+# `claim=`, `round=` and `id=` ONLY - see the S3 note above for why
+# `ACCOUNTS=` is not on this list.
+$script:coord_subject_kv = '^(?:claim|round|id)=(\S+)$'
+
+# Is this token a timestamp as some lane on this fleet has actually written
+# one? A `[...]`-wrapped stamp counts: two `[2026-08-14T02:01:10Z] CLAIM
+# <id>` lines are on apple-m1-ultra-64gb and the brackets are the only thing between
+# them and shape S2. No prose token in the corpus is bracketed.
+#
+# RETURNS AND EMITS NOTHING ELSE, for the reason Get-BoxHandover's header gives
+# at length - every statement in here is an assignment, a control-flow keyword
+# or the single return.
+function Test-CoordStampToken([string]$tok) {
+  if (-not $tok) { return $false }
+  $t = $tok
+  if ($t.Length -gt 2 -and $t[0] -eq '[' -and $t[$t.Length - 1] -eq ']') { $t = $t.Substring(1, $t.Length - 2) }
+  if ($t -match $script:coord_stamp_core) { return $true }
+  return ($t -match $script:coord_stamp_degenerate)
+}
+
+# A subject has at least one letter in it and is not itself a stamp. That
+# second clause is not decoration: a `CLAIM <date> <time> - <id> session:` line
+# on apple-m1-ultra-64gb and three `<date> <time> <id>` lines on intel-i5-10600kf all put a
+# STAMP in field 2, and taking it as the subject is how those files grew open
+# claims named after clock readings. The first clause drops `6` and `-`,
+# which is what `CLAIM 23:16Z 6 Aug <id>` and `THE RESULT - THE CONTROLLER`
+# offer in that position.
+function Test-CoordSubjectToken([string]$tok) {
+  if (-not $tok) { return $false }
+  if ($tok -notmatch '[A-Za-z]') { return $false }
+  return (-not (Test-CoordStampToken $tok))
+}
+
+# ONE line -> one event, or $null for prose. This is the only place the
+# grammar above is spelled, and `Get-CoordFoldedState` and `Get-BoxHandover`
+# both go through it: a second copy of a coordination matcher is the thing
+# tools/coord-matcher-gate.py exists to refuse, and two copies of it inside the
+# library it points at would be the same defect wearing the right coat.
+#
+# The caller supplies the OPEN vocabulary, exactly as the fold does, so the box
+# queue keeps its "only CLAIM is a hold" rule. Returns a hashtable with
+# Keyword (upper-cased) and Subject, or $null.
+#
+# RETURNS AND EMITS NOTHING ELSE. Same rule as its two neighbours.
+function Get-CoordMarkerEvent([string]$line, [string[]]$openkw) {
+  if (-not $line) { return $null }
+  if (-not $openkw) { $openkw = [string[]]@('CLAIM') }
+  $f = $line.Split((" `t").ToCharArray(), [StringSplitOptions]::RemoveEmptyEntries)
+  if ($f.Count -lt 3) { return $null }
+  $k0 = $f[0].ToUpperInvariant()
+  $k1 = $f[1].ToUpperInvariant()
+  $isk0 = ($openkw.Contains($k0) -or $script:handover_close.Contains($k0))
+  $isk1 = ($openkw.Contains($k1) -or $script:handover_close.Contains($k1))
+  # S1, then S2, then S3. The order matters only for a line that could be
+  # read two ways, and no line in the corpus is.
+  if ($isk0 -and (Test-CoordStampToken $f[1]) -and (Test-CoordSubjectToken $f[2])) {
+    return @{ Keyword = $k0; Subject = $f[2] }
+  }
+  if ($isk1 -and (Test-CoordStampToken $f[0]) -and (Test-CoordSubjectToken $f[2])) {
+    return @{ Keyword = $k1; Subject = $f[2] }
+  }
+  if ($isk0 -and $f[2] -match $script:coord_subject_kv) {
+    return @{ Keyword = $k0; Subject = $Matches[1] }
+  }
+  return $null
+}
+
+function Get-CoordFoldedState([string]$coordpath, [string[]]$openkw) {
+  if (-not $openkw) { $openkw = [string[]]@('CLAIM') }
+  $state = @{}
+  $order = @()
+  $lines = $null
+  try { $lines = @(Get-Content -LiteralPath $coordpath -ErrorAction Stop) } catch { return @{ Order = @(); State = $state } }
+  foreach ($line in $lines) {
+    $ev = Get-CoordMarkerEvent $line $openkw
+    if (-not $ev) { continue }
+    $lid = $ev.Subject
+    if (-not $state.ContainsKey($lid)) { $order += $lid }
+    $state[$lid] = $openkw.Contains($ev.Keyword)
+  }
+  return @{ Order = $order; State = $state }
+}
+
+# Every id whose most recent CLAIM has no later close-class line, in the
+# order each first appeared, minus $excludeId. This is `Enter-BoxQueue`'s
+# ahead-list, snapshotted ONCE at QUEUE time - the list a lane polls
+# against, never recomputed wholesale (a late arrival joins the SAME
+# poll loop the next time it posts a CLAIM, which is re-checked at
+# claim-settle time below, not by widening this snapshot).
+function Get-CoordOpenIds([string]$coordpath, [string]$excludeId) {
+  $f = Get-CoordFoldedState $coordpath
+  return @($f.Order | Where-Object { $f.State[$_] -and $_ -ne $excludeId })
+}
+
+# Would `parfast-rigs-parse.py` (or a human folding the file by eye) still
+# call $id a holder of $coordpath right now? Used both to poll an
+# ahead-list id closed and, in Exit-BoxQueue, to FAIL LOUDLY when a
+# posted close did not land.
+function Test-CoordStillHolds([string]$coordpath, [string]$id) {
+  $f = Get-CoordFoldedState $coordpath
+  if (-not $f.State.ContainsKey($id)) { return $false }
+  return [bool]$f.State[$id]
+}
+
+# Post one marker-shaped line: `<KEYWORD> <iso-stamp> <id> - <body>`. The
+# stamp is `yyyy-MM-ddTHH:mm:ssZ`, one of the forms `parfast-rigs-parse.
+# py`'s `MARKER_TS_RE` accepts without the fractional-second or basic-form
+# arms (those exist because OTHER tools write those shapes, not because
+# this one should start). Throws on an unwritable file rather than
+# swallowing the failure the way `Write-RigLockOrphanNote` does for its
+# best-effort note: a QUEUED/CLAIM/close line that silently failed to
+# post is the exact invisible-lane hazard item 0a5's fifth bullet is
+# about, and $ErrorActionPreference = 'Stop' at the top of this file is
+# what a caller of this helper is already relying on everywhere else.
+function Write-CoordMarker([string]$coordpath, [string]$keyword, [string]$id, [string]$body) {
+  $ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+  $line = "$keyword $ts $id - $body"
+  Add-Content -LiteralPath $coordpath -Value $line -ErrorAction Stop
+  Write-PlibLine "BOXQUEUE-POST $coordpath $line"
+  return $line
+}
+
+# THE QUEUE ENTER. `$coordpath` and `$id` follow `Get-BoxHandover`'s own
+# rule: never guessed, always the caller's - a wrong guess reads a stale
+# file as a free box, which is the class of incident item 2 exists to
+# close. `$gen` is the claim's generation out of an internal note
+# (`tools/claims.py claim` prints it); it goes in the posted prose only,
+# never parsed back. `$round` is passed straight to Take-RigLock.
+#
+# Returns nothing; success/failure is `$script:boxqueue_taken`, for the
+# same reason `Try-TakeRigLock` reports through `$script:riglock_taken`
+# and not a return value - PowerShell returns every line a function
+# EMITS, so a `return $true` next to the BOXQUEUE-* lines this prints
+# would hand the caller a two-element array.
+function Enter-BoxQueue([string]$coordpath, [string]$id, [string]$gen, [string]$round,
+                         [string]$expectBy = '', [int]$pollSecs = 20, [int]$maxPolls = 180) {
+  $script:boxqueue_taken = $false
+  if (-not (Test-Path -LiteralPath $coordpath)) {
+    Write-PlibLine "BOXQUEUE-REFUSE $coordpath does not exist - Enter-BoxQueue never creates the coordination file, the caller must (item 2: failing to find is failing)."
+    return
+  }
+
+  # --- snapshot the ahead-list and declare the intention -------------------
+  $ahead = @(Get-CoordOpenIds $coordpath $id)
+  $expectTxt = if ($expectBy) { "Expect CLAIM and DONE by $expectBy." } else { 'No ETA given.' }
+  if ($ahead.Count -eq 0) {
+    Write-CoordMarker $coordpath 'QUEUED' $id "gen=$gen round=$round - box appears free of any open CLAIM. Posting CLAIM next. $expectTxt" | Out-Null
+  } else {
+    Write-CoordMarker $coordpath 'QUEUED' $id "gen=$gen round=$round - queuing behind: $($ahead -join ', '). Will post CLAIM once every one of those has posted a close-class marker (DONE/RELEASED/WITHDRAWN/ABORTED/STAND-DOWN). $expectTxt" | Out-Null
+  }
+
+  # --- poll the ahead-list closed, an id at a time, never a keyword anywhere
+  # in a line (parfast-rigs-parse.py rule 16 / the intel-i5-10600kf sixth rule) -----
+  foreach ($aheadId in $ahead) {
+    $tries = 0
+    while (Test-CoordStillHolds $coordpath $aheadId) {
+      $tries++
+      if ($tries -gt $maxPolls) {
+        Write-CoordMarker $coordpath 'WITHDRAWN' $id "gen=$gen round=$round - STANDING DOWN. $aheadId never posted a close-class marker after $($tries * $pollSecs) s of polling. This is an intention timing out, never a hold; nothing of mine was taken." | Out-Null
+        return
+      }
+      Start-Sleep -Seconds $pollSecs
+    }
+  }
+
+  # --- claim it, then re-read the tail and stand down if beaten ------------
+  # (bench-box-gate.py decision D, item 0a5: append, settle, re-read, stand
+  # down inside the window if a second CLAIM landed under mine - the
+  # earlier timestamp keeps the box). This loops rather than recursing so a
+  # lane that loses several ties in a row still terminates on $maxPolls.
+  for (;;) {
+    Write-CoordMarker $coordpath 'CLAIM' $id "gen=$gen round=$round - taking the box. $expectTxt" | Out-Null
+    Start-Sleep -Seconds 20   # settle: bench-box-gate.py decision D's window -
+    $rivals = @(Get-CoordOpenIds $coordpath $id)
+    if ($rivals.Count -eq 0) { break }
+    # A rival CLAIM is under mine. Stand down, wait for IT to close (folding
+    # it into the same poll loop above, not a fresh snapshot of the whole
+    # file), and try again - this is the box queue's own re-check, and it is
+    # deliberately not "whoever posted first wins without a stand-down": the
+    # loser must SAY so, or it reads as a phantom holder the next lane has
+    # to wait out unnecessarily.
+    Write-CoordMarker $coordpath 'STAND-DOWN' $id "gen=$gen round=$round - a rival CLAIM landed under mine ($($rivals -join ', ')). Standing down and waiting for it to close before re-claiming." | Out-Null
+    foreach ($rivalId in $rivals) {
+      $tries = 0
+      while (Test-CoordStillHolds $coordpath $rivalId) {
+        $tries++
+        if ($tries -gt $maxPolls) {
+          Write-CoordMarker $coordpath 'WITHDRAWN' $id "gen=$gen round=$round - STANDING DOWN. $rivalId (which beat my CLAIM) never posted a close-class marker after $($tries * $pollSecs) s of polling." | Out-Null
+          return
+        }
+        Start-Sleep -Seconds $pollSecs
+      }
+    }
+  }
+
+  # --- the coordination file says it is my turn; now take the REAL lock ----
+  # THIS WAS A `Get-Command` PROBE FOR A FUNCTION THAT NEVER EXISTED, and the
+  # shape is worth naming because it looks like careful forward compatibility
+  # and is the "failing to find is failing" class wearing a hat. It asked
+  # whether claim `riglock-waiter-blind-to-late-arrivals` had landed a
+  # `Wait-LockFree` into this scope and fell through to a bare retry loop if
+  # not. That claim landed on 18 Sep 2026 and the function it landed is called
+  # `Take-RigLockWhenFree`, so the probe answered NO FOREVER, silently, on the
+  # one path it was written for - a hook whose absent arm is indistinguishable
+  # from its waiting arm.
+  #
+  # AND WHERE IT DID RESOLVE, IT RESOLVED THE WRONG THING. `Wait-LockFree` is
+  # not a plib name at all: it is hand-rolled inside cfload.ps1, cfknee.ps1 and
+  # cfbuf.ps1, each of which DOT-SOURCES this library, so in those scopes
+  # `Get-Command` finds the ROUND'S OWN copy and calls it with plib's
+  # `($round, $maxPolls)` arguments, then reads a `$script:lockfree` that
+  # nothing here sets. A cross-scope call by NAME to a function no file in this
+  # repo defines is not a hook, it is a hope. Do not put one back.
+  #
+  # SO IT CALLS THE REAL FUNCTION, BY NAME, AND GETS THE LATE-ARRIVAL RE-READ
+  # WITH IT. The old fall-through loop was `Try-TakeRigLock` on a timer with no
+  # look at the coordination file between polls - the probe-then-act shape, in
+  # the one place the box queue is most exposed to it: the ahead-list was
+  # SNAPSHOTTED before the wait, so a lane that claims while we are polling is
+  # invisible to this function by construction (`Get-CoordOpenIds`' own header
+  # says so). `Take-RigLockWhenFree` re-reads on every attempt, with the lock
+  # already in hand, and gives it back if the file says the box is not ours.
+  #
+  # `-StandDownOnClaim` rather than waiting it out, because the box queue has
+  # ALREADY posted a CLAIM of its own: sitting in a retry loop under somebody
+  # else's open claim would leave two lanes claiming one box on the file, which
+  # is the state this whole pair exists to prevent. Standing down posts the
+  # WITHDRAWN below, which closes ours.
+  Take-RigLockWhenFree -round $round -coordpath $coordpath -selfid $id `
+                       -maxwaits ($pollSecs * $maxPolls) -polls $pollSecs -standdownonclaim
+  if ($script:riglock_taken) {
+    $script:boxqueue_taken = $true
+    Write-PlibLine "BOXQUEUE-TAKEN $coordpath $id round=$round"
+    return
+  }
+  # ONE WITHDRAWN, AND IT SAYS WHICH REASON. The loop this replaced had exactly
+  # one way to fail - the lock never came free - and its message said so. There
+  # are two now, an open claim and a busy box, and `$script:boxtake_why` is the
+  # one that distinguishes them: a lane reading this file afterwards needs to
+  # know whether it was beaten to the box or whether the box was simply loaded.
+  Write-CoordMarker $coordpath 'WITHDRAWN' $id "gen=$gen round=$round - the coordination file gave me the box but I did not take it: $($script:boxtake_why). Standing down after $($maxPolls * $pollSecs) s. Nothing of mine holds the rig lock and nothing of mine is running." | Out-Null
+}
+
+# THE QUEUE EXIT. Releases the rig lock, posts a close-class marker
+# (default DONE), then RE-READS THE FILE AND FAILS LOUDLY if $id would
+# still read as a holder - an append that silently failed (permissions,
+# a race, a truncated write) must not be mistaken for a released box by
+# the next lane in the queue, which is exactly the "posted no line to
+# the file at any point while holding the box" failure mode item 2's
+# table records for `nttwork-rig-stamp-16sep`.
+function Exit-BoxQueue([string]$coordpath, [string]$id, [string]$gen, [string]$closeKeyword = 'DONE', [string]$note = '') {
+  if ($closeKeyword -notin $script:handover_close) {
+    throw "Exit-BoxQueue: '$closeKeyword' is not one of the five close-class markers ($($script:handover_close -join ', ')) - posting it would leave $id reading as a holder to every other reader of $coordpath."
+  }
+  Release-RigLock (Get-RigLockPath)
+  $body = if ($note) { "gen=$gen box released. $note" } else { "gen=$gen box released." }
+  Write-CoordMarker $coordpath $closeKeyword $id $body | Out-Null
+  if (Test-CoordStillHolds $coordpath $id) {
+    throw "Exit-BoxQueue: FAIL LOUDLY - after posting $closeKeyword, $id STILL reads as a holder of $coordpath (a later CLAIM landed for this id, or the close did not really land). The rig lock has already been released; fix the coordination file before anything else queues behind a phantom."
+  }
+  Write-PlibLine "BOXQUEUE-RELEASED $coordpath $id"
+}
+
+# ---------------------------------------------------------------------------
+# THE CENSUS, AND THE GAP NO CENSUS CAN CLOSE
+# ---------------------------------------------------------------------------
+# `Test-BoxFree` was hand-rolled in four waiters (cfwait.ps1, t6wait.ps1 and
+# two more) and every copy asked the same two questions the same wrong way:
+#
+#   1. `Test-Path` on the lock file. EXISTENCE IS NOT A HOLD - a round that
+#      dies between the create and the identity write leaves a file that blocks
+#      every waiter forever and names nobody. That is the whole subject of
+#      an internal note and of
+#      `Get-RigLockHolder` above, which is the one place the hold rule lives.
+#      A waiter must ask THAT, and `Test-RigLockHeld` is the read-only door to
+#      it.
+#   2. `Get-Process -Name parfast,cargo,rustc`. A NAME LIST CANNOT BE COMPLETE
+#      and this one is three words long. On 18 Sep 2026 a lane compiled the
+#      Windows installer with ISCC for ninety seconds and the box read
+#      genuinely free on two samples sixty seconds apart, because an Inno Setup
+#      compile is none of those three names and takes no rig lock. rars, 7-Zip,
+#      msbuild, a Defender pass and a Windows Update scan are all in the same
+#      position.
+#
+# SO THE PRIMARY ARM IS CPU ATTRIBUTION, NOT NAMES. `Get-ForeignCpu` already
+# measures the CPU burnt OUTSIDE our own process tree over a one second window
+# and is the quantity `Require-QuietBox` aborts a leg on; asking it here costs
+# one second and sees every tool on the box whatever it is called. The name
+# list is KEPT as corroboration, widened, and demoted: it catches a tool that
+# is between bursts at the instant we sample, which is the one thing the CPU
+# arm can miss.
+#
+# AND THE READING IS REPORTED WHETHER IT IS OVER THE CEILING OR NOT, which is
+# the half that makes this reviewable after the fact. The 18 Sep 13:26Z probe
+# that read the box free was CORRECT about the lock and had `foreign_cpu 21.7`
+# in its own hand; the number only became interesting two minutes later. A
+# census that logs "free" and drops the figure cannot be re-read.
+#
+# WHAT THIS DOES NOT FIX, STATED HERE BECAUSE THE FIRST DRAFT OF THE HANDOFF
+# THOUGHT IT DID. "Ask the rig lock rather than a name list" does NOT cover the
+# second dated instance. That lane asked the lock DIRECTLY, with a fifteen
+# second per-process attribution census wider than this one, and got
+# `lock_exists=False lock_held=False` at 13:26 - and another lane took the lock
+# at 13:28:19, thirteen seconds before the round asked for it. The lock was
+# free when asked. The exposure is the GAP between any probe and the driver's
+# own acquire, which is about two minutes of staging scripts and launching, and
+# A CENSUS CANNOT CLOSE A GAP THAT OPENS AFTER IT RETURNS. Only an acquire that
+# is itself the probe can, which is `Take-RigLockWhenFree` below.
+#
+# A WIDER LIST THAN THREE WORDS, and still not a complete one - it cannot be,
+# which is why it is second. These are the tools measured contending for a box
+# on this fleet: the PAR2 family, the Rust build, the RAR engines, the
+# archivers, the installer compiler and the MSVC build.
+$script:boxcensus_names = [string[]]@(
+  'parfast', 'par2', 'par2j', 'par2j64', 'par2turbo', 'phpar2',
+  'cargo', 'rustc', 'cc1', 'link', 'cl', 'msbuild', 'ninja', 'cmake',
+  'rars', 'rarfast', 'rar', 'unrar', 'WinRAR', '7z', '7za', '7zg', '7zz',
+  'ISCC', 'Compil32', 'makensis')
+
+# The whole census as one object. RETURNS AND EMITS NOTHING, same seam, same
+# reason. `Free` is the verdict; every input that produced it is a field beside
+# it so the log line and the caller read the same numbers.
+#
+# AN UNMEASURABLE COUNTER IS NOT BUSY, and the direction is chosen rather than
+# defaulted. `Get-ForeignCpu` answers -1 when it cannot sample, and on a box
+# where that is permanent - not a blip - treating it as busy makes every waiter
+# wait forever, which loses the round exactly as surely as taking an occupied
+# box does and is harder to see. The lock arm is unaffected and stays
+# authoritative, `Take-RigLockWhenFree` still holds the lock before it believes
+# anything, and the field says `cpu=-1` so a reader knows the arm was blind
+# rather than quiet.
+function Get-BoxCensus([double]$cpuceiling) {
+  if ($cpuceiling -le 0) { $cpuceiling = 50.0 }
+  $r = [ordered]@{ Free = $true; LockHeld = $false; LockWhy = ''; ForeignCpu = -1.0
+                   CpuCeiling = $cpuceiling; Names = ''; Why = 'free' }
+  $h = Get-RigLockHolder
+  # A LOCK HELD BY OUR OWN PID IS NOT SOMEBODY ELSE'S BOX. Without this the
+  # census is unusable from inside `Take-RigLockWhenFree`, which asks it with
+  # our own handle deliberately open - it would report `lock held by live
+  # pid=<us>` and refuse every take forever. It is the right answer for a
+  # standalone caller too: a driver asking "is this box free" while holding the
+  # lock is asking about everyone else.
+  $r.LockHeld = ($h.Held -and $h.Pid -ne $PID)
+  $r.LockWhy = $h.Why
+  $r.ForeignCpu = Get-ForeignCpu
+  $mine = Get-OwnPidTree
+  $hits = @()
+  foreach ($p in (Get-Process -ErrorAction SilentlyContinue)) {
+    if ($mine.Contains($p.Id)) { continue }
+    if (-not $script:boxcensus_names.Contains($p.ProcessName)) { continue }
+    $hits += ($p.ProcessName + '(' + $p.Id + ')')
+  }
+  $r.Names = ($hits -join ' ')
+  $why = @()
+  if ($r.LockHeld) { $why += "lock $($r.LockWhy)" }
+  if ($r.ForeignCpu -ge $cpuceiling) { $why += "foreign_cpu=$($r.ForeignCpu) over ceiling=$cpuceiling" }
+  if ($hits.Count -gt 0) { $why += "tools=[$($r.Names)]" }
+  if ($why.Count -gt 0) { $r.Free = $false; $r.Why = ($why -join '; ') }
+  return [pscustomobject]$r
+}
+
+# The one-line question, for a caller that wants a boolean and nothing else.
+# Every hand-rolled waiter spelled this; none of them spelled it right.
+function Test-BoxFree([double]$cpuceiling) { (Get-BoxCensus $cpuceiling).Free }
+
+# The logging half. It prints on a FREE box too, deliberately: the figure that
+# made the 18 Sep probe re-readable was the one taken on the sample that said
+# free.
+function Write-BoxCensusNote([string]$where, $census) {
+  Write-PlibLine "BOX-CENSUS at=$where free=$(if ($census.Free) { 1 } else { 0 }) lock_held=$(if ($census.LockHeld) { 1 } else { 0 }) foreign_cpu=$($census.ForeignCpu) ceiling=$($census.CpuCeiling) tools=[$($census.Names)] why=$($census.Why) ts=$((Get-Date).ToUniversalTime().ToString('o'))"
+}
+
+# ---------------------------------------------------------------------------
+# THE ACQUIRE IS THE PROBE
+# ---------------------------------------------------------------------------
+# THE ROUND-START PATH IS THE ONE PLACE ON THIS FLEET THAT STILL PROBES AND
+# THEN ACTS. Inside a round the shape is already right: cfload.ps1's
+# `Wait-LockFree` probes the lock free with no load generator running and then
+# acquires, and a legset that never gets the lock is SKIPPED rather than run on
+# a borrowed box. At round START every driver did the opposite - read the file,
+# sample the box, stage the scripts, build, then acquire, with minutes between
+# the belief and the act. Both 18 Sep instances live in that gap.
+#
+# SO TAKE THE LOCK FIRST AND ASK AFTERWARDS. `Try-TakeRigLock` is an exclusive
+# CreateNew on NTFS: while our handle is open no other round's CreateNew can
+# succeed (see Release-RigLock's note on why "the path is taken" and "the file
+# is open" are the same fact here). Every question this function asks is asked
+# with that handle HELD, so an answer cannot go stale between the asking and
+# the running. If any answer says the box is not ours we RELEASE and wait -
+# holding a lock we are not entitled to would be the same defect pointed the
+# other way.
+#
+# THE ORDER IS ACQUIRE, CLAIM, CPU, and it is not arbitrary. The acquire is
+# cheapest and excludes every lane that respects the lock. The coordination
+# re-read is a file read and catches the lane that claimed the box in prose
+# without having taken the lock yet - which is precisely the late arrival, and
+# precisely what an ahead-list cannot see. The CPU sample costs a second and
+# catches the tool that is in neither, which is the ISCC case.
+#
+# WE NEVER CLEAR ANOTHER LANE'S ANYTHING and we never kill: an orphaned lock is
+# handled by Try-TakeRigLock's own arm, which proves it is nobody's before
+# touching it, and everything else here is a wait.
+#
+# STAND DOWN OR KEEP WAITING IS THE CALLER'S POLICY, not this function's. A
+# waiter whose whole job is to catch a gap wants to keep waiting;
+# `g4winrun2.ps1`'s round wanted to exit 7 and be re-queued by a human, because
+# a six-hour sitting that starts under somebody else's claim is worse than one
+# that does not start. `-StandDownOnClaim` picks the second.
+#
+# SUCCESS IS $script:riglock_taken, NOT A RETURN VALUE, for the reason
+# Try-TakeRigLock's header gives - this function logs, so anything it returned
+# would reach the caller as an array with its log lines in it. The reason is
+# $script:boxtake_why.
+function Take-RigLockWhenFree {
+  param([string]$round,
+        [string]$coordpath = '',
+        [string]$selfid = '',
+        [int]$maxwaits = 3600,
+        [int]$polls = 60,
+        [double]$cpuceiling = 50.0,
+        [switch]$standdownonclaim)
+  $script:riglock_taken = $false
+  $script:boxtake_why = ''
+  if ($polls -lt 1) { $polls = 1 }
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  while ($true) {
+    Try-TakeRigLock $round
+    if ($script:riglock_taken) {
+      # HELD FROM HERE. Nothing below can be invalidated by a lane that
+      # respects the lock, which is what the probe-then-act shape could not say.
+      $claimants = (Get-OpenClaimants $coordpath $selfid)
+      if ($claimants.Count -gt 0) {
+        Release-RigLock ''
+        $script:riglock_taken = $false
+        Write-LateArrivalNote "take:$round" $claimants
+        $script:boxtake_why = "open claim(s) not mine: $($claimants -join ' ')"
+        if ($standdownonclaim) {
+          Write-PlibLine "BOX-TAKE-STANDDOWN round=$round why=$($script:boxtake_why)"
+          return
+        }
+      } else {
+        $census = Get-BoxCensus $cpuceiling
+        Write-BoxCensusNote "take:$round" $census
+        if ($census.Free) {
+          Write-PlibLine "BOX-TAKE-CONFIRMED round=$round waited_s=$([math]::Round($sw.Elapsed.TotalSeconds)) foreign_cpu=$($census.ForeignCpu) open_claims=none"
+          $script:riglock_taken = $true
+          $script:boxtake_why = 'free'
+          return
+        }
+        # The lock was ours and the box is not. Give it back rather than sit on
+        # it: a lane that DOES respect the lock must not be blocked by our wait.
+        Release-RigLock ''
+        $script:riglock_taken = $false
+        $script:boxtake_why = $census.Why
+      }
+    } else {
+      $script:boxtake_why = 'rig lock held by another round'
+    }
+    if ($sw.Elapsed.TotalSeconds -ge $maxwaits) {
+      Write-PlibLine "BOX-TAKE-GAVE-UP round=$round waited_s=$([math]::Round($sw.Elapsed.TotalSeconds)) cap_s=$maxwaits why=$($script:boxtake_why)"
+      return
+    }
+    Write-PlibLine "BOX-TAKE-WAIT round=$round waited_s=$([math]::Round($sw.Elapsed.TotalSeconds)) why=$($script:boxtake_why)"
+    Start-Sleep -Seconds $polls
+  }
 }
 
 # Run one tool invocation and measure it. Returns rc, wall, child CPU seconds and
@@ -1402,6 +2166,131 @@ function Set-LegAffinity([long]$mask) {
 
 function Get-LegAffinity { $script:legAffinity }
 
+# ---------------------------------------------------------------- POWER STATE
+# Package power and core frequency per leg, added 18 Sep 2026 for lane
+# cf-load-term-buffer-and-placement-18sep. Candidate 3 for the unexplained
+# residual in the `c_f` drift census is THERMAL OR POWER DRIFT ACROSS A
+# SITTING, and that census could not test it at all - not because the evidence
+# was ambiguous but because no LEG line in the whole banked corpus carries
+# either quantity, so there was nothing to reduce. This is the field that makes
+# it testable from banked logs from now on; it settles nothing by itself.
+#
+# WHAT IS AVAILABLE ON THIS FLEET, MEASURED ON intel-i5-10600kf 18 Sep 2026 RATHER
+# THAN ASSUMED, because the honest answer is "one of the two":
+#
+#   FREQUENCY - YES, and NOT from where you would first reach for it.
+#   `Win32_Processor.CurrentClockSpeed` read 3801 MHz in the same second that
+#   the perf counter read 113% of nominal, i.e. ~4295 MHz: that property is the
+#   NOMINAL speed restated, it equals MaxClockSpeed on this part, and a round
+#   that logged it would publish a dead constant under a live-sounding name -
+#   which is worse than logging nothing, because it reads as evidence that
+#   frequency did not drift. The live figure is the `Processor Information`
+#   counter's `PercentProcessorPerformance` against nominal. Both the percent
+#   and the derived MHz travel, so a reader can check the derivation.
+#
+#   PACKAGE POWER - NO, and it cannot be had here without installing software
+#   on somebody's box. Intel exposes package watts through RAPL MSRs, which
+#   Windows does not surface to user mode at all: there is no `root\OpenHardwareMonitor`
+#   or `root\LibreHardwareMonitor` namespace on this box, no Intel Power Gadget,
+#   and `Win32_Battery` is absent because it is a desktop, so the `Power Meter`
+#   ACPI counter set that laptops and some servers carry has no instance either.
+#   Every remaining route needs a KERNEL DRIVER. So `pkg_w` is emitted as `na`
+#   rather than omitted: the field exists so a box that CAN read it needs no
+#   format change and no reducer edit, and so its absence is a recorded fact in
+#   every log rather than a column a later reader wonders about. Getting real
+#   watts is a decision for the maintainer about installing a driver on a shared timing
+#   box, not something a lane may do on its own.
+#
+#   TEMPERATURE AND PASSIVE THROTTLE - YES, and they are the useful proxy while
+#   watts are missing. Thermal drift's whole signature is the part getting
+#   hotter and clocking down, and `temp_c` falling with `freq_mhz` across a
+#   sitting is that signature without needing watts at all. RE-TENSED 18 Sep
+#   2026: half of that signature is unavailable - see the banner below, which
+#   finds the frequency half of this function unreadable. TEMPERATURE alone
+#   still answers "did this box heat at all", which is the cheap stand-down the
+#   candidate-3 design puts before any long sitting.
+#
+# COST, AND WHY IT CONTAMINATES NOTHING. The sample costs a few hundred
+# milliseconds of CPU. That is large next to a 3.6 s leg and would be a real
+# problem if it landed INSIDE one - it does not. Invoke-Leg's `$watch` starts at
+# `$proc.Start()` and stops at `WaitForExit`, and both samples are taken
+# outside that span, so they cost the SITTING wall-clock time and cost no CELL
+# anything. The same is already true of `Get-ForeignCpu`, which samples for a
+# full second twice per leg.
+#
+# IT NEVER THROWS. A counter class that is missing, renamed or momentarily
+# unavailable returns the `na` shape, exactly as Get-ForeignCpu returns -1: a
+# round must not die mid-leg, orphaning a child, over an instrument that is only
+# ever additional evidence.
+#
+# ==========================================================================
+# THE FREQUENCY HALF OF THIS FUNCTION IS BROKEN. `FreqMhz` AND `PerfPct` MUST
+# NOT BE REDUCED OR QUOTED. Found 18 Sep 2026 by lane
+# `cf-thermal-drift-candidate3-18sep`; full argument and the proposed fix in
+# `rounds/cf-thermal-drift-2026-09-18/README.md`.
+#
+# `PercentProcessorPerformance` is a DELTA counter and the query below is a
+# SINGLE un-refreshed one. That is the same mistake, through a different API,
+# that an internal note section 2a was written about
+# and whose rule 1 is "never sample this counter single-shot"; that rule names
+# `Get-Counter`, this reaches the counter through WMI's cooked provider
+# instead, and the structural problem - it needs two refreshes of its cache and
+# a lone query gives it one - is identical.
+#
+# THE EVIDENCE IS THE SIX VALIDATION LEGS THIS FUNCTION'S OWN LANE BANKED, and
+# the argument is internal to that single log (`rounds/
+# cf-load-term-buffer-2026-09-18/pwr.log`, intel-i5-10600kf): every leg held 9.4-11.0
+# of 12 threads busy for its whole duration, every temperature sample in the
+# sitting read 27.9 C, and `freq_after_mhz` nonetheless spans 912-2585 MHz - a
+# 2.83x range with everything that could move it held fixed. The level is wrong
+# as well as the spread: on the same idle box, the route section 2a PROVED
+# reads 109.74-110.45% of nominal where this one reads 24-30%.
+#
+# WHY SWAPPING IN `-SampleInterval 1 -MaxSamples 2` IS NOT THE FIX. It is the
+# right rule in the wrong place: a delta counter needs an interval, `$pwr1` is
+# taken within ~300 ms of the child exiting, and an interval starting there
+# integrates the idle decay rather than the leg. The fix is to bracket the leg
+# with the RAW class and divide the deltas here, which returns the average over
+# exactly the leg's own window and retires wcomb.ps1's stated "brackets, does
+# not average" limit rather than working around it. It is NOT applied here
+# because it is UNVERIFIED ON A BOX - every Windows timing box in the fleet was
+# held and saturated - and an untested edit to this file is executed by other
+# lanes' live rounds. Validate with
+# `rounds/cf-thermal-drift-2026-09-18/pwrcheck2.ps1` FIRST.
+#
+# TEMPERATURE AND `ThrottlePct` ARE SOUND and nothing here impugns them: both
+# are instantaneous gauges, so one query is the correct way to read them and
+# the bracket means what it says. `ThrottlePct` is `PercentPassiveLimit` and
+# reads 100 when NOTHING is throttling - a drop below 100 is the signal.
+# ==========================================================================
+$script:nominalMhz = 0
+function Get-PowerState {
+  $r = [ordered]@{ FreqMhz = ''; PerfPct = ''; TempC = ''; ThrottlePct = ''; PkgW = 'na' }
+  try {
+    if (-not $script:nominalMhz) {
+      $script:nominalMhz = [int](Get-CimInstance Win32_Processor -ErrorAction Stop |
+                                 Select-Object -First 1 -ExpandProperty MaxClockSpeed)
+    }
+    $p = Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation `
+           -Filter "Name='_Total'" -ErrorAction Stop | Select-Object -First 1
+    if ($p -and $p.PercentProcessorPerformance -ne $null) {
+      $r.PerfPct = [int]$p.PercentProcessorPerformance
+      if ($script:nominalMhz) {
+        $r.FreqMhz = [int][math]::Round($script:nominalMhz * $r.PerfPct / 100.0)
+      }
+    }
+  } catch { }
+  try {
+    $tz = Get-CimInstance Win32_PerfFormattedData_Counters_ThermalZoneInformation `
+            -ErrorAction Stop | Select-Object -First 1
+    # The counter is in KELVIN despite the name, so 301 is 27.9 C and not a
+    # broken reading. Converted here so no reducer has to know that.
+    if ($tz -and $tz.Temperature) { $r.TempC = [math]::Round([double]$tz.Temperature - 273.15, 1) }
+    if ($tz -and $tz.PercentPassiveLimit -ne $null) { $r.ThrottlePct = [int]$tz.PercentPassiveLimit }
+  } catch { }
+  return [pscustomobject]$r
+}
+
 function Invoke-Leg {
   # $envExtra overlays the child's environment, for the joint Forney solver
   # ("fast mode"): it ships as a CLI switch AND as NZBFAST_FORNEY_JOINT, default
@@ -1420,6 +2309,8 @@ function Invoke-Leg {
   # along with its reading - see the note in Require-QuietBox.
   Require-QuietBox ([IO.Path]::GetFileName($logbase))
   $foreign = $script:lastforeign
+  # OUTSIDE the timed window on purpose - see Get-PowerState's cost note.
+  $pwr0 = Get-PowerState
   $psi = New-Object Diagnostics.ProcessStartInfo
   $psi.FileName = $exepath
   $psi.Arguments = $argstr
@@ -1427,6 +2318,37 @@ function Invoke-Leg {
   $psi.UseShellExecute = $false
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
+  # AND BOTH STREAMS ARE DECODED AS UTF-8, EXPLICITLY. Without these two lines
+  # a redirected stream is decoded in the CONSOLE CODEPAGE (437 on
+  # intel-core-ultra-9-386h, 850 on the NUC), and the damage lands in two stages, only the
+  # first of which is reversible. Stage 1: parfast separates the fields of its
+  # `mem-floor:` lines with U+00B7 MIDDLE DOT, `C2 B7` in UTF-8, so a CP437
+  # decode turns one character into two and `[IO.File]::WriteAllText` below
+  # banks `E2 94 AC E2 95 96` - a VALID-UTF-8 `<U+252C><U+2556>` where a middle
+  # dot belongs. Stage 2: a driver echoes those `.err` lines to stdout as
+  # TIMING lines, `cmd /c ... >` applies the console encoding AGAIN to
+  # characters the codepage cannot represent, and it emits the
+  # unmappable-character `?`. That one is NOT reversible, and it has already
+  # cost a post-hoc rewrite of two banked round logs (256 copies in
+  # `oramnuc1.log`, 128 in `oramnuc2.log`), because
+  # `website/tools/export_parfast_evidence.py` correctly REFUSES a file it
+  # cannot decode as UTF-8.
+  # Measured on intel-core-ultra-9-386h (PowerShell 5.1.26100.9444, console cp 437,
+  # 20 Sep 2026) with a child writing the two raw bytes to its stderr handle:
+  # without these lines the `.err` file holds `E2 94 AC E2 95 96`, with them it
+  # holds `C2 B7`.
+  # `[Console]::OutputEncoding` is the SEPARATE, per-DRIVER half of this - it is
+  # what keeps a driver's OWN round log clean - and it is deliberately not set
+  # here: this function decodes other people's output and must not reach into
+  # the console of whoever dot-sourced it.
+  # The one behaviour this trades away, stated rather than discovered later: a
+  # child that emits bytes which are NOT valid UTF-8 now decodes to U+FFFD
+  # where CP437 would have given some readable character. Every tool a leg runs
+  # here writes UTF-8 or pure ASCII, and a replacement character that survives
+  # into a banked log is a visible defect, where the two-stage mangling above
+  # is not.
+  $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+  $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
   $psi.CreateNoWindow = $true
   if ($envExtra) { foreach ($k in $envExtra.Keys) { $psi.EnvironmentVariables[$k] = [string]$envExtra[$k] } }
   $proc = New-Object Diagnostics.Process
@@ -1451,6 +2373,10 @@ function Invoke-Leg {
   $sout = $taskout.Result
   $serr = $taskerr.Result
   $foreignAfter = Get-ForeignCpu
+  # The AFTER sample is the one that carries the signal: a leg that ran long
+  # enough to heat the part reports its end state here, and the pair brackets
+  # the leg the way foreign/foreignAfter already do.
+  $pwr1 = Get-PowerState
   $peakbytes = [PMem]::PeakWS($proc.Handle)
   $cpusecs = $proc.TotalProcessorTime.TotalSeconds
   $rcode = $proc.ExitCode
@@ -1473,6 +2399,10 @@ function Invoke-Leg {
     # not run where its arm says it ran, and is refused rather than reported.
     affWant = $affWant
     affGot  = $affGot
+    # Candidate 3's evidence. ADDITIVE and last, so every existing reducer that
+    # reads this object by name is untouched.
+    pwr0    = $pwr0
+    pwr1    = $pwr1
   }
 }
 
@@ -1739,6 +2669,26 @@ function Write-HarnessFacts([string[]]$paths) {
   # `Get-RigStamp` re-reads exactly the files these HARNESS lines named. This
   # library adds ITSELF; the caller passes its own `$PSCommandPath` (and
   # anything else it sources).
+  #
+  # THE COMPOSITION MOVED INTO `Get-HarnessLines` (20 Sep 2026) and this is now
+  # the printing half alone. A driver that tees its own log through a local
+  # `Log` / `Say` and never calls `Set-PlibLog` cannot use THIS function: it
+  # writes through `Write-PlibLine`, whose sink is plib's, so the stamp would
+  # land on stdout and the BANKED log would stay unstamped - looking fixed.
+  # Five drivers in the second census are in exactly that state and call
+  # `Get-HarnessLines` instead (an internal note).
+  foreach ($l in (Get-HarnessLines $paths)) { Write-PlibLine $l }
+}
+
+function Get-HarnessLines([string[]]$paths) {
+  # `Write-HarnessFacts` without the writing: REGISTERS the set and RETURNS the
+  # lines, for a driver whose own helper is the one that reaches the banked log.
+  #
+  # IT RETURNS LINES AND EMITS NOTHING ELSE, for `Get-RigStamp`'s reason one
+  # function down: PowerShell does not distinguish logging from returning, so a
+  # single stray unassigned statement in here would be returned to the caller
+  # as an extra "line" and written into the round log as one. Every statement
+  # below is an assignment, a loop, or consumed by `if`.
   $all = @()
   if ($script:pliblibpath) { $all += $script:pliblibpath }
   foreach ($p in $paths) { if ($p) { $all += $p } }
@@ -1755,16 +2705,23 @@ function Write-HarnessFacts([string[]]$paths) {
   # ONE sort key, built as a string, so the order cannot depend on how this
   # PowerShell version handles a multi-scriptblock Sort-Object.
   $script:harnessfiles = @($uniq | Sort-Object { [IO.Path]::GetFileName($_) + '|' + $_ })
+  $out = @()
   foreach ($p in $script:harnessfiles) {
+    # A MISSING file still ends the round here, and it is the one thing this
+    # function is allowed to do besides return lines. A round that cannot find
+    # what it sources has established nothing, and the caller's own log helper
+    # has not necessarily been wired yet - so the refusal goes through plib's
+    # sink, the same one `Write-HarnessFacts` used before the split.
     if (-not (Test-Path -LiteralPath $p)) { Write-PlibLine "PREFLIGHT-FAIL missing $p"; exit 9 }
     $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()
     $len = (Get-Item -LiteralPath $p).Length
-    Write-PlibLine "HARNESS $([IO.Path]::GetFileName($p)) sha256=$h bytes=$len"
+    $out += "HARNESS $([IO.Path]::GetFileName($p)) sha256=$h bytes=$len"
   }
-  # The token the legs will carry, printed once at round start as well, so a
+  # The token the legs will carry, emitted once at round start as well, so a
   # reader who greps the head of a log sees the same string the legs carry
   # instead of composing it from the HARNESS lines by hand.
-  Write-PlibLine "HARNESS-RIG $(Get-RigStamp)"
+  $out += "HARNESS-RIG $(Get-RigStamp)"
+  return $out
 }
 
 # ---------------------------------------------------------------------------

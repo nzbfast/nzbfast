@@ -1,0 +1,10 @@
+== 64k-n4096 repair threads=4  CPU-s: median of both copies of each arm (n legs); A/A = worst |X - X2| / min over the reps; verdict clears the A/A floor or is UNRESOLVED
+      m |     fold    force     F/T |   aa_F   aa_T  floor | verdict |      wF      wT  wF/wT | foreign max | peak MB force/fold
+    192 |     2.33     2.70   0.861 |   6.8%   5.1%   6.8% | fold    |    0.41    0.56  0.728 | 89% (8 legs) | 290/274
+    256 |     2.55     2.68   0.953 |   4.6%   5.2%   5.2% | unres   |    0.48    0.56  0.857 | 100% (8 legs) | 292/277
+    320 |     2.66     2.65   1.006 |  14.5%   3.6%  14.5% | unres   |    0.54    0.57  0.951 | 130% (8 legs) | 294/287
+    384 |     2.77     2.63   1.054 |   7.7%  11.8%  11.8% | unres   |    0.60    0.57  1.055 | 102% (8 legs) | 294/297
+    448 |     3.19     2.67   1.193 |   3.0%  14.0%  14.0% | ntt     |    0.68    0.59  1.149 | 64% (8 legs) | 296/302
+    512 |     3.43     2.71   1.265 |   5.3%   8.9%   8.9% | ntt     |    0.75    0.61  1.222 | 106% (8 legs) | 299/314
+  crossover (log-interpolated, median): CPU m ~ 312   wall m ~ 350
+  foreign CPU over 48 legs: median 9% of a core, max 130% (after-leg median 36%)

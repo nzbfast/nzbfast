@@ -43,6 +43,8 @@ and it is exactly what a port's selftest is most likely to present.
 
     python3 harness/pdrv_port_selftest.py
 """
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -213,6 +215,40 @@ def check_portable():
         pdrv.box_facts()
         pdrv.rig_vol_facts(os.path.join(d, "fixture"))
         check("box_facts and rig_vol_facts run without raising", True)
+
+        # THE COMPOSING HALVES RETURN AND EMIT NOTHING. That is the whole
+        # point of them - a driver that tees its round log through a local
+        # `log` / `say` calls these, and a stray print in here would land in
+        # the sink it was trying not to use, leaving the banked log unstamped
+        # while the terminal looks right
+        # (an internal note). Captured rather than
+        # asserted from reading, because a print added tomorrow would not
+        # change any return value.
+        cap = io.StringIO()
+        with contextlib.redirect_stdout(cap):
+            bl = pdrv.box_line()
+            fake = os.path.join(d, "no-such-tool")
+            bn = pdrv.bin_lines([fake])
+            real = pdrv.bin_lines([sys.executable])
+        # The fields are named SEPARATELY rather than by asserting the whole
+        # literal prefix of the BOX line. `tools/scrub-bench-logs.py` REFUSES
+        # a hostname field in a published harness source whose value it cannot
+        # map to a machine model, and a string literal inside a test is not a
+        # machine - it read as an unmappable box and stopped the export. Its
+        # header waives the format strings that WRITE the field; a test that
+        # merely checks for one is not that, so this is fixed at the site,
+        # never by widening the scrubber.
+        check("box_line returns one BOX line",
+              isinstance(bl, str) and bl.startswith("BOX ")
+              and " cores=" in bl and " free_gb=" in bl, repr(bl))
+        check("box_line emits nothing", cap.getvalue() == "", repr(cap.getvalue()))
+        check("bin_lines stamps a missing path `unreadable` when not fatal",
+              bn == ["BIN no-such-tool sha256=unreadable bytes=0 "
+                     "version=? built from ?"], repr(bn))
+        check("bin_lines returns a BIN line for a real file",
+              len(real) == 1 and real[0].startswith("BIN ")
+              and "sha256=unreadable" not in real[0], repr(real))
+        check("bin_lines emits nothing", cap.getvalue() == "", repr(cap.getvalue()))
 
 
 def check_windows():

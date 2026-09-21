@@ -1,0 +1,40 @@
+floornull - the A/A FLOOR under a random drop of the same size as the steal filter's, 64 KiB EPYC guest, steal < 8.00%
+legs 160, 20 cells of 8; the null at each rung is EXHAUSTIVE - every C(8, d) way of dropping d legs
+
+  cell     m  d | floor0 v0     |   effS floorS vS     |   nmed    np5   np95   pctl     n | P(vS) P(fl) | ratio floor | reading
+  t4      96  3 |  43.5% unres  |  35.9%   8.6% fold  *|   8.6%   0.6%  43.5%! 64.3%    56 |   71%   71% | unres fold  | FLOOR alone; 71% of drops flip
+  t4     128  0 |   3.3% fold   |  25.6%   3.3% fold   |      -      -      -      -     1 |     -     - | -     -     | no leg dropped
+  t4     160  1 |  14.4% fold   |  21.9%   7.0% fold   |  14.4%   7.0%  14.4%  25.0%     8 |  100%    0% | fold  fold  | no flip
+  t4     192  0 |   7.6% unres  |   6.4%   7.6% unres  |      -      -      -      -     1 |     -     - | -     -     | no leg dropped
+  t4     224  1 |  30.5% unres  |   1.1%   7.2% unres  |  30.5%   7.2%  30.5%  25.0%     8 |  100%    0% | unres unres | no flip
+  t4     256  0 |   8.2% unres  |   4.7%   8.2% unres  |      -      -      -      -     1 |     -     - | -     -     | no leg dropped
+  t4     288  1 |  24.5% unres  |  17.3%   2.7% ntt   *|  24.5%   2.7%  24.5%! 25.0%     8 |   25%   25% | unres ntt   | FLOOR alone; 25% of drops flip
+  t4     320  2 |  24.6% unres  |  12.1%   6.3% ntt   *|  24.6%   3.9%  24.6%! 46.4%    28 |   82%   82% | unres ntt   | FLOOR alone; 82% of drops flip
+  t4     384  1 |  29.4% unres  |  27.0%   9.4% ntt   *|  29.4%   9.4%  29.4%! 25.0%     8 |   75%   75% | unres ntt   | FLOOR alone; 75% of drops flip
+  t4     512  1 |  27.3% ntt    |  64.6%   6.2% ntt    |  27.3%   6.2%  27.3%  25.0%     8 |  100%    0% | ntt   ntt   | no flip
+  t8      96  2 |  10.5% fold   |  31.4%  10.5% fold   |  10.5%   4.3%  10.5% 100.0%    28 |  100%    0% | fold  fold  | no flip
+  t8     128  2 |  54.3% unres  |  17.7%   4.9% fold  *|  54.3%   4.9%  54.3%! 14.3%    28 |   21%   21% | unres fold  | FLOOR alone; 21% of drops flip
+  t8     160  2 |  15.9% unres  |  14.3%   2.9% fold  *|  15.9%   2.9%  15.9%! 14.3%    28 |   54%   54% | unres fold  | FLOOR alone; 54% of drops flip
+  t8     192  0 |   5.5% unres  |   0.4%   5.5% unres  |      -      -      -      -     1 |     -     - | -     -     | no leg dropped
+  t8     224  1 |  31.9% unres  |   4.9%   2.3% ntt   *|  31.9%   2.3%  31.9%! 25.0%     8 |   25%   25% | unres unres | needs both; 25% of drops flip
+  t8     256  0 |   6.6% ntt    |   9.3%   6.6% ntt    |      -      -      -      -     1 |     -     - | -     -     | no leg dropped
+  t8     288  0 |   8.8% ntt    |  16.6%   8.8% ntt    |      -      -      -      -     1 |     -     - | -     -     | no leg dropped
+  t8     320  0 |   6.6% ntt    |  21.4%   6.6% ntt    |      -      -      -      -     1 |     -     - | -     -     | no leg dropped
+  t8     384  3 |  11.4% ntt    |  43.0%   4.3% ntt    |  10.7%   4.3%  11.4%  14.3%    56 |  100%    0% | ntt   ntt   | no flip
+  t8     512  0 |   5.5% ntt    |  72.7%   5.5% ntt    |      -      -      -      -     1 |     -     - | -     -     | no leg dropped
+
+  cell/m/d      the (threads, m) rung and how many of its 8 legs steal < 8.00% removes
+  floor0/v0     the A/A floor and verdict over all 8 legs (the PUBLISHED reading)
+  effS          the filtered rung's EFFECT, max(F/T, T/F) - 1, on the floor's
+                own scale; `!` after np95 marks a null of floors that STRADDLES
+                it, which is a rung whose verdict is decided by which legs
+                survived rather than by the arms
+  floorS/vS     the floor and verdict after the steal filter; `*` marks a FLIP
+  nmed/np5/np95 the enumerated null of floors under a random d-leg drop
+  pctl          where floorS sits in that null (share of members at or below it)
+  n             the null's size - C(8, d), the WHOLE family, not a sample
+  P(vS)         share of random d-drops that reach the steal filter's verdict
+  P(fl)         share of random d-drops that flip the verdict AT ALL
+  ratio/floor   counterfactuals: the filtered ratio against the UNFILTERED
+                floor, and the unfiltered ratio against the FILTERED floor -
+                which half of the filter the flip is attributable to

@@ -1,0 +1,45 @@
+legs 22  not-ok-or-folded 0
+W [512]  slabs [1]  threads [8]  slice [262144]  m [1400]
+windows 62  dropped under 1000 sources: 2
+
+        S      t s    n    spr% |     lv   fmin   fmed   fmax |   add paired     add%
+     3016    0.823    2    1.55 | no fill line
+     3144    0.848    2    0.39 | no fill line
+     3208    0.859    2    0.10 | no fill line
+     4032    0.987   14    2.65 | no fill line
+     7144    1.490    2    0.00 | no fill line
+     7176    1.480    2    0.00 | no fill line
+     7208    1.485    2    2.02 | no fill line
+     8032    1.630    6    1.23 | no fill line
+    11208    2.155    2    0.46 | no fill line
+    12032    2.310    4    0.43 | no fill line
+    13192    2.485    2    0.40 | no fill line
+    14048    2.650    4    0.75 | no fill line
+    14824    2.730    2    0.73 | no fill line
+    15208    2.800    2    0.71 | no fill line
+    16032    3.005    2    1.00 | no fill line
+    16416    3.095    2    0.97 | no fill line
+    18048    3.470    2    2.31 | no fill line
+    20032    3.845    2    0.26 | no fill line
+    24032    4.540    2    0.88 | no fill line
+    28032    5.260    2    1.52 | no fill line
+    31239    5.770    2    0.35 | no fill line
+
+SECANTS between consecutive widths (T cancels: m is fixed)
+     S_lo      S_hi           dS df/dS ms/src
+     3208      4032          824     0.1546
+     4032      7144         3112     0.1618
+     7208      8032          824     0.1760
+     8032     11208         3176     0.1653
+    11208     12032          824     0.1881
+    12032     13192         1160     0.1509
+    13192     14048          856     0.1928
+    14048     14824          776     0.1031
+    14824     15208          384     0.1823
+    15208     16032          824     0.2488
+    16032     16416          384     0.2344
+    16416     18048         1632     0.2298
+    18048     20032         1984     0.1890
+    20032     24032         4000     0.1737
+    24032     28032         4000     0.1800
+    28032     31239         3207     0.1590

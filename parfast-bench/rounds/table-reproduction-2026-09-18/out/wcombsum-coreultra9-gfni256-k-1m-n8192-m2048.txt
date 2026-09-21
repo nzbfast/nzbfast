@@ -1,0 +1,41 @@
+# foreign CPU per log, % of ONE core (median over the legs, then max, then after-leg median)
+#   coreultra9-gfni256-k-1m-n8192-m2048.log                     48 legs  median  12%  max 111%  after  27%
+# fixture n=8192 block=1048576 B (fold normalised by 16 x 64 KiB)
+== threads=4
+  fold m=192   cpu=  60.41 wall= 11.33 path=fold reps=2 load=4/6 foreign=87.5/9.4
+  fold m=512   cpu= 105.95 wall= 23.05 path=fold reps=2 load=2/0 foreign=98.4/37.5
+  fold m=1024  cpu= 184.45 wall= 42.85 path=fold reps=2 load=4/11 foreign=10.9/21.9
+  fold m=2048  cpu= 308.97 wall= 74.28 path=fold reps=2 load=12/5 foreign=104.7/28.1
+  c_f = 1.021e-06 CPU-s per source-row per 64 KiB (slope 0.1338 CPU-s/row over n=8192, block 1048576 B, intercept 38.59, worst residual 8.80)
+  c_f FITTED OVER RUNGS m = 192,512,1024,2048 (every fold rung in the log) - a c_f quoted without this cannot be compared with another
+  c_f' = 1.419e-06 per PRESENT source-row per 64 KiB (slope in m*(n-m), worst residual 4.69)
+  force big m=192   cpu= 87.45 wall=18.88 windows=0 prof=1 slabs=1 w=1048576 W=512 combine/win=0.830 (list 0.83) c_w=2.702e-04 c_l=3.746e-04
+  force big m=512   cpu= 89.52 wall=19.69 windows=0 prof=1 slabs=1 w=1048576 W=512 combine/win=1.930 (list 1.93) c_w=2.356e-04 c_l=3.637e-04
+  force big m=1024  cpu=102.16 wall=24.04 windows=0 prof=1 slabs=1 w=1048576 W=512 combine/win=3.930 (list 3.93) c_w=2.399e-04 c_l=3.680e-04
+  force big m=2048  cpu=105.20 wall=24.66 windows=0 prof=1 slabs=1 w=1048576 W=512 combine/win=7.340 (list 7.34) c_w=2.240e-04 c_l=3.478e-04
+  force 2048 m=192   cpu= 82.05 wall=17.17 windows=3 prof=4 slabs=1 w=1048576 W=512 combine/win=0.733 (list 0.82/0.66/0.68/0.77) c_w=2.384e-04
+  force 2048 m=512   cpu= 89.19 wall=19.05 windows=3 prof=4 slabs=1 w=1048576 W=512 combine/win=1.765 (list 2.03/1.68/1.68/1.67) c_w=2.155e-04
+  force 2048 m=1024  cpu=109.14 wall=25.02 windows=2 prof=4 slabs=2 w=524288 W=512 combine/win=1.808 (list 1.98/1.74/1.79/1.72) c_w=2.206e-04
+  force 2048 m=2048  cpu=110.94 wall=36.39 windows=2 prof=4 slabs=2 w=524288 W=512 combine/win=3.670 (list 3.91/3.56/3.6/3.61) c_w=2.240e-04
+  c_w median over 8 cells = 2.298e-04 (range 2.155e-04 .. 2.702e-04)
+  k = c_w / c_f = 225   (per present source-row: 162)   [c_f rungs m = 192,512,1024,2048]
+  c_l median = 3.659e-04; single-window crossover c_l/c_f = 358 rows
+== threads=16
+  fold m=192   cpu=  87.55 wall=  7.35 path=fold reps=2 load=7/5 foreign=7.8/23.4
+  fold m=512   cpu= 183.44 wall= 13.30 path=fold reps=2 load=1/0 foreign=6.2/6.2
+  fold m=1024  cpu= 370.34 wall= 26.10 path=fold reps=2 load=6/5 foreign=9.4/35.9
+  fold m=2048  cpu= 634.91 wall= 42.70 path=fold reps=2 load=3/1 foreign=10.9/10.9
+  c_f = 2.259e-06 CPU-s per source-row per 64 KiB (slope 0.2961 CPU-s/row over n=8192, block 1048576 B, intercept 39.54, worst residual 27.60)
+  c_f FITTED OVER RUNGS m = 192,512,1024,2048 (every fold rung in the log) - a c_f quoted without this cannot be compared with another
+  c_f' = 3.143e-06 per PRESENT source-row per 64 KiB (slope in m*(n-m), worst residual 14.16)
+  force big m=192   cpu=135.73 wall=11.59 windows=0 prof=1 slabs=1 w=1048576 W=512 combine/win=1.520 (list 1.52) c_w=4.948e-04 c_l=7.296e-04
+  force big m=512   cpu=137.67 wall=11.76 windows=0 prof=1 slabs=1 w=1048576 W=512 combine/win=3.590 (list 3.59) c_w=4.382e-04 c_l=7.065e-04
+  force big m=1024  cpu=162.64 wall=13.93 windows=0 prof=1 slabs=1 w=1048576 W=512 combine/win=6.660 (list 6.66) c_w=4.065e-04 c_l=6.555e-04
+  force big m=2048  cpu=170.53 wall=14.49 windows=0 prof=1 slabs=1 w=1048576 W=512 combine/win=13.380 (list 13.38) c_w=4.083e-04 c_l=6.564e-04
+  force 2048 m=192   cpu=140.44 wall=10.97 windows=3 prof=4 slabs=1 w=1048576 W=512 combine/win=1.645 (list 2.12/1.33/1.49/1.64) c_w=5.355e-04
+  force 2048 m=512   cpu=151.05 wall=12.00 windows=3 prof=4 slabs=1 w=1048576 W=512 combine/win=4.065 (list 4.98/3.52/3.51/4.25) c_w=4.962e-04
+  force 2048 m=1024  cpu=168.98 wall=14.70 windows=2 prof=4 slabs=2 w=524288 W=512 combine/win=3.688 (list 4.54/3.39/3.4/3.42) c_w=4.501e-04
+  force 2048 m=2048  cpu=183.80 wall=16.59 windows=2 prof=4 slabs=2 w=524288 W=512 combine/win=7.565 (list 8.09/7.43/7.23/7.51) c_w=4.617e-04
+  c_w median over 8 cells = 4.559e-04 (range 4.065e-04 .. 5.355e-04)
+  k = c_w / c_f = 202   (per present source-row: 145)   [c_f rungs m = 192,512,1024,2048]
+  c_l median = 6.815e-04; single-window crossover c_l/c_f = 302 rows

@@ -167,6 +167,12 @@ $binbase = Join-Path $Root 'parfast-base.exe'
 
   "ROUND tag=catwin main_sha=$MainSha base_sha=1dd22f7fe warm_reps=$WarmReps cold_reps=$ColdReps start=$(Get-Ts)"
   Write-BoxFacts
+  # The HARNESS's own provenance, and the round-start twin of the per-leg
+  # `rig=` token - see plib.ps1's Get-RigStamp. $PSCommandPath is THIS driver;
+  # plib.ps1 adds itself. Without it a banked log cannot be traced to the
+  # harness revision that wrote it (census
+  # an internal note).
+  Write-HarnessFacts @($PSCommandPath)
 
   foreach ($pair in @(@($mainsrc, $binmain, 'main'), @($basesrc, $binbase, 'base'))) {
     $tree = $pair[0]; $dst = $pair[1]; $lbl = $pair[2]

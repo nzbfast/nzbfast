@@ -1,0 +1,26 @@
+floornull --global: 1000 draws of 140 legs from 160, seed 7 (the steal filter keeps 140)
+  cell     m | floor0 v0     | floorS vS     |   nmed    np5   np95   pctl | P(vS) P(fl)
+  t4      96 |  43.5% unres  |   8.6% fold  *|  43.5%   6.4%  43.5%  23.2% |   24%   24%
+  t4     128 |   3.3% fold   |   3.3% fold   |   3.3%   2.5%   3.3% 100.0% |  100%    0%
+  t4     160 |  14.4% fold   |   7.0% fold   |  14.4%   2.0%  14.4%  24.5% |   99%    1%
+  t4     192 |   7.6% unres  |   7.6% unres  |   7.6%   2.8%   7.6% 100.0% |   77%   23%
+  t4     224 |  30.5% unres  |   7.2% unres  |  30.5%   1.0%  30.5%  23.3% |   93%    7%
+  t4     256 |   8.2% unres  |   8.2% unres  |   8.2%   1.0%   8.2% 100.0% |   76%   24%
+  t4     288 |  24.5% unres  |   2.7% ntt   *|  24.5%   1.4%  24.5%  25.0% |   23%   23%
+  t4     320 |  24.6% unres  |   6.3% ntt   *|  24.6%   6.2%  24.6%  21.6% |   50%   50%
+  t4     384 |  29.4% unres  |   9.4% ntt   *|  29.4%   3.1%  29.4%  22.3% |   47%   47%
+  t4     512 |  27.3% ntt    |   6.2% ntt    |  27.3%   5.5%  27.3%  25.4% |  100%    0%
+  t8      96 |  10.5% fold   |  10.5% fold   |  10.5%   4.3%  10.5% 100.0% |  100%    0%
+  t8     128 |  54.3% unres  |   4.9% fold  *|  54.3%   4.9%  54.3%   5.4% |    7%    7%
+  t8     160 |  15.9% unres  |   2.9% fold  *|  15.9%   8.5%  15.9%   5.0% |   25%   25%
+  t8     192 |   5.5% unres  |   5.5% unres  |   5.5%   4.5%   5.5% 100.0% |   96%    4%
+  t8     224 |  31.9% unres  |   2.3% ntt   *|  31.9%   1.6%  31.9%  20.5% |   15%   18%
+  t8     256 |   6.6% ntt    |   6.6% ntt    |   6.6%   2.2%   6.6% 100.0% |  100%    0%
+  t8     288 |   8.8% ntt    |   8.8% ntt    |   8.8%   5.8%   8.8% 100.0% |  100%    0%
+  t8     320 |   6.6% ntt    |   6.6% ntt    |   6.6%   3.6%   6.6% 100.0% |  100%    0%
+  t8     384 |  11.4% ntt    |   4.3% ntt    |  11.4%  10.7%  11.4%   0.8% |  100%    0%
+  t8     512 |   5.5% ntt    |   5.5% ntt    |   5.5%   1.6%   5.5% 100.0% |  100%    0%
+
+  the steal filter flips 7 of the 20 rungs.
+  a random drop of the SAME SIZE flips 2.52 rungs on average (min 0, median 2, max 6 over 1000 draws);
+  0% of random draws flip AT LEAST as many rungs as the steal filter does.

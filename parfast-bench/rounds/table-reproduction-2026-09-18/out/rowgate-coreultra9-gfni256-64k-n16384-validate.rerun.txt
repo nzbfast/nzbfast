@@ -1,0 +1,20 @@
+== 64k-validate repair threads=4  CPU-s: median of both copies of each arm (n legs); A/A = worst |X - X2| / min over the reps; verdict clears the A/A floor or is UNRESOLVED
+      m |     fold    force     F/T |   aa_F   aa_T  floor | verdict |      wF      wT  wF/wT | foreign max | peak MB force/fold
+    320 |     9.53     9.16   1.041 |   0.0%   0.0%   0.0% | ntt     |    1.89    1.91  0.993 | 23% (4 legs) | 1064/464
+    352 |     9.92     9.45   1.050 |   0.0%   0.0%   0.0% | ntt     |    2.05    2.01  1.019 | 8% (4 legs) | 1064/450
+  crossover (log-interpolated, median): CPU m ~ <320   wall m ~ 329
+  foreign CPU over 8 legs: median 6% of a core, max 23% (after-leg median 27%)
+== 64k-validate repair threads=16  CPU-s: median of both copies of each arm (n legs); A/A = worst |X - X2| / min over the reps; verdict clears the A/A floor or is UNRESOLVED
+      m |     fold    force     F/T |   aa_F   aa_T  floor | verdict |      wF      wT  wF/wT | foreign max | peak MB force/fold
+    320 |    15.31    14.27   1.073 |   0.0%   0.0%   0.0% | ntt     |    1.16    1.17  0.991 | 25% (4 legs) | 1149/449
+    352 |    16.50    14.44   1.143 |   0.0%   0.0%   0.0% | ntt     |    1.24    1.20  1.026 | 20% (4 legs) | 1149/466
+  crossover (log-interpolated, median): CPU m ~ <320   wall m ~ 328
+  foreign CPU over 8 legs: median 13% of a core, max 25% (after-leg median 32%)
+== 64k-validate threads=4 budget=big  validate, CPU-s median over reps
+      m |    fold   force |    auto path W/win/slabs  ok  | autoalt path ok 
+    320 |    9.53    9.16 |    9.28 ntt  512/0/1      yes |    9.09 ntt  yes
+    352 |    9.92    9.45 |    9.38 ntt  512/0/1      yes |    9.39 ntt  yes
+== 64k-validate threads=16 budget=big  validate, CPU-s median over reps
+      m |    fold   force |    auto path W/win/slabs  ok  | autoalt path ok 
+    320 |   15.31   14.27 |   14.52 ntt  512/0/1      yes |   14.12 ntt  yes
+    352 |   16.50   14.44 |   14.50 ntt  512/0/1      yes |   14.00 ntt  yes

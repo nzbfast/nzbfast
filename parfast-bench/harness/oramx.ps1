@@ -50,6 +50,25 @@ param(
 # SHA-256 - every arm, lock and rep of one (gib, pct) must print one digest.
 . (Join-Path $PSScriptRoot 'plib.ps1')
 
+# THIS DRIVER'S OWN ROUND LOG IS UTF-8, EXPLICITLY, AND THAT IS HALF OF A
+# TWO-HALF FIX - see an internal note
+# section 9. Stdout here is redirected by `cmd /c powershell -File ... > $log`
+# (oramxl.ps1), and a redirect encodes in the CONSOLE CODEPAGE - 437 on
+# intel-core-ultra-9-386h, 850 on the NUC - so a non-ASCII character in a TIMING echo
+# below is best-fitted to one unmappable byte and the round log is not valid
+# UTF-8. Such a log will not BANK:
+# website/tools/export_parfast_evidence.py correctly refuses a file it cannot
+# decode as UTF-8, and that refusal is not the thing to change.
+# plib.ps1's Invoke-Leg owns the OTHER end - it sets both child stream
+# encodings so the `.err` file is banked as real UTF-8 - and it deliberately
+# does NOT set this, because a dot-sourced library must not reach into the
+# console of whoever sourced it. So this line belongs here, in the driver.
+# THE TWO HALVES BELOW MUST MOVE TOGETHER. `-Encoding UTF8` on the `.err`
+# reads alone makes the round log WORSE: it puts a real U+00B7 into the echo,
+# which cp437 and cp850 both best-fit to the single byte FA - still invalid
+# UTF-8, and now indistinguishable from a deliberate byte.
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+
 if (-not $Bin) { $Bin = Join-Path $Root 'bin\parfast.exe' }
 $fix = Join-Path $Root 'fix'
 $logs = Join-Path $Root "logs\$Tag"
@@ -90,7 +109,12 @@ function Get-Route([string]$errfile) {
   # moved, so treat it as a failed READING of the leg, not as a quiet leg.
   $route = 'UNPARSED'; $corpus = -1; $mapgate = 'silent'
   if (Test-Path $errfile) {
-    foreach ($ln in (Get-Content $errfile)) {
+    # `-Encoding UTF8` IS LOAD-BEARING and pairs with the [Console]::OutputEncoding
+    # line at the top of this file. plib's Invoke-Leg banks this `.err` as real
+    # UTF-8; Windows PowerShell 5.1 defaults Get-Content to ANSI, which reads
+    # parfast's U+00B7 field separator back as the two cp1252 characters `C2 B7`
+    # stands for. Never take one of the two without the other.
+    foreach ($ln in (Get-Content $errfile -Encoding UTF8)) {
       if ($ln -match 'create stripe-first admitted:.*bands of up to (\d+) B over copies') {
         $route = 'bands'; $corpus = [int64]$matches[1]
       } elseif ($ln -match 'create stripe-first admitted:') {
@@ -266,7 +290,12 @@ try {
     $diskgb = if ($dr0 -ge 0 -and $script:io_dr -ge 0) { [math]::Round(($script:io_dr - $dr0) / 1GB, 2) } else { -1 }
     "LEG round=$Tag gib=$gib members=$nmem pct=$pcent arm=$arm avail_gb=$availgb mem_mb=$memmb rep=$rep rc=$($res.rc) wall=$($res.wall) cpu=$($res.cpu) peak_mb=$($res.peakmb) gbps=$([math]::Round($gib * 1.073741824 / [math]::Max($res.wall, 0.001), 3)) route=$($rt[0]) corpus_b=$($rt[1]) mapgate=$($rt[2]) set=$setsha parfiles=$($pars.Count) parbytes=$parbytes warm_s=$warm page_reads=$pagereads pages_in=$pagesin disk_read_gb=$diskgb avail_mb_before=$av0 avail_mb_after=$($script:io_av) load_before=$load0 load_after=$load1 foreign_cpu=$($res.foreign) foreign_after=$($res.foreignAfter) errlen=$($res.errlen) rig=$(Get-RigStamp) ts=$(Ts)"
     if (Test-Path "$logbase.err") {
-      foreach ($ln in (Get-Content "$logbase.err" | Select-Object -First 60)) {
+      # `-Encoding UTF8` IS LOAD-BEARING and pairs with the [Console]::OutputEncoding
+      # line at the top of this file. plib's Invoke-Leg banks this `.err` as real
+      # UTF-8; Windows PowerShell 5.1 defaults Get-Content to ANSI, which reads
+      # parfast's U+00B7 field separator back as the two cp1252 characters `C2 B7`
+      # stands for. Never take one of the two without the other.
+      foreach ($ln in (Get-Content "$logbase.err" -Encoding UTF8 | Select-Object -First 60)) {
         $clean = $ln.Trim()
         if ($clean) { "TIMING leg=$legtag $clean" }
       }

@@ -1,0 +1,121 @@
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=oramnuc2 pid=15732 started=2026-09-18T20:59:27.3016080Z
+ROUND tag=oramnuc2 root=D:\oramnuc-18sep bin=D:\oramnuc-18sep\stage\tip\src\target\release\parfast.exe maxreps=2 plan=90:15:main:0:0:2;90:15:nobands:0:0:2;90:5:main:0:0:2;90:5:nobands:0:0:2 start=2026-09-18T20:59:27.3176273Z
+BOX host=intel-i5-10600kf cpu=Intel(R) Core(TM) i5-10600KF CPU @ 4.10GHz caption=Intel64 Family 6 Model 165 Stepping 5 cores=6 threads=12 ram_gb=63.9 os=Microsoft Windows 11 Pro build=10.0.26200 Dfree_gb=6865.9
+HARNESS oramx.ps1 sha256=fab68c5a3a34a47ed378202728dcb9070f5ccce7a4a3d90c29119fc23f2c3072 bytes=16088
+HARNESS plib.ps1 sha256=f7d1fdb395521f09f7af37dcfbf3bd400a21eb16d55fce41f5735e495809e15f bytes=112420
+HARNESS ramlock.ps1 sha256=3eaff2dd775b3793754b32efdc34c1fa439090d3f51a374f7c41818001d54555 bytes=3781
+HARNESS-RIG oramx.ps1:fab68c5a3a34a47e+plib.ps1:f7d1fdb395521f09+ramlock.ps1:3eaff2dd775b3793
+BIN parfast sha256=6ef1eb4926fcbd8f9b245cfcbfe022f28c810cfedf63bd88608b264d87ee4084 bytes=4324864 version=parfast version 1.6.0 built from unknown
+BIN sha256=6EF1EB4926FCBD8F9B245CFCBFE022F28C810CFEDF63BD88608B264D87EE4084
+FIXTURE gib=90 members=1 kept=1 wrote=0 bytes=96636764160 secs=0
+LEG round=oramnuc2 gib=90 members=1 pct=15 arm=main avail_gb=0 mem_mb=0 rep=1 rc=0 wall=237.753 cpu=1011.969 peak_mb=20967.2 gbps=0.406 route=bands corpus_b=16568156160 mapgate=refused set=140427AEC90D9A55 parfiles=14 parbytes=14553613880 warm_s=50.5 page_reads=395656 pages_in=55264776 disk_read_gb=208.89 avail_mb_before=59241 avail_mb_after=59144 load_before=1 load_after=3 foreign_cpu=10.5 foreign_after=99 errlen=1425 rig=oramx.ps1:fab68c5a3a34a47e+plib.ps1:f7d1fdb395521f09+ramlock.ps1:3eaff2dd775b3793 ts=2026-09-18T21:04:58.9599111Z
+TIMING leg=g90-n1-r15-main-a0-m0-rep1 INFO repair-timing: create arms: n=32768 rows=4915 batches=2 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING leg=g90-n1-r15-main-a0-m0-rep1 INFO repair-timing: create map refused: payload 96636764160 B + headroom 0 B against host 62110982144 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING leg=g90-n1-r15-main-a0-m0-rep1 INFO repair-timing: create stripe-first admitted: 2 batch(es), 4915 rows, n=32768, bands of up to 16568156160 B over copies
+TIMING leg=g90-n1-r15-main-a0-m0-rep1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 256 KiB)
+TIMING leg=g90-n1-r15-main-a0-m0-rep1 INFO repair-timing: create stripe-first: 4915 rows in 6 chunk(s) of 493 stripes (n=32768, bands of 16542334976 B over copies, read 166.11s, probe 3.47s, 8 reader(s), W=512, threads=12, probe ok): 236.80s
+TIMING leg=g90-n1-r15-main-a0-m0-rep1 INFO repair-timing: create scan + fold: 237.17s; batch fold width 12 of 12 a priori (0 restore(s)); scan lanes 2 of 12 a priori
+TIMING leg=g90-n1-r15-main-a0-m0-rep1 INFO repair-timing: plan prep: 2.83ms over 1 cold build(s), 2880 stripe use(s) - 0.001% of the 237.72s create
+TIMING leg=g90-n1-r15-main-a0-m0-rep1 mem-floor: live high-water | ru_maxrss 21986 MB | rss 21986 MB | footprint 21986 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 21986 MB
+TIMING leg=g90-n1-r15-main-a0-m0-rep1 mem-floor: sampled peak rss | ru_maxrss 21986 MB | rss 21986 MB | footprint 21986 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 21986 MB
+VERIFY tool=parfast leg=g90-n1-r15-main-a0-m0-rep1 rc=0 wall=33.431
+BOX-BUSY-WAIT try=1 foreign_cpu=161.1 ceiling=120 at=g90-n1-r15-nobands-a0-m0-rep1 ts=2026-09-18T21:06:29.9183028Z
+LEG round=oramnuc2 gib=90 members=1 pct=15 arm=nobands avail_gb=0 mem_mb=0 rep=1 rc=0 wall=460.633 cpu=4231.109 peak_mb=24650.6 gbps=0.21 route=refused corpus_b=-1 mapgate=refused set=140427AEC90D9A55 parfiles=14 parbytes=14553613880 warm_s=51.1 page_reads=257496 pages_in=76924728 disk_read_gb=293.44 avail_mb_before=59218 avail_mb_after=58181 load_before=4 load_after=3 foreign_cpu=10.8 foreign_after=20.3 errlen=2371 rig=oramx.ps1:fab68c5a3a34a47e+plib.ps1:f7d1fdb395521f09+ramlock.ps1:3eaff2dd775b3793 ts=2026-09-18T21:15:16.2509339Z
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 INFO repair-timing: create arms: n=32768 rows=4915 batches=2 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 INFO repair-timing: create map refused: payload 96636764160 B + headroom 0 B against host 62080622592 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 INFO repair-timing: create stripe-first refused: the members are read through copies (not mapped, or the payload would not stay resident - see mapped_payload_fits_memory) and bands are off (NZBFAST_CREATE_STRIPE_BANDS=0) (2 batch(es), 4915 rows, n=32768, fused=false)
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 INFO repair-timing: create map refused: payload 96636764160 B + headroom 6326366208 B against host 56033546240 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 256 KiB)
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 INFO repair-timing: create ntt rows 0+2047 (n=32768, 6 window(s) of 5714, W=1024, 1440 stripe(s), threads=12, probe ok): 214.83s
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 INFO repair-timing: create recovery batch 0+2047: 216.16s (total 216.17s) (fold width 12 of 12)
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 INFO repair-timing: create seals: mode=lanes rows=2047 in 246.2259ms
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 INFO repair-timing: create map refused: payload 96636764160 B + headroom 8838389760 B against host 53622906880 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 INFO repair-timing: create ntt rows 2047+2868 (n=32768, 6 window(s) of 5683, W=1024, 1440 stripe(s), threads=12, probe ok): 236.61s
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 INFO repair-timing: create recovery batch 2047+2868: 237.91s (total 456.86s) (fold width 12 of 12)
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 INFO repair-timing: create seals: mode=lanes rows=2868 in 291.86ms
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 INFO repair-timing: create scan + fold: 460.50s; batch fold width 12 of 12 a priori (0 restore(s)); scan lanes 2 of 12 a priori
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 INFO repair-timing: plan prep: 28.20ms over 12 cold build(s), 17280 stripe use(s) - 0.006% of the 460.58s create
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 mem-floor: live high-water | ru_maxrss 25848 MB | rss 25848 MB | footprint 25848 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 25848 MB
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep1 mem-floor: sampled peak rss | ru_maxrss 25848 MB | rss 25848 MB | footprint 25848 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 25848 MB
+LEG round=oramnuc2 gib=90 members=1 pct=5 arm=main avail_gb=0 mem_mb=0 rep=1 rc=0 wall=199.445 cpu=847.516 peak_mb=17922.4 gbps=0.485 route=bands corpus_b=16895508480 mapgate=refused set=F0C4002077022635 parfiles=12 parbytes=4874044464 warm_s=45.9 page_reads=339129 pages_in=48828440 disk_read_gb=185.64 avail_mb_before=59234 avail_mb_after=59162 load_before=3 load_after=3 foreign_cpu=32.7 foreign_after=81.7 errlen=1423 rig=oramx.ps1:fab68c5a3a34a47e+plib.ps1:f7d1fdb395521f09+ramlock.ps1:3eaff2dd775b3793 ts=2026-09-18T21:19:43.4830460Z
+TIMING leg=g90-n1-r5-main-a0-m0-rep1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=true, fusion displaced by the transform=true)
+TIMING leg=g90-n1-r5-main-a0-m0-rep1 INFO repair-timing: create map refused: payload 96636764160 B + headroom 0 B against host 62107070464 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING leg=g90-n1-r5-main-a0-m0-rep1 INFO repair-timing: create stripe-first admitted: 1 batch(es), 1638 rows, n=32768, bands of up to 16895508480 B over copies
+TIMING leg=g90-n1-r5-main-a0-m0-rep1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 256 KiB)
+TIMING leg=g90-n1-r5-main-a0-m0-rep1 INFO repair-timing: create stripe-first: 1638 rows in 6 chunk(s) of 503 stripes (n=32768, bands of 16877879296 B over copies, read 143.55s, probe 3.54s, 8 reader(s), W=512, threads=12, probe ok): 199.04s
+TIMING leg=g90-n1-r5-main-a0-m0-rep1 INFO repair-timing: create scan + fold: 199.17s; batch fold width 12 of 12 a priori (0 restore(s)); scan lanes 2 of 12 a priori
+TIMING leg=g90-n1-r5-main-a0-m0-rep1 INFO repair-timing: plan prep: 2.33ms over 1 cold build(s), 2880 stripe use(s) - 0.001% of the 199.39s create
+TIMING leg=g90-n1-r5-main-a0-m0-rep1 mem-floor: live high-water | ru_maxrss 18793 MB | rss 18793 MB | footprint 18793 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 18793 MB
+TIMING leg=g90-n1-r5-main-a0-m0-rep1 mem-floor: sampled peak rss | ru_maxrss 18793 MB | rss 18793 MB | footprint 18793 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 18793 MB
+VERIFY tool=parfast leg=g90-n1-r5-main-a0-m0-rep1 rc=0 wall=31.277
+LEG round=oramnuc2 gib=90 members=1 pct=5 arm=nobands avail_gb=0 mem_mb=0 rep=1 rc=0 wall=239.931 cpu=1999.562 peak_mb=21118.8 gbps=0.403 route=refused corpus_b=-1 mapgate=refused set=F0C4002077022635 parfiles=12 parbytes=4874044464 warm_s=50.1 page_reads=173204 pages_in=50925778 disk_read_gb=194.26 avail_mb_before=59233 avail_mb_after=58812 load_before=8 load_after=8 foreign_cpu=24.5 foreign_after=24.3 errlen=1862 rig=oramx.ps1:fab68c5a3a34a47e+plib.ps1:f7d1fdb395521f09+ramlock.ps1:3eaff2dd775b3793 ts=2026-09-18T21:25:25.8084496Z
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=true, fusion displaced by the transform=true)
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep1 INFO repair-timing: create map refused: payload 96636764160 B + headroom 0 B against host 62110900224 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep1 INFO repair-timing: create stripe-first refused: the members are read through copies (not mapped, or the payload would not stay resident - see mapped_payload_fits_memory) and bands are off (NZBFAST_CREATE_STRIPE_BANDS=0) (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep1 INFO repair-timing: create map refused: payload 96636764160 B + headroom 5074944000 B against host 57254748160 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 256 KiB)
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep1 INFO repair-timing: create ntt rows 0+1638 (n=32768, 6 window(s) of 5729, W=1024, 1440 stripe(s), threads=12, probe ok): 203.38s
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep1 INFO repair-timing: create recovery batch 0+1638: 204.53s (total 204.54s) (fold width 12 of 12)
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep1 INFO repair-timing: create seals: mode=lanes rows=1638 in 224.673ms
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep1 INFO repair-timing: create scan + fold: 239.85s; batch fold width 12 of 12 a priori (0 restore(s)); scan lanes 2 of 12 a priori
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep1 INFO repair-timing: plan prep: 12.23ms over 6 cold build(s), 8640 stripe use(s) - 0.005% of the 239.87s create
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep1 mem-floor: live high-water | ru_maxrss 22145 MB | rss 22145 MB | footprint 22145 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 22145 MB
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep1 mem-floor: sampled peak rss | ru_maxrss 22145 MB | rss 22145 MB | footprint 22145 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 22145 MB
+LEG round=oramnuc2 gib=90 members=1 pct=5 arm=nobands avail_gb=0 mem_mb=0 rep=2 rc=0 wall=239.615 cpu=1986.547 peak_mb=21119.2 gbps=0.403 route=refused corpus_b=-1 mapgate=refused set=F0C4002077022635 parfiles=12 parbytes=4874044464 warm_s=35.8 page_reads=171384 pages_in=50814957 disk_read_gb=193.84 avail_mb_before=59227 avail_mb_after=58688 load_before=2 load_after=2 foreign_cpu=18.6 foreign_after=31 errlen=1862 rig=oramx.ps1:fab68c5a3a34a47e+plib.ps1:f7d1fdb395521f09+ramlock.ps1:3eaff2dd775b3793 ts=2026-09-18T21:30:18.4078501Z
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep2 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=true, fusion displaced by the transform=true)
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep2 INFO repair-timing: create map refused: payload 96636764160 B + headroom 0 B against host 62106927104 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep2 INFO repair-timing: create stripe-first refused: the members are read through copies (not mapped, or the payload would not stay resident - see mapped_payload_fits_memory) and bands are off (NZBFAST_CREATE_STRIPE_BANDS=0) (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep2 INFO repair-timing: create map refused: payload 96636764160 B + headroom 5074944000 B against host 57272025088 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep2 INFO repair-timing: fold tile budget 32 KiB (L2 per core 256 KiB)
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep2 INFO repair-timing: create ntt rows 0+1638 (n=32768, 6 window(s) of 5729, W=1024, 1440 stripe(s), threads=12, probe ok): 201.90s
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep2 INFO repair-timing: create recovery batch 0+1638: 203.01s (total 203.01s) (fold width 12 of 12)
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep2 INFO repair-timing: create seals: mode=lanes rows=1638 in 206.2353ms
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep2 INFO repair-timing: create scan + fold: 239.55s; batch fold width 12 of 12 a priori (0 restore(s)); scan lanes 2 of 12 a priori
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep2 INFO repair-timing: plan prep: 5.51ms over 6 cold build(s), 8640 stripe use(s) - 0.002% of the 239.56s create
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep2 mem-floor: live high-water | ru_maxrss 22145 MB | rss 22145 MB | footprint 22145 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 22145 MB
+TIMING leg=g90-n1-r5-nobands-a0-m0-rep2 mem-floor: sampled peak rss | ru_maxrss 22145 MB | rss 22145 MB | footprint 22145 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 22145 MB
+LEG round=oramnuc2 gib=90 members=1 pct=5 arm=main avail_gb=0 mem_mb=0 rep=2 rc=0 wall=201.554 cpu=844.703 peak_mb=17922.6 gbps=0.479 route=bands corpus_b=16895508480 mapgate=refused set=F0C4002077022635 parfiles=12 parbytes=4874044464 warm_s=47.6 page_reads=336121 pages_in=48936432 disk_read_gb=186.05 avail_mb_before=59237 avail_mb_after=59153 load_before=3 load_after=2 foreign_cpu=13.9 foreign_after=101.5 errlen=1423 rig=oramx.ps1:fab68c5a3a34a47e+plib.ps1:f7d1fdb395521f09+ramlock.ps1:3eaff2dd775b3793 ts=2026-09-18T21:34:44.7485489Z
+TIMING leg=g90-n1-r5-main-a0-m0-rep2 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=true, fusion displaced by the transform=true)
+TIMING leg=g90-n1-r5-main-a0-m0-rep2 INFO repair-timing: create map refused: payload 96636764160 B + headroom 0 B against host 62113034240 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING leg=g90-n1-r5-main-a0-m0-rep2 INFO repair-timing: create stripe-first admitted: 1 batch(es), 1638 rows, n=32768, bands of up to 16895508480 B over copies
+TIMING leg=g90-n1-r5-main-a0-m0-rep2 INFO repair-timing: fold tile budget 32 KiB (L2 per core 256 KiB)
+TIMING leg=g90-n1-r5-main-a0-m0-rep2 INFO repair-timing: create stripe-first: 1638 rows in 6 chunk(s) of 503 stripes (n=32768, bands of 16877879296 B over copies, read 146.18s, probe 3.56s, 8 reader(s), W=512, threads=12, probe ok): 201.16s
+TIMING leg=g90-n1-r5-main-a0-m0-rep2 INFO repair-timing: create scan + fold: 201.29s; batch fold width 12 of 12 a priori (0 restore(s)); scan lanes 2 of 12 a priori
+TIMING leg=g90-n1-r5-main-a0-m0-rep2 INFO repair-timing: plan prep: 2.45ms over 1 cold build(s), 2880 stripe use(s) - 0.001% of the 201.50s create
+TIMING leg=g90-n1-r5-main-a0-m0-rep2 mem-floor: live high-water | ru_maxrss 18793 MB | rss 18793 MB | footprint 18793 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 18793 MB
+TIMING leg=g90-n1-r5-main-a0-m0-rep2 mem-floor: sampled peak rss | ru_maxrss 18793 MB | rss 18793 MB | footprint 18793 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 18793 MB
+LEG round=oramnuc2 gib=90 members=1 pct=15 arm=nobands avail_gb=0 mem_mb=0 rep=2 rc=0 wall=450.939 cpu=4244.391 peak_mb=24650.4 gbps=0.214 route=refused corpus_b=-1 mapgate=refused set=140427AEC90D9A55 parfiles=14 parbytes=14553613880 warm_s=44.4 page_reads=254658 pages_in=76757331 disk_read_gb=292.8 avail_mb_before=59232 avail_mb_after=58168 load_before=6 load_after=2 foreign_cpu=35.8 foreign_after=27.9 errlen=2373 rig=oramx.ps1:fab68c5a3a34a47e+plib.ps1:f7d1fdb395521f09+ramlock.ps1:3eaff2dd775b3793 ts=2026-09-18T21:43:40.8600874Z
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 INFO repair-timing: create arms: n=32768 rows=4915 batches=2 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 INFO repair-timing: create map refused: payload 96636764160 B + headroom 0 B against host 62109798400 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 INFO repair-timing: create stripe-first refused: the members are read through copies (not mapped, or the payload would not stay resident - see mapped_payload_fits_memory) and bands are off (NZBFAST_CREATE_STRIPE_BANDS=0) (2 batch(es), 4915 rows, n=32768, fused=false)
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 INFO repair-timing: create map refused: payload 96636764160 B + headroom 6326366208 B against host 56060899328 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 INFO repair-timing: fold tile budget 32 KiB (L2 per core 256 KiB)
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 INFO repair-timing: create ntt rows 0+2047 (n=32768, 6 window(s) of 5714, W=1024, 1440 stripe(s), threads=12, probe ok): 216.30s
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 INFO repair-timing: create recovery batch 0+2047: 217.48s (total 217.48s) (fold width 12 of 12)
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 INFO repair-timing: create seals: mode=lanes rows=2047 in 273.1135ms
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 INFO repair-timing: create map refused: payload 96636764160 B + headroom 8838389760 B against host 53447315456 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 INFO repair-timing: create ntt rows 2047+2868 (n=32768, 6 window(s) of 5683, W=1024, 1440 stripe(s), threads=12, probe ok): 227.18s
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 INFO repair-timing: create recovery batch 2047+2868: 228.54s (total 448.14s) (fold width 12 of 12)
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 INFO repair-timing: create seals: mode=lanes rows=2868 in 301.1467ms
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 INFO repair-timing: create scan + fold: 450.74s; batch fold width 12 of 12 a priori (0 restore(s)); scan lanes 2 of 12 a priori
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 INFO repair-timing: plan prep: 18.62ms over 12 cold build(s), 17280 stripe use(s) - 0.004% of the 450.89s create
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 mem-floor: live high-water | ru_maxrss 25848 MB | rss 25848 MB | footprint 25848 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 25848 MB
+TIMING leg=g90-n1-r15-nobands-a0-m0-rep2 mem-floor: sampled peak rss | ru_maxrss 25848 MB | rss 25848 MB | footprint 25848 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 25848 MB
+LEG round=oramnuc2 gib=90 members=1 pct=15 arm=main avail_gb=0 mem_mb=0 rep=2 rc=0 wall=240.668 cpu=1017.375 peak_mb=20970 gbps=0.402 route=bands corpus_b=16568156160 mapgate=refused set=140427AEC90D9A55 parfiles=14 parbytes=14553613880 warm_s=45.7 page_reads=382902 pages_in=51848824 disk_read_gb=195.84 avail_mb_before=59246 avail_mb_after=59118 load_before=9 load_after=9 foreign_cpu=27.8 foreign_after=107.5 errlen=1425 rig=oramx.ps1:fab68c5a3a34a47e+plib.ps1:f7d1fdb395521f09+ramlock.ps1:3eaff2dd775b3793 ts=2026-09-18T21:49:04.6947511Z
+TIMING leg=g90-n1-r15-main-a0-m0-rep2 INFO repair-timing: create arms: n=32768 rows=4915 batches=2 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING leg=g90-n1-r15-main-a0-m0-rep2 INFO repair-timing: create map refused: payload 96636764160 B + headroom 0 B against host 62119428096 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING leg=g90-n1-r15-main-a0-m0-rep2 INFO repair-timing: create stripe-first admitted: 2 batch(es), 4915 rows, n=32768, bands of up to 16568156160 B over copies
+TIMING leg=g90-n1-r15-main-a0-m0-rep2 INFO repair-timing: fold tile budget 32 KiB (L2 per core 256 KiB)
+TIMING leg=g90-n1-r15-main-a0-m0-rep2 INFO repair-timing: create stripe-first: 4915 rows in 6 chunk(s) of 493 stripes (n=32768, bands of 16542334976 B over copies, read 157.79s, probe 3.53s, 8 reader(s), W=512, threads=12, probe ok): 239.67s
+TIMING leg=g90-n1-r15-main-a0-m0-rep2 INFO repair-timing: create scan + fold: 240.05s; batch fold width 12 of 12 a priori (0 restore(s)); scan lanes 2 of 12 a priori
+TIMING leg=g90-n1-r15-main-a0-m0-rep2 INFO repair-timing: plan prep: 2.43ms over 1 cold build(s), 2880 stripe use(s) - 0.001% of the 240.63s create
+TIMING leg=g90-n1-r15-main-a0-m0-rep2 mem-floor: live high-water | ru_maxrss 21989 MB | rss 21989 MB | footprint 21989 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 21989 MB
+TIMING leg=g90-n1-r15-main-a0-m0-rep2 mem-floor: sampled peak rss | ru_maxrss 21989 MB | rss 21989 MB | footprint 21989 MB | rss over footprint 0 MB | repair work 0 MB (own peak 0) | scan reads 0 MB (own peak 0) | verifier tables 0 MB | unattributed 21989 MB
+ROUTE-IDENTITY cell=g90-n1-r15-main legs=2 distinct=1 routes=bands
+ROUTE-IDENTITY cell=g90-n1-r15-nobands legs=2 distinct=1 routes=refused
+ROUTE-IDENTITY cell=g90-n1-r5-main legs=2 distinct=1 routes=bands
+ROUTE-IDENTITY cell=g90-n1-r5-nobands legs=2 distinct=1 routes=refused
+SET-IDENTITY shape=g90-n1-r15 legs=4 distinct=1 digests=140427AEC90D9A55
+SET-IDENTITY shape=g90-n1-r5 legs=4 distinct=1 digests=F0C4002077022635
+ALL DONE end=2026-09-18T21:49:05.4359299Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock

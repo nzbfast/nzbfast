@@ -1,0 +1,24 @@
+ok   w4 carries exactly four banked legs
+ok   w5 carries exactly four banked legs
+ok   w6 carries exactly four banked legs
+ok   w7 carries exactly four banked legs
+ok   w8 carries exactly four banked legs
+ok   w9 carries exactly four banked legs
+ok   w10 carries exactly four banked legs
+ok   8.20.8's four exact rows hold: w4 syndromes 155.81 IS the median of its legs
+ok   8.20.8's four exact rows hold: w6 syndromes 219.53 IS the median of its legs
+ok   8.20.8's four exact rows hold: w8 syndromes 272.14 IS the median of its legs
+ok   8.20.8's four exact rows hold: w9 syndromes 275.78 IS the median of its legs
+ok   8.20.8's three bad rows hold: w5 syndromes 188.30 is NOT the median (banked 191.60)
+ok   8.20.8's three bad rows hold: w7 syndromes 245.13 is NOT the median (banked 250.75)
+ok   8.20.8's three bad rows hold: w10 syndromes 281.44 is NOT the median (banked 296.66)
+ok   8.20.8's stronger claim holds: w5 syndromes 188.30 sits BELOW every one of its four legs (cheapest 190.99)
+ok   8.20.8's stronger claim holds: w10 syndromes 281.44 sits BELOW every one of its four legs (cheapest 288.85)
+ok   w7 is 'near the min' rather than below it, as 8.20.8 says (245.13 vs min 245.04)
+ok   legs.json names the same two leg files as the round
+ok   legs.json carries all 16 legs of legs-p4.jsonl
+ok   legs.json agrees with legs-p4.jsonl field for field, so the published mirror reduces the same numbers this copy does
+ok   legs.json carries all 12 legs of legs-p4b.jsonl
+ok   legs.json agrees with legs-p4b.jsonl field for field, so the published mirror reduces the same numbers this copy does
+---
+p4recheck --selftest: OK - 22 checks, 8.20.8's finding re-derived independently

@@ -1,0 +1,52 @@
+legs 28  not-ok-or-folded 0
+W [512]  slabs [1]  threads [8]  slice [262144]  m [1400]
+windows 118  dropped under 1000 sources: 0
+
+        S      t s    n    spr% |     lv   fmin   fmed   fmax |   add paired     add%
+     1095    0.519    2    0.10 | no fill line
+     1159    0.529    4    1.59 | no fill line
+     1191    0.533    2    1.01 | no fill line
+     3208    0.858    4    0.55 | no fill line
+     3240    0.863    4    2.61 | no fill line
+     4000    0.984   14    1.44 | no fill line
+     4168    1.010    2    0.00 | no fill line
+     5024    1.140   12    1.75 | no fill line
+     5704    1.260    2    0.00 | no fill line
+     6016    1.300   10    1.54 | no fill line
+     7008    1.460    8    1.37 | no fill line
+     7240    1.495    4    0.67 | no fill line
+     7520    1.550    8    7.74 | no fill line
+     8000    2.080    6    5.29 | no fill line
+     8512    2.965    6    7.76 | no fill line
+     9024    3.095    6    0.97 | no fill line
+    10016    3.105    6    1.93 | no fill line
+    11240    3.100    2    0.65 | no fill line
+    12000    3.135    4    2.23 | no fill line
+    14016    3.165    4    1.26 | no fill line
+    15240    3.145    2    0.95 | no fill line
+    16000    3.210    2    1.25 | no fill line
+    20000    3.275    2    0.92 | no fill line
+    28000    3.405    2    0.88 | no fill line
+
+SECANTS between consecutive widths (T cancels: m is fixed)
+     S_lo      S_hi           dS df/dS ms/src
+     1191      3208         2017     0.1611
+     3240      4000          760     0.1586
+     4000      4168          168     0.1571
+     4168      5024          856     0.1519
+     5024      5704          680     0.1765
+     5704      6016          312     0.1282
+     6016      7008          992     0.1613
+     7008      7240          232     0.1509
+     7240      7520          280     0.1964
+     7520      8000          480     1.1042
+     8000      8512          512     1.7285
+     8512      9024          512     0.2539
+     9024     10016          992     0.0101
+    10016     11240         1224    -0.0041
+    11240     12000          760     0.0461
+    12000     14016         2016     0.0149
+    14016     15240         1224    -0.0163
+    15240     16000          760     0.0855
+    16000     20000         4000     0.0162
+    20000     28000         8000     0.0163

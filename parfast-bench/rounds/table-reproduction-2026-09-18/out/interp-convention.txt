@@ -1,0 +1,12 @@
+rowgate.cross()      : m = exp(log m0 + t*(log m1 - log m0))   GEOMETRIC in m
+waskred.crossover()  : m = m0 + t*(m1 - m0)                    LINEAR in m
+both share t = -log(r0) / (log r1 - log r0)
+
+ladder                        m0      m1 geometric    linear      gap  published pair
+cu9 1MiB n16384 -t4          384     448    408.47    409.65    +1.18  408 (rowgate) vs 409.6 (w3winred)
+cu9 1MiB n16384 -t16         320     384    341.75    343.09    +1.33  342 (rowgate) vs 342.9 (w3winred)
+EPYC 64k -t4             no bracket
+
+The gap is the arithmetic-minus-geometric mean of the bracket, so it is
+ALWAYS >= 0: every figure in the 18 Sep error-bars file's crossover column
+sits at or above what the campaign's original reducer returns on the same legs.

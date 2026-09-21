@@ -1,0 +1,14 @@
+8.18.6 re-fit at the published 45-leg / <6.20% threshold: 45 legs, 66 window points
+
+quantity                  published       re-run
+best K                         4275         4275
+c_l ms/source                1.2405       1.2405
+c_w ms/row below             0.9440       0.9440
+c_r ms/row above             0.0729       0.0729
+ratio c_r/c_w                0.0772       0.0772
+r2                          0.94789      0.94789
+SSE (knee model)              16.34        16.34
+no-knee r2                  0.92676      0.92676
+no-knee SSE                   22.97        22.97
+SSE at K=4369                 16.36        16.36
+knee removes                  28.9%         28.9%

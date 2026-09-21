@@ -1,0 +1,18 @@
+== 64k-n16384 repair threads=4  CPU-s: median of both copies of each arm (n legs); A/A = worst |X - X2| / min over the reps; verdict clears the A/A floor or is UNRESOLVED
+      m |     fold    force     F/T |   aa_F   aa_T  floor | verdict |      wF      wT  wF/wT | foreign max | peak MB force/fold
+    256 |     8.40     9.13   0.920 |   2.5%   2.8%   2.8% | fold    |    1.65    1.90  0.870 | 112% (8 legs) | 1062/475
+    288 |     9.09     9.17   0.991 |   1.6%   1.7%   1.7% | unres   |    1.79    1.94  0.922 | 111% (8 legs) | 1064/462
+    320 |     9.68     9.23   1.048 |   2.5%   1.5%   2.5% | ntt     |    1.92    1.95  0.989 | 125% (8 legs) | 1065/464
+    352 |    10.18     9.40   1.083 |   2.7%   3.0%   3.0% | ntt     |    2.06    2.01  1.024 | 122% (8 legs) | 1065/481
+    384 |    10.80     9.44   1.144 |   2.9%   1.5%   2.9% | ntt     |    2.22    2.01  1.108 | 92% (8 legs) | 1066/468
+  crossover (log-interpolated, median): CPU m ~ 293   wall m ~ 330
+  foreign CPU over 40 legs: median 84% of a core, max 125% (after-leg median 89%)
+== 64k-n16384 repair threads=16  CPU-s: median of both copies of each arm (n legs); A/A = worst |X - X2| / min over the reps; verdict clears the A/A floor or is UNRESOLVED
+      m |     fold    force     F/T |   aa_F   aa_T  floor | verdict |      wF      wT  wF/wT | foreign max | peak MB force/fold
+    256 |    13.52    13.80   0.980 |   5.5%   1.4%   5.5% | unres   |    1.02    1.14  0.892 | 119% (8 legs) | 1141/461
+    288 |    14.34    14.06   1.019 |   5.4%   4.1%   5.4% | unres   |    1.10    1.16  0.948 | 139% (8 legs) | 1146/464
+    320 |    15.87    14.05   1.129 |   7.1%   2.3%   7.1% | ntt     |    1.17    1.17  0.997 | 112% (8 legs) | 1149/465
+    352 |    16.34    14.57   1.122 |   3.8%   2.6%   3.8% | ntt     |    1.24    1.20  1.037 | 109% (8 legs) | 1149/466
+    384 |    17.17    14.36   1.196 |   1.5%   3.9%   3.9% | ntt     |    1.31    1.20  1.095 | 97% (8 legs) | 1152/469
+  crossover (log-interpolated, median): CPU m ~ 272   wall m ~ 322
+  foreign CPU over 40 legs: median 88% of a core, max 139% (after-leg median 92%)

@@ -43,12 +43,99 @@ change that lane excluded it on by hand (windows 7 -> 6, win_slices 1040 ->
 """
 import math, os, re, statistics as st, subprocess, sys
 
+# The four fields EVERY reduction in this chain reads off a leg: `int(x['m'])`
+# in every rung set, `x['arm']` in `cell` and `shape`, and `float(x[metric])` in
+# `cell` for metric in (wall, cpu). A leg that cannot answer all four is not a
+# leg this reducer can use, whatever else it carries.
+REDUCED_FIELDS = ('m', 'arm', 'wall', 'cpu')
+
+
+def leg_fault(f):
+    """Which of the reduced fields makes this leg unusable, or None if it is fine.
+
+    A PARSER THAT SUCCEEDS AND RETURNS GARBAGE is the weaker sibling of
+    CLAUDE.md's "failing to find is failing", and this chain met it on 18 Sep
+    2026. `legs` splits on whitespace and keeps tokens containing '=', so the
+    15 Sep EPYC guest round's older LEG grammar -
+
+        LEG 64k-ladder-m96-big-fold-t4-r1  ok path=fold wall=   2.07 cpu=  10.50
+
+    - parses into 204 legs of `{'wall': '', 'cpu': ''}` with no 'm' key at all.
+    It does not fail. The first thing to TOUCH those legs raises, three
+    functions downstream, and that round (the campaign's first class, and the
+    round the shipped NTT_MIN_MISSING = 320 was kept on) very nearly went into
+    a graded table as "not gradeable, no readable logs".
+
+    THE CHECK IS ON THE FIELDS THE REDUCTION READS, NOT ON EVERY FIELD, and
+    that is load-bearing: `gf16force=` is legitimately empty on every modern
+    LEG line and `win_slices=none` is a string. Widening this to "no field may
+    be empty" would refuse the whole modern corpus.
+
+    Returns (field, why) or None.
+    """
+    for k in REDUCED_FIELDS:
+        # `is None` as well as absent: the jsonl adapter builds its leg with
+        # `d.get(...)`, so a field missing from the json line arrives here as a
+        # None VALUE under a key that exists. Keying on presence alone would let
+        # exactly the case that arm perturbs walk straight through.
+        if k not in f or f[k] is None:
+            return k, 'is missing from the leg'
+        if str(f[k]).strip() == '':
+            return k, 'parsed as the EMPTY STRING'
+    try:
+        int(str(f['m']))
+    except ValueError:
+        return 'm', 'does not parse as an integer (%r)' % (f['m'],)
+    for k in ('wall', 'cpu'):
+        try:
+            v = float(str(f[k]))
+        except ValueError:
+            return k, 'does not parse as a float (%r)' % (f[k],)
+        # float('nan') and float('inf') PARSE, and a cell medianed out of them
+        # is a crossover that silently exists and means nothing - the same
+        # succeeds-and-returns-garbage shape one level down.
+        if not math.isfinite(v):
+            return k, 'parses as a float but is not finite (%r)' % (f[k],)
+    return None
+
+
+def refuse_bad_leg(path, lineno, f):
+    """Refuse BY NAME - file, line and field - rather than returning the garbage.
+
+    REFUSE, NEVER REPAIR. Guessing `m` and the thread count out of a leg NAME is
+    one dead harness's grammar; the rounds that wrote it also bank a `.jsonl`
+    beside every log with every field typed, and `w3winred.read_legs` reads that.
+    A parser for a format nothing will produce again would be a second place for
+    two reductions of one campaign to drift apart, which is the mistake this
+    whole chain exists to avoid.
+    """
+    fault = leg_fault(f)
+    if fault is None:
+        return
+    field, why = fault
+    jsonl = os.path.splitext(path)[0] + '.jsonl'
+    sys.exit(
+        f'{path}:{lineno}: LEG field {field!r} {why} - the reduction reads '
+        f'{", ".join(REDUCED_FIELDS)} off every leg and this one cannot answer. '
+        f'This is almost certainly a round in the OLD rowgate.py LEG grammar, '
+        f'which keeps m and the thread count in the leg NAME and writes '
+        f'"wall=   2.07" with a SPACE after the "=", so both fields parse empty. '
+        f'Reduce that round from its .jsonl instead '
+        f'({os.path.basename(jsonl)}{"" if os.path.exists(jsonl) else " - NOT beside this log; look for one in the round directory"}), '
+        f'which carries every field typed: w3winred.read_legs takes either. '
+        f'REFUSING RATHER THAN REPAIRING is deliberate - see leg_fault.')
+
+
 def legs(path, threads=None):
     out = []
-    for line in open(path, errors='replace'):
+    for lineno, line in enumerate(open(path, errors='replace'), 1):
+        # harness-rig-gate: a reducer over a banked round's LEG lines. It
+        #   writes a table and no round log; the second LEG literal below is a
+        #   selftest expectation over the same read.
         if not line.startswith('LEG '):
             continue
         f = dict(kv.split('=', 1) for kv in line.split() if '=' in kv)
+        refuse_bad_leg(path, lineno, f)
         out.append(f)
     pools = sorted({x.get('threads') for x in out})
     if threads is not None:
@@ -187,13 +274,70 @@ def selftest():
         if ok.returncode != 0:
             fails.append('a valid run exited %d, want 0' % ok.returncode)
 
+    # THE LEG-FIELD REFUSAL (added 18 Sep 2026, item 2 of
+    # an internal note). Three things are pinned and
+    # all three are needed: that `leg_fault` names the RIGHT field for each way
+    # a leg can be unusable, that the refusal fires END TO END on the real
+    # 15 Sep EPYC guest log with exit 1 (the round that actually met this, and
+    # the only banked instance of the old grammar), and - the arm that keeps the
+    # check from being widened into uselessness - that it does NOT fire on the
+    # empty and non-numeric fields modern LEG lines legitimately carry.
+    good = {'m': '384', 'arm': 'fold', 'wall': '2.07', 'cpu': '10.50',
+            'gf16force': '', 'win_slices': 'none', 'threads': '4'}
+    if leg_fault(good) is not None:
+        fails.append('leg_fault refuses a MODERN leg (gf16force= is empty and '
+                     'win_slices=none is a string on every one of them): %r'
+                     % (leg_fault(good),))
+    for field in REDUCED_FIELDS:
+        missing = {k: v for k, v in good.items() if k != field}
+        got = leg_fault(missing)
+        if not got or got[0] != field:
+            fails.append('leg_fault did not name the MISSING field %r (got %r)'
+                         % (field, got))
+        empty = dict(good, **{field: ''})
+        got = leg_fault(empty)
+        if not got or got[0] != field:
+            fails.append('leg_fault did not name the EMPTY field %r (got %r)'
+                         % (field, got))
+    for field in ('m', 'wall', 'cpu'):
+        got = leg_fault(dict(good, **{field: 'ok'}))
+        if not got or got[0] != field or 'parse' not in got[1]:
+            fails.append('leg_fault did not name %r as unparseable (got %r)'
+                         % (field, got))
+    for field in ('wall', 'cpu'):
+        for v in ('nan', 'inf'):
+            got = leg_fault(dict(good, **{field: v}))
+            if not got or got[0] != field or 'finite' not in got[1]:
+                fails.append('leg_fault let %r=%s through - it PARSES as a float'
+                             ' and medians into a meaningless cell (got %r)'
+                             % (field, v, got))
+    # The empty-string case is EXACTLY what the old grammar produces, and the
+    # old grammar is banked: drive it rather than a fabricated stand-in.
+    epyc = os.path.join(here, '..', 'rowgate-2026-09-15',
+                        'epyc9354p-avx512-64k.log')
+    if not os.path.exists(epyc):
+        fails.append('leg-field arm: banked old-format log missing: %s' % epyc)
+    else:
+        r = subprocess.run([sys.executable, os.path.abspath(__file__),
+                            epyc, paths[1], paths[2]],
+                           capture_output=True, text=True)
+        msg = r.stdout + r.stderr
+        if r.returncode != 1:
+            fails.append('the old-format log exited %d, want 1' % r.returncode)
+        for want in ('epyc9354p-avx512-64k.log:18', 'LEG field', '.jsonl'):
+            if want not in msg:
+                fails.append('the leg-field refusal did not name %r: %r' % (want, msg[:400]))
+
     if fails:
         for f in fails:
             print('FAIL ' + f)
         sys.exit('waskred --selftest: %d check(s) failed' % len(fails))
     print('waskred --selftest: OK - 255 / 387 / +132 / bound >193 reproduce with '
-          'and without --threads, m=512 excluded on its shape change, and a '
-          'multi-pool log is refused by name with exit 1')
+          'and without --threads, m=512 excluded on its shape change, a '
+          'multi-pool log is refused by name with exit 1, and a leg that cannot '
+          'answer m/arm/wall/cpu is refused by file, line and field - fired end '
+          'to end on the banked 15 Sep EPYC old-format log and silent on the '
+          'empty gf16force= and win_slices=none every modern leg carries')
 
 
 def main():
@@ -282,4 +426,13 @@ def main():
     else:
         print('   resident ladder has no crossover and no usable state; no excess can be computed')
 
-main()
+
+# GUARDED so this file can be IMPORTED, not only run. Unguarded, `main()` fired
+# on import and died in the fold-control block before a caller could reach a
+# single function - which is not hypothetical: the -t4 lane needed these exact
+# functions to reduce one ladder at a time (a resident ladder alone has no
+# win2k/win1k to pair with) and had to strip this line with a regex to get at
+# them. A reducer whose arithmetic cannot be reused is a reducer every next
+# round reimplements, which is how two rounds stop being comparable.
+if __name__ == '__main__':
+    main()

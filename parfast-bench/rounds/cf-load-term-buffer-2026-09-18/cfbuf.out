@@ -1,0 +1,108 @@
+2026-09-18T10:59:42.3429895Z CFBUF start root=<rig>\cfbuf18sep lane=cf-load-term-buffer-and-placement-18sep
+2026-09-18T10:59:42.4062573Z HARNESS plib.ps1 sha256=20CB3299332113BD
+2026-09-18T10:59:42.4062573Z HARNESS wcomb.ps1 sha256=60DED61D70BC4ABD
+2026-09-18T10:59:42.4062573Z HARNESS loadgen.ps1 sha256=9698D5DEB71A399D
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=cfbuf pid=8088 started=2026-09-18T10:59:42.4222216Z
+2026-09-18T10:59:42.4538299Z CENSUS setup lock_exists=True lock_held=True lock_text=round=cfbuf pid=8088 started=2026-09-18T10:59:42.4222216Z
+2026-09-18T10:59:43.7166269Z CENSUS setup foreign_cpu=31.2 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T10:59:43.7235306Z BIN copying <rig>\wcomb-16sep\src\target\release\parfast.exe -> <rig>\cfbuf18sep\parfast.exe
+2026-09-18T10:59:43.9384435Z BIN sha256=8983A55A4E260BA395B42D252EC1A421B1F35AB8B789CD3F3191E2E01E8E2C84 <rig>\cfbuf18sep\parfast.exe
+2026-09-18T10:59:43.9384435Z FIXTURE copying <rig>\wcomb-16sep\fix -> <rig>\cfbuf18sep\fix
+2026-09-18T10:59:45.4871320Z FIXTURE copied secs=1.5
+2026-09-18T10:59:45.7414623Z GEN-SELFTEST start buf_kib=98304
+2026-09-18T11:00:06.8939231Z GEN-SELFTEST foreign_cpu_with_generator=28.1 (box idles near 18; this 1 s sampler overstates a BIRTH sample by 2-5x on purpose-built evidence, so read it as alive/not-alive)
+2026-09-18T11:00:31.9470966Z GEN-SELFTEST ok pid=17128 died on its own deadline after 25 s of nobody helping it
+2026-09-18T11:00:31.9631150Z GEN-SELFTEST-LOG 2026-09-18T10:59:46.2056424Z loadgen pid=17128 START target_pct=50 buf_kib=98304 deadline=2026-09-18T11:00:30.7414623Z max_s=90 hard_stop=2026-09-18T11:00:30.7414623Z
+2026-09-18T11:00:31.9631150Z GEN-SELFTEST-LOG 2026-09-18T11:00:30.7783017Z loadgen pid=17128 STOP reason=deadline elapsed_s=44.5 achieved_pct=49.7 touched_mib=83127
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+2026-09-18T11:00:31.9789876Z PHASE-A start (buffer sweep at a FIXED 72% of one core; 4096 is the banked control)
+2026-09-18T11:00:32.0264604Z CENSUS q1 lock_exists=False lock_held=False lock_text=
+2026-09-18T11:00:33.1045145Z CENSUS q1 foreign_cpu=23.4 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T11:06:56.3022542Z LEGSET q1 rc=0 legs=22 extra=[-Reps 1 -Threads 4,12] log=<rig>\cfbuf18sep\q1.log
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=cfbuf pid=8088 started=2026-09-18T11:06:56.3146456Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+2026-09-18T11:06:56.3146456Z LOCKPROBE b4a lock was free on try 1 - starting load now
+2026-09-18T11:06:56.3376937Z GEN-START pid=15968 target_pct=72 buf_kib=4096 deadline=2026-09-18T11:31:56.3146456Z
+2026-09-18T11:06:56.3376937Z CENSUS b4a lock_exists=False lock_held=False lock_text=
+2026-09-18T11:06:57.4146217Z CENSUS b4a foreign_cpu=40.6 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T11:13:42.1560013Z LEGSET b4a rc=0 legs=22 extra=[-Reps 1 -Threads 4,12] log=<rig>\cfbuf18sep\b4a.log
+2026-09-18T11:13:42.1640390Z GEN-STOP pid=15968 kill sent
+2026-09-18T11:13:44.1874910Z GEN-STOP pid=15968 confirmed gone
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=cfbuf pid=8088 started=2026-09-18T11:13:44.2027202Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+2026-09-18T11:13:44.2186560Z LOCKPROBE b24a lock was free on try 1 - starting load now
+2026-09-18T11:13:44.2507146Z GEN-START pid=15820 target_pct=72 buf_kib=24576 deadline=2026-09-18T11:38:44.2186560Z
+2026-09-18T11:13:44.2561288Z CENSUS b24a lock_exists=False lock_held=False lock_text=
+2026-09-18T11:13:45.3389829Z CENSUS b24a foreign_cpu=25 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T11:20:40.3766337Z LEGSET b24a rc=0 legs=22 extra=[-Reps 1 -Threads 4,12] log=<rig>\cfbuf18sep\b24a.log
+2026-09-18T11:20:40.3766337Z GEN-STOP pid=15820 kill sent
+2026-09-18T11:20:42.3844036Z GEN-STOP pid=15820 confirmed gone
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=cfbuf pid=8088 started=2026-09-18T11:20:42.3921737Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+2026-09-18T11:20:42.4002229Z LOCKPROBE b96a lock was free on try 1 - starting load now
+2026-09-18T11:20:42.4478730Z GEN-START pid=17236 target_pct=72 buf_kib=98304 deadline=2026-09-18T11:45:42.4002229Z
+2026-09-18T11:20:42.4478730Z CENSUS b96a lock_exists=False lock_held=False lock_text=
+2026-09-18T11:20:43.5384879Z CENSUS b96a foreign_cpu=29.7 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T11:28:14.5551618Z LEGSET b96a rc=0 legs=22 extra=[-Reps 1 -Threads 4,12] log=<rig>\cfbuf18sep\b96a.log
+2026-09-18T11:28:14.5579520Z GEN-STOP pid=17236 kill sent
+2026-09-18T11:28:16.5652717Z GEN-STOP pid=17236 confirmed gone
+2026-09-18T11:28:16.5713104Z CENSUS qm lock_exists=False lock_held=False lock_text=
+2026-09-18T11:28:17.7272722Z CENSUS qm foreign_cpu=23.4 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T11:34:39.2130339Z LEGSET qm rc=0 legs=22 extra=[-Reps 1 -Threads 4,12] log=<rig>\cfbuf18sep\qm.log
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=cfbuf pid=8088 started=2026-09-18T11:34:39.2130339Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+2026-09-18T11:34:39.2233297Z LOCKPROBE b96b lock was free on try 1 - starting load now
+2026-09-18T11:34:39.2298514Z GEN-START pid=16748 target_pct=72 buf_kib=98304 deadline=2026-09-18T11:59:39.2233297Z
+2026-09-18T11:34:39.2298514Z CENSUS b96b lock_exists=False lock_held=False lock_text=
+2026-09-18T11:34:40.3268784Z CENSUS b96b foreign_cpu=39.1 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T11:41:31.8801905Z LEGSET b96b rc=0 legs=22 extra=[-Reps 1 -Threads 4,12] log=<rig>\cfbuf18sep\b96b.log
+2026-09-18T11:41:31.8821988Z GEN-STOP pid=16748 kill sent
+2026-09-18T11:41:33.8982163Z GEN-STOP pid=16748 confirmed gone
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=cfbuf pid=8088 started=2026-09-18T11:41:33.8982163Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+2026-09-18T11:41:33.9140227Z LOCKPROBE b24b lock was free on try 1 - starting load now
+2026-09-18T11:41:33.9539563Z GEN-START pid=16424 target_pct=72 buf_kib=24576 deadline=2026-09-18T12:06:33.9160388Z
+2026-09-18T11:41:33.9539563Z CENSUS b24b lock_exists=False lock_held=False lock_text=
+2026-09-18T11:41:35.0425648Z CENSUS b24b foreign_cpu=43.8 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T11:48:31.3427689Z LEGSET b24b rc=0 legs=22 extra=[-Reps 1 -Threads 4,12] log=<rig>\cfbuf18sep\b24b.log
+2026-09-18T11:48:31.3427689Z GEN-STOP pid=16424 kill sent
+2026-09-18T11:48:33.3552058Z GEN-STOP pid=16424 confirmed gone
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=cfbuf pid=8088 started=2026-09-18T11:48:33.3552058Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+2026-09-18T11:48:33.3712037Z LOCKPROBE b4b lock was free on try 1 - starting load now
+2026-09-18T11:48:33.4113933Z GEN-START pid=4272 target_pct=72 buf_kib=4096 deadline=2026-09-18T12:13:33.3728002Z
+2026-09-18T11:48:33.4113933Z CENSUS b4b lock_exists=False lock_held=False lock_text=
+2026-09-18T11:48:34.5163865Z CENSUS b4b foreign_cpu=59.4 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T11:56:23.5651986Z LEGSET b4b rc=0 legs=22 extra=[-Reps 1 -Threads 4,12] log=<rig>\cfbuf18sep\b4b.log
+2026-09-18T11:56:23.5651986Z GEN-STOP pid=4272 kill sent
+2026-09-18T11:56:25.5739060Z GEN-STOP pid=4272 confirmed gone
+2026-09-18T11:56:25.5739060Z CENSUS q2 lock_exists=False lock_held=False lock_text=
+2026-09-18T11:56:26.6746110Z CENSUS q2 foreign_cpu=40.6 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T12:02:48.5643590Z LEGSET q2 rc=0 legs=22 extra=[-Reps 1 -Threads 4,12] log=<rig>\cfbuf18sep\q2.log
+2026-09-18T12:02:48.5643590Z PHASE-A done fails=[]
+2026-09-18T12:02:48.5721011Z CFBUF-CLEAN at=between-phases no generator pid of mine is alive
+2026-09-18T12:02:48.5721011Z PHASE-B start (pinned against unpinned at -t4; 0x55 = four DISTINCT cores, 0xF = four SMT siblings on two cores, topology READ from GetLogicalProcessorInformation)
+2026-09-18T12:02:48.5721011Z CENSUS u1 lock_exists=False lock_held=False lock_text=
+2026-09-18T12:02:49.6472846Z CENSUS u1 foreign_cpu=25 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T12:09:48.2702834Z LEGSET u1 rc=0 legs=22 extra=[-Reps 2 -Threads 4 -Label unpinned] log=<rig>\cfbuf18sep\u1.log
+2026-09-18T12:09:48.2702834Z CENSUS p55a lock_exists=False lock_held=False lock_text=
+2026-09-18T12:09:49.3442899Z CENSUS p55a foreign_cpu=21.9 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T12:16:24.5254602Z LEGSET p55a rc=0 legs=22 extra=[-Reps 2 -Threads 4 -Affinity 0x55 -Label pin0x55] log=<rig>\cfbuf18sep\p55a.log
+2026-09-18T12:16:24.5254602Z CENSUS pFa lock_exists=False lock_held=False lock_text=
+2026-09-18T12:16:25.6108791Z CENSUS pFa foreign_cpu=26.6 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T12:25:30.2492188Z LEGSET pFa rc=0 legs=22 extra=[-Reps 2 -Threads 4 -Affinity 0xF -Label pin0xF] log=<rig>\cfbuf18sep\pFa.log
+2026-09-18T12:25:30.2492188Z CENSUS pFb lock_exists=False lock_held=False lock_text=
+2026-09-18T12:25:31.3195468Z CENSUS pFb foreign_cpu=40.6 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T12:34:35.7742054Z LEGSET pFb rc=0 legs=22 extra=[-Reps 2 -Threads 4 -Affinity 0xF -Label pin0xF] log=<rig>\cfbuf18sep\pFb.log
+2026-09-18T12:34:35.7742054Z CENSUS p55b lock_exists=False lock_held=False lock_text=
+2026-09-18T12:34:36.8287850Z CENSUS p55b foreign_cpu=32.8 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T12:41:12.1991276Z LEGSET p55b rc=0 legs=22 extra=[-Reps 2 -Threads 4 -Affinity 0x55 -Label pin0x55] log=<rig>\cfbuf18sep\p55b.log
+2026-09-18T12:41:12.1991276Z CENSUS u2 lock_exists=False lock_held=False lock_text=
+2026-09-18T12:41:13.2776993Z CENSUS u2 foreign_cpu=25 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T12:48:20.5514529Z LEGSET u2 rc=0 legs=22 extra=[-Reps 2 -Threads 4 -Label unpinned] log=<rig>\cfbuf18sep\u2.log
+2026-09-18T12:48:20.5514529Z PHASE-B done
+2026-09-18T12:48:20.5514529Z CFBUF-CLEAN at=final no generator pid of mine is alive
+2026-09-18T12:48:21.5915584Z CFBUF foreign_cpu_after=45.3
+2026-09-18T12:48:21.5915584Z CENSUS final lock_exists=False lock_held=False lock_text=
+2026-09-18T12:48:22.7011976Z CENSUS final foreign_cpu=18.8 top=[System(4) SRAgent(5524) SearchIndexer(12044) dwm(1652) java(6136) SRService(3724)]
+2026-09-18T12:48:22.7011976Z CFBUF ALL DONE

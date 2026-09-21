@@ -1,0 +1,30 @@
+2026-09-18T13:31:36.4739730Z loadgen pid=15964 START target_pct=10 buf_kib=4096 deadline=2026-09-18T13:32:21.0327201Z max_s=90 hard_stop=2026-09-18T13:32:21.0327201Z
+2026-09-18T13:32:21.0604437Z loadgen pid=15964 STOP reason=deadline elapsed_s=44.5 achieved_pct=14.4 touched_mib=18863
+2026-09-18T13:38:47.3742324Z loadgen pid=3268 START target_pct=10 buf_kib=4096 deadline=2026-09-18T14:03:47.0263560Z max_s=1620 hard_stop=2026-09-18T14:03:47.0263560Z
+2026-09-18T13:39:47.4235637Z loadgen pid=3268 HEARTBEAT achieved_pct_since_start=13.6 elapsed_s=60 remaining_s=1440
+2026-09-18T13:40:47.4174747Z loadgen pid=3268 HEARTBEAT achieved_pct_since_start=13.5 elapsed_s=120 remaining_s=1380
+2026-09-18T13:41:47.4309341Z loadgen pid=3268 HEARTBEAT achieved_pct_since_start=13.3 elapsed_s=180 remaining_s=1320
+2026-09-18T13:42:47.4263653Z loadgen pid=3268 HEARTBEAT achieved_pct_since_start=13.1 elapsed_s=240 remaining_s=1260
+2026-09-18T13:43:47.4390292Z loadgen pid=3268 HEARTBEAT achieved_pct_since_start=13 elapsed_s=300 remaining_s=1200
+2026-09-18T13:44:47.4407490Z loadgen pid=3268 HEARTBEAT achieved_pct_since_start=13 elapsed_s=360 remaining_s=1140
+2026-09-18T13:45:16.3225104Z loadgen pid=6172 START target_pct=72 buf_kib=4096 deadline=2026-09-18T14:10:15.9217510Z max_s=1620 hard_stop=2026-09-18T14:10:15.9217510Z
+2026-09-18T13:46:16.3578994Z loadgen pid=6172 HEARTBEAT achieved_pct_since_start=71 elapsed_s=60 remaining_s=1440
+2026-09-18T13:47:16.3538793Z loadgen pid=6172 HEARTBEAT achieved_pct_since_start=70.8 elapsed_s=120 remaining_s=1380
+2026-09-18T13:48:16.3504429Z loadgen pid=6172 HEARTBEAT achieved_pct_since_start=70.8 elapsed_s=180 remaining_s=1320
+2026-09-18T13:49:16.3620142Z loadgen pid=6172 HEARTBEAT achieved_pct_since_start=70.4 elapsed_s=240 remaining_s=1260
+2026-09-18T13:50:16.3620827Z loadgen pid=6172 HEARTBEAT achieved_pct_since_start=66.6 elapsed_s=300 remaining_s=1200
+2026-09-18T13:51:16.3780679Z loadgen pid=6172 HEARTBEAT achieved_pct_since_start=67 elapsed_s=360 remaining_s=1140
+2026-09-18T13:58:30.1098273Z loadgen pid=3244 START target_pct=72 buf_kib=4096 deadline=2026-09-18T14:23:29.7438833Z max_s=1620 hard_stop=2026-09-18T14:23:29.7438833Z
+2026-09-18T13:59:30.1596325Z loadgen pid=3244 HEARTBEAT achieved_pct_since_start=71.1 elapsed_s=60 remaining_s=1440
+2026-09-18T14:00:30.1587631Z loadgen pid=3244 HEARTBEAT achieved_pct_since_start=71 elapsed_s=120 remaining_s=1380
+2026-09-18T14:01:30.1584219Z loadgen pid=3244 HEARTBEAT achieved_pct_since_start=70.9 elapsed_s=180 remaining_s=1320
+2026-09-18T14:02:30.1788203Z loadgen pid=3244 HEARTBEAT achieved_pct_since_start=70 elapsed_s=240 remaining_s=1260
+2026-09-18T14:03:30.1832411Z loadgen pid=3244 HEARTBEAT achieved_pct_since_start=66.7 elapsed_s=300 remaining_s=1200
+2026-09-18T14:04:30.1696904Z loadgen pid=3244 HEARTBEAT achieved_pct_since_start=67.1 elapsed_s=360 remaining_s=1140
+2026-09-18T14:05:16.2326566Z loadgen pid=14716 START target_pct=10 buf_kib=4096 deadline=2026-09-18T14:30:15.8445473Z max_s=1620 hard_stop=2026-09-18T14:30:15.8445473Z
+2026-09-18T14:06:16.3022557Z loadgen pid=14716 HEARTBEAT achieved_pct_since_start=13 elapsed_s=60 remaining_s=1440
+2026-09-18T14:07:16.3159802Z loadgen pid=14716 HEARTBEAT achieved_pct_since_start=13 elapsed_s=120 remaining_s=1380
+2026-09-18T14:08:16.3332602Z loadgen pid=14716 HEARTBEAT achieved_pct_since_start=13.3 elapsed_s=180 remaining_s=1320
+2026-09-18T14:09:16.3214421Z loadgen pid=14716 HEARTBEAT achieved_pct_since_start=13.2 elapsed_s=240 remaining_s=1260
+2026-09-18T14:10:16.3366660Z loadgen pid=14716 HEARTBEAT achieved_pct_since_start=13 elapsed_s=300 remaining_s=1200
+2026-09-18T14:11:16.3516331Z loadgen pid=14716 HEARTBEAT achieved_pct_since_start=13 elapsed_s=360 remaining_s=1139

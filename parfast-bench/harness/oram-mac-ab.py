@@ -35,6 +35,10 @@ import subprocess
 import sys
 import time
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import pdrv  # noqa: E402
+
 LOCK = os.path.expanduser("~/.parfast-rig.lock")
 TOOLS = ("parfast", "par2turbo", "par2j", "par2")
 
@@ -87,6 +91,11 @@ def main():
     bins = {"base": os.path.abspath(a.base), "cand": os.path.abspath(a.cand)}
     for k, b in bins.items():
         print("BIN arm=%s path=%s sha256=%s" % (k, b, sha256(b)), flush=True)
+    # The HARNESS's own provenance, and the round-start twin of the
+    # per-leg `rig=` token - see `pdrv.harness_facts`. Without it a
+    # banked log cannot be traced to the harness revision that wrote
+    # it (census an internal note).
+    pdrv.harness_facts()
 
     waited = 0
     while busy():

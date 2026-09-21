@@ -91,6 +91,7 @@ IMAGE = os.environ.get("IMAGE", "debian:bookworm")
 # how two rounds come to disagree about what "cold" meant.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cgmap  # noqa: E402
+import pdrv   # noqa: E402 - for harness_facts; see main()
 
 ARM_ENV = {
     "bands": {"NZBFAST_PAR2GEN_MAP": "0"},
@@ -298,6 +299,14 @@ def secs(v, unit):
 
 def main():
     say("BANDONE start %s reps=%d shapes=%s arms=%s" % (TAG, REPS, SHAPES, ARMS))
+    # The HARNESS's own provenance, and the round-start twin of the
+    # per-leg `rig=` token - see `pdrv.harness_facts`. Without it a
+    # banked log cannot be traced to the harness revision that wrote
+    # it (census an internal note).
+    # NAMED EXPLICITLY rather than defaulted: this round's legs are built by
+    # cgmap.py's uncache and cgroup-counter helpers, so a stamp that omitted
+    # cgmap.py would not name what ran.
+    pdrv.harness_facts([os.path.abspath(__file__), cgmap.__file__, pdrv.__file__])
     with open(OUT, "a") as f:
         for shape in SHAPES:
             for rep in range(REPS):

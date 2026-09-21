@@ -59,7 +59,7 @@ env: BIN     the binary every arm uses unless ARM_BIN says otherwise
 import json, os, shutil, signal, socket, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pdrv import require_quiet_box, foreign_cpu  # noqa: E402
+from pdrv import require_quiet_box, foreign_cpu, harness_facts  # noqa: E402
 
 R = os.environ.get("R", "/root/wstage-16sep")
 BIN = os.environ["BIN"]
@@ -289,6 +289,11 @@ def main():
         if not os.path.exists(arm_bin(arm)):
             raise SystemExit("arm %r: no such binary %s" % (arm, arm_bin(arm)))
     bins = sorted({arm_bin(a) for a in ARMS} | {SERVER_BIN})
+    # The HARNESS's own provenance, and the round-start twin of the
+    # per-leg `rig=` token - see `pdrv.harness_facts`. Without it a
+    # banked log cannot be traced to the harness revision that wrote
+    # it (census an internal note).
+    harness_facts()
     print("wstage round start %s R=%s reps=%d cells=%s arms=%s"
           % (utcnow(), R, REPS, ORDER_CELLS, ARMS), flush=True)
     # Every distinct binary's sha256, in the log, because a round with more

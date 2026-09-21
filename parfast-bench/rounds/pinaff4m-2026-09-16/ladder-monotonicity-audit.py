@@ -24,7 +24,26 @@ column beside the verdict, and never treat a hit as a defect on its own.
 """
 import re, subprocess, sys, glob, os
 
-tbl  = re.compile(r'^== (\S+) threads=(\d+)')
+# THE PHASE TOKEN IS OPTIONAL AND THAT IS NOT COSMETIC. rowgate.py's read
+# header was `== <label> threads=N` until 17 Sep 2026, when the create phase
+# joined its grouping key and it became `== <label> <create|repair> threads=N`.
+# This regex did not follow, so from that day the audit matched NOTHING and
+# printed `0 ladders   non-monotone: 0` - a clean bill over an empty set, on
+# every log in the campaign. Found 18 Sep 2026 by lane
+# `parfast-create-band-and-interleave-18sep`, which ran the mandated screen over
+# rounds/crg4-2026-09-16/ and got zero ladders out of the very log
+# whose non-monotone -t4 ladder rounds/crpool4m-2026-09-17/README.md
+# quotes a result for. Accept both spellings so banked logs and new ones both
+# reduce, and see the refusal below for the half that stops this recurring.
+#
+# THE REST OF THE CAMPAIGN WAS SWEPT FOR THE SAME BREAK AND IS CLEAN (18 Sep
+# 2026). Of the nine python reducers that mention rowgate, this was the ONLY
+# one parsing its printed `== ...` table header: kneeratio.py, wcombsum.py,
+# bandpass.py, waskred.py, t16-peak-audit.py, regrid-and-arm-split.py and
+# band-trade.py all read LEG lines directly or print their own headers, so a
+# rowgate header change cannot blind them. Recorded so the next lane does not
+# re-run the sweep; it is a negative result and it was not free to get.
+tbl  = re.compile(r'^== (\S+)(?: (?:create|repair))? threads=(\d+)')
 row  = re.compile(r'^\s*(\d+) \|\s*[\d.]+\s+[\d.]+\s+([\d.]+) \|\s*[\d.]+%\s+[\d.]+%\s+([\d.]+)%')
 
 files = sorted(set(sys.argv[1:]))
@@ -47,6 +66,18 @@ for lg in files:
             cur['ft'].append(float(r.group(2))); cur['fl'].append(float(r.group(3)))
     if cur and len(cur['ft']) >= 3: out_rows.append(cur)
 
+# FAILING TO FIND IS FAILING. Reducing zero ladders out of a non-empty file
+# list means the audit could not locate its subject - a renamed label, a moved
+# header format, a log rowgate refused - and that is the precondition for every
+# rubber-stamp incident in this repo's history. It printed `0 ladders` and
+# exit 0 for a day and a half and nobody noticed. It now REFUSES, loudly, and a
+# lane that sees this must fix the pointer and never the refusal.
+if files and not out_rows:
+    print("REFUSED: reduced ZERO ladders out of %d file(s): %s" % (len(files), ', '.join(files)))
+    print("  This is the audit reporting its own BLINDNESS, not a clean screen.")
+    print("  Check that rowgate.py read prints a `== <label> [create|repair] threads=N`")
+    print("  header for these logs, and that each table has at least 3 rungs.")
+    sys.exit(2)
 print(f"{'thr':>4} {'label':<22}{'mono':<6}{'worst floor':>12}  log")
 print("-"*110)
 bad16 = bad_other = tot16 = tot_other = 0

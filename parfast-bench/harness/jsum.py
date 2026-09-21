@@ -45,6 +45,10 @@ def parse(path):
             harness.append(line.strip())
         elif line.startswith("BOX-BUSY-WAIT"):
             retries += 1
+        # harness-rig-gate: a REDUCER. It parses the LEG lines of a log it is
+        #   handed and writes no round log of its own, so there is nothing here
+        #   for a HARNESS-RIG line to name. It READS the token three lines up,
+        #   to refuse a fold whose legs came from two different harnesses.
         if not line.startswith("LEG "):
             continue
         v = {}

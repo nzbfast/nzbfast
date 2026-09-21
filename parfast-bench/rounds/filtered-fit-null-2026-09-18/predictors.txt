@@ -1,0 +1,21 @@
+What predicts a null's width? Nothing in this table does.
+
+  cell                            n_lo  n_hi    r2 lo    r2 hi  x/top_lo     null w  null w %
+  8.17 shipped arm, gate 128        25     9  0.99975  0.96421      1.14      141.6      0.80
+  8.17 ADDITIVE_MIN=64 arm          13     9  0.99991  0.97026      2.41     5322.6     29.38
+  8.17 ADDITIVE=0 arm (control      14     5  0.99964  0.99952     -0.04    13867.8   2404.03
+  8.21 depth-1 nibble, two til k1     5     6  0.99929  0.99843      1.03      805.1     19.03
+  8.21 depth-1 nibble, two til k2     6     4  0.99843  0.99294      1.04     1228.8      5.60
+
+  READ THE r2 COLUMNS AGAINST THE LAST ONE. The BEST-fitting pair
+  in the table (0.99964 / 0.99952) has the WORST null, and the
+  worst-fitting single line (0.96421) belongs to the TIGHTEST. So
+  r2 is not merely a poor predictor of how well a location is
+  determined here - over these five it runs the wrong way.
+
+  AND NO OTHER COLUMN RESCUES IT. Extrapolation explains the g64
+  arm (2.41x its own top rung, a 29% null) and fails on 8.21's
+  first knee, which extrapolates least of all five (1.03x) and
+  still carries a 19% null - there it is the five-rung lower line.
+  Two different causes, no column that catches both, which is the
+  case for measuring the null rather than arguing about the fit.

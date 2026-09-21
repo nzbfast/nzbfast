@@ -1,0 +1,65 @@
+2026-09-18T19:50:12.7504366+01:00 ZRIDER-ROUND start root=<rig>\zr18sep bin=<rig>\zr18sep\src\target\release\parfast.exe budget=21474836480 ladders=9 plan=zwarm:create:288 zsolo:create:288,320,352,384,416,448,480,512 zint:create:288,320,352,384,416,448,480,512 zdrift:create:384,416 zp3e8:rowgate:128,192,256 zp3e4:rowgate:128,192,256 ze8top:create:420,424,428,432,436,440 zp4rep:create:408,412,416 zp3pe8:rowgate:128,192,256
+2026-09-18T19:51:14.9037868+01:00 LOAD-GATE ok at=prebuild loads=4/0 waited_s=0
+2026-09-18T19:51:15.0914143+01:00 COORD-POST-VERIFIED CLAIM line is present and starts at column 0: CLAIM 2026-09-18T18:51:14Z coreultra9-4mib-riders-sitting-18sep
+2026-09-18T19:51:22.7604975+01:00 CLASS-PROBE P-core0 mask=0x1 got=0x1 wall_s=7.651 cpu_s=7.578 SPIN ms=7491 x=72000065999996.6 
+2026-09-18T19:51:35.9972197+01:00 CLASS-PROBE E-core4 mask=0x10 got=0x10 wall_s=13.239 cpu_s=13.172 SPIN ms=13046 x=72000065999996.6 
+2026-09-18T19:51:49.3121897+01:00 CLASS-PROBE E-core8 mask=0x100 got=0x100 wall_s=13.306 cpu_s=13.219 SPIN ms=13114 x=72000065999996.6 
+2026-09-18T19:52:02.5865486+01:00 CLASS-PROBE E-core11 mask=0x800 got=0x800 wall_s=13.273 cpu_s=13.172 SPIN ms=13080 x=72000065999996.6 
+2026-09-18T19:52:18.4697388+01:00 CLASS-PROBE LPE-core12 mask=0x1000 got=0x1000 wall_s=15.883 cpu_s=15.797 SPIN ms=15660 x=72000065999996.6 
+2026-09-18T19:52:24.2080065+01:00 EXTRACT rc=0 secs=5.7 into=<rig>\zr18sep\src
+2026-09-18T19:54:29.8792308+01:00 BUILD rc=0 secs=125.7 log=<rig>\zr18sep\build-zrider.log
+2026-09-18T19:54:29.9490909+01:00 BIN bytes=4173312 want_bytes=4173312 sha256=B61D98BD6690AD8C94D38814AB120B8579D194349E51BEE7CCC9D72FCEBCDE5F (a sha that matches no other round is EXPECTED and not a fault - the build embeds its own path; the byte count is the invariant across every build of 06d5734b7 on this fleet)
+2026-09-18T19:54:29.9516026+01:00 FIXTURE ABSENT - ladder zwarm builds it, then waits out the settle <rig>\zr18sep\fix-4194304-1024
+2026-09-18T19:55:07.1170481+01:00 LOAD-GATE ok at=zwarm loads=4 waited_s=0
+2026-09-18T19:55:07.2590055+01:00 COORD-POST-VERIFIED CLAIM line is present and starts at column 0: CLAIM 2026-09-18T18:55:07Z coreultra9-4mib-riders-sitting-18sep
+2026-09-18T19:55:07.2646362+01:00 LADDER zwarm label=4mr-warm phase=create aff=none (UNPINNED) threads=16 rungs=288 log=<rig>\zr18sep\harness\logs\zwarm.log
+2026-09-18T19:55:07.2646362+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\zr18sep\harness\wcomb.ps1" -Root "<rig>\zr18sep" -Bin "<rig>\zr18sep\src\target\release\parfast.exe" -NoBuild -Phase create -Tag zwarm -Label 4mr-warm -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs "288" -Threads "16" -Reps 1 -Residency resident -NttBudget 21474836480
+2026-09-18T20:12:59.6624443+01:00 ARM-DONE zwarm rc=0 legs=4 lock_waits=0
+2026-09-18T20:13:00.6858460+01:00 LOAD-GATE ok at=zsolo loads=1 waited_s=0
+2026-09-18T20:13:00.7972871+01:00 COORD-POST-VERIFIED CLAIM line is present and starts at column 0: CLAIM 2026-09-18T19:13:00Z coreultra9-4mib-riders-sitting-18sep
+2026-09-18T20:13:00.8131343+01:00 LADDER zsolo label=4mr-t16-solo phase=create aff=none (UNPINNED) threads=16 rungs=288,320,352,384,416,448,480,512 log=<rig>\zr18sep\harness\logs\zsolo.log
+2026-09-18T20:13:00.8131343+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\zr18sep\harness\wcomb.ps1" -Root "<rig>\zr18sep" -Bin "<rig>\zr18sep\src\target\release\parfast.exe" -NoBuild -Phase create -Tag zsolo -Label 4mr-t16-solo -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs "288,320,352,384,416,448,480,512" -Threads "16" -Reps 1 -Residency resident -NttBudget 21474836480
+2026-09-18T20:29:22.5143558+01:00 ARM-DONE zsolo rc=0 legs=32 lock_waits=0
+2026-09-18T20:29:23.5511973+01:00 LOAD-GATE ok at=zint loads=1 waited_s=0
+2026-09-18T20:29:23.6656657+01:00 COORD-POST-VERIFIED CLAIM line is present and starts at column 0: CLAIM 2026-09-18T19:29:23Z coreultra9-4mib-riders-sitting-18sep
+2026-09-18T20:29:23.6656657+01:00 LADDER zint label=4mr-int phase=create aff=none (UNPINNED) threads=4,16 rungs=288,320,352,384,416,448,480,512 log=<rig>\zr18sep\harness\logs\zint.log
+2026-09-18T20:29:23.6656657+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\zr18sep\harness\wcomb.ps1" -Root "<rig>\zr18sep" -Bin "<rig>\zr18sep\src\target\release\parfast.exe" -NoBuild -Phase create -Tag zint -Label 4mr-int -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs "288,320,352,384,416,448,480,512" -Threads "4,16" -Reps 1 -Residency resident -NttBudget 21474836480
+2026-09-18T21:08:50.3200511+01:00 ARM-DONE zint rc=0 legs=64 lock_waits=0
+2026-09-18T21:08:51.3711405+01:00 LOAD-GATE ok at=zdrift loads=1 waited_s=0
+2026-09-18T21:08:51.4874499+01:00 COORD-POST-VERIFIED CLAIM line is present and starts at column 0: CLAIM 2026-09-18T20:08:51Z coreultra9-4mib-riders-sitting-18sep
+2026-09-18T21:08:51.4891999+01:00 LADDER zdrift label=4mr-t16-drift phase=create aff=none (UNPINNED) threads=16 rungs=384,416 log=<rig>\zr18sep\harness\logs\zdrift.log
+2026-09-18T21:08:51.4895846+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\zr18sep\harness\wcomb.ps1" -Root "<rig>\zr18sep" -Bin "<rig>\zr18sep\src\target\release\parfast.exe" -NoBuild -Phase create -Tag zdrift -Label 4mr-t16-drift -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs "384,416" -Threads "16" -Reps 1 -Residency resident -NttBudget 21474836480
+2026-09-18T21:12:57.6564810+01:00 ARM-DONE zdrift rc=0 legs=8 lock_waits=0
+2026-09-18T21:12:58.6988163+01:00 LOAD-GATE ok at=zp3e8 loads=2 waited_s=0
+2026-09-18T21:12:58.8254662+01:00 COORD-POST-VERIFIED CLAIM line is present and starts at column 0: CLAIM 2026-09-18T20:12:58Z coreultra9-4mib-riders-sitting-18sep
+2026-09-18T21:12:58.8254662+01:00 LADDER zp3e8 label=4m3-e8 phase=rowgate aff=0xFF0 threads=8 rungs=128,192,256 log=<rig>\zr18sep\harness\logs\zp3e8.log
+2026-09-18T21:12:58.8254662+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\zr18sep\harness\wcomb.ps1" -Root "<rig>\zr18sep" -Bin "<rig>\zr18sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag zp3e8 -Label 4m3-e8 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs "128,192,256" -Threads "8" -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xFF0
+2026-09-18T21:23:48.4384008+01:00 AFFINITY-AUDIT zp3e8 want=0xFF0 legs=12 with_affinity_field=12 readback_equal=12
+2026-09-18T21:23:48.4495713+01:00 ARM-DONE zp3e8 rc=0 legs=12 lock_waits=0
+2026-09-18T21:23:49.4774902+01:00 LOAD-GATE ok at=zp3e4 loads=1 waited_s=0
+2026-09-18T21:23:49.6534475+01:00 COORD-POST-VERIFIED CLAIM line is present and starts at column 0: CLAIM 2026-09-18T20:23:49Z coreultra9-4mib-riders-sitting-18sep
+2026-09-18T21:23:49.6534475+01:00 LADDER zp3e4 label=4m3-e4 phase=rowgate aff=0xF0 threads=4 rungs=128,192,256 log=<rig>\zr18sep\harness\logs\zp3e4.log
+2026-09-18T21:23:49.6534475+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\zr18sep\harness\wcomb.ps1" -Root "<rig>\zr18sep" -Bin "<rig>\zr18sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag zp3e4 -Label 4m3-e4 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs "128,192,256" -Threads "4" -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xF0
+2026-09-18T21:38:56.3046566+01:00 AFFINITY-AUDIT zp3e4 want=0xF0 legs=12 with_affinity_field=12 readback_equal=12
+2026-09-18T21:38:56.3065227+01:00 ARM-DONE zp3e4 rc=0 legs=12 lock_waits=0
+2026-09-18T21:38:57.3418425+01:00 LOAD-GATE ok at=ze8top loads=3 waited_s=0
+2026-09-18T21:38:57.5079646+01:00 COORD-POST-VERIFIED CLAIM line is present and starts at column 0: CLAIM 2026-09-18T20:38:57Z coreultra9-4mib-riders-sitting-18sep
+2026-09-18T21:38:57.5079646+01:00 LADDER ze8top label=4mr-e8-top phase=create aff=0xFF0 threads=8 rungs=420,424,428,432,436,440 log=<rig>\zr18sep\harness\logs\ze8top.log
+2026-09-18T21:38:57.5079646+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\zr18sep\harness\wcomb.ps1" -Root "<rig>\zr18sep" -Bin "<rig>\zr18sep\src\target\release\parfast.exe" -NoBuild -Phase create -Tag ze8top -Label 4mr-e8-top -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs "420,424,428,432,436,440" -Threads "8" -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xFF0
+2026-09-18T21:58:00.1275809+01:00 AFFINITY-AUDIT ze8top want=0xFF0 legs=24 with_affinity_field=24 readback_equal=24
+2026-09-18T21:58:00.1275809+01:00 ARM-DONE ze8top rc=0 legs=24 lock_waits=0
+2026-09-18T21:58:01.1679638+01:00 LOAD-GATE ok at=zp4rep loads=6 waited_s=0
+2026-09-18T21:58:01.2814734+01:00 COORD-POST-VERIFIED CLAIM line is present and starts at column 0: CLAIM 2026-09-18T20:58:01Z coreultra9-4mib-riders-sitting-18sep
+2026-09-18T21:58:01.2814734+01:00 LADDER zp4rep label=4mr-p4-rep phase=create aff=0xF threads=4 rungs=408,412,416 log=<rig>\zr18sep\harness\logs\zp4rep.log
+2026-09-18T21:58:01.2814734+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\zr18sep\harness\wcomb.ps1" -Root "<rig>\zr18sep" -Bin "<rig>\zr18sep\src\target\release\parfast.exe" -NoBuild -Phase create -Tag zp4rep -Label 4mr-p4-rep -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs "408,412,416" -Threads "4" -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xF
+2026-09-18T22:08:09.3908212+01:00 AFFINITY-AUDIT zp4rep want=0xF legs=12 with_affinity_field=12 readback_equal=12
+2026-09-18T22:08:09.3908212+01:00 ARM-DONE zp4rep rc=0 legs=12 lock_waits=0
+2026-09-18T22:08:10.4256742+01:00 LOAD-GATE ok at=zp3pe8 loads=9 waited_s=0
+2026-09-18T22:08:10.5507118+01:00 COORD-POST-VERIFIED CLAIM line is present and starts at column 0: CLAIM 2026-09-18T21:08:10Z coreultra9-4mib-riders-sitting-18sep
+2026-09-18T22:08:10.5507118+01:00 LADDER zp3pe8 label=4m3-pe8 phase=rowgate aff=0xFF threads=8 rungs=128,192,256 log=<rig>\zr18sep\harness\logs\zp3pe8.log
+2026-09-18T22:08:10.5529019+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\zr18sep\harness\wcomb.ps1" -Root "<rig>\zr18sep" -Bin "<rig>\zr18sep\src\target\release\parfast.exe" -NoBuild -Phase rowgate -Tag zp3pe8 -Label 4m3-pe8 -Slice 4194304 -MemberMiB 1024 -Recovery 640 -Rungs "128,192,256" -Threads "8" -Reps 1 -Residency resident -NttBudget 21474836480 -Affinity 0xFF
+2026-09-18T22:17:51.7445299+01:00 AFFINITY-AUDIT zp3pe8 want=0xFF legs=12 with_affinity_field=12 readback_equal=12
+2026-09-18T22:17:51.7445299+01:00 ARM-DONE zp3pe8 rc=0 legs=12 lock_waits=0
+2026-09-18T22:17:51.7546823+01:00 ZRIDER-ROUND end rc=0
+2026-09-18T22:17:51.8222976+01:00 ZRIDER-TALLY zwarm=4 zsolo=32 zint=64 zdrift=8 zp3e8=12 zp3e4=12 ze8top=24 zp4rep=12 zp3pe8=12
+2026-09-18T22:17:51.9440269+01:00 COORD-POST-VERIFIED DONE line is present and starts at column 0: DONE 2026-09-18T21:17:51Z coreultra9-4mib-riders-sitting-18sep 

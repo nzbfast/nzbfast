@@ -693,8 +693,21 @@ if __name__ == "__main__":
     _good, bad = pdrv.gate(WORK, members, gold)
     if bad:
         raise SystemExit("work copy is not pristine at start: %s" % bad)
-    print("BIN   %s" % json.dumps(pdrv.bin_facts([BIN, BIN_AA]), sort_keys=True), flush=True)
-    print("BOX   %s" % json.dumps(pdrv.box_facts(), sort_keys=True), flush=True)
+    # The HARNESS's own provenance, and the round-start twin of the
+    # per-leg `rig=` token - see `pdrv.harness_facts`. Without it a
+    # banked log cannot be traced to the harness revision that wrote
+    # it (census an internal note).
+    pdrv.harness_facts()
+    # NOT `json.dumps(pdrv.bin_facts(...))`, which is what these two lines
+    # were until 21 Sep 2026: both functions PRINT and return None, so the
+    # round banked the real BIN and BOX lines AND a literal `BIN   null`
+    # and `BOX   null` beside them - and `s2sum.py` matches `BOX ` with a
+    # trailing space, so which of the two a fold reports is the file order
+    # (an internal note section 5). This driver
+    # banks its round log on STDOUT, so the printing halves are the right
+    # ones here; a driver that tees wants `bin_lines` / `box_line`.
+    pdrv.bin_facts([BIN, BIN_AA])
+    pdrv.box_facts()
     print("SHAPE m=%d slice=%d solve_window=%d MiB reps=%d threads=%s marg=%s"
           % (M, SLICE, 2 * M * SLICE // (1 << 20), REPS, THREADS, MARG), flush=True)
     # THE `RUNGS` LINE KEEPS ITS FIVE-ELEMENT SHAPE unless a rung actually

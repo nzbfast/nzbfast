@@ -1,0 +1,12 @@
+ INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=true, fusion displaced by the transform=true)
+ INFO repair-timing: create map refused: payload 96636764160 B + headroom 0 B against host 62110900224 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+ INFO repair-timing: create stripe-first refused: the members are read through copies (not mapped, or the payload would not stay resident - see mapped_payload_fits_memory) and bands are off (NZBFAST_CREATE_STRIPE_BANDS=0) (1 batch(es), 1638 rows, n=32768, fused=false)
+ INFO repair-timing: create map refused: payload 96636764160 B + headroom 5074944000 B against host 57254748160 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+ INFO repair-timing: fold tile budget 32 KiB (L2 per core 256 KiB)
+ INFO repair-timing: create ntt rows 0+1638 (n=32768, 6 window(s) of 5729, W=1024, 1440 stripe(s), threads=12, probe ok): 203.38s
+ INFO repair-timing: create recovery batch 0+1638: 204.53s (total 204.54s) (fold width 12 of 12)
+ INFO repair-timing: create seals: mode=lanes rows=1638 in 224.673ms
+ INFO repair-timing: create scan + fold: 239.85s; batch fold width 12 of 12 a priori (0 restore(s)); scan lanes 2 of 12 a priori
+ INFO repair-timing: plan prep: 12.23ms over 6 cold build(s), 8640 stripe use(s) - 0.005% of the 239.87s create
+mem-floor: live high-water ┬À ru_maxrss 22145 MB ┬À rss 22145 MB ┬À footprint 22145 MB ┬À rss over footprint 0 MB ┬À repair work 0 MB (own peak 0) ┬À scan reads 0 MB (own peak 0) ┬À verifier tables 0 MB ┬À unattributed 22145 MB
+mem-floor: sampled peak rss ┬À ru_maxrss 22145 MB ┬À rss 22145 MB ┬À footprint 22145 MB ┬À rss over footprint 0 MB ┬À repair work 0 MB (own peak 0) ┬À scan reads 0 MB (own peak 0) ┬À verifier tables 0 MB ┬À unattributed 22145 MB

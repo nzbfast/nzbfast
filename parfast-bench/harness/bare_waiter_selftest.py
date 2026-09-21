@@ -15,7 +15,7 @@ is the lock state and the log, never an exit code.
 
 Five arms per script:
   1 absent      - takes it and NAMES itself (round=<tag> pid=<child>)
-  2 zero bytes  - the apple-m3-ultra orphan: cleared, taken, ORPHAN announced
+  2 zero bytes  - an ORDINARY HAND-OVER: taken, and SILENTLY (see below)
   3 dead pid    - the ordinary crash: cleared and taken
   4 live pid, no flock - the `set -o noclobber` shell taker: REFUSED, and its
                   identity line left byte-for-byte intact.  NEW behaviour: the
@@ -96,13 +96,30 @@ def arms(script, tag):
         check("rig lock TAKEN" in out, "1 absent: announced the take")
 
         # --- 2. zero bytes
+        #
+        # RETIGHTENED 20 Sep 2026, the same day and for the same reason as
+        # `rig_lock_selftest.py`'s arm 1 (`5402734b4`): this arm is not an
+        # orphan at all. `riglock.py`'s `release()` TRUNCATES rather than
+        # unlinks, so a zero-byte lock is that function's own spelling for
+        # "released", and `lock_state()` could not tell it apart from the
+        # crash-before-write case until it grew a distinct "released" state.
+        # Every ordinary hand-over on apple-m3-ultra therefore announced a false
+        # RIG-LOCK-ORPHAN and posted a coordination NOTE that two lanes read
+        # as a double-booking that never happened.
+        #
+        # That commit fixed `rig_lock_selftest.py` and the windows one and
+        # MISSED this script, which is the gate's OTHER subject - so the two
+        # halves of `tools/riglock-selftest-gate.py` disagreed and the job
+        # went red. Both directions stay pinned: silence here, and arm 3's
+        # dead pid below is a GENUINE orphan that must still announce.
         open(lp, "w").close()
         pid, out = run(script, env)
         check("pid=%d" % pid in (lockfile(home) or ""), "2 zero bytes: handed over")
-        check("RIG-LOCK-ORPHAN" in out, "2 zero bytes: announced the orphan on stdout")
+        check("RIG-LOCK-ORPHAN" not in out,
+              "2 zero bytes: a released lock is an ordinary hand-over, announced NOTHING")
         coord = env["BOXGATE_COORD"]
-        check(os.path.exists(coord) and "ORPHAN" in open(coord).read(),
-              "2 zero bytes: wrote the coordination NOTE (and to OUR file)")
+        check(not os.path.exists(coord) or "ORPHAN" not in open(coord).read(),
+              "2 zero bytes: wrote NO coordination NOTE")
 
         # --- 3. dead pid
         with open(lp, "w") as fh:

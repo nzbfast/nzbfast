@@ -1,0 +1,78 @@
+NARROW-WAIT tag=narrow-rot-gfni rungs=256,320,378,384,392,400,448,512,640,768 reps=4 until=2026-09-20T06:00:00Z ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] cap_min=360 coord=<rig>\COORDINATION-coreultra9.txt root=<rig>\narrow-15sep pid=18072 ts=2026-09-18T17:18:53.6191415Z
+NARROW-WAIT lock=held procs=0 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=7 ts=2026-09-18T17:18:54.7503111Z
+NARROW-WAIT lock=held procs=0 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=7 ts=2026-09-18T17:28:56.6855714Z
+NARROW-WAIT lock=held procs=0 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=9 ts=2026-09-18T17:38:58.4493235Z
+NARROW-WAIT lock=held procs=0 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=10 ts=2026-09-18T17:49:00.0251430Z
+NARROW-WAIT lock=held procs=0 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=11 ts=2026-09-18T17:59:01.7980977Z
+NARROW-WAIT lock=held procs=0 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=2 ts=2026-09-18T18:09:05.9009409Z
+NARROW-WAIT lock=held procs=1 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=96 ts=2026-09-18T18:19:07.8568357Z
+NARROW-IDLE-FIRST the box first read idle ts=2026-09-18T18:29:08.5836905Z
+NARROW-WAIT lock=free procs=0 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=3 ts=2026-09-18T18:29:09.6710284Z
+NARROW-WAIT lock=free procs=0 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=1 ts=2026-09-18T18:39:11.1359147Z
+NARROW-WAIT lock=free procs=0 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=6 ts=2026-09-18T18:49:12.6037629Z
+NARROW-WAIT lock=held procs=0 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=2 ts=2026-09-18T18:59:14.0786630Z
+NARROW-WAIT lock=held procs=0 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=4 ts=2026-09-18T19:09:15.4830394Z
+NARROW-WAIT lock=held procs=1 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=100 ts=2026-09-18T19:19:18.2764464Z
+NARROW-WAIT lock=held procs=0 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=3 ts=2026-09-18T19:29:21.0644950Z
+NARROW-WAIT lock=held procs=1 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=100 ts=2026-09-18T19:39:22.8122791Z
+NARROW-WAIT lock=held procs=1 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=100 ts=2026-09-18T19:49:24.8947555Z
+NARROW-WAIT lock=held procs=1 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=100 ts=2026-09-18T19:59:27.0432843Z
+NARROW-WAIT lock=held procs=0 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=11 ts=2026-09-18T20:09:28.9326423Z
+NARROW-WAIT lock=held procs=1 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=20 ts=2026-09-18T20:19:30.4265870Z
+NARROW-WAIT lock=held procs=0 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=3 ts=2026-09-18T20:29:31.9503891Z
+NARROW-WAIT lock=held procs=1 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=7 ts=2026-09-18T20:39:33.4351044Z
+NARROW-WAIT lock=held procs=1 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=5 ts=2026-09-18T20:49:34.9084515Z
+NARROW-WAIT lock=held procs=1 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=100 ts=2026-09-18T20:59:36.4472942Z
+NARROW-WAIT lock=held procs=1 ahead=[coreultra9-4mib-riders-sitting-18sep,codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=100 ts=2026-09-18T21:09:38.0030059Z
+NARROW-WAIT lock=free procs=0 ahead=[codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=0 ts=2026-09-18T21:19:39.5287229Z
+NARROW-WAIT lock=held procs=0 ahead=[codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=1 ts=2026-09-18T21:29:41.0766483Z
+NARROW-WAIT lock=held procs=0 ahead=[codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=66 ts=2026-09-18T21:39:42.8074535Z
+NARROW-WAIT lock=held procs=0 ahead=[codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=77 ts=2026-09-18T21:49:44.5636298Z
+NARROW-WAIT lock=held procs=0 ahead=[codex-parfast-create-readers-18sep,zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=62 ts=2026-09-18T21:59:49.7704016Z
+NARROW-WAIT lock=held procs=0 ahead=[zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=71 ts=2026-09-18T22:09:51.9341133Z
+NARROW-WAIT lock=held procs=1 ahead=[zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=15 ts=2026-09-18T22:19:54.2181818Z
+NARROW-WAIT lock=held procs=0 ahead=[zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=74 ts=2026-09-18T22:29:56.3852496Z
+NARROW-WAIT lock=held procs=0 ahead=[zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=93 ts=2026-09-18T22:40:02.0741551Z
+NARROW-WAIT lock=held procs=1 ahead=[zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=39 ts=2026-09-18T22:50:04.1285135Z
+NARROW-WAIT lock=held procs=0 ahead=[zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=88 ts=2026-09-18T23:00:21.3724409Z
+NARROW-WAIT lock=held procs=0 ahead=[zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=82 ts=2026-09-18T23:10:23.3344068Z
+NARROW-WAIT lock=held procs=1 ahead=[zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=42 ts=2026-09-18T23:20:25.4879305Z
+NARROW-WAIT lock=held procs=0 ahead=[zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=90 ts=2026-09-18T23:30:27.5711169Z
+NARROW-WAIT lock=held procs=1 ahead=[zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=43 ts=2026-09-18T23:40:29.3859976Z
+NARROW-WAIT lock=held procs=1 ahead=[zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=54 ts=2026-09-18T23:50:31.2234002Z
+NARROW-WAIT lock=held procs=1 ahead=[zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=47 ts=2026-09-19T00:00:33.1503717Z
+NARROW-WAIT lock=held procs=1 ahead=[zswp2-rotated-rerun-18sep] free=False streak=0 box_cpu=45 ts=2026-09-19T00:10:35.0255961Z
+NARROW-WAIT lock=free procs=0 ahead=[] free=True streak=1 box_cpu=2 ts=2026-09-19T00:12:36.1860495Z
+NARROW-WAIT lock=free procs=0 ahead=[] free=True streak=2 box_cpu=6 ts=2026-09-19T00:13:37.3603020Z
+NARROW-FREE ts=2026-09-19T00:13:37.5208112Z box_cpu=4
+NARROW-UNPACK rc=0 ts=2026-09-19T00:14:36.7210580Z
+NARROW-HARNESS wcomb.ps1 sha256=F49C24371C40FB127E6647909F2F40F0014C7BA16171CCAFC0C93701AC4C0F59 plib.ps1 sha256=4464B815A1587D6B2D81030F843E0AE9E66385CF88749B1764B7B982D75072EC
+NARROW-OVERLAY base crates\nzbkit-base\src\par2repair.rs sha256=8DA56F6B06656A1890F50B2419B1B3FD2D7A5D800B18B0D903A42897F4831EBF
+NARROW-OVERLAY base crates\nzbkit-base\src\par2repair\fastpar.rs sha256=C34AA0950DB595DC0258408C964E60004DADDAD66A64B5117776D28C06A2F6A1
+NARROW-OVERLAY base crates\nzbkit-base\src\par2repair\inline_tests.rs sha256=8F6602F8C340E12305E119818C9FDD3CB1996868AFE06AE4F968D38B66EB1FFB
+NARROW-BUILD base rc=0 secs=118.2 ts=2026-09-19T00:16:35.2736589Z
+NARROW-OVERLAY new crates\nzbkit-base\src\par2repair.rs sha256=76D6FA2BF1522A4B27808A5EB9D3B31C54FF8B6FB8628A47BB89BF3E65DC40DA
+NARROW-OVERLAY new crates\nzbkit-base\src\par2repair\fastpar.rs sha256=4317EA5621418DA4E1DFA375213F200E8153F26B216565B5849784EEB7487277
+NARROW-OVERLAY new crates\nzbkit-base\src\par2repair\inline_tests.rs sha256=5224FD32D38C85B157ABB9512034E769F5077E9ACD7A7AE9CF8E7C8EF15407C3
+NARROW-BUILD new rc=0 secs=84.9 ts=2026-09-19T00:18:00.2497055Z
+NARROW-BINS base=28680395FDA42DBF5FB4D67BF0635E1ADD79162BD258678E2BD900AFB098ADC8 new=7E9CB980008359CDBF0B784BD3C2B2D26B67246ED959893C400D9EFDF4EF42AF
+NARROW-EXPECT base DIFFERS 15sep=F7E51BFE7D2313C2D8DB2A2C148C53A091A622246B6E18DFDD5D605AC5CEFE46
+NARROW-EXPECT new DIFFERS 15sep=A6F882CE2D2BD6F5E0AD8A84EC18E6E4D373539913E78F4C676E6CFE66A3F701
+NARROW-RIG-LOCK-RELEASED <rig>\.parfast-rig.lock ts=2026-09-19T00:18:00.6759565Z
+NARROW-REP rep=1 arm_order=rotating-by-rep arms=fold,force,auto,autoalt ts=2026-09-19T00:18:00.6759565Z
+NARROW-BOX rep=1 when=before box_cpu=4 procs=0 ts=2026-09-19T00:18:01.7563550Z
+NARROW-WCOMB rep=1 rc=0 secs=315 ts=2026-09-19T00:23:16.7554313Z
+NARROW-BOX rep=1 when=after box_cpu=2 procs=0 ts=2026-09-19T00:23:17.7998415Z
+NARROW-REP rep=2 arm_order=rotating-by-rep arms=force,auto,autoalt,fold ts=2026-09-19T00:23:17.8044739Z
+NARROW-BOX rep=2 when=before box_cpu=4 procs=0 ts=2026-09-19T00:23:18.8367387Z
+NARROW-WCOMB rep=2 rc=0 secs=341 ts=2026-09-19T00:28:59.8582441Z
+NARROW-BOX rep=2 when=after box_cpu=19 procs=0 ts=2026-09-19T00:29:00.8864713Z
+NARROW-REP rep=3 arm_order=rotating-by-rep arms=auto,autoalt,fold,force ts=2026-09-19T00:29:00.8864713Z
+NARROW-BOX rep=3 when=before box_cpu=1 procs=0 ts=2026-09-19T00:29:01.9368773Z
+NARROW-WCOMB rep=3 rc=0 secs=307.4 ts=2026-09-19T00:34:09.3423848Z
+NARROW-BOX rep=3 when=after box_cpu=1 procs=0 ts=2026-09-19T00:34:10.3863488Z
+NARROW-REP rep=4 arm_order=rotating-by-rep arms=autoalt,fold,force,auto ts=2026-09-19T00:34:10.3863488Z
+NARROW-BOX rep=4 when=before box_cpu=4 procs=0 ts=2026-09-19T00:34:11.4275664Z
+NARROW-WCOMB rep=4 rc=0 secs=306.3 ts=2026-09-19T00:39:17.7202099Z
+NARROW-BOX rep=4 when=after box_cpu=4 procs=0 ts=2026-09-19T00:39:18.7553772Z
+NARROW-DONE rc=0 legs=160 gated=160 log=<rig>\narrow-15sep\narrow-rot-gfni.log ts=2026-09-19T00:39:18.7634224Z

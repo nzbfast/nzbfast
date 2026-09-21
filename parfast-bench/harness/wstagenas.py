@@ -56,7 +56,7 @@ import json, os, shutil, signal, socket, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pdrv  # noqa: E402
-from pdrv import require_quiet_box, foreign_cpu  # noqa: E402
+from pdrv import require_quiet_box, foreign_cpu, harness_facts  # noqa: E402
 
 # THE ONE ADJUSTMENT MADE TO pdrv's QUIET GATE, AND WHY IT IS AT THE SITE.
 #
@@ -320,6 +320,11 @@ def main():
     refuse_ram_disk()
     ram = meminfo("MemTotal")
     payload = FILES * int(FILE_SIZE[:-1]) * (1 << 20 if FILE_SIZE.endswith("M") else 1 << 30)
+    # The HARNESS's own provenance, and the round-start twin of the
+    # per-leg `rig=` token - see `pdrv.harness_facts`. Without it a
+    # banked log cannot be traced to the harness revision that wrote
+    # it (census an internal note).
+    harness_facts()
     print("wstagenas round start %s R=%s regime=%s reps=%d cells=%s arms=%s "
           "payload=%.2fGB ram=%.2fGB bin=%s"
           % (utcnow(), R, REGIME, REPS, ORDER_CELLS, ARMS, payload / 1e9, ram / 1e9, BIN),

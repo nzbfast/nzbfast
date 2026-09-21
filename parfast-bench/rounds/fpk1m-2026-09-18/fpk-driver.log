@@ -1,0 +1,22 @@
+2026-09-18T05:37:13.6302374+01:00 FPK-ROUND start root=<rig>\fpk18sep bin=<rig>\fpk18sep\src\target\release\parfast.exe budget=12884901888 ladders=2 rungs=192,512,1024,2048
+2026-09-18T05:38:15.7829940+01:00 LOAD-GATE busy at=prebuild riglock=False parfast=0 loads=3/26 waited_s=0
+2026-09-18T05:40:17.8982023+01:00 LOAD-GATE ok at=prebuild loads=1/2 waited_s=122
+2026-09-18T05:40:25.5402584+01:00 CLASS-PROBE P-core0 mask=0x1 got=0x1 wall_s=7.609 cpu_s=7.531 SPIN ms=7451 x=72000065999996.6 
+2026-09-18T05:40:38.7483241+01:00 CLASS-PROBE E-core4 mask=0x10 got=0x10 wall_s=13.202 cpu_s=13.172 SPIN ms=13006 x=72000065999996.6 
+2026-09-18T05:40:51.9965922+01:00 CLASS-PROBE E-core7 mask=0x80 got=0x80 wall_s=13.239 cpu_s=13.141 SPIN ms=13049 x=72000065999996.6 
+2026-09-18T05:41:05.3271127+01:00 CLASS-PROBE E-core8 mask=0x100 got=0x100 wall_s=13.336 cpu_s=13.281 SPIN ms=13149 x=72000065999996.6 
+2026-09-18T05:41:18.6338798+01:00 CLASS-PROBE E-core11 mask=0x800 got=0x800 wall_s=13.301 cpu_s=13.266 SPIN ms=13106 x=72000065999996.6 
+2026-09-18T05:41:34.5963378+01:00 CLASS-PROBE LPE-core12 mask=0x1000 got=0x1000 wall_s=15.959 cpu_s=15.891 SPIN ms=15735 x=72000065999996.6 
+2026-09-18T05:41:41.8032522+01:00 EXTRACT rc=0 secs=7.2 into=<rig>\fpk18sep\src
+2026-09-18T05:43:40.3196284+01:00 BUILD rc=0 secs=118.5 log=<rig>\fpk18sep\build-fpk.log
+2026-09-18T05:43:40.4309076+01:00 BIN bytes=4324864 sha256=7DBF785D6AD48735EE3073C72A7314D5B74068B17147FA64E6955CFDACF52E78 <rig>\fpk18sep\src\target\release\parfast.exe (a sha matching no other round is EXPECTED - the build embeds its own path)
+2026-09-18T05:43:40.4309076+01:00 FIXTURE ABSENT - ladder A builds it, then waits out the settle <rig>\fpk18sep\fix-1048576-512
+2026-09-18T05:44:07.4459117+01:00 LOAD-GATE ok at=fpku loads=5 waited_s=0
+2026-09-18T05:44:07.4616604+01:00 LADDER fpku label=g1m-unpinned affinity=UNPINNED threads=4,6,12 reps=2 rungs=192,512,1024,2048 log=<rig>\fpk18sep\harness\logs\fpku.log
+2026-09-18T05:44:07.4663024+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\fpk18sep\harness\wcomb.ps1" -Root "<rig>\fpk18sep" -Bin "<rig>\fpk18sep\src\target\release\parfast.exe" -NoBuild -Phase measure -Tag fpku -Label g1m-unpinned -Slice 1048576 -MemberMiB 512 -Recovery 2048 -Rungs "192,512,1024,2048" -Threads "4,6,12" -Reps 2 -Budget 2048 -NttBudget 12884901888
+2026-09-18T06:48:22.0696971+01:00 ARM-DONE fpku rc=0 legs=72 lock_waits=0
+2026-09-18T06:48:23.1299427+01:00 LOAD-GATE ok at=fpke loads=4 waited_s=0
+2026-09-18T06:48:23.1299427+01:00 LADDER fpke label=g1m-ecore affinity=0xFF0 threads=4,6,8 reps=1 rungs=192,512,1024,2048 log=<rig>\fpk18sep\harness\logs\fpke.log
+2026-09-18T06:48:23.1299427+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\fpk18sep\harness\wcomb.ps1" -Root "<rig>\fpk18sep" -Bin "<rig>\fpk18sep\src\target\release\parfast.exe" -NoBuild -Phase measure -Tag fpke -Label g1m-ecore -Slice 1048576 -MemberMiB 512 -Recovery 2048 -Rungs "192,512,1024,2048" -Threads "4,6,8" -Reps 1 -Budget 2048 -NttBudget 12884901888 -Affinity 0xFF0
+2026-09-18T07:20:17.5544253+01:00 ARM-DONE fpke rc=0 legs=36 lock_waits=0
+2026-09-18T07:20:17.5544253+01:00 FPK-ROUND end rc=0

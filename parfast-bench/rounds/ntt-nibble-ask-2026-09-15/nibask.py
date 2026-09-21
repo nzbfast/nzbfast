@@ -22,6 +22,8 @@ def legs(paths):
     for p in paths:
         for line in open(p, encoding="utf-8", errors="replace"):
             line = line.strip().lstrip("﻿")
+            # harness-rig-gate: a reducer: it reads the LEG lines of a banked
+            #   round and reports them. It banks no round log of its own.
             if line.startswith("LEG "):
                 kv = dict(t.split("=", 1) for t in line.split()[1:] if "=" in t)
                 if kv["rc"] != "0" or kv["restored"] != "16/16":

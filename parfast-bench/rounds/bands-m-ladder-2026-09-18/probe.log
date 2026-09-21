@@ -1,0 +1,54 @@
+RIGLOCK HELD pid=630484 18:17:37Z
+=== 18:17:37Z FIXTURE 16 GiB ===
+FIXTURE-WROTE /root/bandm-18sep/f16g.bin bytes=17179869184 secs=424.7
+=== 18:24:42Z PROBE - the bottom rung, single bands legs, reading admit/batches/run ===
+BANDONE start m-probe reps=1 shapes=['32768:2:512', '32768:2:544', '32768:2:576', '32768:2:640'] arms=['bands']
+LEG 32768:2:512 bands rep0 rc=0 wall=75.76 inner=75.156 cpu=563.91 read=None transform=None chunks/windows=None run=None readmb=40727 resident=0 admit=refused digest=69100d1c5c1d1e4b
+TIMING 32768:2:512/bands/r0 INFO repair-timing: create arms: n=32768 rows=655 batches=2 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING 32768:2:512/bands/r0 INFO repair-timing: create stripe-first refused: the transform is not admitted for all rows at once (2 batch(es), 655 rows, n=32768, fused=false)
+TIMING 32768:2:512/bands/r0 INFO repair-timing: fold unit dst budget 256 KiB (L2 per core 512 KiB)
+TIMING 32768:2:512/bands/r0 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING 32768:2:512/bands/r0 INFO repair-timing: create direct fold (257 windows of 128, read-ahead): first read 4.53ms, fold+read 56.63s (fold alone 56.59s, chain alone 0.00ns)
+TIMING 32768:2:512/bands/r0 INFO repair-timing: create recovery batch 0+511: 56.86s (total 56.86s) (fold width 8 of 8)
+TIMING 32768:2:512/bands/r0 INFO repair-timing: create seals: mode=lanes rows=511 in 10.619415ms
+TIMING 32768:2:512/bands/r0 INFO repair-timing: create direct fold (257 windows of 128, read-ahead): first read 5.92ms, fold+read 17.98s (fold alone 16.84s, chain alone 0.00ns)
+TIMING 32768:2:512/bands/r0 INFO repair-timing: create recovery batch 511+144: 17.99s (total 75.01s) (fold width 8 of 8)
+TIMING 32768:2:512/bands/r0 INFO repair-timing: create seals: mode=lanes rows=144 in 6.508022ms
+TIMING 32768:2:512/bands/r0 INFO repair-timing: create scan + fold: 75.12s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING 32768:2:512/bands/r0 INFO repair-timing: plan prep: 0.00ns over 0 cold build(s), 0 stripe use(s) - 0.000% of the 75.12s create
+LEG 32768:2:544 bands rep0 rc=0 wall=69.81 inner=69.329 cpu=523.66 read=None transform=None chunks/windows=None run=None readmb=40711 resident=0 admit=refused digest=69100d1c5c1d1e4b
+TIMING 32768:2:544/bands/r0 INFO repair-timing: create arms: n=32768 rows=655 batches=2 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING 32768:2:544/bands/r0 INFO repair-timing: create stripe-first refused: the transform is not admitted for all rows at once (2 batch(es), 655 rows, n=32768, fused=false)
+TIMING 32768:2:544/bands/r0 INFO repair-timing: fold unit dst budget 256 KiB (L2 per core 512 KiB)
+TIMING 32768:2:544/bands/r0 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING 32768:2:544/bands/r0 INFO repair-timing: create direct fold (257 windows of 128, read-ahead): first read 5.07ms, fold+read 52.40s (fold alone 52.38s, chain alone 0.00ns)
+TIMING 32768:2:544/bands/r0 INFO repair-timing: create recovery batch 0+511: 52.66s (total 52.66s) (fold width 8 of 8)
+TIMING 32768:2:544/bands/r0 INFO repair-timing: create seals: mode=lanes rows=511 in 12.395368ms
+TIMING 32768:2:544/bands/r0 INFO repair-timing: create direct fold (257 windows of 128, read-ahead): first read 5.37ms, fold+read 16.32s (fold alone 15.33s, chain alone 0.00ns)
+TIMING 32768:2:544/bands/r0 INFO repair-timing: create recovery batch 511+144: 16.34s (total 69.22s) (fold width 8 of 8)
+TIMING 32768:2:544/bands/r0 INFO repair-timing: create seals: mode=lanes rows=144 in 3.58648ms
+TIMING 32768:2:544/bands/r0 INFO repair-timing: create scan + fold: 69.29s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING 32768:2:544/bands/r0 INFO repair-timing: plan prep: 0.00ns over 0 cold build(s), 0 stripe use(s) - 0.000% of the 69.29s create
+LEG 32768:2:576 bands rep0 rc=0 wall=72.48 inner=72.026 cpu=545.57 read=None transform=None chunks/windows=None run=None readmb=41560 resident=0 admit=refused digest=69100d1c5c1d1e4b
+TIMING 32768:2:576/bands/r0 INFO repair-timing: create arms: n=32768 rows=655 batches=2 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING 32768:2:576/bands/r0 INFO repair-timing: create stripe-first refused: the transform is not admitted for all rows at once (2 batch(es), 655 rows, n=32768, fused=false)
+TIMING 32768:2:576/bands/r0 INFO repair-timing: fold unit dst budget 256 KiB (L2 per core 512 KiB)
+TIMING 32768:2:576/bands/r0 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING 32768:2:576/bands/r0 INFO repair-timing: create direct fold (257 windows of 128, read-ahead): first read 3.27ms, fold+read 54.48s (fold alone 54.46s, chain alone 0.00ns)
+TIMING 32768:2:576/bands/r0 INFO repair-timing: create recovery batch 0+511: 54.72s (total 54.73s) (fold width 8 of 8)
+TIMING 32768:2:576/bands/r0 INFO repair-timing: create seals: mode=lanes rows=511 in 10.463833ms
+TIMING 32768:2:576/bands/r0 INFO repair-timing: create direct fold (257 windows of 128, read-ahead): first read 5.38ms, fold+read 16.99s (fold alone 16.11s, chain alone 0.00ns)
+TIMING 32768:2:576/bands/r0 INFO repair-timing: create recovery batch 511+144: 17.01s (total 71.89s) (fold width 8 of 8)
+TIMING 32768:2:576/bands/r0 INFO repair-timing: create seals: mode=lanes rows=144 in 6.438941ms
+TIMING 32768:2:576/bands/r0 INFO repair-timing: create scan + fold: 71.98s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING 32768:2:576/bands/r0 INFO repair-timing: plan prep: 0.00ns over 0 cold build(s), 0 stripe use(s) - 0.000% of the 71.99s create
+LEG 32768:2:640 bands rep0 rc=0 wall=67.26 inner=66.837 cpu=167.44 read=58.28 transform=66.79 chunks/windows=31 run=17408 readmb=47686 resident=0 admit=admitted digest=69100d1c5c1d1e4b
+TIMING 32768:2:640/bands/r0 INFO repair-timing: create arms: n=32768 rows=655 batches=2 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING 32768:2:640/bands/r0 INFO repair-timing: create stripe-first admitted: 2 batch(es), 655 rows, n=32768, bands of up to 582483968 B over copies
+TIMING 32768:2:640/bands/r0 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING 32768:2:640/bands/r0 INFO repair-timing: create stripe-first: 655 rows in 31 chunk(s) of 17 stripes (n=32768, bands of 570425344 B over copies, read 58.28s, probe 610.31ms, 8 reader(s), W=512, threads=8, probe ok): 66.79s
+TIMING 32768:2:640/bands/r0 INFO repair-timing: create scan + fold: 66.80s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING 32768:2:640/bands/r0 INFO repair-timing: plan prep: 1.97ms over 1 cold build(s), 512 stripe use(s) - 0.003% of the 66.83s create
+BANDONE done -> /root/bandm-18sep/probe.jsonl
+=== 18:29:42Z PROBE DONE - read the admit/batches lines above before spending the ladder ===
+RIGLOCK RELEASING rc=0 18:29:42Z

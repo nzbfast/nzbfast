@@ -1,0 +1,83 @@
+floornull - the A/A FLOOR under a random drop of the same size as the steal filter's, 64 KiB EPYC guest, steal < 4.00%
+legs 160, 20 cells of 8; the null at each rung is EXHAUSTIVE - every C(8, d) way of dropping d legs
+
+  cell     m  d | floor0 v0     |   effS floorS vS     |   nmed    np5   np95   pctl     n | P(vS) P(fl) | ratio floor | reading
+  t4      96  6 |  43.5% unres  |  29.2%   0.0% fold  *|   0.0%   0.0%   0.0% 100.0%    16 |  100%  100% | unres fold  | FLOOR alone; 100% of drops flip
+  t4     128  2 |   3.3% fold   |  22.3%   0.6% fold   |   3.3%   0.6%   3.3%  14.3%    28 |  100%    0% | fold  fold  | no flip
+  t4     160  4 |  14.4% fold   |  23.1%   0.0% fold   |   2.0%   0.0%  14.4%  23.5%    68 |   94%    6% | fold  fold  | no flip
+  t4     192  2 |   7.6% unres  |   8.5%   6.7% fold  *|   7.6%   2.8%   7.6%  46.4%    28 |   43%   43% | fold  unres | RATIO alone; 43% of drops flip
+  t4     224  2 |  30.5% unres  |   1.6%   7.2% unres  |  30.5%   1.0%  30.5%! 46.4%    28 |   79%   21% | unres unres | no flip
+  t4     256  3 |   8.2% unres  |   4.0%   8.2% unres  |   2.3%   0.0%   8.2%!100.0%    56 |   34%   66% | unres unres | no flip
+  t4     288  3 |  24.5% unres  |  14.5%   1.4% ntt   *|   2.7%   0.8%  24.5%! 35.7%    56 |   55%   57% | unres ntt   | FLOOR alone; 57% of drops flip
+  t4     320  3 |  24.6% unres  |  15.4%   3.9% ntt   *|   6.3%   0.9%  24.6%! 35.7%    56 |   89%   89% | unres ntt   | FLOOR alone; 89% of drops flip
+  t4     384  2 |  29.4% unres  |  29.0%   9.4% ntt   *|  29.4%   3.1%  29.4%! 46.4%    28 |   71%   71% | unres ntt   | FLOOR alone; 71% of drops flip
+  t4     512  2 |  27.3% ntt    |  62.4%   5.5% ntt    |  27.3%   5.5%  27.3%  14.3%    28 |  100%    0% | ntt   ntt   | no flip
+  t8      96  4 |  10.5% fold   |  34.1%   4.3% fold   |   4.3%   0.0%  10.5%  60.3%    68 |  100%    0% | fold  fold  | no flip
+  t8     128  3 |  54.3% unres  |  19.3%   4.9% fold  *|  26.2%   1.5%  54.3%! 35.7%    56 |   45%   45% | unres fold  | FLOOR alone; 45% of drops flip
+  t8     160  8 |  15.9% unres  |      -      - GONE   |      -      -      -      -     - |     -     - | -     -     | the filter left no fold leg
+  t8     192  2 |   5.5% unres  |   2.7%   1.7% fold  *|   5.5%   1.7%   5.5%! 14.3%    28 |    4%    7% | unres unres | needs both; 7% of drops flip
+  t8     224  3 |  31.9% unres  |   4.4%   2.3% ntt   *|   2.3%   0.1%  31.9%! 64.3%    56 |   32%   50% | unres unres | needs both; 50% of drops flip
+  t8     256  1 |   6.6% ntt    |   9.0%   6.6% ntt    |   6.6%   4.7%   6.6% 100.0%     8 |  100%    0% | ntt   ntt   | no flip
+  t8     288  1 |   8.8% ntt    |  14.7%   5.8% ntt    |   8.8%   5.8%   8.8%  25.0%     8 |  100%    0% | ntt   ntt   | no flip
+  t8     320  3 |   6.6% ntt    |  20.4%   2.1% ntt    |   5.5%   2.1%   6.6%  14.3%    56 |  100%    0% | ntt   ntt   | no flip
+  t8     384  3 |  11.4% ntt    |  43.0%   4.3% ntt    |  10.7%   4.3%  11.4%  14.3%    56 |  100%    0% | ntt   ntt   | no flip
+  t8     512  4 |   5.5% ntt    |  65.3%   0.9% ntt    |   1.6%   0.0%   5.5%  41.2%    68 |  100%    0% | ntt   ntt   | no flip
+
+  cell/m/d      the (threads, m) rung and how many of its 8 legs steal < 4.00% removes
+  floor0/v0     the A/A floor and verdict over all 8 legs (the PUBLISHED reading)
+  effS          the filtered rung's EFFECT, max(F/T, T/F) - 1, on the floor's
+                own scale; `!` after np95 marks a null of floors that STRADDLES
+                it, which is a rung whose verdict is decided by which legs
+                survived rather than by the arms
+  floorS/vS     the floor and verdict after the steal filter; `*` marks a FLIP
+  nmed/np5/np95 the enumerated null of floors under a random d-leg drop
+  pctl          where floorS sits in that null (share of members at or below it)
+  n             the null's size - C(8, d), the WHOLE family, not a sample
+  P(vS)         share of random d-drops that reach the steal filter's verdict
+  P(fl)         share of random d-drops that flip the verdict AT ALL
+  ratio/floor   counterfactuals: the filtered ratio against the UNFILTERED
+                floor, and the unfiltered ratio against the FILTERED floor -
+                which half of the filter the flip is attributable to
+floornull --joint: the whole table under the d-matched null (every rung's drop size held at the steal filter's, only WHICH legs randomised)
+
+  cell     m  d |     n | v0     -> vS     | P(a random d-drop flips this rung)
+  t4      96  6 |    16 | unres  -> fold  *| 1.0000
+  t4     128  2 |    28 | fold   -> fold   | 0.0000
+  t4     160  4 |    68 | fold   -> fold   | 0.0588
+  t4     192  2 |    28 | unres  -> fold  *| 0.4286
+  t4     224  2 |    28 | unres  -> unres  | 0.2143
+  t4     256  3 |    56 | unres  -> unres  | 0.6607
+  t4     288  3 |    56 | unres  -> ntt   *| 0.5714
+  t4     320  3 |    56 | unres  -> ntt   *| 0.8929
+  t4     384  2 |    28 | unres  -> ntt   *| 0.7143
+  t4     512  2 |    28 | ntt    -> ntt    | 0.0000
+  t8      96  4 |    68 | fold   -> fold   | 0.0000
+  t8     128  3 |    56 | unres  -> fold  *| 0.4464
+  t8     160  8 |     0 | unres  -> GONE  *| 0.0000
+  t8     192  2 |    28 | unres  -> fold  *| 0.0714
+  t8     224  3 |    56 | unres  -> ntt   *| 0.5000
+  t8     256  1 |     8 | ntt    -> ntt    | 0.0000
+  t8     288  1 |     8 | ntt    -> ntt    | 0.0000
+  t8     320  3 |    56 | ntt    -> ntt    | 0.0000
+  t8     384  3 |    56 | ntt    -> ntt    | 0.0000
+  t8     512  4 |    68 | ntt    -> ntt    | 0.0000
+
+  the steal filter flips 9 of 20 rungs.
+  under the d-matched null the EXPECTED number of flips is 5.56, sd 1.34,
+  and P(a random same-size drop flips 9 or more) = 0.0112.
+
+  distribution of the flip count under that null:
+    2:0.008  3:0.050  4:0.154  5:0.269  6:0.278  7:0.170  8:0.059  9:0.010  10:0.001
+
+  READ THIS AGAINST THE PER-RUNG TABLE AND NOT INSTEAD OF IT. The two
+  answer different questions and both answers are real: no INDIVIDUAL
+  flip is established (every one is reproduced by chance 21% to 82% of
+  the time, and three of them sit in 8-member nulls whose smallest
+  attainable P is 0.125), while the SET of them is not chance - which
+  says steal predicts WHICH leg owns the A/A worst, and nothing about
+  whether any one rung's verdict can now be read.
+
+  AND THIS IS A CALIBRATION, NOT A SIZED HYPOTHESIS TEST. The statistic
+  is computed on the round that raised the question, so 0.0032 prices
+  the coincidence and does not license a decision - the same limit the
+  guest-steal retrospective states about its own nulls.

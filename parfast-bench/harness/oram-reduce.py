@@ -12,6 +12,9 @@ timing = defaultdict(list)
 other = []
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     line = line.rstrip("\n")
+    # harness-rig-gate: a REDUCER over oram.ps1 / oramx.ps1 logs, which
+    #   carry their own stamp. This reads a log named on argv and writes a
+    #   summary to stdout; nothing it emits is banked as a round.
     if line.startswith("LEG "):
         kv = dict(re.findall(r"(\w+)=(\S*)", line))
         legs[(int(kv["gib"]), int(kv["pct"]), kv["arm"])].append(kv)

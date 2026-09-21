@@ -1,0 +1,19 @@
+8.17 shipped arm - the FLOOR and MERGE filters, priced
+  FLOOR   MERGE    rungs  dropped   lo n  hi n    crossing
+  0       0           47        0     33    10     17547.8
+  0       16          39        0     27     9     17540.4
+  0       32          36        0     24     9     17501.5
+  320     0           44        8     30    10     17795.4
+  320     16          37        8     25     9     17760.9
+  320     32          34        8     22     9     17756.2
+  1000    0           44        8     30    10     17795.4
+  1000    16          37        8     25     9     17760.9   <- published
+  1000    32          34        8     22     9     17756.2
+  2000    0           39       20     25    10     17756.8
+  2000    16          34       20     22     9     17733.8
+  2000    32          32       20     20     9     17730.0
+
+  FLOOR=320 and FLOOR=1000 are the SAME reduction: all 8 windows the
+  floor removes on this arm are under 320 sources, so 8.17.10's move
+  from NTT_MIN_WINDOW_PRESENT to 1,000 - argued from 8.16.6's
+  narrow-window onset - removed nothing extra here.

@@ -1,0 +1,28 @@
+== 1m-validate repair threads=4  CPU-s: median of both copies of each arm (n legs); A/A = worst |X - X2| / min over the reps; verdict clears the A/A floor or is UNRESOLVED
+      m |     fold    force     F/T |   aa_F   aa_T  floor | verdict |      wF      wT  wF/wT | foreign max | peak MB force/fold
+    320 |   151.23   181.44   0.834 |   0.0%   0.0%   0.0% | fold    |   30.94   42.56  0.727 | 33% (4 legs) | 16428/922
+    344 |   168.19   183.16   0.918 |   0.0%   0.0%   0.0% | fold    |   34.48   42.10  0.819 | 20% (4 legs) | 16428/973
+    352 |   171.03   183.22   0.933 |   0.0%   0.0%   0.0% | fold    |   35.03   41.85  0.837 | 31% (4 legs) | 16428/990
+    384 |   178.73   186.80   0.957 |   0.0%   0.0%   0.0% | fold    |   37.14   42.93  0.865 | 25% (4 legs) | 16429/1057
+  crossover (log-interpolated, median): CPU m ~ >384   wall m ~ >384
+  foreign CPU over 16 legs: median 10% of a core, max 33% (after-leg median 120%)
+== 1m-validate repair threads=16  CPU-s: median of both copies of each arm (n legs); A/A = worst |X - X2| / min over the reps; verdict clears the A/A floor or is UNRESOLVED
+      m |     fold    force     F/T |   aa_F   aa_T  floor | verdict |      wF      wT  wF/wT | foreign max | peak MB force/fold
+    320 |   274.38   292.72   0.937 |   0.0%   0.0%   0.0% | fold    |   20.04   27.07  0.740 | 12% (4 legs) | 16513/924
+    344 |   300.02   294.81   1.018 |   0.0%   0.0%   0.0% | ntt     |   21.73   27.11  0.802 | 22% (4 legs) | 16511/973
+    352 |   303.58   297.69   1.020 |   0.0%   0.0%   0.0% | ntt     |   22.22   26.81  0.829 | 17% (4 legs) | 16512/990
+    384 |   328.08   298.52   1.099 |   0.0%   0.0%   0.0% | ntt     |   23.37   26.96  0.867 | 30% (4 legs) | 16516/1057
+  crossover (log-interpolated, median): CPU m ~ 339   wall m ~ >384
+  foreign CPU over 16 legs: median 12% of a core, max 30% (after-leg median 179%)
+== 1m-validate threads=4 budget=big  validate, CPU-s median over reps
+      m |    fold   force |    auto path W/win/slabs  ok  | autoalt path ok 
+    320 |  151.23  181.44 |  154.70 fold -/0/1        yes |  173.72 ntt  NO 
+    344 |  168.19  183.16 |  169.89 fold -/0/1        yes |  181.27 ntt  NO 
+    352 |  171.03  183.22 |  186.69 ntt  512/0/1      NO  |  181.33 ntt  NO 
+    384 |  178.73  186.80 |  183.77 ntt  512/0/1      NO  |  183.44 ntt  NO 
+== 1m-validate threads=16 budget=big  validate, CPU-s median over reps
+      m |    fold   force |    auto path W/win/slabs  ok  | autoalt path ok 
+    320 |  274.38  292.72 |  282.66 fold -/0/1        yes |  293.30 ntt  NO 
+    344 |  300.02  294.81 |  300.06 fold -/0/1        NO  |  292.14 ntt  yes
+    352 |  303.58  297.69 |  300.16 ntt  512/0/1      yes |  302.34 ntt  yes
+    384 |  328.08  298.52 |  301.72 ntt  512/0/1      yes |  303.55 ntt  yes

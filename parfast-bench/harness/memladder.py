@@ -102,7 +102,7 @@ def aa(base_path, new_path, budget=None):
 if len(sys.argv) > 1 and sys.argv[1] == "aa":
     sys.exit(aa(*sys.argv[2:]))
 
-from pdrv import apply_damage, damage_picks, foreign_cpu, require_quiet_box, restore_slices  # noqa: E402
+from pdrv import apply_damage, damage_picks, foreign_cpu, harness_facts, require_quiet_box, restore_slices  # noqa: E402
 
 S = os.environ["SCRATCH"]
 BIN = os.environ["BIN"]
@@ -244,6 +244,11 @@ if __name__ == "__main__":
     if not gate():
         raise SystemExit("work copy is not pristine at start")
     require_quiet_box("round-start")
+    # The HARNESS's own provenance, and the round-start twin of the
+    # per-leg `rig=` token - see `pdrv.harness_facts`. Without it a
+    # banked log cannot be traced to the harness revision that wrote
+    # it (census an internal note).
+    harness_facts()
     print("ROUND tag=%s bin=%s arm_order=%s arms=%s rungs=%s budgets=%s reps=%d threads=%s slice=%d load=%.2f/%.2f/%.2f"
           % (TAG or "(none)", BIN, ARM_ORDER_LABEL, ",".join(ARMS), ",".join(str(r) for r in RUNGS),
              ",".join(BUDGETS), REPS, THREADS, SLICE, *os.getloadavg()), flush=True)

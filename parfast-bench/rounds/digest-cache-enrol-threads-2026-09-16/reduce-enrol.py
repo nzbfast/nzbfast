@@ -13,6 +13,9 @@ import re, statistics, sys
 def parse(path):
     legs = []
     for line in open(path, errors="replace"):
+        # harness-rig-gate: a reducer over the LEG lines of a banked dcenrol
+        #   round. The drivers that bank those logs - dcenrol.sh and
+        #   dcenrol.ps1 - carry the stamp.
         if not line.startswith("LEG "):
             continue
         d = dict(re.findall(r"(\w+)=([^\s\[]+|\[[^\]]*\])", line))

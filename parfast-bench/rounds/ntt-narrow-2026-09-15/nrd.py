@@ -1,11 +1,33 @@
 #!/usr/bin/env python3
 """nrd.py - NEON A/B for parfast-ntt-narrow-admits-unpriced-stripe-14sep.
 
-A thin driver over harness/memladder.py's run_leg: four arms
-interleaved per rung and rep so both dispatchers see the same box state -
-fold, force (base binary), auto on the NEW binary, auto on the BASE binary
+A thin driver over harness/memladder.py's run_leg: four arms in one
+round per rung and rep so both dispatchers see the same box state - fold,
+force (base binary), auto on the NEW binary, auto on the BASE binary
 (recorded with tag=base / tag=new and written to separate jsonl files so
 `memladder.py aa` compares their dispatch). -t4 -m128.
+
+ARM ORDER IS DECLARATION ORDER, NOT A ROTATION, AND ROTATION IS OWED. The
+loop runs fold, force, auto(new), auto(base) in that order for every rung and
+every rep, so `fold` leads every cell and the auto-on-base A/A trails every
+one. This docstring said "interleaved" until 18 Sep 2026, in the sense of
+adjacent-in-time within a rung; that is the same-round half of the protocol
+and not the position half, which is the half that matters here because the
+arms are CLOSE (one change apart) and the A/A pair sits in two ADJACENT
+slots, so it measures the smallest drift in the cell rather than the typical
+one.
+
+NOTHING IS CHANGED HERE: this file is a ROUND RECORD and the banked x86 and
+NEON logs beside it must stay reproducible by this exact script. The rotated
+re-run is a separate piece of work, held under the claim id
+`ntt-narrow-x86-rotated-remeasure-18sep` and priced as item R2 of the 18 Sep
+driver arm-order census
+(an internal note section 5). It rotates one
+step a rep (`ARMS[r % n:] + ARMS[:r % n]`, never `reversed()`), banks
+arm_pos=, and quotes a paired per-rep statistic. Its x86 sibling narrowx86.ps1 calls
+`wcomb.ps1 -Phase validate` WITHOUT `-Flip`, so that half was fixed-order
+too. The rule is `.claude/skills/bench-suite` "Writing an A/B driver: rotate
+the arm order, and BANK it".
 
 Holds ~/.parfast-rig.lock with an exclusive flock for the whole round, after
 waiting for it AND for no parfast/par2 process (mqueue.py's rule).
@@ -59,6 +81,10 @@ try:
     for rep in range(1, REPS + 1):
         for m in RUNGS:
             picks = damage_picks(ml.WORK, ml.members, ml.SLICE, m, 1000 + m)
+            # Declaration order, every rung and rep - NOT a rotation. See
+            # the module docstring: the rotated re-run is claimed separately
+            # as `ntt-narrow-x86-rotated-remeasure-18sep`, and this copy
+            # stays as it ran so its banked logs stay reproducible.
             for arm, binp, tag, out in (("fold", BASE, "base", "fold.jsonl"),
                                         ("force", BASE, "base", "force.jsonl"),
                                         ("auto", NEW, "new", "new.jsonl"),

@@ -72,6 +72,9 @@ def legs(paths):
     for p in paths:
         for line in open(p, encoding="utf-8", errors="replace"):
             line = line.strip().lstrip("﻿")
+            # harness-rig-gate: a REDUCER over wcomb.ps1's banked log. The round
+            #   log is that driver's, and carries plib.ps1's stamp; this file only
+            #   reads it.
             if not line.startswith("LEG "):
                 continue
             kv = dict(t.split("=", 1) for t in line[4:].split() if "=" in t)
@@ -128,6 +131,26 @@ def fnum(s):
 
 
 def best(rows, key):
+    """The MINIMUM-CPU row per key, and the whole row - not a mean, not a median.
+
+    Minimum is the right estimator for a cell measured repeatedly on a shared
+    box: interference can only make a leg slower, so the fastest observation is
+    the closest to the unloaded truth. Callers that want a metric other than
+    CPU read it OFF THE SELECTED ROW rather than minimising it separately,
+    which is what keeps CPU and wall like for like - the correction
+    `cfdriftsum.py`'s docstring records.
+
+    IT IS BIASED BY HOW MANY ROWS YOU HAND IT, and that is a trap for any
+    caller comparing units. A minimum over three legsets sits lower than a
+    minimum over two of the same cell, for no reason but the extra draw, so two
+    units built from unequal numbers of logs are not comparable and the
+    difference reads as an effect. Give every unit in a comparison the SAME
+    number of legs, or reduce each legset on its own and compare the mean of
+    the per-legset fits. Met and avoided by lane
+    cf-load-term-buffer-and-placement-18sep, whose arms would otherwise have
+    read a quiet baseline three legsets deep against loaded arms two deep, and
+    inflated every ratio printed against it.
+    """
     cells = {}
     for r in rows:
         k = key(r)

@@ -23,6 +23,38 @@ def sha256_file(p):
             if not b: return h.hexdigest()
             h.update(b)
 
+def harness_lines(paths):
+    """The round-start harness stamp, `plib.ps1` / `pdrv.py` format exactly:
+    one `HARNESS <basename> sha256=... bytes=...` per file the round sources,
+    then `HARNESS-RIG <basename>:<sha16>+...` sorted by basename.
+
+    COMPOSED HERE RATHER THAN CALLED FROM `pdrv.harness_facts`, and that is
+    the whole reason this exists: this driver tees its log through `say`,
+    writing the banked file AND stdout, where `pdrv.harness_facts` uses a bare
+    `print` - so calling it would put the stamp on stdout and leave the BANKED
+    log unstamped, which is the exact defect being fixed
+    (an internal note). Returns the lines for
+    the caller to `say`; it prints nothing itself.
+
+    An unreadable file is stamped `unreadable` rather than left off, for
+    pdrv.rig_stamp's reason: an absent token is indistinguishable from a
+    harness older than this block, which never had one.
+    """
+    out, parts = [], []
+    for p in sorted((os.path.abspath(q) for q in paths), key=os.path.basename):
+        nm = os.path.basename(p)
+        try:
+            sha, n = sha256_file(p), os.path.getsize(p)
+        except OSError:
+            out.append(f"HARNESS {nm} sha256=unreadable bytes=0")
+            parts.append(f"{nm}:unreadable")
+            continue
+        out.append(f"HARNESS {nm} sha256={sha} bytes={n}")
+        parts.append(f"{nm}:{sha[:16]}")
+    out.append("HARNESS-RIG " + ("+".join(parts) if parts else "unknown"))
+    return out
+
+
 def warm(paths):
     for p in paths:
         try:
@@ -150,6 +182,10 @@ def main():
 
     extra = dict(kv.split("=", 1) for kv in a.extra_env.split(",") if kv)
     say(f"PHASE-START {now()} host={platform.node()} os={platform.platform()} cores={os.cpu_count()} extra_env={extra}")
+    # The HARNESS's own provenance, so a banked round can be traced to the
+    # harness revision that wrote it. This driver imports nothing from
+    # harness/, so it is the whole harness set.
+    for _l in harness_lines([__file__]): say(_l)
     pristine = os.path.join(a.rig, "pristine"); work = os.path.join(a.rig, "work")
     src = gen_payload(a.payload)
     if not os.path.isdir(pristine) or not os.path.exists(os.path.join(pristine, "f.par2")):

@@ -90,6 +90,9 @@ def force_peaks(path):
     """Peaks of the `force`/`force2` measurement LEGS only - never the CREATE."""
     out = []
     for ln in Path(path).read_text(errors="replace").splitlines():
+        # harness-rig-gate: an audit over a banked round's LEG lines. It reads
+        #   logs it is handed and writes a verdict, not a round log - both LEG
+        #   sites here are reads.
         if not ln.startswith("LEG "):
             continue
         if " arm=force" not in ln:

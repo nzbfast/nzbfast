@@ -1,0 +1,258 @@
+{
+ "legs-p4.jsonl": [
+  {
+   "rung": "w4",
+   "ok": true,
+   "path": "ntt",
+   "wall": 285.911,
+   "cpu": 2169.007,
+   "syn_total": 156.54,
+   "peak_mb": 11223.5
+  },
+  {
+   "rung": "w4",
+   "ok": true,
+   "path": "ntt",
+   "wall": 283.592,
+   "cpu": 2160.979,
+   "syn_total": 155.87,
+   "peak_mb": 11223.3
+  },
+  {
+   "rung": "w6",
+   "ok": true,
+   "path": "ntt",
+   "wall": 342.638,
+   "cpu": 2682.666,
+   "syn_total": 221.35,
+   "peak_mb": 11223.6
+  },
+  {
+   "rung": "w6",
+   "ok": true,
+   "path": "ntt",
+   "wall": 351.77,
+   "cpu": 2688.102,
+   "syn_total": 221.52,
+   "peak_mb": 11224.1
+  },
+  {
+   "rung": "w8",
+   "ok": true,
+   "path": "ntt",
+   "wall": 399.309,
+   "cpu": 3116.814,
+   "syn_total": 275.27,
+   "peak_mb": 11224.2
+  },
+  {
+   "rung": "w8",
+   "ok": true,
+   "path": "ntt",
+   "wall": 408.551,
+   "cpu": 3182.73,
+   "syn_total": 284.13,
+   "peak_mb": 11223.5
+  },
+  {
+   "rung": "w10",
+   "ok": true,
+   "path": "ntt",
+   "wall": 439.582,
+   "cpu": 3436.257,
+   "syn_total": 315.69,
+   "peak_mb": 11223.9
+  },
+  {
+   "rung": "w10",
+   "ok": true,
+   "path": "ntt",
+   "wall": 419.519,
+   "cpu": 3304.3,
+   "syn_total": 301.12,
+   "peak_mb": 11224.1
+  },
+  {
+   "rung": "w4",
+   "ok": true,
+   "path": "ntt",
+   "wall": 273.358,
+   "cpu": 2141.103,
+   "syn_total": 155.53,
+   "peak_mb": 11223.7
+  },
+  {
+   "rung": "w4",
+   "ok": true,
+   "path": "ntt",
+   "wall": 273.61,
+   "cpu": 2143.649,
+   "syn_total": 155.75,
+   "peak_mb": 11223.6
+  },
+  {
+   "rung": "w10",
+   "ok": true,
+   "path": "ntt",
+   "wall": 409.697,
+   "cpu": 3230.709,
+   "syn_total": 292.21,
+   "peak_mb": 11223.4
+  },
+  {
+   "rung": "w10",
+   "ok": true,
+   "path": "ntt",
+   "wall": 406.28,
+   "cpu": 3204.514,
+   "syn_total": 288.85,
+   "peak_mb": 11222.7
+  },
+  {
+   "rung": "w8",
+   "ok": true,
+   "path": "ntt",
+   "wall": 386.543,
+   "cpu": 3047.356,
+   "syn_total": 269.02,
+   "peak_mb": 11223.6
+  },
+  {
+   "rung": "w8",
+   "ok": true,
+   "path": "ntt",
+   "wall": 379.766,
+   "cpu": 2990.942,
+   "syn_total": 262.16,
+   "peak_mb": 11223.7
+  },
+  {
+   "rung": "w6",
+   "ok": true,
+   "path": "ntt",
+   "wall": 333.874,
+   "cpu": 2624.071,
+   "syn_total": 216.3,
+   "peak_mb": 11223.8
+  },
+  {
+   "rung": "w6",
+   "ok": true,
+   "path": "ntt",
+   "wall": 335.633,
+   "cpu": 2638.031,
+   "syn_total": 217.72,
+   "peak_mb": 11224.0
+  }
+ ],
+ "legs-p4b.jsonl": [
+  {
+   "rung": "w5",
+   "ok": true,
+   "path": "ntt",
+   "wall": 312.774,
+   "cpu": 2446.383,
+   "syn_total": 193.51,
+   "peak_mb": 11224.0
+  },
+  {
+   "rung": "w5",
+   "ok": true,
+   "path": "ntt",
+   "wall": 310.459,
+   "cpu": 2434.135,
+   "syn_total": 192.12,
+   "peak_mb": 11224.6
+  },
+  {
+   "rung": "w7",
+   "ok": true,
+   "path": "ntt",
+   "wall": 370.841,
+   "cpu": 2918.884,
+   "syn_total": 253.03,
+   "peak_mb": 11223.4
+  },
+  {
+   "rung": "w7",
+   "ok": true,
+   "path": "ntt",
+   "wall": 370.273,
+   "cpu": 2912.331,
+   "syn_total": 252.59,
+   "peak_mb": 11223.8
+  },
+  {
+   "rung": "w9",
+   "ok": true,
+   "path": "ntt",
+   "wall": 394.771,
+   "cpu": 3111.939,
+   "syn_total": 277.14,
+   "peak_mb": 11223.2
+  },
+  {
+   "rung": "w9",
+   "ok": true,
+   "path": "ntt",
+   "wall": 379.388,
+   "cpu": 2988.118,
+   "syn_total": 261.76,
+   "peak_mb": 11223.4
+  },
+  {
+   "rung": "w5",
+   "ok": true,
+   "path": "ntt",
+   "wall": 308.709,
+   "cpu": 2422.34,
+   "syn_total": 190.99,
+   "peak_mb": 11223.8
+  },
+  {
+   "rung": "w5",
+   "ok": true,
+   "path": "ntt",
+   "wall": 308.782,
+   "cpu": 2424.39,
+   "syn_total": 191.08,
+   "peak_mb": 11224.1
+  },
+  {
+   "rung": "w9",
+   "ok": true,
+   "path": "ntt",
+   "wall": 391.945,
+   "cpu": 3089.726,
+   "syn_total": 274.43,
+   "peak_mb": 11223.2
+  },
+  {
+   "rung": "w9",
+   "ok": true,
+   "path": "ntt",
+   "wall": 406.04,
+   "cpu": 3202.964,
+   "syn_total": 288.57,
+   "peak_mb": 11224.2
+  },
+  {
+   "rung": "w7",
+   "ok": true,
+   "path": "ntt",
+   "wall": 366.4,
+   "cpu": 2885.781,
+   "syn_total": 248.9,
+   "peak_mb": 11224.1
+  },
+  {
+   "rung": "w7",
+   "ok": true,
+   "path": "ntt",
+   "wall": 362.689,
+   "cpu": 2855.774,
+   "syn_total": 245.04,
+   "peak_mb": 11222.8
+  }
+ ]
+}

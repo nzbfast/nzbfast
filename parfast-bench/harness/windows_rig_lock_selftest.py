@@ -119,21 +119,27 @@ def check_orphans():
 
         import ladder
 
-        # --- 1. ZERO BYTES: names nobody, so it is nobody's, at any age.
+        # --- 1. ZERO BYTES: release()'s own spelling for an ordinary
+        # hand-over, not the 16 Sep crash-before-write case any more -
+        # riglock_state.lock_state() tells them apart since 20 Sep 2026.
+        # take() must still clear it, but SILENTLY (an internal note-
+        # 20-RARKIT-DISPATCHER-4.md - folding this into "orphan" and
+        # announcing it is what made an ordinary hand-over on apple-m3-ultra
+        # print a false RIG-LOCK-ORPHAN).
+        coord = os.environ["BOXGATE_COORD"]
         _write_lock(lock, "")
         a = ladder.RigLock("selftest-round", lock_path=lock)
         a.take()
         with open(lock) as fh:
             assert "pid=%d" % os.getpid() in fh.read(), \
-                "FAIL: a zero-byte orphan did not hand the lock over"
+                "FAIL: a released (zero-byte) lock did not hand over"
         a.release()
-        coord = os.environ["BOXGATE_COORD"]
-        assert os.path.exists(coord), "FAIL: clearing an orphan wrote no coordination NOTE"
-        with open(coord) as fh:
-            assert "ORPHAN" in fh.read(), "FAIL: the coordination NOTE does not name the orphan"
+        assert not os.path.exists(coord), \
+            "FAIL: an ordinary hand-over (zero bytes) announced an orphan"
 
         # --- 2. A DEAD PID, with an intact identity line and a deliberately
         # ancient `started` - age is NOT what decides, in either direction.
+        # A genuine orphan, unlike arm 1: must be cleared AND announced.
         _write_lock(lock, "pid=%d round=ghost started=2026-09-16T02:17:45Z\n" % _dead_pid())
         b = ladder.RigLock("selftest-round", lock_path=lock)
         b.take()
@@ -141,6 +147,9 @@ def check_orphans():
             assert "pid=%d" % os.getpid() in fh.read(), \
                 "FAIL: a lock naming a dead pid did not hand over"
         b.release()
+        assert os.path.exists(coord), "FAIL: clearing a dead-pid orphan wrote no coordination NOTE"
+        with open(coord) as fh:
+            assert "ORPHAN" in fh.read(), "FAIL: the coordination NOTE does not name the orphan"
 
         # --- 3. A LIVE PID: refused, at any age, with its line untouched.
         sleeper = _live_pid()

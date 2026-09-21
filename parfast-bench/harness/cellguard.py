@@ -145,14 +145,22 @@ USAGE AS A SCRIPT.
 
     cellguard.py --scan research          re-audit every banked log
     cellguard.py --scan research --floor 0.8 --verbose
+    cellguard.py --unparsed research      the sixth-format probe (see below)
     cellguard.py --selftest               the built-in cases
 
 The `--scan` arm is what produced an internal note
 and exists so the audit is repeatable rather than a one-off. It parses the
-five per-arm print formats the corpus actually uses; `--scan` reports the
-lines it could see and a driver family that prints its statistics some sixth
-way is invisible to it, which is a real blind spot and is why the audit
-quantified it rather than assuming the dominant format was all of them.
+five per-arm print formats the corpus actually uses, PLUS, since 18 Sep 2026,
+a markdown table whose header pairs a `<word> median` column with a `<word>
+min` column (rarbench's `wall median s` / `wall min s`), read out of *.log AND
+*.md - the one shape the 17 Sep audit could not see, and it held the corpus's
+three worst cells. `--scan` reports the lines it could see and a driver family
+that prints its statistics some seventh way is invisible to it, which is a
+real blind spot and is why the audit quantified it rather than assuming the
+dominant format was all of them. `--unparsed` is the probe for that: it lists
+every cell-shaped line no scanner reads, grouped by round directory, and
+an internal note is the method and the
+sweep that found the table.
 """
 
 import re
@@ -271,6 +279,67 @@ def scan_ratio_line(line):
     return (a, b) if a > 0 and b > 0 else None
 
 
+# The SIXTH shape, found 18 Sep 2026 and not a line at all: a markdown TABLE
+# whose header names a median column and a min column and whose rows are bare
+# numbers. rarbench banks every round that way (`| tool | wall median s |
+# wall min s | ...`) - 499 tables and 1,655 cells across three round
+# directories on the day, every one of them invisible to the five line
+# patterns and to the roster, and holding cells at 0.148, 0.264 and 0.346,
+# under anything the line scan had ever seen. The audit's section 5a argued
+# that a WORDLESS cell cannot be anchored, and that still holds for a row on
+# its own; here the words are one line up, so the anchor is the header. It is
+# strict on purpose: the two columns must share their leading word (`wall
+# median s` / `wall min s`), because in a prose document's table `min` is as
+# often minutes as a minimum - a `| commits | min | p25 | median | ...` row of
+# claim-to-done wall clock reads 0.022 under the loose pairing. The 22 bare
+# `| min | median | max |` tables in an internal note are NOT read for that
+# reason, and an internal note names them.
+_CELL_NUM = re.compile(r"^\s*\**([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\**\s*(?:ms|s|x)?\s*$")
+
+
+def _cols(line):
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def scan_table_header(line):
+    """[(median column, min column)] off a markdown table header, or []."""
+    if not line.lstrip().startswith("|"):
+        return []
+    cols = _cols(line)
+    pairs = []
+    for a, ca in enumerate(cols):
+        wa = ca.lower().split()
+        if len(wa) < 2 or wa[1] not in ("median", "med"):
+            continue
+        for b, cb in enumerate(cols):
+            wb = cb.lower().split()
+            if len(wb) >= 2 and wb[0] == wa[0] and wb[1] == "min":
+                pairs.append((a, b))
+                break
+    return pairs
+
+
+def scan_table_row(line, pairs):
+    """[(median, min)] off one data row under a header scan_table_header read."""
+    if not line.lstrip().startswith("|"):
+        return None
+    cols = _cols(line)
+    if all(set(c) <= set("-: ") for c in cols):
+        return []  # the |---|---| rule under the header
+    out = []
+    for a, b in pairs:
+        if a >= len(cols) or b >= len(cols):
+            continue
+        ma, mb = _CELL_NUM.match(cols[a]), _CELL_NUM.match(cols[b])
+        if not (ma and mb):
+            continue
+        med = float(ma.group(1).replace(",", ""))
+        lo = float(mb.group(1).replace(",", ""))
+        if med > 0 and lo > 0 and lo <= med * 1.0001:
+            out.append((med, lo))
+    return out
+
+
 # Logs their own author already condemned, or ran degraded ON PURPOSE. These
 # are not findings and they drown the report: the VOID armbench cell alone
 # contributes 60-odd hits down to a ratio of 0.074, and section 12.4's banked
@@ -296,9 +365,13 @@ def _scan(root, floor, ceiling, verbose, include_all=False):
     import pathlib
 
     root = pathlib.Path(root)
-    cells = ratios = skipped = 0
+    cells = ratios = tcells = skipped = 0
     hits = []
-    for p in sorted(root.rglob("*.log")):
+    # *.log carries the line formats and any table; *.md is read for TABLES
+    # ONLY - a cell quoted in a write-up's prose is a quotation, not a second
+    # cell, and reading the line patterns over documents would count it twice.
+    files = sorted(root.rglob("*.log")) + sorted(root.rglob("*.md"))
+    for p in files:
         if not include_all and _skipped(p):
             skipped += 1
             continue
@@ -306,7 +379,24 @@ def _scan(root, floor, ceiling, verbose, include_all=False):
             text = p.read_text(errors="replace")
         except OSError:
             continue
+        pairs = []
         for i, line in enumerate(text.splitlines(), 1):
+            if pairs:
+                rows = scan_table_row(line, pairs)
+                if rows is None:
+                    pairs = []
+                else:
+                    for med, lo in rows:
+                        tcells += 1
+                        if lo / med < floor:
+                            hits.append(("table", p, i, lo / med, line.strip()))
+                    continue
+            hdr = scan_table_header(line)
+            if hdr:
+                pairs = hdr
+                continue
+            if p.suffix == ".md":
+                continue
             got = scan_line(line)
             if got:
                 cells += 1
@@ -321,18 +411,87 @@ def _scan(root, floor, ceiling, verbose, include_all=False):
                 spread = max(a / b, b / a)
                 if spread >= ceiling:
                     hits.append(("disagree", p, i, spread, line.strip()))
-    print("cellguard: %d per-arm cells and %d ratio cells over %s"
-          % (cells, ratios, root))
+    print("cellguard: %d per-arm cells, %d ratio cells and %d table cells over %s"
+          % (cells, ratios, tcells, root))
     if skipped:
         print("cellguard: skipped %d log(s) already marked VOID/contaminated or "
               "banked as deliberate degraded observations (--all to include)"
               % skipped)
     print("cellguard: floor %.2f, ceiling %.2f -> %d flagged (%.2f%% of cells)"
-          % (floor, ceiling, len(hits), 100.0 * len(hits) / max(cells + ratios, 1)))
+          % (floor, ceiling, len(hits), 100.0 * len(hits) / max(cells + ratios + tcells, 1)))
     for kind, p, i, val, line in sorted(hits, key=lambda h: (h[0], h[3])):
         print("  %-8s %.3f  %s:%d" % (kind, val, p, i))
         if verbose:
             print("           %s" % line[:120])
+    return 0
+
+
+# ------------------------------------------------------- unparsed-line report
+
+# The probe behind "is a sixth print format hiding in the corpus". The scan
+# above reads the five per-arm spellings and the ratio form; a driver family
+# printing its statistics some other way is invisible to it, and an invisible
+# family reports as a CLEAN corpus rather than an incomplete one. Measured on
+# 17 Sep 2026: the four spellings the first scan could not read held the two
+# worst cells in the corpus (0.391 and 0.437). This arm lists every line that
+# LOOKS like a cell and that neither scanner could parse, grouped by round
+# directory - a directory with a large count and a consistent example line is
+# a new spelling; a handful of prose lines is not. Two kinds:
+#   med+min   names BOTH a median and a min with two decimals: the sixth
+#             spelling proper, if one exists.
+#   med-only  names a median, two decimals, and no min word at all. This is
+#             where a median-with-quartiles driver (rarbench's `wall median
+#             24.8 ms p25 24.4 p75 25.1`) shows up. It is NOT taught to
+#             scan_line on purpose: p25 is not min, and the rule's quantity is
+#             min/median. Such a family is a stated limit, not a pattern.
+# Method and the 18 Sep 2026 run:
+# an internal note.
+_MED_WORD = re.compile(r"\bmed(?:ian)?\b", re.I)
+_MIN_WORD = re.compile(r"\bmin\b", re.I)
+_DECIMAL = re.compile(r"[0-9]+\.[0-9]+")
+
+
+def unparsed_kind(line):
+    """'med+min' / 'med-only' for a cell-shaped line no scanner reads; else None."""
+    if not _MED_WORD.search(line) or len(_DECIMAL.findall(line)) < 2:
+        return None
+    if scan_line(line) or scan_ratio_line(line):
+        return None
+    return "med+min" if _MIN_WORD.search(line) else "med-only"
+
+
+def _unparsed(root, glob, top):
+    import collections
+    import pathlib
+
+    root = pathlib.Path(root)
+    count = {"med+min": collections.Counter(), "med-only": collections.Counter()}
+    example = {"med+min": {}, "med-only": {}}
+    files = 0
+    for p in sorted(root.rglob(glob)):
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:
+            continue
+        files += 1
+        for line in text.splitlines():
+            kind = unparsed_kind(line)
+            if not kind:
+                continue
+            d = str(p.parent)
+            count[kind][d] += 1
+            example[kind].setdefault(d, line.strip()[:110])
+    print("cellguard: unparsed cell-shaped lines over %d file(s) matching %s under %s"
+          % (files, glob, root))
+    for kind in ("med+min", "med-only"):
+        c = count[kind]
+        print("%s: %d line(s) in %d dir(s)%s" % (
+            kind, sum(c.values()), len(c), "" if c else " - nothing to read"))
+        for d, n in c.most_common(top):
+            print("  %5d  %s\n         %s" % (n, d, example[kind][d]))
+    print("cellguard: this is a REPORT, not a gate - exit 0. A directory with a"
+          " large count and a consistent example is a spelling to read; prose"
+          " and counter rows are noise.")
     return 0
 
 
@@ -382,6 +541,47 @@ def _selftest():
         if not got or abs(got[0] - wa) > 1e-6 or abs(got[1] - wb) > 1e-6:
             fails.append("scan_ratio_line %r -> %r, wanted (%s, %s)" % (line[:40], got, wa, wb))
 
+    # The table arm: rarbench's header pairs `wall median s` with `wall min s`
+    # and nothing else; a bare `| min | median |` header is refused (prose
+    # tables spell minutes that way); a data row yields the pair, the rule
+    # line yields nothing, and prose ends the table.
+    hdr = scan_table_header("| tool | wall median s | wall min s | cpu s | cpu/wall |")
+    if hdr != [(1, 2)]:
+        fails.append("scan_table_header rarbench -> %r" % (hdr,))
+    if scan_table_header("| commits | min | p25 | median | p75 | max |"):
+        fails.append("scan_table_header paired a bare min/median header")
+    if scan_table_header("| wall median s | wall min s |"):  # no leading |
+        pass
+    if scan_table_header("wall median s | wall min s"):
+        fails.append("scan_table_header read a line that is not a table")
+    if scan_table_row("|---|---|---|---|---|", [(1, 2)]) != []:
+        fails.append("scan_table_row did not skip the rule line")
+    if scan_table_row("| rarfast | 0.480 | 0.071 | 0.19 | 0.4 |", [(1, 2)]) != [(0.480, 0.071)]:
+        fails.append("scan_table_row rarbench row -> %r"
+                     % scan_table_row("| rarfast | 0.480 | 0.071 | 0.19 | 0.4 |", [(1, 2)]))
+    if scan_table_row("| rar | **6,523.0** | 3,277.5 | x | y |", [(1, 2)]) != [(6523.0, 3277.5)]:
+        fails.append("scan_table_row bold/comma row")
+    if scan_table_row("| rar | 0.322 | 0.500 | 0.15 | 0.5 |", [(1, 2)]) != []:
+        fails.append("scan_table_row accepted a min above its median")
+    if scan_table_row("prose after the table", [(1, 2)]) is not None:
+        fails.append("scan_table_row did not end the table on prose")
+
+    # The unparsed-line report's classifier: a parsed cell is None, a prose
+    # line naming both words is med+min, a quartile line is med-only, and a
+    # line with one decimal or no median word is nothing.
+    for line, want in [
+        ("  base   median  764.115 ms   min  489.604", None),
+        ("B/A med=0.790 min/min=0.544", None),
+        ("#     median (60.096) sat 2.2 ms above its own min (57.801) while", "med+min"),
+        ("test-m5-text  base  wall median   24.8 ms  p25   24.4  p75   25.1  n=51", "med-only"),
+        ("load_before min/median/max 3.5/5.2/11.6", "med+min"),
+        ("median 24.8 ms n=51", None),
+        ("min 1.5 max 2.5 mean 2.0", None),
+    ]:
+        got = unparsed_kind(line)
+        if got != want:
+            fails.append("unparsed_kind %r -> %r, wanted %r" % (line[:40], got, want))
+
     for f in fails:
         print("FAIL  %s" % f)
     print("cellguard selftest: %s" % ("FAILED (%d)" % len(fails) if fails else "ok"))
@@ -399,9 +599,18 @@ def main(argv):
     ap.add_argument("--all", action="store_true",
                     help="include logs marked VOID/contaminated/degraded")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--unparsed", metavar="DIR",
+                    help="list cell-shaped lines under DIR no scanner can read, "
+                         "grouped by directory (the sixth-format probe)")
+    ap.add_argument("--glob", default="*.log",
+                    help="file pattern for --unparsed (default *.log; rarbench "
+                         "banks its rounds as *.md)")
+    ap.add_argument("--top", type=int, default=20, help="directories to show per kind")
     a = ap.parse_args(argv)
     if a.selftest:
         return _selftest()
+    if a.unparsed:
+        return _unparsed(a.unparsed, a.glob, a.top)
     if a.scan:
         return _scan(a.scan, a.floor, a.ceiling, a.verbose, a.all)
     ap.print_help()

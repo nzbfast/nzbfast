@@ -1,0 +1,9 @@
+2026-09-18T07:29:34.4764096+01:00 FPKC-ROUND start root=<rig>\fpk18sep bin=<rig>\fpk18sep\src\target\release\parfast.exe
+2026-09-18T07:29:34.5166019+01:00 BIN sha256=7DBF785D6AD48735EE3073C72A7314D5B74068B17147FA64E6955CFDACF52E78 <rig>\fpk18sep\src\target\release\parfast.exe
+2026-09-18T07:29:34.5166019+01:00 FIXTURE reused <rig>\fpk18sep\fix-1048576-512
+2026-09-18T07:30:36.6737355+01:00 LOAD-GATE ok at=fpkc loads=5/3 waited_s=0
+2026-09-18T07:30:36.6737355+01:00 LADDER fpkc label=g1m-nibble UNPINNED threads=4,6,12 reps=1 gf16force=avx2 log=<rig>\fpk18sep\harness\logs\fpkc.log
+2026-09-18T07:30:36.7116978+01:00 ARGV powershell -NoProfile -ExecutionPolicy Bypass -File "<rig>\fpk18sep\harness\wcomb.ps1" -Root "<rig>\fpk18sep" -Bin "<rig>\fpk18sep\src\target\release\parfast.exe" -NoBuild -Phase measure -Tag fpkc -Label g1m-nibble -Slice 1048576 -MemberMiB 512 -Recovery 2048 -Rungs "192,512,1024,2048" -Threads "4,6,12" -Reps 1 -Budget 2048 -NttBudget 12884901888 -Gf16Force avx2
+2026-09-18T08:00:04.8037257+01:00 ARM-DONE fpkc rc=0 legs=36 lock_waits=0
+2026-09-18T08:00:04.8355084+01:00 GF16FORCE-ASSERT legs=36 without_avx2=0
+2026-09-18T08:00:04.8355084+01:00 FPKC-ROUND end rc=0

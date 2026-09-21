@@ -78,7 +78,7 @@ env: BIN       the ONE binary (client and server alike)
 import json, os, shutil, signal, socket, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pdrv import require_quiet_box, foreign_cpu  # noqa: E402
+from pdrv import require_quiet_box, foreign_cpu, harness_facts  # noqa: E402
 
 R = os.environ.get("R", "/root/wstagefs-17sep")
 BIN = os.environ["BIN"]
@@ -344,6 +344,11 @@ def leg(cell, arm, nzb, cfg, rep, keep=True):
 def main():
     refuse_ram_disk()
     cg_setup()
+    # The HARNESS's own provenance, and the round-start twin of the
+    # per-leg `rig=` token - see `pdrv.harness_facts`. Without it a
+    # banked log cannot be traced to the harness revision that wrote
+    # it (census an internal note).
+    harness_facts()
     print("wstagefs round start %s R=%s regime=%s reps=%d cells=%s arms=%s bin=%s"
           % (utcnow(), R, REGIME, REPS, ORDER_CELLS, ARMS, BIN), flush=True)
     try:

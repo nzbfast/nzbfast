@@ -1,0 +1,260 @@
+DRV-START 2026-09-18T17:07:14.0364078Z pid=16768 root=<rig>\zswp3-18sep restart=True
+DRV-POLL 2026-09-18T17:07:15.3578219Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=74.8 streak=0/10
+DRV-POLL 2026-09-18T17:08:16.5156724Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=804.5 streak=0/10
+DRV-POLL 2026-09-18T17:09:17.9610137Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=984.6 streak=0/10
+DRV-POLL 2026-09-18T17:10:19.0400535Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=457.3 streak=0/10
+DRV-POLL 2026-09-18T17:11:20.1695856Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=834.4 streak=0/10
+DRV-POLL 2026-09-18T17:12:21.2755290Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=30.8 streak=0/10
+DRV-POLL 2026-09-18T17:13:22.3849405Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=12.4 streak=0/10
+DRV-POLL 2026-09-18T17:14:23.5142733Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=743.1 streak=0/10
+DRV-POLL 2026-09-18T17:15:24.5789076Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=273.2 streak=0/10
+DRV-POLL 2026-09-18T17:16:25.8799699Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1710.4 streak=0/10
+DRV-POLL 2026-09-18T17:17:27.0170228Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=479.2 streak=0/10
+DRV-POLL 2026-09-18T17:18:28.1221578Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=109 streak=0/10
+DRV-POLL 2026-09-18T17:19:29.4653810Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1432 streak=0/10
+DRV-POLL 2026-09-18T17:20:30.5574241Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=117.5 streak=0/10
+DRV-POLL 2026-09-18T17:21:31.6671184Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=52.1 streak=0/10
+DRV-POLL 2026-09-18T17:22:32.8020445Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1559 streak=0/10
+DRV-POLL 2026-09-18T17:23:34.0274189Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=37 streak=0/10
+DRV-POLL 2026-09-18T17:24:35.1364154Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=21.7 streak=0/10
+DRV-POLL 2026-09-18T17:25:36.2036179Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=20.1 streak=0/10
+DRV-POLL 2026-09-18T17:26:37.3118227Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=42.8 streak=0/10
+DRV-POLL 2026-09-18T17:27:38.4026583Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=46.9 streak=0/10
+DRV-POLL 2026-09-18T17:28:39.5481585Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1494.7 streak=0/10
+DRV-POLL 2026-09-18T17:29:40.6668862Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=808 streak=0/10
+DRV-POLL 2026-09-18T17:30:42.3551235Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1453.1 streak=0/10
+DRV-POLL 2026-09-18T17:31:43.4507181Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=147.2 streak=0/10
+DRV-POLL 2026-09-18T17:32:44.5652873Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=114 streak=0/10
+DRV-POLL 2026-09-18T17:33:45.6740838Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=104.1 streak=0/10
+DRV-POLL 2026-09-18T17:34:47.6029900Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1493.8 streak=0/10
+DRV-POLL 2026-09-18T17:35:48.7727509Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=733.6 streak=0/10
+DRV-POLL 2026-09-18T17:36:49.9091778Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=833.2 streak=0/10
+DRV-POLL 2026-09-18T17:37:50.9685703Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=112.8 streak=0/10
+DRV-POLL 2026-09-18T17:38:52.1008724Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=761.1 streak=0/10
+DRV-POLL 2026-09-18T17:39:53.1965703Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=12.4 streak=0/10
+DRV-POLL 2026-09-18T17:40:54.3992734Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1595.4 streak=0/10
+DRV-POLL 2026-09-18T17:41:55.6242955Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=857.7 streak=0/10
+DRV-POLL 2026-09-18T17:42:56.7359886Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=811.9 streak=0/10
+DRV-POLL 2026-09-18T17:43:57.8388359Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=307.1 streak=0/10
+DRV-POLL 2026-09-18T17:44:59.4721330Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1433 streak=0/10
+DRV-POLL 2026-09-18T17:46:00.5782712Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=412.5 streak=0/10
+DRV-POLL 2026-09-18T17:47:01.7649905Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=865.9 streak=0/10
+DRV-POLL 2026-09-18T17:48:02.8955495Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=219.9 streak=0/10
+DRV-POLL 2026-09-18T17:49:04.0136625Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=18.3 streak=0/10
+DRV-POLL 2026-09-18T17:50:05.1829185Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=780.9 streak=0/10
+DRV-POLL 2026-09-18T17:51:06.4207361Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1567.9 streak=0/10
+DRV-POLL 2026-09-18T17:52:07.5155073Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=113.6 streak=0/10
+DRV-POLL 2026-09-18T17:53:08.6320656Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=13.9 streak=0/10
+DRV-POLL 2026-09-18T17:54:10.8730288Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1350.7 streak=0/10
+DRV-POLL 2026-09-18T17:55:11.9861782Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=38.7 streak=0/10
+DRV-POLL 2026-09-18T17:56:13.0848082Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=106.6 streak=0/10
+DRV-POLL 2026-09-18T17:57:14.1911606Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=112.4 streak=0/10
+DRV-POLL 2026-09-18T17:58:15.4357238Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=825.8 streak=0/10
+DRV-POLL 2026-09-18T17:59:16.8094567Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1391.3 streak=0/10
+DRV-POLL 2026-09-18T18:00:17.9536047Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=653.5 streak=0/10
+DRV-POLL 2026-09-18T18:01:19.1565593Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=939.4 streak=0/10
+DRV-POLL 2026-09-18T18:02:20.2868670Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=111.7 streak=0/10
+DRV-POLL 2026-09-18T18:03:21.4141674Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=13.9 streak=0/10
+DRV-POLL 2026-09-18T18:04:22.5484835Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=799.9 streak=0/10
+DRV-POLL 2026-09-18T18:05:26.0852695Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1583 streak=0/10
+DRV-POLL 2026-09-18T18:06:27.1998774Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1208.8 streak=0/10
+DRV-POLL 2026-09-18T18:07:28.4521077Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=739.9 streak=0/10
+DRV-POLL 2026-09-18T18:08:29.6392931Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1121.2 streak=0/10
+DRV-POLL 2026-09-18T18:09:30.7514741Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=24.8 streak=0/10
+DRV-POLL 2026-09-18T18:10:31.8569573Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=798.2 streak=0/10
+DRV-POLL 2026-09-18T18:11:32.9506945Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=122.6 streak=0/10
+DRV-POLL 2026-09-18T18:12:34.0665646Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=10.7 streak=0/10
+DRV-POLL 2026-09-18T18:13:35.1473798Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=25 streak=0/10
+DRV-POLL 2026-09-18T18:14:36.4611918Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1472.4 streak=0/10
+DRV-POLL 2026-09-18T18:15:37.5560597Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=113.9 streak=0/10
+DRV-POLL 2026-09-18T18:16:38.7134974Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1251.8 streak=0/10
+DRV-POLL 2026-09-18T18:17:39.8436722Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=862.7 streak=0/10
+DRV-POLL 2026-09-18T18:18:40.9597552Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=13.9 streak=0/10
+DRV-POLL 2026-09-18T18:19:42.0711014Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=808.6 streak=0/10
+DRV-POLL 2026-09-18T18:20:43.1565125Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=104.3 streak=0/10
+DRV-POLL 2026-09-18T18:21:44.2644516Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=248.7 streak=0/10
+DRV-POLL 2026-09-18T18:22:45.3629065Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=811.9 streak=0/10
+DRV-POLL 2026-09-18T18:23:46.4730003Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=406.7 streak=0/10
+DRV-POLL 2026-09-18T18:24:47.8689050Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1546.5 streak=0/10
+DRV-POLL 2026-09-18T18:25:49.1600923Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=110.3 streak=0/10
+DRV-POLL 2026-09-18T18:26:50.2655766Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=428.2 streak=0/10
+DRV-POLL 2026-09-18T18:27:51.8198579Z lock_held=True lock_why=held by live pid=2868 open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=23.3 streak=0/10
+DRV-POLL 2026-09-18T18:28:52.9058120Z lock_held=False lock_why=absent open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=78.9 streak=0/10
+DRV-POLL 2026-09-18T18:29:54.0226237Z lock_held=False lock_why=absent open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=6.2 streak=0/10
+DRV-POLL 2026-09-18T18:30:55.1453704Z lock_held=False lock_why=absent open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=3.1 streak=0/10
+DRV-POLL 2026-09-18T18:31:56.2518450Z lock_held=False lock_why=absent open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=23.3 streak=0/10
+DRV-POLL 2026-09-18T18:32:57.3539429Z lock_held=False lock_why=absent open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=3.1 streak=0/10
+DRV-POLL 2026-09-18T18:33:58.4659485Z lock_held=False lock_why=absent open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=13.8 streak=0/10
+DRV-POLL 2026-09-18T18:34:59.5980507Z lock_held=False lock_why=absent open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=7.8 streak=0/10
+DRV-POLL 2026-09-18T18:36:00.7337176Z lock_held=False lock_why=absent open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=10.8 streak=0/10
+DRV-POLL 2026-09-18T18:37:01.8430447Z lock_held=False lock_why=absent open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=1.6 streak=0/10
+DRV-POLL 2026-09-18T18:38:02.9427455Z lock_held=False lock_why=absent open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=14.1 streak=0/10
+DRV-POLL 2026-09-18T18:39:04.0263957Z lock_held=False lock_why=absent open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=92.7 streak=0/10
+DRV-POLL 2026-09-18T18:40:05.1244041Z lock_held=False lock_why=absent open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=82.3 streak=0/10
+DRV-POLL 2026-09-18T18:41:06.2227260Z lock_held=False lock_why=absent open_claims=[gfni256-four-window-shape-1mib-18sep] foreign_cpu=43.5 streak=0/10
+DRV-POLL 2026-09-18T18:42:07.3250205Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=78.4 streak=1/10
+DRV-POLL 2026-09-18T18:43:08.4635207Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=24.5 streak=2/10
+DRV-POLL 2026-09-18T18:44:09.5814605Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=6.2 streak=3/10
+DRV-POLL 2026-09-18T18:45:10.7105688Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=3.1 streak=4/10
+DRV-POLL 2026-09-18T18:46:11.7993689Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=15.6 streak=5/10
+DRV-POLL 2026-09-18T18:47:12.9090311Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=4.7 streak=6/10
+DRV-POLL 2026-09-18T18:48:14.0238599Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=7.7 streak=7/10
+DRV-POLL 2026-09-18T18:49:15.1500079Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=82.6 streak=8/10
+DRV-POLL 2026-09-18T18:50:16.2660760Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=3.1 streak=9/10
+DRV-POLL 2026-09-18T18:51:17.3495079Z lock_held=False lock_why=absent open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=192.2 streak=0/10
+DRV-POLL 2026-09-18T18:52:18.4507913Z lock_held=False lock_why=absent open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=104.5 streak=0/10
+DRV-POLL 2026-09-18T18:53:19.5339143Z lock_held=False lock_why=absent open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=295.9 streak=0/10
+DRV-POLL 2026-09-18T18:54:20.6335513Z lock_held=False lock_why=absent open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=199.1 streak=0/10
+DRV-POLL 2026-09-18T18:55:21.7087049Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=254.2 streak=0/10
+DRV-POLL 2026-09-18T18:56:22.8253384Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=702.4 streak=0/10
+DRV-POLL 2026-09-18T18:57:23.9320040Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=82.9 streak=0/10
+DRV-POLL 2026-09-18T18:58:25.0358856Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=114.6 streak=0/10
+DRV-POLL 2026-09-18T18:59:26.1201574Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=88.8 streak=0/10
+DRV-POLL 2026-09-18T19:00:27.2004425Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=103.3 streak=0/10
+DRV-POLL 2026-09-18T19:01:28.3159663Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=105.5 streak=0/10
+DRV-POLL 2026-09-18T19:02:29.4273824Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=87.9 streak=0/10
+DRV-POLL 2026-09-18T19:03:30.5129200Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=200.5 streak=0/10
+DRV-POLL 2026-09-18T19:04:31.6130873Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=29.4 streak=0/10
+DRV-POLL 2026-09-18T19:05:32.7334118Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=7.7 streak=0/10
+DRV-POLL 2026-09-18T19:06:33.8318769Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=10.8 streak=0/10
+DRV-POLL 2026-09-18T19:07:34.9450647Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=6.2 streak=0/10
+DRV-POLL 2026-09-18T19:08:36.0824061Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=6.1 streak=0/10
+DRV-POLL 2026-09-18T19:09:37.1817702Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=7.7 streak=0/10
+DRV-POLL 2026-09-18T19:10:38.3158085Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=7.7 streak=0/10
+DRV-POLL 2026-09-18T19:11:39.6133867Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1513.2 streak=0/10
+DRV-POLL 2026-09-18T19:12:40.7054215Z lock_held=True lock_why=held by live pid=12024 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=10.9 streak=0/10
+DRV-POLL 2026-09-18T19:13:42.1347658Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1619.3 streak=0/10
+DRV-POLL 2026-09-18T19:14:43.4737110Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1491.3 streak=0/10
+DRV-POLL 2026-09-18T19:15:44.5621675Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=26.2 streak=0/10
+DRV-POLL 2026-09-18T19:16:45.9220917Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1623.9 streak=0/10
+DRV-POLL 2026-09-18T19:17:47.3829640Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1565.9 streak=0/10
+DRV-POLL 2026-09-18T19:18:48.8134509Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1564.8 streak=0/10
+DRV-POLL 2026-09-18T19:19:49.9591127Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=110.3 streak=0/10
+DRV-POLL 2026-09-18T19:20:51.0698602Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=35.5 streak=0/10
+DRV-POLL 2026-09-18T19:21:52.1836263Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=105.1 streak=0/10
+DRV-POLL 2026-09-18T19:22:53.2913847Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=29.4 streak=0/10
+DRV-POLL 2026-09-18T19:23:54.3615432Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=255.9 streak=0/10
+DRV-POLL 2026-09-18T19:24:55.9141820Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1686.9 streak=0/10
+DRV-POLL 2026-09-18T19:25:57.4790747Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1594.1 streak=0/10
+DRV-POLL 2026-09-18T19:26:58.6308138Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=9.2 streak=0/10
+DRV-POLL 2026-09-18T19:28:00.0602829Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1655.5 streak=0/10
+DRV-POLL 2026-09-18T19:29:01.5678052Z lock_held=True lock_why=held by live pid=17796 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1573.1 streak=0/10
+DRV-POLL 2026-09-18T19:30:02.6899932Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=40.3 streak=0/10
+DRV-POLL 2026-09-18T19:31:03.8290459Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=400.9 streak=0/10
+DRV-POLL 2026-09-18T19:32:05.0364943Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=208.2 streak=0/10
+DRV-POLL 2026-09-18T19:33:06.1474552Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=103.9 streak=0/10
+DRV-POLL 2026-09-18T19:34:07.8349844Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1518 streak=0/10
+DRV-POLL 2026-09-18T19:35:08.9669880Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=439.9 streak=0/10
+DRV-POLL 2026-09-18T19:36:10.1054241Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=162.6 streak=0/10
+DRV-POLL 2026-09-18T19:37:11.2353747Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=443.9 streak=0/10
+DRV-POLL 2026-09-18T19:38:12.7742007Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1595.3 streak=0/10
+DRV-POLL 2026-09-18T19:39:14.1276865Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=58.4 streak=0/10
+DRV-POLL 2026-09-18T19:40:15.2766822Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=402.8 streak=0/10
+DRV-POLL 2026-09-18T19:41:16.3888009Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=101.2 streak=0/10
+DRV-POLL 2026-09-18T19:42:17.5026367Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=50.7 streak=0/10
+DRV-POLL 2026-09-18T19:43:18.6061352Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=18.6 streak=0/10
+DRV-POLL 2026-09-18T19:44:19.7555597Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=408.6 streak=0/10
+DRV-POLL 2026-09-18T19:45:20.8910199Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=403.3 streak=0/10
+DRV-POLL 2026-09-18T19:46:22.0521200Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=412.6 streak=0/10
+DRV-POLL 2026-09-18T19:47:23.4608572Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=928.7 streak=0/10
+DRV-POLL 2026-09-18T19:48:24.5729411Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=31 streak=0/10
+DRV-POLL 2026-09-18T19:49:25.7167545Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=402.1 streak=0/10
+DRV-POLL 2026-09-18T19:50:26.8635360Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=408.4 streak=0/10
+DRV-POLL 2026-09-18T19:51:28.3594772Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1598 streak=0/10
+DRV-POLL 2026-09-18T19:52:29.7224806Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1649.3 streak=0/10
+DRV-POLL 2026-09-18T19:53:30.8678737Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=416.4 streak=0/10
+DRV-POLL 2026-09-18T19:54:32.0028354Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=402.6 streak=0/10
+DRV-POLL 2026-09-18T19:55:33.1271563Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=13.8 streak=0/10
+DRV-POLL 2026-09-18T19:56:34.6331257Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1553.4 streak=0/10
+DRV-POLL 2026-09-18T19:57:36.1282680Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1613.1 streak=0/10
+DRV-POLL 2026-09-18T19:58:37.2946108Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=438.2 streak=0/10
+DRV-POLL 2026-09-18T19:59:38.4678430Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=402.4 streak=0/10
+DRV-POLL 2026-09-18T20:00:39.5790045Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=139.1 streak=0/10
+DRV-POLL 2026-09-18T20:01:41.1403950Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1650.6 streak=0/10
+DRV-POLL 2026-09-18T20:02:42.4921210Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1612.4 streak=0/10
+DRV-POLL 2026-09-18T20:03:43.5785438Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1228.4 streak=0/10
+DRV-POLL 2026-09-18T20:04:44.7272101Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=404.2 streak=0/10
+DRV-POLL 2026-09-18T20:05:45.9224737Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=195.7 streak=0/10
+DRV-POLL 2026-09-18T20:06:47.2828343Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1594.9 streak=0/10
+DRV-POLL 2026-09-18T20:07:48.5267167Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=547.7 streak=0/10
+DRV-POLL 2026-09-18T20:08:49.6790923Z lock_held=True lock_why=held by live pid=12680 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=96.9 streak=0/10
+DRV-POLL 2026-09-18T20:09:51.1847879Z lock_held=True lock_why=held by live pid=11052 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1582.7 streak=0/10
+DRV-POLL 2026-09-18T20:10:52.6370787Z lock_held=True lock_why=held by live pid=11052 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1618.6 streak=0/10
+DRV-POLL 2026-09-18T20:11:53.7464306Z lock_held=True lock_why=held by live pid=11052 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=119.3 streak=0/10
+DRV-POLL 2026-09-18T20:12:54.8745484Z lock_held=True lock_why=held by live pid=11052 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=41.5 streak=0/10
+DRV-POLL 2026-09-18T20:13:55.9921982Z lock_held=True lock_why=held by live pid=14452 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=801.4 streak=0/10
+DRV-POLL 2026-09-18T20:14:57.0927202Z lock_held=True lock_why=held by live pid=14452 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=255.8 streak=0/10
+DRV-POLL 2026-09-18T20:15:58.2032237Z lock_held=True lock_why=held by live pid=14452 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1248.1 streak=0/10
+DRV-POLL 2026-09-18T20:16:59.3153787Z lock_held=True lock_why=held by live pid=14452 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=806.5 streak=0/10
+DRV-POLL 2026-09-18T20:18:00.4609353Z lock_held=True lock_why=held by live pid=14452 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=302.6 streak=0/10
+DRV-POLL 2026-09-18T20:19:01.5891711Z lock_held=True lock_why=held by live pid=14452 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=799.2 streak=0/10
+DRV-POLL 2026-09-18T20:20:02.6822346Z lock_held=True lock_why=held by live pid=14452 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=106.8 streak=0/10
+DRV-POLL 2026-09-18T20:21:03.7969212Z lock_held=True lock_why=held by live pid=14452 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=739.8 streak=0/10
+DRV-POLL 2026-09-18T20:22:04.8917961Z lock_held=True lock_why=held by live pid=14452 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=10.8 streak=0/10
+DRV-POLL 2026-09-18T20:23:05.9834584Z lock_held=True lock_why=held by live pid=14452 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=80.6 streak=0/10
+DRV-POLL 2026-09-18T20:24:07.1180125Z lock_held=True lock_why=held by live pid=14828 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=404.5 streak=0/10
+DRV-POLL 2026-09-18T20:25:08.2387994Z lock_held=True lock_why=held by live pid=14828 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1099.4 streak=0/10
+DRV-POLL 2026-09-18T20:26:09.3239285Z lock_held=True lock_why=held by live pid=14828 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=184.9 streak=0/10
+DRV-POLL 2026-09-18T20:27:10.4538471Z lock_held=True lock_why=held by live pid=14828 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=402.4 streak=0/10
+DRV-POLL 2026-09-18T20:28:11.5701869Z lock_held=True lock_why=held by live pid=14828 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=382.4 streak=0/10
+DRV-POLL 2026-09-18T20:29:12.6799112Z lock_held=True lock_why=held by live pid=14828 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=372.1 streak=0/10
+DRV-POLL 2026-09-18T20:30:13.7998179Z lock_held=True lock_why=held by live pid=14828 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=398.7 streak=0/10
+DRV-POLL 2026-09-18T20:31:14.9259533Z lock_held=True lock_why=held by live pid=14828 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=941.8 streak=0/10
+DRV-POLL 2026-09-18T20:32:16.0241407Z lock_held=True lock_why=held by live pid=14828 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=560.2 streak=0/10
+DRV-POLL 2026-09-18T20:33:17.1647682Z lock_held=True lock_why=held by live pid=14828 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=390.6 streak=0/10
+DRV-POLL 2026-09-18T20:34:18.2731087Z lock_held=True lock_why=held by live pid=14828 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=407.4 streak=0/10
+DRV-POLL 2026-09-18T20:35:19.3979384Z lock_held=True lock_why=held by live pid=14828 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=406.9 streak=0/10
+DRV-POLL 2026-09-18T20:36:20.5108683Z lock_held=True lock_why=held by live pid=14828 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=108.4 streak=0/10
+DRV-POLL 2026-09-18T20:37:21.6516174Z lock_held=True lock_why=held by live pid=14828 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=406.9 streak=0/10
+DRV-POLL 2026-09-18T20:38:22.7677076Z lock_held=True lock_why=held by live pid=14828 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=412.3 streak=0/10
+DRV-POLL 2026-09-18T20:39:23.8949119Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=802.1 streak=0/10
+DRV-POLL 2026-09-18T20:40:25.0194682Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=814.1 streak=0/10
+DRV-POLL 2026-09-18T20:41:26.1148592Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=48.2 streak=0/10
+DRV-POLL 2026-09-18T20:42:27.2245493Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=802.4 streak=0/10
+DRV-POLL 2026-09-18T20:43:28.3506622Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=803.2 streak=0/10
+DRV-POLL 2026-09-18T20:44:29.4643850Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=102.1 streak=0/10
+DRV-POLL 2026-09-18T20:45:30.5763992Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=804.4 streak=0/10
+DRV-POLL 2026-09-18T20:46:31.6928835Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=808.4 streak=0/10
+DRV-POLL 2026-09-18T20:47:32.8315519Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=821.4 streak=0/10
+DRV-POLL 2026-09-18T20:48:33.9520905Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=802.9 streak=0/10
+DRV-POLL 2026-09-18T20:49:35.0963391Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=816 streak=0/10
+DRV-POLL 2026-09-18T20:50:36.2279067Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=795.2 streak=0/10
+DRV-POLL 2026-09-18T20:51:37.3244372Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=32.8 streak=0/10
+DRV-POLL 2026-09-18T20:52:38.4588600Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=814.3 streak=0/10
+DRV-POLL 2026-09-18T20:53:39.5683618Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=799.1 streak=0/10
+DRV-POLL 2026-09-18T20:54:40.7249710Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=800 streak=0/10
+DRV-POLL 2026-09-18T20:55:41.8363718Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=9.2 streak=0/10
+DRV-POLL 2026-09-18T20:56:42.9612690Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=802.6 streak=0/10
+DRV-POLL 2026-09-18T20:57:44.0903786Z lock_held=True lock_why=held by live pid=9220 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=792 streak=0/10
+DRV-POLL 2026-09-18T20:58:45.2436016Z lock_held=True lock_why=held by live pid=7444 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=406.9 streak=0/10
+DRV-POLL 2026-09-18T20:59:46.3588993Z lock_held=True lock_why=held by live pid=7444 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=102.7 streak=0/10
+DRV-POLL 2026-09-18T21:00:47.5086592Z lock_held=True lock_why=held by live pid=7444 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=405.4 streak=0/10
+DRV-POLL 2026-09-18T21:01:48.6498094Z lock_held=True lock_why=held by live pid=7444 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=403.1 streak=0/10
+DRV-POLL 2026-09-18T21:02:49.8218463Z lock_held=True lock_why=held by live pid=7444 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=407.3 streak=0/10
+DRV-POLL 2026-09-18T21:03:50.9610224Z lock_held=True lock_why=held by live pid=7444 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=398.9 streak=0/10
+DRV-POLL 2026-09-18T21:04:52.1018417Z lock_held=True lock_why=held by live pid=7444 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=408.7 streak=0/10
+DRV-POLL 2026-09-18T21:05:53.2379871Z lock_held=True lock_why=held by live pid=7444 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=402.2 streak=0/10
+DRV-POLL 2026-09-18T21:06:54.3717995Z lock_held=True lock_why=held by live pid=7444 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=414.6 streak=0/10
+DRV-POLL 2026-09-18T21:07:55.5153071Z lock_held=True lock_why=held by live pid=7444 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=396.3 streak=0/10
+DRV-POLL 2026-09-18T21:08:56.6260451Z lock_held=True lock_why=held by live pid=15356 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=117.7 streak=0/10
+DRV-POLL 2026-09-18T21:09:57.7264568Z lock_held=True lock_why=held by live pid=15356 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=13.9 streak=0/10
+DRV-POLL 2026-09-18T21:10:58.8966245Z lock_held=True lock_why=held by live pid=15356 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=1212.9 streak=0/10
+DRV-POLL 2026-09-18T21:12:00.0104803Z lock_held=True lock_why=held by live pid=15356 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=115.5 streak=0/10
+DRV-POLL 2026-09-18T21:13:01.1061816Z lock_held=True lock_why=held by live pid=15356 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=559.3 streak=0/10
+DRV-POLL 2026-09-18T21:14:02.2323859Z lock_held=True lock_why=held by live pid=15356 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=840.7 streak=0/10
+DRV-POLL 2026-09-18T21:15:03.3492066Z lock_held=True lock_why=held by live pid=15356 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=22.9 streak=0/10
+DRV-POLL 2026-09-18T21:16:04.4168981Z lock_held=True lock_why=held by live pid=15356 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=656.9 streak=0/10
+DRV-POLL 2026-09-18T21:17:05.5400526Z lock_held=True lock_why=held by live pid=15356 open_claims=[coreultra9-4mib-riders-sitting-18sep] foreign_cpu=243.3 streak=0/10
+DRV-POLL 2026-09-18T21:18:06.6525012Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=72 streak=1/10
+DRV-POLL 2026-09-18T21:19:07.7833391Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=15.5 streak=2/10
+DRV-POLL 2026-09-18T21:20:08.8841241Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=12.5 streak=3/10
+DRV-POLL 2026-09-18T21:21:09.9941363Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=10.8 streak=4/10
+DRV-POLL 2026-09-18T21:22:11.1131174Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=10.7 streak=5/10
+DRV-POLL 2026-09-18T21:23:12.2182230Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=24.6 streak=6/10
+DRV-POLL 2026-09-18T21:24:13.3597966Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=32.5 streak=7/10
+DRV-POLL 2026-09-18T21:25:14.5372765Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=10.8 streak=8/10
+DRV-POLL 2026-09-18T21:26:15.6318010Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=4.7 streak=9/10
+DRV-POLL 2026-09-18T21:27:16.7389606Z lock_held=False lock_why=absent open_claims=[] foreign_cpu=4.7 streak=10/10
+DRV-LAUNCH 2026-09-18T21:27:16.7582490Z attempt=1
+DRV-CHILD-EXIT 2026-09-19T00:12:01.6809985Z rc=0
+DRV-END 2026-09-19T00:12:06.6566860Z rc=0 legs=54 ended=True

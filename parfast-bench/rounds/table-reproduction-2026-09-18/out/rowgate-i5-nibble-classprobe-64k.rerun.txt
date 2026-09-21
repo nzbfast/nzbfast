@@ -1,0 +1,6 @@
+== probe-64k repair threads=4  CPU-s: median of both copies of each arm (n legs); A/A = worst |X - X2| / min over the reps; verdict clears the A/A floor or is UNRESOLVED
+      m |     fold    force     F/T |   aa_F   aa_T  floor | verdict |      wF      wT  wF/wT | foreign max | peak MB force/fold
+  crossover (log-interpolated, median): CPU m ~ ?   wall m ~ ?
+  foreign CPU over 3 legs: median 64% of a core, max 88% (after-leg median 73%)
+== probe-64k threads=4 budget=big  validate, CPU-s median over reps
+      m |    fold   force |    auto path W/win/slabs  ok  | autoalt path ok 

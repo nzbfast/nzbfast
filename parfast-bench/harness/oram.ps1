@@ -60,6 +60,19 @@ param(
 # reports refusal in $script:riglock_taken so this loop can go round again.
 . (Join-Path $PSScriptRoot 'plib.ps1')
 
+# THIS DRIVER'S OWN ROUND LOG IS UTF-8, EXPLICITLY. Same two-half fix oramx.ps1
+# carries at the same place, for the same reason and with the same pairing
+# rule: stdout here is redirected by `cmd /c powershell -File ... > $log`
+# (oraml.ps1), a redirect encodes in the CONSOLE CODEPAGE, and the TIMING echo
+# below copies a leg's `.err` lines - which carry parfast's U+00B7 field
+# separator - straight into it. Without this line that log is not valid UTF-8
+# and website/tools/export_parfast_evidence.py correctly refuses to bank it.
+# plib.ps1's Invoke-Leg owns the other end and deliberately does not set this.
+# Do not take the `-Encoding UTF8` below without this line: alone it makes the
+# round log worse, not better. Full record:
+# an internal note section 9.
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+
 $src = Join-Path $Root 'src'
 if (-not $Bin) { $Bin = Join-Path $src 'target\release\parfast.exe' }
 $fix = Join-Path $Root 'fix'
@@ -208,7 +221,12 @@ try {
     "LEG round=$Tag gib=$gib pct=$pcent arm=$arm rep=$rep rc=$($res.rc) wall=$($res.wall) cpu=$($res.cpu) peak_mb=$($res.peakmb) gbps=$([math]::Round($gib * 1.073741824 / [math]::Max($res.wall, 0.001), 3)) set=$setsha parfiles=$($pars.Count) parbytes=$parbytes warm_s=$warm page_reads=$pagereads pages_in=$pagesin disk_read_gb=$diskgb avail_mb_before=$av0 avail_mb_after=$($script:io_av) load_before=$load0 load_after=$load1 foreign_cpu=$($res.foreign) foreign_after=$($res.foreignAfter) errlen=$($res.errlen) rig=$(Get-RigStamp) ts=$(Ts)"
     $esc = [string][char]27
     if (Test-Path "$logbase.err") {
-      foreach ($ln in (Get-Content "$logbase.err" | Select-Object -First 60)) {
+      # `-Encoding UTF8` IS LOAD-BEARING and pairs with the [Console]::OutputEncoding
+      # line at the top of this file. plib's Invoke-Leg banks this `.err` as real
+      # UTF-8; Windows PowerShell 5.1 defaults Get-Content to ANSI, which reads
+      # parfast's U+00B7 field separator back as the two cp1252 characters `C2 B7`
+      # stands for. Never take one of the two without the other.
+      foreach ($ln in (Get-Content "$logbase.err" -Encoding UTF8 | Select-Object -First 60)) {
         $clean = ($ln -replace ($esc + '\[[0-9;]*m'), '').Trim()
         if ($clean) { "TIMING leg=$legtag $clean" }
       }

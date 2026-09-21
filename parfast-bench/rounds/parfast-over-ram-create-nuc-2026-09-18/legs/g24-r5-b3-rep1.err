@@ -1,0 +1,8 @@
+ INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+ INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+ INFO repair-timing: fold tile budget 32 KiB (L2 per core 256 KiB)
+ INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 768 stripe(s), threads=12, probe ok): 50.28s
+ INFO repair-timing: create recovery batch 0+1638: 53.70s (total 53.74s)
+ INFO repair-timing: create seals: mode=lanes rows=1638 in 50.7614ms
+ INFO repair-timing: create scan + fold: 54.13s
+ INFO repair-timing: plan prep: 45.08ms over 1 cold build(s), 768 stripe use(s) - 0.083% of the 54.14s create

@@ -1,0 +1,194 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling typenum v1.20.1
+   Compiling getrandom v0.4.3
+   Compiling rand_core v0.10.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling shlex v2.0.1
+   Compiling cmov v0.5.4
+   Compiling dunce v1.0.5
+   Compiling fs_extra v1.3.0
+   Compiling cpufeatures v0.3.0
+   Compiling base64ct v1.8.3
+   Compiling version_check v0.9.5
+   Compiling ctutils v0.4.2
+   Compiling libm v0.2.16
+   Compiling const-oid v0.10.2
+   Compiling const-oid v0.9.6
+   Compiling generic-array v0.14.7
+   Compiling autocfg v1.5.1
+   Compiling aws-lc-rs v1.18.0
+   Compiling zerocopy v0.8.54
+   Compiling getrandom v0.2.17
+   Compiling crossbeam-utils v0.8.22
+   Compiling rand_core v0.6.4
+   Compiling pem-rfc7468 v0.7.0
+   Compiling rayon-core v1.13.0
+   Compiling num-traits v0.2.19
+   Compiling crossbeam-epoch v0.9.20
+   Compiling crc32fast v1.5.1
+   Compiling windows-link v0.2.1
+   Compiling once_cell v1.21.4
+   Compiling spin v0.9.9
+   Compiling windows-sys v0.61.2
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling jobserver v0.1.35
+   Compiling lazy_static v1.5.0
+   Compiling crossbeam-deque v0.8.7
+   Compiling syn v2.0.119
+   Compiling syn v3.0.0
+   Compiling untrusted v0.7.1
+   Compiling serde_core v1.0.229
+   Compiling cc v1.4.4
+   Compiling memchr v2.8.3
+   Compiling digest v0.10.7
+   Compiling cpubits v0.1.1
+   Compiling untrusted v0.9.0
+   Compiling pin-project-lite v0.2.17
+   Compiling subtle v2.6.1
+   Compiling arrayvec v0.7.8
+   Compiling rustls v0.23.43
+   Compiling constant_time_eq v0.4.2
+   Compiling num-bigint-dig v0.8.6
+   Compiling num-integer v0.1.46
+   Compiling simd-adler32 v0.3.10
+   Compiling zmij v1.0.23
+   Compiling adler2 v2.0.1
+   Compiling cmake v0.1.58
+   Compiling num-iter v0.1.46
+   Compiling miniz_oxide v0.9.1
+   Compiling tracing-core v0.1.36
+   Compiling phc v0.6.1
+   Compiling libc v0.2.189
+   Compiling serde_json v1.0.151
+   Compiling smallvec v1.15.2
+   Compiling libbz2-rs-sys v0.2.5
+   Compiling zlib-rs v0.6.6
+   Compiling bytes v1.12.1
+   Compiling aws-lc-sys v0.44.0
+   Compiling blake3 v1.8.7
+   Compiling serde v1.0.229
+   Compiling thiserror v2.0.20
+   Compiling log v0.4.34
+   Compiling bzip2 v0.6.1
+   Compiling nzbkit-base v1.0.0 (<rig>\narrow-nibble-15sep\src\crates\nzbkit-base)
+   Compiling mio v1.2.2
+   Compiling socket2 v0.6.5
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.20
+   Compiling password-hash v0.6.1
+   Compiling blake2s_simd v1.0.5
+   Compiling aho-corasick v1.1.5
+   Compiling flate2 v1.1.10
+   Compiling signature v2.2.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling ppmd-rust v1.4.0
+   Compiling lzma-rust2 v0.20.0 (<rig>\narrow-nibble-15sep\src\vendor\lzma-rust2)
+   Compiling rand_chacha v0.3.1
+   Compiling itoa v1.0.18
+   Compiling rand v0.8.8
+   Compiling tracing v0.1.44
+   Compiling num-bigint v0.5.1
+   Compiling quick-xml v0.42.0
+   Compiling md-5 v0.10.6
+   Compiling regex-lite v0.1.9
+   Compiling sharded-slab v0.1.7
+   Compiling thread_local v1.1.10
+   Compiling zeroize_derive v1.5.0
+   Compiling tokio-macros v2.7.1
+   Compiling parfast v1.5.0-beta.3 (<rig>\narrow-nibble-15sep\src\crates\parfast)
+   Compiling zeroize v1.9.0
+   Compiling hybrid-array v0.4.13
+   Compiling der v0.7.10
+   Compiling rustls-pki-types v1.15.0
+   Compiling tokio v1.53.1
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling block-padding v0.4.2
+   Compiling webpki-roots v1.0.9
+   Compiling inout v0.2.2
+   Compiling tracing-subscriber v0.3.23
+   Compiling spki v0.7.3
+   Compiling pkcs8 v0.10.2
+   Compiling pkcs1 v0.7.5
+   Compiling digest v0.11.3
+   Compiling cipher v0.5.2
+   Compiling sha2 v0.11.0
+   Compiling aes v0.9.3
+   Compiling cbc v0.2.1
+   Compiling universal-hash v0.6.1
+   Compiling poly1305 v0.9.1
+   Compiling chacha20 v0.10.2
+   Compiling hmac v0.13.0
+   Compiling sha1 v0.11.0
+   Compiling blake2 v0.11.0
+   Compiling aead v0.6.1
+   Compiling rsa v0.9.10
+   Compiling rars v0.4.6+nzbfast (<rig>\narrow-nibble-15sep\src\vendor\rars)
+   Compiling argon2 v0.6.0
+   Compiling chacha20poly1305 v0.11.0
+   Compiling sevenz-rust2 v0.22.2 (<rig>\narrow-nibble-15sep\src\vendor\sevenz-rust2)
+warning: constant `ENCODE_WAVE_MEMORY_BUDGET_MIN` is never used
+    --> vendor\rars\src\codec\rar50.rs:1057:7
+     |
+1057 | const ENCODE_WAVE_MEMORY_BUDGET_MIN: usize = 1 << 30;
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `TREE_WALKER_CAP` is never used
+    --> vendor\rars\src\codec\rar50.rs:1753:7
+     |
+1753 | const TREE_WALKER_CAP: usize = 4;
+     |       ^^^^^^^^^^^^^^^
+
+warning: method `with_member_ends` is never used
+    --> vendor\rars\src\codec\rar50.rs:6773:8
+     |
+6711 | impl StreamingOutput {
+     | -------------------- method in this implementation
+...
+6773 |     fn with_member_ends(mut self, member_ends: Vec<usize>) -> Self {
+     |        ^^^^^^^^^^^^^^^^
+
+warning: field `shares` is never read
+   --> vendor\rars\src\codec\rar50\tree.rs:269:5
+    |
+238 | pub(super) struct TreeMatchFinder {
+    |                   --------------- field in this struct
+...
+269 |     shares: Vec<Vec<u32>>,
+    |     ^^^^^^
+
+warning: method `walk` is never used
+   --> vendor\rars\src\codec\rar50\tree.rs:549:8
+    |
+275 | impl TreeMatchFinder {
+    | -------------------- method in this implementation
+...
+549 |     fn walk(
+    |        ^^^^
+
+warning: constant `STREAMED_FOLD_PARALLEL` is never used
+    --> vendor\rars\src\recovery\rar5.rs:1932:7
+     |
+1932 | const STREAMED_FOLD_PARALLEL: bool = true;
+     |       ^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling rustls-webpki v0.103.13
+   Compiling tokio-rustls v0.26.4
+warning: unused variable: `starved`
+    --> crates\nzbkit-base\src\par2repair\fastpar.rs:1301:9
+     |
+1301 |     let starved = |cap: usize| {
+     |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_starved`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `rars` (lib) generated 6 warnings
+   Compiling nzbkit v1.0.0 (<rig>\narrow-nibble-15sep\src\crates\nzbkit)
+warning: `nzbkit-base` (lib) generated 1 warning (run `cargo fix --lib -p nzbkit-base` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 2m 03s

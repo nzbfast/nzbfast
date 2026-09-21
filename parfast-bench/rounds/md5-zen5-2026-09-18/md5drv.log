@@ -1,0 +1,77 @@
+MD5RUN-START host=windows-gaming-pc-b pid=18912 root=<rig>\zen5-18sep ts=2026-09-18T16:37:10.5250726Z
+MD5RUN-LOCK-TAKEN pid=18912 id=md5-ab-zen5-windows-gaming-pc-b-18sep-r2 gen=24a1dcd6 taken=2026-09-18T16:37:10.5567523Z what=md5-ab-bench
+MD5RUN-BUILD start=2026-09-18T16:37:20.6462163Z
+MD5RUN-BUILD rc=0 secs=96.1 ts=2026-09-18T16:38:56.7513542Z
+MD5RUN-EXE sha=C17BB8DC909AF06C7BEF9BEE403F4824CD42B688FC21E787CDAB9D8ED8E2A142 len=2272256
+MD5RUN-SITTING u1 pinned=False LOAD-BEFORE foreign_1core_pct=19.8 ts=2026-09-18T16:39:06.8609091Z
+MD5RUN-SITTING u1 pid=17596 pinned=False affinity_got=none ts=2026-09-18T16:39:06.9877418Z
+MD5RUN-SITTING u1 rc= ts=2026-09-18T16:40:03.7085570Z
+MD5RUN-SITTING u1 LOAD-AFTER foreign_1core_pct=13.3 ts=2026-09-18T16:40:13.7279515Z
+----- SITTING u1 pinned=False OUTPUT -----
+AGREE ours == md-5 == awslc == winasm over 12 lengths up to 1024 MiB
+cpu cores=16 payload=1024 MiB reps=5  (GB/s, higher is better)
+REP 1 ours 1c=1.154 all=17.212 | md-5 1c=0.846 all=12.560 | delta 1c=+36.5% all=+37.0% | awslc 1c=1.157 all=17.125 | awslc/md-5 1c=+36.8% all=+36.3% | winasm 1c=1.096 all=16.087 | winasm/md-5 1c=+29.6% all=+28.1%
+REP 2 ours 1c=1.158 all=17.234 | md-5 1c=0.849 all=12.576 | delta 1c=+36.4% all=+37.0% | awslc 1c=1.147 all=16.780 | awslc/md-5 1c=+35.0% all=+33.4% | winasm 1c=1.076 all=16.353 | winasm/md-5 1c=+26.7% all=+30.0%
+REP 3 ours 1c=1.158 all=17.069 | md-5 1c=0.849 all=12.533 | delta 1c=+36.3% all=+36.2% | awslc 1c=1.157 all=16.913 | awslc/md-5 1c=+36.3% all=+34.9% | winasm 1c=1.096 all=15.853 | winasm/md-5 1c=+29.1% all=+26.5%
+REP 4 ours 1c=1.158 all=17.212 | md-5 1c=0.829 all=12.558 | delta 1c=+39.7% all=+37.1% | awslc 1c=1.148 all=17.167 | awslc/md-5 1c=+38.4% all=+36.7% | winasm 1c=1.086 all=16.287 | winasm/md-5 1c=+31.0% all=+29.7%
+REP 5 ours 1c=1.158 all=17.121 | md-5 1c=0.848 all=12.518 | delta 1c=+36.5% all=+36.8% | awslc 1c=1.157 all=17.144 | awslc/md-5 1c=+36.4% all=+37.0% | winasm 1c=1.095 all=16.353 | winasm/md-5 1c=+29.1% all=+30.6%
+BEST ours 1c=1.158 all=17.234 | md-5 1c=0.849 all=12.576 | delta 1c=+36.4% all=+37.0% | awslc 1c=1.157 all=17.167 | awslc/md-5 1c=+36.3% all=+36.5%
+----- SITTING u1 END -----
+MD5RUN-SITTING u2 pinned=False LOAD-BEFORE foreign_1core_pct=19.7 ts=2026-09-18T16:40:23.7529523Z
+MD5RUN-SITTING u2 pid=9476 pinned=False affinity_got=none ts=2026-09-18T16:40:23.7529523Z
+MD5RUN-SITTING u2 rc= ts=2026-09-18T16:41:20.6230155Z
+MD5RUN-SITTING u2 LOAD-AFTER foreign_1core_pct=13.3 ts=2026-09-18T16:41:30.6333907Z
+----- SITTING u2 pinned=False OUTPUT -----
+AGREE ours == md-5 == awslc == winasm over 12 lengths up to 1024 MiB
+cpu cores=16 payload=1024 MiB reps=5  (GB/s, higher is better)
+REP 1 ours 1c=1.116 all=17.073 | md-5 1c=0.840 all=12.531 | delta 1c=+33.0% all=+36.2% | awslc 1c=1.157 all=17.225 | awslc/md-5 1c=+37.8% all=+37.5% | winasm 1c=1.096 all=16.226 | winasm/md-5 1c=+30.6% all=+29.5%
+REP 2 ours 1c=1.157 all=17.192 | md-5 1c=0.849 all=12.511 | delta 1c=+36.4% all=+37.4% | awslc 1c=1.157 all=17.209 | awslc/md-5 1c=+36.3% all=+37.5% | winasm 1c=1.096 all=16.254 | winasm/md-5 1c=+29.1% all=+29.9%
+REP 3 ours 1c=1.157 all=16.795 | md-5 1c=0.847 all=12.543 | delta 1c=+36.6% all=+33.9% | awslc 1c=1.157 all=16.908 | awslc/md-5 1c=+36.5% all=+34.8% | winasm 1c=1.096 all=16.455 | winasm/md-5 1c=+29.4% all=+31.2%
+REP 4 ours 1c=1.158 all=17.100 | md-5 1c=0.849 all=12.594 | delta 1c=+36.4% all=+35.8% | awslc 1c=1.158 all=17.064 | awslc/md-5 1c=+36.4% all=+35.5% | winasm 1c=1.071 all=16.266 | winasm/md-5 1c=+26.2% all=+29.2%
+REP 5 ours 1c=1.130 all=17.212 | md-5 1c=0.849 all=12.314 | delta 1c=+33.1% all=+39.8% | awslc 1c=1.144 all=16.122 | awslc/md-5 1c=+34.7% all=+30.9% | winasm 1c=1.096 all=15.910 | winasm/md-5 1c=+29.1% all=+29.2%
+BEST ours 1c=1.158 all=17.212 | md-5 1c=0.849 all=12.594 | delta 1c=+36.3% all=+36.7% | awslc 1c=1.158 all=17.225 | awslc/md-5 1c=+36.4% all=+36.8%
+----- SITTING u2 END -----
+MD5RUN-SITTING u3 pinned=False LOAD-BEFORE foreign_1core_pct=13.9 ts=2026-09-18T16:41:40.6450705Z
+MD5RUN-SITTING u3 pid=5664 pinned=False affinity_got=none ts=2026-09-18T16:41:40.6450705Z
+MD5RUN-SITTING u3 rc= ts=2026-09-18T16:42:37.5397317Z
+MD5RUN-SITTING u3 LOAD-AFTER foreign_1core_pct=12.2 ts=2026-09-18T16:42:47.5694842Z
+----- SITTING u3 pinned=False OUTPUT -----
+AGREE ours == md-5 == awslc == winasm over 12 lengths up to 1024 MiB
+cpu cores=16 payload=1024 MiB reps=5  (GB/s, higher is better)
+REP 1 ours 1c=1.148 all=16.904 | md-5 1c=0.849 all=12.623 | delta 1c=+35.2% all=+33.9% | awslc 1c=1.153 all=17.158 | awslc/md-5 1c=+35.8% all=+35.9% | winasm 1c=1.096 all=16.323 | winasm/md-5 1c=+29.1% all=+29.3%
+REP 2 ours 1c=1.156 all=17.031 | md-5 1c=0.849 all=12.349 | delta 1c=+36.2% all=+37.9% | awslc 1c=1.153 all=16.453 | awslc/md-5 1c=+35.9% all=+33.2% | winasm 1c=1.077 all=16.026 | winasm/md-5 1c=+26.9% all=+29.8%
+REP 3 ours 1c=1.158 all=17.155 | md-5 1c=0.849 all=12.366 | delta 1c=+36.4% all=+38.7% | awslc 1c=1.157 all=17.007 | awslc/md-5 1c=+36.3% all=+37.5% | winasm 1c=1.096 all=16.216 | winasm/md-5 1c=+29.1% all=+31.1%
+REP 4 ours 1c=1.157 all=17.120 | md-5 1c=0.849 all=12.446 | delta 1c=+36.2% all=+37.6% | awslc 1c=1.157 all=16.941 | awslc/md-5 1c=+36.3% all=+36.1% | winasm 1c=1.075 all=16.066 | winasm/md-5 1c=+26.6% all=+29.1%
+REP 5 ours 1c=1.157 all=17.210 | md-5 1c=0.844 all=12.440 | delta 1c=+37.0% all=+38.4% | awslc 1c=1.157 all=17.135 | awslc/md-5 1c=+37.1% all=+37.7% | winasm 1c=1.096 all=16.338 | winasm/md-5 1c=+29.7% all=+31.3%
+BEST ours 1c=1.158 all=17.210 | md-5 1c=0.849 all=12.623 | delta 1c=+36.3% all=+36.3% | awslc 1c=1.157 all=17.158 | awslc/md-5 1c=+36.3% all=+35.9%
+----- SITTING u3 END -----
+MD5RUN-SITTING p1 pinned=True LOAD-BEFORE foreign_1core_pct=14.7 ts=2026-09-18T16:42:57.5829164Z
+MD5RUN-SITTING p1 pid=5504 pinned=True affinity_got=0x1 ts=2026-09-18T16:42:57.6069230Z
+MD5RUN-SITTING p1 rc= ts=2026-09-18T16:50:23.8521955Z
+MD5RUN-SITTING p1 LOAD-AFTER foreign_1core_pct=11.9 ts=2026-09-18T16:50:33.8713865Z
+----- SITTING p1 pinned=True OUTPUT -----
+AGREE ours == md-5 == awslc == winasm over 12 lengths up to 1024 MiB
+cpu cores=16 payload=1024 MiB reps=5  (GB/s, higher is better)
+REP 1 ours 1c=1.094 all=1.100 | md-5 1c=0.803 all=0.807 | delta 1c=+36.3% all=+36.3% | awslc 1c=1.094 all=1.099 | awslc/md-5 1c=+36.3% all=+36.3% | winasm 1c=1.039 all=1.041 | winasm/md-5 1c=+29.4% all=+29.1%
+REP 2 ours 1c=1.096 all=1.099 | md-5 1c=0.804 all=0.805 | delta 1c=+36.3% all=+36.5% | awslc 1c=1.094 all=1.098 | awslc/md-5 1c=+36.0% all=+36.3% | winasm 1c=1.039 all=1.040 | winasm/md-5 1c=+29.2% all=+29.2%
+REP 3 ours 1c=1.096 all=1.097 | md-5 1c=0.804 all=0.806 | delta 1c=+36.3% all=+36.1% | awslc 1c=1.098 all=1.099 | awslc/md-5 1c=+36.5% all=+36.4% | winasm 1c=1.041 all=1.041 | winasm/md-5 1c=+29.4% all=+29.1%
+REP 4 ours 1c=1.077 all=1.099 | md-5 1c=0.807 all=0.806 | delta 1c=+33.5% all=+36.3% | awslc 1c=1.098 all=1.099 | awslc/md-5 1c=+36.1% all=+36.4% | winasm 1c=1.036 all=1.040 | winasm/md-5 1c=+28.4% all=+29.1%
+REP 5 ours 1c=1.093 all=1.098 | md-5 1c=0.804 all=0.806 | delta 1c=+36.0% all=+36.2% | awslc 1c=1.091 all=1.099 | awslc/md-5 1c=+35.8% all=+36.3% | winasm 1c=1.038 all=1.041 | winasm/md-5 1c=+29.1% all=+29.1%
+BEST ours 1c=1.096 all=1.100 | md-5 1c=0.807 all=0.807 | delta 1c=+35.9% all=+36.3% | awslc 1c=1.098 all=1.099 | awslc/md-5 1c=+36.1% all=+36.3%
+----- SITTING p1 END -----
+MD5RUN-SITTING p2 pinned=True LOAD-BEFORE foreign_1core_pct=11.4 ts=2026-09-18T16:50:43.8962700Z
+MD5RUN-SITTING p2 pid=20868 pinned=True affinity_got=0x1 ts=2026-09-18T16:50:43.8962700Z
+MD5RUN-SITTING p2 rc= ts=2026-09-18T16:58:10.2340346Z
+MD5RUN-SITTING p2 LOAD-AFTER foreign_1core_pct=11.9 ts=2026-09-18T16:58:20.2664273Z
+----- SITTING p2 pinned=True OUTPUT -----
+AGREE ours == md-5 == awslc == winasm over 12 lengths up to 1024 MiB
+cpu cores=16 payload=1024 MiB reps=5  (GB/s, higher is better)
+REP 1 ours 1c=1.093 all=1.098 | md-5 1c=0.804 all=0.806 | delta 1c=+35.9% all=+36.1% | awslc 1c=1.090 all=1.099 | awslc/md-5 1c=+35.5% all=+36.2% | winasm 1c=1.020 all=1.041 | winasm/md-5 1c=+26.9% all=+29.0%
+REP 2 ours 1c=1.095 all=1.099 | md-5 1c=0.805 all=0.807 | delta 1c=+36.1% all=+36.2% | awslc 1c=1.096 all=1.099 | awslc/md-5 1c=+36.1% all=+36.3% | winasm 1c=1.040 all=1.040 | winasm/md-5 1c=+29.3% all=+29.0%
+REP 3 ours 1c=1.097 all=1.099 | md-5 1c=0.804 all=0.806 | delta 1c=+36.4% all=+36.4% | awslc 1c=1.098 all=1.097 | awslc/md-5 1c=+36.5% all=+36.2% | winasm 1c=1.040 all=1.041 | winasm/md-5 1c=+29.4% all=+29.2%
+REP 4 ours 1c=1.098 all=1.098 | md-5 1c=0.806 all=0.806 | delta 1c=+36.1% all=+36.3% | awslc 1c=1.095 all=1.099 | awslc/md-5 1c=+35.9% all=+36.5% | winasm 1c=1.035 all=1.041 | winasm/md-5 1c=+28.4% all=+29.3%
+REP 5 ours 1c=1.095 all=1.099 | md-5 1c=0.804 all=0.806 | delta 1c=+36.2% all=+36.4% | awslc 1c=1.093 all=1.098 | awslc/md-5 1c=+36.0% all=+36.2% | winasm 1c=1.038 all=1.039 | winasm/md-5 1c=+29.1% all=+29.0%
+BEST ours 1c=1.098 all=1.099 | md-5 1c=0.806 all=0.807 | delta 1c=+36.1% all=+36.2% | awslc 1c=1.098 all=1.099 | awslc/md-5 1c=+36.2% all=+36.3%
+----- SITTING p2 END -----
+MD5RUN-LOCK-RELEASED ts=2026-09-18T16:58:30.2747763Z
+MD5RUN-END ts=2026-09-18T16:58:30.2747763Z

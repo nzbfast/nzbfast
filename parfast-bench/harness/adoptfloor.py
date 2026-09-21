@@ -28,6 +28,10 @@ READ: adoptfloor.py read legs.jsonl
 import hashlib, json, os, re, shutil, statistics as st, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import pdrv  # noqa: E402
+
 UNITS = {"ns": 1e-9, "µs": 1e-6, "ms": 1e-3, "s": 1.0}
 
 
@@ -109,6 +113,11 @@ if p.returncode != 0:
     raise SystemExit("create failed: %s" % p.stderr[-400:])
 gold = hashes(root)
 keep = set(os.listdir(root))
+# The HARNESS's own provenance, and the round-start twin of the
+# per-leg `rig=` token - see `pdrv.harness_facts`. Without it a
+# banked log cannot be traced to the harness revision that wrote
+# it (census an internal note).
+pdrv.harness_facts()
 print("CORPUS block=%d m=%d recovery=%d files=%d" % (BLOCK, M, rec, len(keep)), flush=True)
 
 out = open(OUT, "a")

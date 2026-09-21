@@ -18,7 +18,7 @@ stime and voluntary switches, not only as user time).
 import hashlib, json, os, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pdrv import (apply_damage, damage_picks, remove_strays, restore_slices,  # noqa: E402
+from pdrv import (apply_damage, damage_picks, harness_facts, remove_strays, restore_slices,  # noqa: E402
                   require_quiet_box, set_quiet_budget, foreign_cpu,
                   cpu_stat_jiffies, _steal_pct, warm)
 
@@ -153,6 +153,11 @@ def leg(cell, arm, exe, rep, perfdata=None):
 
 
 def main():
+    # The HARNESS's own provenance, and the round-start twin of the
+    # per-leg `rig=` token - see `pdrv.harness_facts`. Without it a
+    # banked log cannot be traced to the harness revision that wrote
+    # it (census an internal note).
+    harness_facts()
     set_quiet_budget(60, 30)
     for fixn in ("fix", "fix1m"):
         warm(os.path.join(R, fixn, "work"))

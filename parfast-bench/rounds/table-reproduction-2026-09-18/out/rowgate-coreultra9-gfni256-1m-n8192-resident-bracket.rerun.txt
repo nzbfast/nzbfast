@@ -1,0 +1,9 @@
+== 1m-res-bracket repair threads=16  CPU-s: median of both copies of each arm (n legs); A/A = worst |X - X2| / min over the reps; verdict clears the A/A floor or is UNRESOLVED
+      m |     fold    force     F/T |   aa_F   aa_T  floor | verdict |      wF      wT  wF/wT | foreign max | peak MB force/fold
+    288 |   116.62   130.89   0.891 |   5.0%   4.4%   5.0% | fold    |    8.84   11.36  0.778 | 22% (12 legs) | 8316/1074
+    304 |   121.27   133.85   0.906 |   7.7%   5.1%   7.7% | fold    |    9.22   11.72  0.787 | 42% (12 legs) | 8317/1073
+    320 |   126.04   138.01   0.913 |   2.8%   4.0%   4.0% | fold    |    9.61   12.03  0.799 | 20% (12 legs) | 8319/1073
+    336 |   130.93   136.09   0.962 |   5.9%   4.4%   5.9% | unres   |    9.87   11.83  0.834 | 50% (12 legs) | 8322/1075
+    352 |   136.54   135.88   1.005 |   5.6%   2.9%   5.6% | unres   |   10.24   11.64  0.880 | 37% (12 legs) | 8318/1073
+  crossover (log-interpolated, median): CPU m ~ 350   wall m ~ >352
+  foreign CPU over 60 legs: median 12% of a core, max 50% (after-leg median 27%)

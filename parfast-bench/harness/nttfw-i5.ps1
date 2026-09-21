@@ -300,6 +300,12 @@ if ($PHASE -eq 'probe') {
   Take-RigLock $PSCommandPath
   try {
     Write-BoxFacts
+    # The HARNESS's own provenance, and the round-start twin of the per-leg
+    # `rig=` token - see plib.ps1's Get-RigStamp. $PSCommandPath is THIS driver;
+    # plib.ps1 adds itself. Without it a banked log cannot be traced to the
+    # harness revision that wrote it (census
+    # an internal note).
+    Write-HarnessFacts @($PSCommandPath)
     Write-BinFacts $Rd @('parfast', 'parfast_aa')
     Wait-FixtureSettle
     # A budget that is DELIBERATELY not derived from the arena form, so the
@@ -335,6 +341,12 @@ if ($PHASE -eq 'ladder') {
   Take-RigLock $PSCommandPath
   try {
     Write-BoxFacts
+    # The HARNESS's own provenance, and the round-start twin of the per-leg
+    # `rig=` token - see plib.ps1's Get-RigStamp. $PSCommandPath is THIS driver;
+    # plib.ps1 adds itself. Without it a banked log cannot be traced to the
+    # harness revision that wrote it (census
+    # an internal note).
+    Write-HarnessFacts @($PSCommandPath)
     Write-BinFacts $Rd @('parfast', 'parfast_aa')
     Say ("SHAPE slice=$SLICE N=$present0 sstar=$SSTAR threads=$THREADS marg=$MARG arena_C=$ARENA_C reps=$REPS rep0=$REP0")
     foreach ($m in $rungs) {
@@ -379,6 +391,12 @@ if ($PHASE -eq 'ctl') {
   Take-RigLock $PSCommandPath
   try {
     Write-BoxFacts
+    # The HARNESS's own provenance, and the round-start twin of the per-leg
+    # `rig=` token - see plib.ps1's Get-RigStamp. $PSCommandPath is THIS driver;
+    # plib.ps1 adds itself. Without it a banked log cannot be traced to the
+    # harness revision that wrote it (census
+    # an internal note).
+    Write-HarnessFacts @($PSCommandPath)
     Wait-FixtureSettle
     $arena = Arenas $m
     for ($rep = $REP0 + 1; $rep -le $REP0 + $REPS; $rep++) {

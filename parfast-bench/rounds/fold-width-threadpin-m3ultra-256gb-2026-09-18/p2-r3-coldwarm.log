@@ -1,0 +1,336 @@
+=== P2-128m-cold-PIN32-AA-floor-w1-head   set=set-4x128 cache=cold runs=32   box_before:  1.94 2.43 2.45   foreign_1core: 147.5 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-cold-PIN32-AA-floor-w1-head  drop=2 width=default runs=32/arm cache=cold
+  base   median  181.022 ms   min  179.481   span 179.5-184.0   process CPU   179.2 ms
+  new    median  180.905 ms   min  179.602   span 179.6-182.2   process CPU   179.1 ms
+  new/base  median 0.999   min/min 1.001
+  cache cold: resident before 49154-49154/49154 (100.00-100.00%), after 0-0/49154 (0.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  2.23 2.47 2.46
+
+=== P2-128m-cold-PIN20-AA-floor-w1-head   set=set-4x128 cache=cold runs=32   box_before:  2.23 2.47 2.46   foreign_1core:  99.3 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-cold-PIN20-AA-floor-w1-head  drop=2 width=default runs=32/arm cache=cold
+  base   median  180.774 ms   min  179.357   span 179.4-185.1   process CPU   179.0 ms
+  new    median  181.064 ms   min  179.587   span 179.6-186.7   process CPU   179.0 ms
+  new/base  median 1.002   min/min 1.001
+  cache cold: resident before 49154-49154/49154 (100.00-100.00%), after 0-0/49154 (0.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  3.00 2.63 2.52
+
+=== P2-128m-cold-PIN32-floor-w1-vs-w2   set=set-4x128 cache=cold runs=32   box_before:  3.00 2.63 2.52   foreign_1core: 100.0 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-cold-PIN32-floor-w1-vs-w2  drop=2 width=default runs=32/arm cache=cold
+  base   median  181.428 ms   min  178.985   span 179.0-196.8   process CPU   180.3 ms
+  new    median  177.111 ms   min  175.028   span 175.0-202.5   process CPU   215.2 ms
+  new/base  median 0.976   min/min 0.978
+  cache cold: resident before 49154-49154/49154 (100.00-100.00%), after 0-0/49154 (0.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  3.09 2.67 2.54
+
+=== P2-128m-cold-PIN20-floor-w1-vs-w2   set=set-4x128 cache=cold runs=32   box_before:  3.09 2.67 2.54   foreign_1core: 187.3 /System/Library/Frameworks/Contacts.framework/Support/contactsd
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-cold-PIN20-floor-w1-vs-w2  drop=2 width=default runs=32/arm cache=cold
+  base   median  181.204 ms   min  179.544   span 179.5-193.6   process CPU   178.3 ms
+  new    median  177.284 ms   min  175.372   span 175.4-199.5   process CPU   210.2 ms
+  new/base  median 0.978   min/min 0.977
+  cache cold: resident before 49154-49154/49154 (100.00-100.00%), after 0-0/49154 (0.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  6.09 3.47 2.83
+
+=== P2-128m-cold-PIN32-floor-w1-vs-w3   set=set-4x128 cache=cold runs=32   box_before:  6.09 3.47 2.83   foreign_1core:  99.9 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-cold-PIN32-floor-w1-vs-w3  drop=2 width=default runs=32/arm cache=cold
+  base   median  182.296 ms   min  179.885   span 179.9-274.7   process CPU   179.7 ms
+  new    median  177.014 ms   min  173.955   span 174.0-270.4   process CPU   240.8 ms
+  new/base  median 0.971   min/min 0.967
+  cache cold: resident before 49154-49154/49154 (100.00-100.00%), after 0-0/49154 (0.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  4.85 3.35 2.80
+
+=== P2-128m-cold-PIN20-floor-w1-vs-w3   set=set-4x128 cache=cold runs=32   box_before:  4.85 3.35 2.80   foreign_1core:  99.7 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-cold-PIN20-floor-w1-vs-w3  drop=2 width=default runs=32/arm cache=cold
+  base   median  180.864 ms   min  179.179   span 179.2-196.3   process CPU   177.6 ms
+  new    median  174.786 ms   min  173.265   span 173.3-177.9   process CPU   228.8 ms
+  new/base  median 0.966   min/min 0.967
+  cache cold: resident before 49154-49154/49154 (100.00-100.00%), after 0-0/49154 (0.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  6.82 3.88 3.01
+
+=== P2-128m-cold-PIN32-floor-w1-vs-w4   set=set-4x128 cache=cold runs=32   box_before:  6.82 3.88 3.01   foreign_1core: 100.0 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-cold-PIN32-floor-w1-vs-w4  drop=2 width=default runs=32/arm cache=cold
+  base   median  181.034 ms   min  179.581   span 179.6-184.0   process CPU   179.6 ms
+  new    median  181.248 ms   min  178.342   span 178.3-183.9   process CPU   294.9 ms
+  new/base  median 1.001   min/min 0.993
+  cache cold: resident before 49154-49154/49154 (100.00-100.00%), after 0-0/49154 (0.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  11.43 5.16 3.49
+
+=== P2-128m-cold-PIN20-floor-w1-vs-w4   set=set-4x128 cache=cold runs=32   box_before:  11.43 5.16 3.49   foreign_1core: 100.0 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-cold-PIN20-floor-w1-vs-w4  drop=2 width=default runs=32/arm cache=cold
+  base   median  180.957 ms   min  179.464   span 179.5-189.5   process CPU   178.7 ms
+  new    median  179.742 ms   min  177.030   span 177.0-200.4   process CPU   277.5 ms
+  new/base  median 0.993   min/min 0.986
+  cache cold: resident before 49154-49154/49154 (100.00-100.00%), after 0-0/49154 (0.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  8.90 4.99 3.46
+
+=== P2-128m-cold-PIN32-floor-w1-vs-w8   set=set-4x128 cache=cold runs=32   box_before:  8.90 4.99 3.46   foreign_1core:  99.6 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-cold-PIN32-floor-w1-vs-w8  drop=2 width=default runs=32/arm cache=cold
+  base   median  181.389 ms   min  179.397   span 179.4-184.5   process CPU   180.5 ms
+  new    median  220.552 ms   min  217.589   span 217.6-240.7   process CPU   890.9 ms
+  new/base  median 1.216   min/min 1.213
+  cache cold: resident before 49154-49154/49154 (100.00-100.00%), after 0-0/49154 (0.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  6.61 4.76 3.42
+
+=== P2-128m-cold-PIN20-floor-w1-vs-w8   set=set-4x128 cache=cold runs=32   box_before:  6.61 4.76 3.42   foreign_1core:  99.7 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-cold-PIN20-floor-w1-vs-w8  drop=2 width=default runs=32/arm cache=cold
+  base   median  181.324 ms   min  179.378   span 179.4-187.1   process CPU   178.7 ms
+  new    median  206.721 ms   min  204.235   span 204.2-209.1   process CPU   604.9 ms
+  new/base  median 1.140   min/min 1.139
+  cache cold: resident before 49154-49154/49154 (100.00-100.00%), after 0-0/49154 (0.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  5.50 4.63 3.41
+
+=== P2-128m-cold-PIN20-AA-floor-w1-tail   set=set-4x128 cache=cold runs=32   box_before:  5.50 4.63 3.41   foreign_1core: 121.4 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-cold-PIN20-AA-floor-w1-tail  drop=2 width=default runs=32/arm cache=cold
+  base   median  181.170 ms   min  179.041   span 179.0-185.6   process CPU   179.0 ms
+  new    median  180.926 ms   min  179.527   span 179.5-189.0   process CPU   179.0 ms
+  new/base  median 0.999   min/min 1.003
+  cache cold: resident before 49154-49154/49154 (100.00-100.00%), after 0-0/49154 (0.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  4.69 4.49 3.39
+
+=== P2-128m-cold-PIN32-AA-floor-w1-tail   set=set-4x128 cache=cold runs=32   box_before:  4.69 4.49 3.39   foreign_1core: 114.4 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-cold-PIN32-AA-floor-w1-tail  drop=2 width=default runs=32/arm cache=cold
+  base   median  181.118 ms   min  179.326   span 179.3-196.5   process CPU   179.4 ms
+  new    median  181.279 ms   min  178.583   span 178.6-183.6   process CPU   179.5 ms
+  new/base  median 1.001   min/min 0.996
+  cache cold: resident before 49154-49154/49154 (100.00-100.00%), after 0-0/49154 (0.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  4.36 4.43 3.39
+
+=== P2-128m-warm-PIN32-AA-floor-w1-head   set=set-4x128 cache=warm runs=32   box_before:  4.36 4.43 3.39   foreign_1core: 112.7 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-warm-PIN32-AA-floor-w1-head  drop=2 width=default runs=32/arm cache=warm
+  base   median  104.011 ms   min  102.239   span 102.2-106.4   process CPU   163.6 ms
+  new    median  103.861 ms   min  101.794   span 101.8-107.7   process CPU   163.7 ms
+  new/base  median 0.999   min/min 0.996
+  cache warm: resident before 49154-49154/49154 (100.00-100.00%), after 49154-49154/49154 (100.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  4.22 4.40 3.39
+
+=== P2-128m-warm-PIN20-AA-floor-w1-head   set=set-4x128 cache=warm runs=32   box_before:  4.22 4.40 3.39   foreign_1core: 100.0 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-warm-PIN20-AA-floor-w1-head  drop=2 width=default runs=32/arm cache=warm
+  base   median  103.898 ms   min  102.585   span 102.6-109.6   process CPU   163.3 ms
+  new    median  103.859 ms   min  102.875   span 102.9-118.0   process CPU   163.3 ms
+  new/base  median 1.000   min/min 1.003
+  cache warm: resident before 49154-49154/49154 (100.00-100.00%), after 49154-49154/49154 (100.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  4.12 4.36 3.39
+
+=== P2-128m-warm-PIN32-floor-w1-vs-w2   set=set-4x128 cache=warm runs=32   box_before:  4.12 4.36 3.39   foreign_1core:  98.7 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-warm-PIN32-floor-w1-vs-w2  drop=2 width=default runs=32/arm cache=warm
+  base   median  103.676 ms   min  101.770   span 101.8-106.1   process CPU   163.6 ms
+  new    median   99.240 ms   min   98.407   span 98.4-100.5   process CPU   198.3 ms
+  new/base  median 0.957   min/min 0.967
+  cache warm: resident before 49154-49154/49154 (100.00-100.00%), after 49154-49154/49154 (100.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  3.73 4.26 3.37
+
+=== P2-128m-warm-PIN20-floor-w1-vs-w2   set=set-4x128 cache=warm runs=32   box_before:  3.73 4.26 3.37   foreign_1core: 100.0 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-warm-PIN20-floor-w1-vs-w2  drop=2 width=default runs=32/arm cache=warm
+  base   median  103.254 ms   min  102.108   span 102.1-104.3   process CPU   162.5 ms
+  new    median   99.508 ms   min   97.735   span 97.7-102.0   process CPU   193.8 ms
+  new/base  median 0.964   min/min 0.957
+  cache warm: resident before 49154-49154/49154 (100.00-100.00%), after 49154-49154/49154 (100.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  3.76 4.25 3.38
+
+=== P2-128m-warm-PIN32-floor-w1-vs-w3   set=set-4x128 cache=warm runs=32   box_before:  3.76 4.25 3.38   foreign_1core: 100.0 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-warm-PIN32-floor-w1-vs-w3  drop=2 width=default runs=32/arm cache=warm
+  base   median  104.148 ms   min  102.567   span 102.6-105.9   process CPU   164.4 ms
+  new    median   99.119 ms   min   97.580   span 97.6-104.0   process CPU   225.7 ms
+  new/base  median 0.952   min/min 0.951
+  cache warm: resident before 49154-49154/49154 (100.00-100.00%), after 49154-49154/49154 (100.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  3.59 4.19 3.37
+
+=== P2-128m-warm-PIN20-floor-w1-vs-w3   set=set-4x128 cache=warm runs=32   box_before:  3.59 4.19 3.37   foreign_1core: 100.0 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-warm-PIN20-floor-w1-vs-w3  drop=2 width=default runs=32/arm cache=warm
+  base   median  104.495 ms   min  102.280   span 102.3-134.4   process CPU   164.0 ms
+  new    median  100.043 ms   min   96.806   span 96.8-130.3   process CPU   217.2 ms
+  new/base  median 0.957   min/min 0.946
+  cache warm: resident before 49154-49154/49154 (100.00-100.00%), after 49154-49154/49154 (100.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  3.50 4.15 3.37
+
+=== P2-128m-warm-PIN32-floor-w1-vs-w4   set=set-4x128 cache=warm runs=32   box_before:  3.50 4.15 3.37   foreign_1core: 517.2 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-warm-PIN32-floor-w1-vs-w4  drop=2 width=default runs=32/arm cache=warm
+  base   median  105.231 ms   min  101.856   span 101.9-116.5   process CPU   166.5 ms
+  new    median  105.781 ms   min  101.191   span 101.2-119.6   process CPU   285.1 ms
+  new/base  median 1.005   min/min 0.993
+  cache warm: resident before 49154-49154/49154 (100.00-100.00%), after 49154-49154/49154 (100.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  5.07 4.47 3.50
+
+=== P2-128m-warm-PIN20-floor-w1-vs-w4   set=set-4x128 cache=warm runs=32   box_before:  5.07 4.47 3.50   foreign_1core: 527.4 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-warm-PIN20-floor-w1-vs-w4  drop=2 width=default runs=32/arm cache=warm
+  base   median  103.820 ms   min  102.422   span 102.4-120.3   process CPU   163.8 ms
+  new    median  103.722 ms   min  101.428   span 101.4-123.6   process CPU   265.6 ms
+  new/base  median 0.999   min/min 0.990
+  cache warm: resident before 49154-49154/49154 (100.00-100.00%), after 49154-49154/49154 (100.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  4.68 4.40 3.48
+
+=== P2-128m-warm-PIN32-floor-w1-vs-w8   set=set-4x128 cache=warm runs=32   box_before:  4.68 4.40 3.48   foreign_1core: 100.0 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-warm-PIN32-floor-w1-vs-w8  drop=2 width=default runs=32/arm cache=warm
+  base   median  104.042 ms   min  102.011   span 102.0-108.5   process CPU   164.3 ms
+  new    median  143.465 ms   min  139.859   span 139.9-150.0   process CPU   887.4 ms
+  new/base  median 1.379   min/min 1.371
+  cache warm: resident before 49154-49154/49154 (100.00-100.00%), after 49154-49154/49154 (100.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  4.39 4.35 3.48
+
+=== P2-128m-warm-PIN20-floor-w1-vs-w8   set=set-4x128 cache=warm runs=32   box_before:  4.39 4.35 3.48   foreign_1core: 124.3 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/corespotlightd
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-warm-PIN20-floor-w1-vs-w8  drop=2 width=default runs=32/arm cache=warm
+  base   median  103.171 ms   min  102.137   span 102.1-105.0   process CPU   162.7 ms
+  new    median  128.820 ms   min  126.914   span 126.9-131.3   process CPU   591.6 ms
+  new/base  median 1.249   min/min 1.243
+  cache warm: resident before 49154-49154/49154 (100.00-100.00%), after 49154-49154/49154 (100.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  5.41 4.58 3.58
+
+=== P2-128m-warm-PIN20-AA-floor-w1-tail   set=set-4x128 cache=warm runs=32   box_before:  5.41 4.58 3.58   foreign_1core:  97.8 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-warm-PIN20-AA-floor-w1-tail  drop=2 width=default runs=32/arm cache=warm
+  base   median  103.728 ms   min  101.468   span 101.5-107.1   process CPU   163.5 ms
+  new    median  103.650 ms   min  102.033   span 102.0-107.0   process CPU   163.4 ms
+  new/base  median 0.999   min/min 1.006
+  cache warm: resident before 49154-49154/49154 (100.00-100.00%), after 49154-49154/49154 (100.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  4.88 4.49 3.56
+
+=== P2-128m-warm-PIN32-AA-floor-w1-tail   set=set-4x128 cache=warm runs=32   box_before:  4.88 4.49 3.56   foreign_1core: 100.2 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P2-128m-warm-PIN32-AA-floor-w1-tail  drop=2 width=default runs=32/arm cache=warm
+  base   median  103.875 ms   min  102.107   span 102.1-112.9   process CPU   164.0 ms
+  new    median  103.895 ms   min  102.774   span 102.8-105.9   process CPU   163.9 ms
+  new/base  median 1.000   min/min 1.007
+  cache warm: resident before 49154-49154/49154 (100.00-100.00%), after 49154-49154/49154 (100.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  4.48 4.42 3.55
+

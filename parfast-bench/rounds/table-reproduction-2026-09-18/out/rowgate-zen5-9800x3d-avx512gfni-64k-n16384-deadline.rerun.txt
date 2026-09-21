@@ -1,0 +1,1 @@
+REFUSED: no legs in rounds/rowgate-2026-09-17/zen5-9800x3d-avx512gfni-64k-n16384-deadline.log

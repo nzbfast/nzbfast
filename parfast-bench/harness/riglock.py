@@ -22,9 +22,16 @@ this fleet:
     `riglock_state.lock_state()` whether the identity already in the file
     names somebody still alive - the ONE rule
     `harness/riglock_state.py` documents, imported rather than
-    re-derived, the same way `pdrv.RigLock.take()` uses it. A file that
-    names nobody (zero bytes, no parseable pid, a dead pid) is cleared and
-    announced; there is no age bound in that verdict and none may be added.
+    re-derived, the same way `pdrv.RigLock.take()` uses it. A file that names
+    nobody is always cleared; whether that is ANNOUNCED depends on why it
+    names nobody. Zero bytes is `release()`'s own spelling for an ordinary
+    hand-over (below) and is cleared silently - it used to be folded into
+    "orphan" and announced, which is what made every normal hand-over on
+    apple-m3-ultra print a false RIG-LOCK-ORPHAN on 20 Sep 2026
+    (an internal note). A file that is
+    non-empty but unparseable, or names a dead pid, is a genuine orphan and
+    is cleared AND announced. There is no age bound in either verdict and
+    none may be added.
 
     python3 riglock.py <round-tag> -- <command> [args...]
 

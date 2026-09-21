@@ -1,0 +1,19 @@
+LOCK-TAKEN pid=8024 id=zen5-window-census-twobox-round-18sep gen=61982699 taken=2026-09-18T16:07:24.8340097Z what=read-only-census
+CLAIM-POSTED
+HOST windows-gaming-pc-b  ts=2026-09-18T16:07:25.5202089Z
+DIMM loc=DIMM 1 bank=P0 CHANNEL B cap_gb=32 speed=4800 configured=6000 volt=1100 mfr=G Skill Intl part=F5-6000J2836G32G  smbios=34 formfactor=8
+DIMM loc=DIMM 1 bank=P0 CHANNEL A cap_gb=32 speed=4800 configured=6000 volt=1100 mfr=G Skill Intl part=F5-6000J2836G32G  smbios=34 formfactor=8
+MEMARRAY slots=4 maxcap_gb=256
+BOARD mfr=ASUSTeK COMPUTER INC. product=ROG CROSSHAIR X870E EXTREME bios=1605 biosdate=07/14/2025 20:00:00
+SYS ram_gb=61.6 model=System Product Name
+CPU name=AMD Ryzen 7 9800X3D 8-Core Processor  maxclk=4700 curclk=4700 cores=8 logical=16 l2=8192 l3=98304
+DISK fn=WD_BLACK SN8100 4000GB bus=17 size_gb=3726 spindle=0
+DISK fn=CT1000T700SSD5 bus=17 size_gb=932 spindle=0
+DRIVE model=CT1000T700SSD5 iface=SCSI size_gb=932
+DRIVE model=WD_BLACK SN8100 4000GB iface=SCSI size_gb=3726
+POWERPLAN Balanced
+UPTIME_H 3
+OS Microsoft Windows 11 Pro build=26200
+FOREIGN_CPU_PCT 2.3
+CENSUS-END
+DONE-POSTED lock-released

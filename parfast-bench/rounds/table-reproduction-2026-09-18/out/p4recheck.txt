@@ -1,0 +1,67 @@
+8.16.5's 4 MiB ladder, re-reduced from an internal note/
+legs: w4=4, w5=4, w6=4, w7=4, w8=4, w9=4, w10=4
+
+rung  col    published     re-run   delta%  position among the 4 legs
+---------------------------------------------------------------------
+w4    wall      278.60     278.60    -0.00  = median
+w4    cpu       2152.3     2152.3    -0.00  = median
+w4    syn       155.81     155.81    +0.00  = median
+w4    peak       11224      11224    +0.00  = median
+
+w5    wall      309.62     309.62    -0.00  = median
+w5    cpu       2429.3     2429.3    +0.00  = median
+w5    syn       188.30     191.60    -1.72  BELOW every leg (min 190.99)   <-- not the median
+w5    peak       11224      11224    -0.00  = median
+
+w6    wall      339.14     339.14    +0.00  = median
+w6    cpu       2660.3     2660.3    -0.00  = median
+w6    syn       219.53     219.53    -0.00  = median
+w6    peak       11224      11224    +0.00  = median
+
+w7    wall      368.34     368.34    +0.00  = median
+w7    cpu       2899.1     2899.1    +0.00  = median
+w7    syn       245.13     250.75    -2.24  inside the spread, not the median [245.04 .. 253.03]   <-- not the median
+w7    peak       11224      11224    +0.00  = median
+
+w8    wall      392.93     392.93    +0.00  = median
+w8    cpu       3082.1     3082.1    +0.00  = median
+w8    syn       272.14     272.14    -0.00  = median
+w8    peak       11224      11224    +0.00  = median
+
+w9    wall      393.36     393.36    +0.00  = median
+w9    cpu       3100.8     3100.8    -0.00  = median
+w9    syn       275.78     275.78    -0.00  = median
+w9    peak       11223      11223    -0.00  = median
+
+w10   wall      414.61     414.61    +0.00  = median
+w10   cpu       3267.5     3267.5    -0.00  = median
+w10   syn       281.44     296.66    -5.13  BELOW every leg (min 288.85)   <-- not the median
+w10   peak       11224      11224    +0.00  = median
+
+rows that are NOT an exact median of their own banked legs: 3 of 28
+  w5    syn   -1.72%
+  w7    syn   -2.24%
+  w10   syn   -5.13%
+
+DERIVED COLUMNS - every one of the three is a function of `ntt syndromes` alone
+
+the k<=3 line, fitted on the three widest rungs (w4, w5, w6):
+  published   31.863 * k + 28.569
+  re-run      31.862 * k + 29.669   (slope -0.00%, intercept +3.85%)
+  8.20.8 predicted 31.862 * k + 29.669 from the same legs: CONFIRMED
+
+rung  marginal pub     re-run      moves | departure pub     re-run      moves | charge pub     re-run
+------------------------------------------------------------------------------------------------------
+w4               -          -          - |         -0.1%      -0.8%       -0.7 |     31.692     31.535
+w5           32.49      35.79      +3.30 |          0.2%       1.4%       +1.2 |     31.880     32.386
+w6           31.24      27.93      -3.31 |         -0.1%      -0.6%       -0.5 |     31.800     31.644
+w7           25.60      31.21      +5.61 |         -2.6%      -0.8%       +1.8 |     31.099     31.582
+w8           27.01      21.40      -5.61 |         -4.0%      -4.4%       -0.4 |     31.220     30.309
+w9            3.64       3.64      -0.00 |        -12.5%     -12.8%       -0.3 |     27.569     27.346
+w10              -          -          - |        -10.7%      -6.2%       +4.5 |     28.536     29.666
+
+8.16.5's flat band: its table reads the w4/w5/w7 departures as -0.1%, +0.2%, -2.6%
+  w4   published -0.1%   on its own legs -0.8%
+  w5   published +0.2%   on its own legs +1.4%
+  w7   published -2.6%   on its own legs -0.8%
+  8.20.8 predicted -0.8%, +1.4%, -0.8% for that band

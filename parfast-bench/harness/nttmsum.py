@@ -403,6 +403,12 @@ if os.environ.get("STEAL"):
                   for x in _spec_thr.split(",") if x.strip()]
     print()
     print("STEAL LADDER - does this box locate the knee, or does the knee locate this box?")
+    # cellguard-roster: this min/med/sd/p90/max is the hypervisor STEAL
+    # PERCENTAGE distributed across measured legs, not a wall-clock time
+    # distributed across repeated runs of one arm - there is no "arm" here,
+    # only a per-leg noise reading, so the bimodal-cell rule (a min far under
+    # the median meaning the box was demoted mid-cell) does not apply. The
+    # spelling matches cellguard's pattern by coincidence.
     print("round steal%%: min=%.2f med=%.2f sd=%.2f p90=%.2f max=%.2f over %d measured leg(s)"
           % (_st["min"], _st["med"], _st["sd"], _st["p90"], _st["max"], _st["n"]))
     print("%-10s %6s %6s %10s %9s %9s %9s %9s"

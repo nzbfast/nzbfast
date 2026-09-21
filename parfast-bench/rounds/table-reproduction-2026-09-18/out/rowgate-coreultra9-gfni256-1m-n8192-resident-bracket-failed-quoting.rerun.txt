@@ -1,0 +1,1 @@
+REFUSED: no legs in rounds/rowgate-2026-09-16/coreultra9-gfni256-1m-n8192-resident-bracket-failed-quoting.log

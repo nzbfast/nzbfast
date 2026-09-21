@@ -53,6 +53,12 @@ try {
   "LAD2-START $((Get-Date).ToUniversalTime().ToString('o'))"
   Write-BoxFacts
   Write-BinFacts $bin $tools
+  # The HARNESS's own provenance, and the round-start twin of the per-leg
+  # `rig=` token - see plib.ps1's Get-RigStamp. $PSCommandPath is THIS driver;
+  # plib.ps1 adds itself. Without it a banked log cannot be traced to the
+  # harness revision that wrote it (census
+  # an internal note).
+  Write-HarnessFacts @($PSCommandPath)
   "PROTOCOL slice=$slice recovery_blocks=$rblk source_blocks=13990 redundancy_pct=14.996 damage=scattered-seeded-slice-overwrite reps=3 gate=sha256-all-members prewarm=full-read-of-work-dir"
   "ARGV parfast='$($argv['parfast'])' par2turbo='$($argv['par2turbo'])' par2j64='$($argv['par2j64'])'"
 

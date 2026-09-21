@@ -17,7 +17,7 @@ param(
   [string]$Residency = '',                       # resident | windowed - ASSERT which side of the admission gate every transform leg took (create included, since 16 Sep 2026)
   [string]$Budget = '',                          # rowgate/validate/measure/create: the -m the legs run at ('big' = none); the phase's own default otherwise
   [string]$NttBudgets = '',                      # validate: m=bytes,m=bytes - the NZBFAST_NTT_BUDGET an `inb*` arm runs at that rung
-  [switch]$Flip,                                 # validate: reverse the arm order on even reps
+  [switch]$Flip,                                 # validate: ACCEPTED AND IGNORED since 18 Sep 2026 - the arms rotate every rep unconditionally; kept so a banked launch line still parses
   [string]$Affinity = '',                        # CPU affinity mask for EVERY leg of this round, e.g. 0xF - see the note below
   [string]$Payload = 'random',                   # random | text | mixed - WHAT THE MEMBERS CONTAIN; see the payload note below
   [switch]$NoBuild
@@ -72,7 +72,21 @@ param(
 #             budget `auto`'s admission hands the worker (budget - arenas at
 #             the geometry's width), so where `auto` transforms the two must
 #             run the same windows - check that before reading `inb` where
-#             `auto` folds. -Flip reverses the arm list on even reps.
+#             `auto` folds.
+#             THE ARM ORDER ROTATES ONE STEP PER REP, unconditionally, since
+#             18 Sep 2026. It used to rotate only behind -Flip and the round
+#             header never echoed the switch, so no banked validate log could
+#             be classified for a position effect at all - two banked callers
+#             classify either way, one having passed the switch and one not.
+#             -Flip is still accepted and is now IGNORED, with a warning on
+#             the round's own output stream. Never `[array]::Reverse` here:
+#             reversing an odd arm count leaves the middle arm in the middle
+#             forever, which is the defect jcross.ps1 shipped on 12 Sep 2026.
+#             The rule, and why banking the order matters as much as rotating
+#             it, is `.claude/skills/bench-suite`, "Writing an A/B driver";
+#             the census is an internal note
+#             section 6 and an internal note section
+#             5 item 5.
 # -Affinity PINS EVERY LEG OF THE ROUND TO A CPU MASK, e.g. `-Affinity 0xF`.
 # Added 16 Sep 2026 for lane parfast-4mib-pinned-affinity-pools. On a HYBRID
 # part a thread count is not a core mix: intel-core-ultra-9-386h is 16C/16T as 4 P-cores
@@ -88,7 +102,8 @@ param(
 #     after the child starts (ProcessStartInfo cannot create one suspended),
 #     so a child that counted cores for itself could have sized its pool off
 #     the UNPINNED mask. Every pinned arm naming -t<n> makes that unreachable.
-#   * THE MASK IS READ BACK and refused on mismatch (`WCOMB-FAIL affinity`).
+#   * THE MASK IS READ BACK and refused on mismatch (`WCOMB-FAIL affinity`),
+#     in both Run-Cell (measure/validate/rowgate) and Run-Create (create).
 #     A pin that silently failed would publish an unpinned leg under a pinned
 #     arm's name - the same class as a transform leg that folded, which the
 #     residency arm already refuses.
@@ -101,6 +116,55 @@ param(
 #     threads), so two masks at one thread count merge into one table and the
 #     round becomes unreadable. The mask IS stamped on every LEG line
 #     (`affinity=`), so a merged log is recoverable, but do not rely on it.
+#
+# EVERY LEG LINE CARRIES FREQUENCY AND THERMAL STATE since 18 Sep 2026, added
+# for lane cf-load-term-buffer-and-placement-18sep: `freq_mhz` / `freq_after_mhz`,
+# `perf_pct` / `perf_after_pct` (the raw counter the MHz is derived from, so a
+# reader can check the derivation), `temp_c` / `temp_after_c`, `throttle_pct`
+# and `pkg_w`. They exist because the within-sitting drift census of 18 Sep
+# ranked THERMAL OR POWER DRIFT third among the candidates for the unexplained
+# residual in `c_f` and then could not test it at all - no LEG line in the whole
+# banked corpus carried either quantity, so there was nothing to reduce and the
+# candidate was untestable by construction rather than merely unproven.
+#
+# THE FREQUENCY HALF OF THOSE FIELDS DOES NOT WORK, found 18 Sep 2026 by lane
+# `cf-thermal-drift-candidate3-18sep` from the six validation legs this lane
+# itself banked: `freq_after_mhz` spans 912-2585 MHz across legs that all held
+# ~10 of 12 threads busy on a box whose thermometer read 27.9 C on every
+# sample. `perf_pct` and both `freq_*` fields are still EMITTED - the columns
+# become correct the moment the sampler is fixed, and a column that vanishes is
+# how a gap stops being visible - but they MUST NOT be reduced or quoted.
+# `temp_c`, `temp_after_c` and `throttle_pct` are sound: they are instantaneous
+# gauges and one query reads them correctly. Diagnosis, the proposed raw-delta
+# fix and its on-box validator:
+# `rounds/cf-thermal-drift-2026-09-18/README.md`; the full argument
+# sits at the site, in `Get-PowerState`'s header in plib.ps1. SO CANDIDATE 3 IS
+# NOT YET TESTABLE AFTER ALL - it is blocked on that fix, not on a hot box.
+#
+# `pkg_w` READS `na` ON THIS FLEET AND THAT IS A MEASURED FACT, not a stub.
+# Intel exposes package watts through RAPL MSRs, which Windows does not surface
+# to user mode: intel-i5-10600kf has no hardware-monitor WMI namespace, no Intel Power
+# Gadget, and no `Win32_Battery` (it is a desktop), so the ACPI `Power Meter`
+# counter set laptops carry has no instance either. Every remaining route needs
+# a kernel driver, which is a decision for the maintainer about a shared timing box and not
+# something a lane installs. The field is EMITTED rather than omitted so a box
+# that can read it needs no format change and no reducer edit, and so the
+# absence is recorded in every log instead of being a column a later reader has
+# to go and rediscover. Get-PowerState's own header in plib.ps1 carries the
+# full measurement, including why `Win32_Processor.CurrentClockSpeed` is the
+# wrong source for the frequency half and would publish a dead constant.
+#
+# THEY ARE ADDITIVE AND OLDER LOGS DO NOT CARRY THEM. Every reducer here parses
+# a LEG line as whitespace-separated `key=value`, so an added field cannot
+# displace an existing one and no reducer needed changing. They sit just BEFORE
+# `ts=` rather than after it, which is additive in the sense that matters and
+# keeps the timestamp as the line's last field, the way every LEG line in the
+# banked corpus already ends; a reducer that found a field by POSITION would
+# have been broken by either choice, and none does.
+# No reducer needed changing: a reducer that comes
+# to READ these must treat absent as "this log predates the field and says
+# nothing about thermals", never as zero - the pattern `wcombsum.shape()` uses
+# for `slice=`/`n=`, which it states in words in the log it prints.
 #
 #   rowgate   the single-window row gate (fastpar::ntt_min_missing), added
 #             15 Sep 2026 for lane parfast-ntt-row-gate-gfni-avx512-15sep:
@@ -339,7 +403,25 @@ function Get-Num([string]$s) { [double]::Parse($s, [Globalization.CultureInfo]::
 New-Item -ItemType Directory -Force $logs | Out-Null
 Take-RigLock $Tag   # the ROUND's name, not $lock: see plib.ps1's Take-RigLock
 try {
-  "ROUND tag=$Tag phase=$Phase root=$Root bin=$Bin reps=$Reps gf16force=$Gf16Force start=$((Get-Date).ToUniversalTime().ToString('o'))"
+  # `arm_order=` IS THE ONLY THING IN A BANKED LOG THAT SAYS WHICH ORDERING
+  # RULE PRODUCED IT. Until 18 Sep 2026 this header carried no such token and
+  # the validate phase rotated only behind an optional -Flip, so a reader of a
+  # banked wcomb validate round could not tell a rotated ladder from a fixed
+  # one without reconstructing the rule out of the LEG lines. Change this
+  # string whenever the rule changes.
+  #   validate  rotating-by-rep, one step per rep, every arm in every slot
+  #   rowgate   abba-by-rep - the four legs are two A/A pairs written ABBA,
+  #   create    reversed whole on even reps; unchanged 18 Sep 2026
+  #   measure   fixed - fold and force run DIFFERENT rung lists here, so there
+  #             is no single arm list to rotate and nothing to claim
+  $armOrderTag = switch ($Phase) {
+    'validate' { 'rotating-by-rep' }
+    'rowgate'  { 'abba-by-rep' }
+    'create'   { 'abba-by-rep' }
+    default    { 'fixed' }
+  }
+  "ROUND tag=$Tag phase=$Phase root=$Root bin=$Bin reps=$Reps gf16force=$Gf16Force arm_order=$armOrderTag start=$((Get-Date).ToUniversalTime().ToString('o'))"
+  if ($Flip) { "WCOMB-WARN -Flip is accepted and IGNORED since 18 Sep 2026 - the validate arms rotate one step every rep unconditionally, which is a superset of what the switch did; the launch line needs no edit" }
   Write-BoxFacts
   Write-HarnessFacts @($PSCommandPath)
 
@@ -570,6 +652,51 @@ try {
     "RUNG-BOUND ok max_m=$maxr <= recovery=$fixrec"
   }
 
+  # THE VALIDATE PHASE'S ARM ORDER, DECIDED AND ASSERTED HERE rather than in
+  # the rep loop, and BEFORE the fixture settle below - which is the last thing
+  # this round does before its first leg, and so this driver's warm-up. Two
+  # reasons, both learned from jcross.ps1's port on 12 Sep 2026:
+  #
+  # ONE: THERE IS NO PARSE-CHECK FOR THIS FILE ON THE BOX THAT EDITS IT. The
+  # dev Macs run the gates; the rigs run the rounds. So an off-by-one in the
+  # modulus, or a rotate-in-place that scrambles every later rep, lands UNRUN
+  # and publishes a ladder whose arms are not what the log says they are. The
+  # round asserts the property it needs - every arm exactly once, every rep -
+  # and dies at leg zero instead. Costing the assertion here rather than in
+  # the loop means it fires BEFORE up to twenty minutes of settling.
+  #
+  # TWO: it prints each rep's order into the log, so a later reader tests a
+  # BANKED round for a position effect instead of spending a rig to re-run it.
+  # That is the whole of what an internal note
+  # section 6 asks of this driver.
+  #
+  # A NEW ARRAY EVERY REP. Never [array]::Reverse and never a rotate-in-place
+  # on @($varms): @() around an object[] hands back the SAME object, so a
+  # mutation there would scramble every later rep - and reversing an ODD arm
+  # count leaves the middle arm in the middle forever, which is the defect
+  # that reported +42.75% for an arm that could not engage.
+  $varms = if ($Arms) { @($Arms.Split(',')) } elseif ($AltBin) { @('fold', 'force', 'auto', 'autoalt') } else { @('fold', 'force', 'auto') }
+  $vorders = @()
+  if ($Phase -eq 'validate') {
+    if ($varms.Count -lt 1) { "WCOMB-FAIL validate has no arms"; exit 9 }
+    foreach ($rep in 1..$Reps) {
+      $k = ($rep - 1) % $varms.Count
+      $ord = @(0..($varms.Count - 1) | ForEach-Object { $varms[($k + $_) % $varms.Count] })
+      if ($ord.Count -ne $varms.Count -or
+          @(Compare-Object $ord $varms -SyncWindow ($varms.Count)).Count -ne 0) {
+        "WCOMB-FAIL rep=$rep arm order '$($ord -join ',')' is not a permutation of '$($varms -join ',')'"
+        exit 9
+      }
+      $vorders += ,$ord
+      "ARM-ORDER rep=$rep $($ord -join ',')"
+    }
+    # A rep count that is a MULTIPLE of the arm count is what puts every arm in
+    # every slot the same number of times; at 3 arms and 5 reps the first slot
+    # goes 2/2/1. Said rather than refused, because a short confirmation round
+    # is a legitimate thing to ask this phase for.
+    if ($Reps % $varms.Count -ne 0) { "WCOMB-WARN reps=$Reps is not a multiple of arms=$($varms.Count), so the slots are unevenly filled - a paired per-rep statistic still holds, a per-slot mean does not" }
+  }
+
   # A fixture built THIS round is 10.7 GB Windows Search has not seen before,
   # and the `attrib +I` above stops it growing rather than undoing the walk
   # already under way - both stamps returned rc=0 on 16 Sep 2026 and two ladders
@@ -609,7 +736,7 @@ try {
     exit 9
   }
 
-  function Run-Cell([int]$m, [string]$budget, [string]$arm, [int]$threads, [int]$rep, [bool]$prof) {
+  function Run-Cell([int]$m, [string]$budget, [string]$arm, [int]$threads, [int]$rep, [bool]$prof, [int]$armPos = 0) {
     $tag = "m$m-$budget-$arm-t$threads-r$rep"
     $dseed = 1000 + $m
     $picks = Get-DamagePicks $work $members $slice $m $dseed
@@ -724,7 +851,7 @@ try {
       Fail-Leg "WCOMB-FAIL affinity want=0x$($AffinityMask.ToString('X')) got=$(if ([long]$r.affGot -eq -1) { 'THREW' } else { '0x' + ([long]$r.affGot).ToString('X') }) arm=$arm at $tag - the leg did not run on the cores this arm names"
     }
 
-    "LEG round=$Tag label=$Label slice=$slice payload=$Payload n=$n phase=$Phase rep=$rep m=$m budget=$budget arm=$arm ntt_budget=$($envx['NZBFAST_NTT_BUDGET']) threads=$threads prof=$([int]$prof) rc=$($r.rc) restored=$($post.good)/$($members.Count) wall=$($r.wall) cpu=$($r.cpu) peak_mb=$($r.peakmb) path=$path ntt_w=$($ws -join '/') ntt_calls=$($syn.Count) ntt_n=$(($ns | Select-Object -First 3) -join '/') windows=$($wins.Count) residency=$(if ($Residency) { $Residency } else { 'unset' }) win_slices=$(($wins | Select-Object -First 3) -join '/') slabs=$slabs slab_width=$slabw prof_lines=$($combs.Count) depth0_sum=$([math]::Round($d0,3)) leaves_sum=$([math]::Round($lv,3)) combine_sum=$([math]::Round($d0-$lv,3)) combine_mean=$cmean combine_list=$(($combs | Select-Object -First 12) -join '/') forney_s=$forney ffs_s=$ffs unbuildable=$unbuildable blocks_written=$wrote strays=$strays gf16force=$Gf16Force foreign_cpu=$($r.foreign) foreign_after=$($r.foreignAfter) load_before=$load0 load_after=$load1 errlen=$($r.errlen) affinity=$(if ($AffinityMask) { '0x' + $AffinityMask.ToString('X') } else { 'none' }) affinity_got=$(if ($AffinityMask) { '0x' + ([long]$r.affGot).ToString('X') } else { 'none' }) rig=$(Get-RigStamp) ts=$((Get-Date).ToUniversalTime().ToString('o'))"
+    "LEG round=$Tag label=$Label slice=$slice payload=$Payload n=$n phase=$Phase rep=$rep m=$m budget=$budget arm=$arm arm_pos=$(if ($armPos) { $armPos } else { 'na' }) arm_order=$armOrderTag ntt_budget=$($envx['NZBFAST_NTT_BUDGET']) threads=$threads prof=$([int]$prof) rc=$($r.rc) restored=$($post.good)/$($members.Count) wall=$($r.wall) cpu=$($r.cpu) peak_mb=$($r.peakmb) path=$path ntt_w=$($ws -join '/') ntt_calls=$($syn.Count) ntt_n=$(($ns | Select-Object -First 3) -join '/') windows=$($wins.Count) residency=$(if ($Residency) { $Residency } else { 'unset' }) win_slices=$(($wins | Select-Object -First 3) -join '/') slabs=$slabs slab_width=$slabw prof_lines=$($combs.Count) depth0_sum=$([math]::Round($d0,3)) leaves_sum=$([math]::Round($lv,3)) combine_sum=$([math]::Round($d0-$lv,3)) combine_mean=$cmean combine_list=$(($combs | Select-Object -First 12) -join '/') forney_s=$forney ffs_s=$ffs unbuildable=$unbuildable blocks_written=$wrote strays=$strays gf16force=$Gf16Force foreign_cpu=$($r.foreign) foreign_after=$($r.foreignAfter) load_before=$load0 load_after=$load1 errlen=$($r.errlen) affinity=$(if ($AffinityMask) { '0x' + $AffinityMask.ToString('X') } else { 'none' }) affinity_got=$(if ($AffinityMask) { '0x' + ([long]$r.affGot).ToString('X') } else { 'none' }) rig=$(Get-RigStamp) freq_mhz=$($r.pwr0.FreqMhz) freq_after_mhz=$($r.pwr1.FreqMhz) perf_pct=$($r.pwr0.PerfPct) perf_after_pct=$($r.pwr1.PerfPct) temp_c=$($r.pwr0.TempC) temp_after_c=$($r.pwr1.TempC) throttle_pct=$($r.pwr1.ThrottlePct) pkg_w=$($r.pwr1.PkgW) ts=$((Get-Date).ToUniversalTime().ToString('o'))"
 
     Restore-Slices $work $pristine $members $slice $picks
     $chk = Test-RestoredFast $work $members $gold
@@ -852,7 +979,15 @@ try {
     $match = [int]($cref[$m] -eq $dig)
     foreach ($f in $outs) { Remove-Item $f.FullName -Force }
 
-    "LEG round=$Tag label=$Label slice=$slice payload=$Payload n=$n phase=$Phase rep=$rep m=$m budget=$budget arm=$arm ntt_budget=$($envx['NZBFAST_NTT_BUDGET']) threads=$threads prof=0 rc=$($r.rc) restored=$(if($match){$members.Count}else{0})/$($members.Count) match=$match out_files=$($outs.Count) out_bytes=$obytes wall=$($r.wall) cpu=$($r.cpu) peak_mb=$($r.peakmb) path=$path route=$croute windows=$cwmax win_slices=$(if ($cslices.Count -gt 0) { ($cslices | Select-Object -First 3) -join '/' } else { $croute }) residency=$(if ($Residency) { $Residency } else { 'unset' }) cold_builds=$cold gf16force=$Gf16Force foreign_cpu=$($r.foreign) foreign_after=$($r.foreignAfter) load_before=$load0 load_after=$load1 errlen=$($r.errlen) rig=$(Get-RigStamp) ts=$((Get-Date).ToUniversalTime().ToString('o'))"
+    # A leg that did not run on the cores its arm names measured a DIFFERENT
+    # core mix under this arm's name. Same refusal class as the residency
+    # arm above, and Run-Cell's own affinity check, and it fires before the
+    # LEG line so nothing unpinned is published as pinned.
+    if ($AffinityMask -and [long]$r.affGot -ne [long]$AffinityMask) {
+      Fail-Leg "WCOMB-FAIL affinity want=0x$($AffinityMask.ToString('X')) got=$(if ([long]$r.affGot -eq -1) { 'THREW' } else { '0x' + ([long]$r.affGot).ToString('X') }) arm=$arm at $tag - the leg did not run on the cores this arm names"
+    }
+
+    "LEG round=$Tag label=$Label slice=$slice payload=$Payload n=$n phase=$Phase rep=$rep m=$m budget=$budget arm=$arm arm_pos=na arm_order=$armOrderTag ntt_budget=$($envx['NZBFAST_NTT_BUDGET']) threads=$threads prof=0 rc=$($r.rc) restored=$(if($match){$members.Count}else{0})/$($members.Count) match=$match out_files=$($outs.Count) out_bytes=$obytes wall=$($r.wall) cpu=$($r.cpu) peak_mb=$($r.peakmb) path=$path route=$croute windows=$cwmax win_slices=$(if ($cslices.Count -gt 0) { ($cslices | Select-Object -First 3) -join '/' } else { $croute }) residency=$(if ($Residency) { $Residency } else { 'unset' }) cold_builds=$cold gf16force=$Gf16Force foreign_cpu=$($r.foreign) foreign_after=$($r.foreignAfter) load_before=$load0 load_after=$load1 errlen=$($r.errlen) affinity=$(if ($AffinityMask) { '0x' + $AffinityMask.ToString('X') } else { 'none' }) affinity_got=$(if ($AffinityMask) { '0x' + ([long]$r.affGot).ToString('X') } else { 'none' }) rig=$(Get-RigStamp) freq_mhz=$($r.pwr0.FreqMhz) freq_after_mhz=$($r.pwr1.FreqMhz) perf_pct=$($r.pwr0.PerfPct) perf_after_pct=$($r.pwr1.PerfPct) temp_c=$($r.pwr0.TempC) temp_after_c=$($r.pwr1.TempC) throttle_pct=$($r.pwr1.ThrottlePct) pkg_w=$($r.pwr1.PkgW) ts=$((Get-Date).ToUniversalTime().ToString('o'))"
     if ($r.rc -ne 0) { "WCOMB-FAIL create rc=$($r.rc) at $tag"; exit 9 }
     if (-not $match) { "WCOMB-FAIL create output differs from the first arm at m=$m ($tag)"; exit 9 }
   }
@@ -879,14 +1014,18 @@ try {
       }
     } elseif ($Phase -eq 'validate') {
       $vm = if ($Rungs) { @($Rungs.Split(',') | ForEach-Object { [int]$_ }) } else { @(192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096) }
-      $varms = if ($Arms) { @($Arms.Split(',')) } elseif ($AltBin) { @('fold', 'force', 'auto', 'autoalt') } else { @('fold', 'force', 'auto') }
       $vt = if ($Threads) { $threadlist } else { @(4) }
       # No profile on these arms: the per-depth timers are the one thing that
       # could tax the transform's CPU and not the fold's, in the comparison
       # this phase exists to make.
-      $va = if ($Flip -and -not ($rep % 2)) { $varms[($varms.Count - 1)..0] } else { $varms }
+      #
+      # $vorders was built and asserted before the fixture settle above; the
+      # arm list is NOT rebuilt here, so the order the log banked in its
+      # ARM-ORDER lines is the order that runs, with no second copy of the
+      # rotation rule to drift from the first.
+      $va = $vorders[$rep - 1]
       $vb = if ($Budget) { $Budget } else { '128' }
-      foreach ($t in $vt) { foreach ($m in $vm) { foreach ($arm in $va) { Run-Cell $m $vb $arm $t $rep $false } } }
+      foreach ($t in $vt) { foreach ($m in $vm) { for ($ai = 0; $ai -lt $va.Count; $ai++) { Run-Cell $m $vb $va[$ai] $t $rep $false ($ai + 1) } } }
     } elseif ($Phase -eq 'rowgate') {
       $rm = if ($Rungs) { @($Rungs.Split(',') | ForEach-Object { [int]$_ }) } else { @(192, 256, 288, 320, 352, 384, 416, 448, 512, 640) }
       # ABBA, flipped on alternate reps, so neither copy of an arm always runs first.

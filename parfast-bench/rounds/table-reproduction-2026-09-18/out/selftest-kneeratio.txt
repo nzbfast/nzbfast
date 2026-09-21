@@ -1,0 +1,1 @@
+selftest OK - reproduces the published efficiency table; -t4 1.6x (smooth), -t12 16.3x (knee)

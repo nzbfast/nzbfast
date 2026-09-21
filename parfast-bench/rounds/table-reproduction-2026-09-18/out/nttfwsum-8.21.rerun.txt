@@ -1,0 +1,57 @@
+FIXED-WIDTH LADDER  S*=2096  68 legs over 17 rungs
+c_l used for the width correction: 0.0000 ms/source  (NONE - pass --cl to correct)
+       m   legs      k    width  charge s   spread%  wall s     cpu s    bsub s   peak MB
+    1000      4     15     2110    2.6517      1.46    66.3     470.6       6.2      6405
+    1600      4     14     2112    3.2550      1.58    73.1     526.5       5.2      6402
+    2500      4     14     2112    4.1614      1.44    89.8     652.7       7.7      6403
+    3400      4     13     2112    5.1446      1.47   102.9     753.6      10.3      6403
+    4096      4     13     2110    5.9392      0.43   116.0     852.5      12.3      6405
+    4369      4     13     2110    6.1562      2.71   120.6     883.4      13.4      6401
+    6000      4     12     2110    6.4229      1.32   124.9     913.7      19.0      6403
+    9000      4     11     2106    6.9577      1.11   135.9     989.4      28.8      9040
+   12000      4      9     2110    7.5561      1.21   143.3    1032.5      41.4     12044
+   15000      4      8     2107    8.0650      2.26   158.1    1133.2      56.9     15048
+   18000      4      6     2110    8.6992      0.82   178.1    1274.7      85.9     18060
+   21000      4      5     2106    9.3520      0.81   183.2    1289.9      92.5     21065
+   21845      4      5     2108    9.5320      1.24   184.6    1300.1      92.9     21911
+   23000      4      4     2110    9.5663      1.52   179.2    1251.4      95.6     23067
+   25000      4      3     2103    9.7617      1.60   176.6    1218.8     100.1     25070
+   26500      4      2     2108    9.8550      2.33   171.0    1161.5     102.3     26572
+   28000      4      2     2110   10.0100      1.00   173.4    1178.6     104.7     28074
+
+achieved FULL-window width: 2103 to 2112 against S* = 2096 (+0.33% to +0.77%)
+width correction applied: median 0.000% of the charge, worst 0.000%
+
+segment                slope ms/row  intercept s         r2  rungs
+m <= 4369                    1.0593       1.5617    0.99929      5
+4369 < m <= 21845            0.1941       5.2220    0.99843      6
+m >= 21845                   0.0865       7.5808    0.99294      4
+
+KNEES (lines crossed; the unknown f(S*) cancels)
+  knee 1/2 at m =     4230.4   against   4369   -3.17%
+  knee 2/3 at m =    21932.1   against  21845   +0.40%
+
+SLOPE RATIOS against the structural prediction (equal per-row cost)
+  first  knee    0.1832  against 18/146 = 0.1233   +49%
+  second knee    0.4459  against  3/18  = 0.1667   +168%
+
+PER-LEVEL COST (three slopes, three levels - a determined system)
+  level     folds x rows                ms/fold-row
+  root      3 x min(m,65535)                0.02884
+  depth-1   15 x min(m,21845)               0.00717
+  depth-2   128 x min(m,4369)               0.00676
+  root / depth-2 = 4.27x      root / depth-1 = 4.02x
+
+DEPARTURE from the MIDDLE line, extrapolated (the second knee's own test)
+  m= 23000  measured   9.5663  line   9.6859  -1.24%
+  m= 25000  measured   9.7617  line  10.0741  -3.10%
+  m= 26500  measured   9.8550  line  10.3652  -4.92%
+  m= 28000  measured  10.0100  line  10.6563  -6.07%
+
+A/A FLOOR (same binary, two paths, same rep and rung)
+  wall       pairs= 34  median  0.32%  worst  3.05%
+  cpu        pairs= 34  median  0.35%  worst  3.10%
+  transform  pairs= 34  median  0.41%  worst  2.86%
+
+foreign CPU at leg start: 6.2 to 118.5, median 22.4 (pct of one core)
+peak RSS 6399 to 28075 MB;  wall 64.6 to 185.1 s;  cpu 466.3 to 1309.3 CPU-s

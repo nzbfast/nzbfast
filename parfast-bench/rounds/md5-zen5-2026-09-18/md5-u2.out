@@ -1,0 +1,8 @@
+AGREE ours == md-5 == awslc == winasm over 12 lengths up to 1024 MiB
+cpu cores=16 payload=1024 MiB reps=5  (GB/s, higher is better)
+REP 1 ours 1c=1.116 all=17.073 | md-5 1c=0.840 all=12.531 | delta 1c=+33.0% all=+36.2% | awslc 1c=1.157 all=17.225 | awslc/md-5 1c=+37.8% all=+37.5% | winasm 1c=1.096 all=16.226 | winasm/md-5 1c=+30.6% all=+29.5%
+REP 2 ours 1c=1.157 all=17.192 | md-5 1c=0.849 all=12.511 | delta 1c=+36.4% all=+37.4% | awslc 1c=1.157 all=17.209 | awslc/md-5 1c=+36.3% all=+37.5% | winasm 1c=1.096 all=16.254 | winasm/md-5 1c=+29.1% all=+29.9%
+REP 3 ours 1c=1.157 all=16.795 | md-5 1c=0.847 all=12.543 | delta 1c=+36.6% all=+33.9% | awslc 1c=1.157 all=16.908 | awslc/md-5 1c=+36.5% all=+34.8% | winasm 1c=1.096 all=16.455 | winasm/md-5 1c=+29.4% all=+31.2%
+REP 4 ours 1c=1.158 all=17.100 | md-5 1c=0.849 all=12.594 | delta 1c=+36.4% all=+35.8% | awslc 1c=1.158 all=17.064 | awslc/md-5 1c=+36.4% all=+35.5% | winasm 1c=1.071 all=16.266 | winasm/md-5 1c=+26.2% all=+29.2%
+REP 5 ours 1c=1.130 all=17.212 | md-5 1c=0.849 all=12.314 | delta 1c=+33.1% all=+39.8% | awslc 1c=1.144 all=16.122 | awslc/md-5 1c=+34.7% all=+30.9% | winasm 1c=1.096 all=15.910 | winasm/md-5 1c=+29.1% all=+29.2%
+BEST ours 1c=1.158 all=17.212 | md-5 1c=0.849 all=12.594 | delta 1c=+36.3% all=+36.7% | awslc 1c=1.158 all=17.225 | awslc/md-5 1c=+36.4% all=+36.8%

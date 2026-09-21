@@ -230,6 +230,9 @@ def load(logpath, logsdir):
             binline = line.strip()
         elif line.startswith("HARNESS ") or line.startswith("HARNESS-RIG "):
             harness.append(line.strip())
+        # harness-rig-gate: a REDUCER, the same as jsum.py - it folds the LEG
+        #   lines of a log it is handed and banks nothing. Its read of
+        #   HARNESS-RIG two lines up is what stops a fold mixing harnesses.
         elif "BOX-BUSY-WAIT" in line and not line.startswith("LEG "):
             busy += line.count("BOX-BUSY-WAIT")
         elif line.startswith("LEG "):

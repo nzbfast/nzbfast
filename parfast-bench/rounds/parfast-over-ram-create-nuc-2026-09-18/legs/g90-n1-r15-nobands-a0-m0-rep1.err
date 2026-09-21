@@ -1,0 +1,16 @@
+ INFO repair-timing: create arms: n=32768 rows=4915 batches=2 fused=false (fusable shape=false, fusion displaced by the transform=false)
+ INFO repair-timing: create map refused: payload 96636764160 B + headroom 0 B against host 62080622592 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+ INFO repair-timing: create stripe-first refused: the members are read through copies (not mapped, or the payload would not stay resident - see mapped_payload_fits_memory) and bands are off (NZBFAST_CREATE_STRIPE_BANDS=0) (2 batch(es), 4915 rows, n=32768, fused=false)
+ INFO repair-timing: create map refused: payload 96636764160 B + headroom 6326366208 B against host 56033546240 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+ INFO repair-timing: fold tile budget 32 KiB (L2 per core 256 KiB)
+ INFO repair-timing: create ntt rows 0+2047 (n=32768, 6 window(s) of 5714, W=1024, 1440 stripe(s), threads=12, probe ok): 214.83s
+ INFO repair-timing: create recovery batch 0+2047: 216.16s (total 216.17s) (fold width 12 of 12)
+ INFO repair-timing: create seals: mode=lanes rows=2047 in 246.2259ms
+ INFO repair-timing: create map refused: payload 96636764160 B + headroom 8838389760 B against host 53622906880 B, cgroup none B (the headroom binds the cgroup reading only) - the copied windows take it
+ INFO repair-timing: create ntt rows 2047+2868 (n=32768, 6 window(s) of 5683, W=1024, 1440 stripe(s), threads=12, probe ok): 236.61s
+ INFO repair-timing: create recovery batch 2047+2868: 237.91s (total 456.86s) (fold width 12 of 12)
+ INFO repair-timing: create seals: mode=lanes rows=2868 in 291.86ms
+ INFO repair-timing: create scan + fold: 460.50s; batch fold width 12 of 12 a priori (0 restore(s)); scan lanes 2 of 12 a priori
+ INFO repair-timing: plan prep: 28.20ms over 12 cold build(s), 17280 stripe use(s) - 0.006% of the 460.58s create
+mem-floor: live high-water ┬À ru_maxrss 25848 MB ┬À rss 25848 MB ┬À footprint 25848 MB ┬À rss over footprint 0 MB ┬À repair work 0 MB (own peak 0) ┬À scan reads 0 MB (own peak 0) ┬À verifier tables 0 MB ┬À unattributed 25848 MB
+mem-floor: sampled peak rss ┬À ru_maxrss 25848 MB ┬À rss 25848 MB ┬À footprint 25848 MB ┬À rss over footprint 0 MB ┬À repair work 0 MB (own peak 0) ┬À scan reads 0 MB (own peak 0) ┬À verifier tables 0 MB ┬À unattributed 25848 MB

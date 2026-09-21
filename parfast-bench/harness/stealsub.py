@@ -212,6 +212,12 @@ def main(argv):
     nna = sum(1 for l in legs if steal_of(l) is None)
     if cmd == "census":
         print("legs=%d measured=%d not-measured=%d" % (len(legs), s["n"], nna))
+        # cellguard-roster: this min/med/mean/sd/p90/max is the hypervisor
+        # STEAL PERCENTAGE distributed across legs, not a wall-clock time
+        # distributed across repeated runs of one arm - there is no "arm" here
+        # at all, only a per-leg noise reading, so the bimodal-cell rule (a
+        # min far under the median meaning the box was demoted mid-cell) does
+        # not apply. The spelling matches cellguard's pattern by coincidence.
         print("steal%%  min=%.2f med=%.2f mean=%.2f sd=%.2f p90=%.2f max=%.2f"
               % (s["min"], s["med"], s["mean"], s["sd"], s["p90"], s["max"]))
         print()

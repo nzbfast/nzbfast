@@ -77,6 +77,8 @@ def main():
         print("== %s (%s)" % (cls, log))
         seen = {}
         for line in open(os.path.join(ROUND, log), encoding="utf-8", errors="replace"):
+            # harness-rig-gate: a reducer over a banked round's LEG lines. It
+            #   mirrors a table out of them and banks no round log of its own.
             if not line.startswith("LEG "):
                 continue
             kv = dict(t.split("=", 1) for t in line.split() if "=" in t)

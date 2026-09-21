@@ -60,6 +60,8 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import pdrv  # noqa: E402
 LOCK = os.path.expanduser("~/.parfast-rig.lock")
 TOOLS = ("parfast", "par2turbo", "par2j", "par2")
 ARMS = {
@@ -220,6 +222,11 @@ def main():
     binp = os.path.abspath(a.bin)
     levels = plan_levels(a.plan)
     print("BIN path=%s sha256=%s" % (binp, sha256(binp)), flush=True)
+    # The HARNESS's own provenance, and the round-start twin of the
+    # per-leg `rig=` token - see `pdrv.harness_facts`. Without it a
+    # banked log cannot be traced to the harness revision that wrote
+    # it (census an internal note).
+    pdrv.harness_facts()
     print("PLAN %s" % " | ".join("%g: %s" % (lv, " ".join("%s#%d" % l for l in legs)) for lv, legs in levels), flush=True)
 
     waited = 0

@@ -1,0 +1,614 @@
+2026-09-18T17:09:10Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (0.7 h ago), no close.; ROUND-PROCESS: pid 589305 - python3 /root/rars-baseline-18sep/rarbench.py --rarfast /root/rars-baseline-18sep/src/target/release/rarfast - (cwd /root/rars-baseline-18sep/harness); RIG-LOCK: /root/.parfast-rig.lock - held by a live process. This gate never takes it and never clears it.
+2026-09-18T17:12:50Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (0.8 h ago), no close.; ROUND-PROCESS: pid 589305 - python3 /root/rars-baseline-18sep/rarbench.py --rarfast /root/rars-baseline-18sep/src/target/release/rarfast - (cwd /root/rars-baseline-18sep/harness); RIG-LOCK: /root/.parfast-rig.lock - held by a live process. This gate never takes it and never clears it.
+2026-09-18T17:18:51Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (0.9 h ago), no close.; ROUND-PROCESS: pid 589305 - python3 /root/rars-baseline-18sep/rarbench.py --rarfast /root/rars-baseline-18sep/src/target/release/rarfast - (cwd /root/rars-baseline-18sep/harness); RIG-LOCK: /root/.parfast-rig.lock - held by a live process. This gate never takes it and never clears it.
+2026-09-18T17:23:11Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (0.9 h ago), no close.; RIG-LOCK: /root/.parfast-rig.lock - held by a live process. This gate never takes it and never clears it.
+2026-09-18T17:24:51Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (1.0 h ago), no close.; RIG-LOCK: /root/.parfast-rig.lock - held by a live process. This gate never takes it and never clears it.
+2026-09-18T17:25:31Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (1.0 h ago), no close.
+2026-09-18T17:27:11Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (1.0 h ago), no close.; RIG-LOCK: /root/.parfast-rig.lock - held by a live process. This gate never takes it and never clears it.
+2026-09-18T17:27:32Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (1.0 h ago), no close.
+2026-09-18T17:30:52Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (1.1 h ago), no close.
+2026-09-18T17:36:52Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (1.2 h ago), no close.
+2026-09-18T17:42:53Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (1.3 h ago), no close.
+2026-09-18T17:48:53Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (1.4 h ago), no close.
+2026-09-18T17:54:54Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (1.5 h ago), no close.
+2026-09-18T18:00:55Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (1.6 h ago), no close.
+2026-09-18T18:05:15Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (1.6 h ago), no close.; ROUND-PROCESS: pid 618154 - python3 rarbench.py --rarfast /root/rars-baseline-18sep/src/target/release/rarfast --rar /root/shapes-round/bi (cwd /root/rars-baseline-18sep); RIG-LOCK: /root/.parfast-rig.lock - held by a live process. This gate never takes it and never clears it.
+2026-09-18T18:05:55Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (1.6 h ago), no close.
+2026-09-18T18:06:55Z boxgate: waiting: HOLD: rars-originality-baseline-profiles-18sep-r2 - CLAIM at 2026-09-18T16:27:44Z (1.7 h ago), no close.
+2026-09-18T18:12:16Z boxgate: clear 1/3 (load 0.12, no holds, no round process)
+2026-09-18T18:12:36Z boxgate: clear 2/3 (load 0.16, no holds, no round process)
+2026-09-18T18:12:56Z boxgate: clear 3/3 (load 0.11, no holds, no round process)
+2026-09-18T18:12:56Z boxgate: claimed at 2026-09-18T18:12:56Z, waiting 20s before the re-read
+2026-09-18T18:13:16Z boxgate: re-read clean, the box is mine
+2026-09-18T18:13:16Z boxgate: registered /root/bench-out/boxgate/cgroup-map-gate-reading-and-bands-m-ladder-18sep.run
+2026-09-18T18:13:16Z boxgate: TAKEN after 1 attempt(s)
+BOXGATE rc=0 18:13:16Z
+RIGLOCK HELD pid=620270 18:13:16Z
+=== 18:13:16Z PHASE A - composition at the gate, 2 GiB member at 5 pct, 32768 slices ===
+BOX Linux amd-epyc-vm 6.8.0-137-generic #137-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 17 20:28:23 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+BINARY /root/cgmap-18sep/parfast sha256=00f0deb9e5e23a9d4ba85e671554156ce86b4dde3979a9e55e9ed88cd057cfda
+FIXTURE-WROTE /root/cgmap-18sep/work/f2g.bin bytes=2147483648 secs=9.8
+MEMAVAIL-HOST 30870288
+LEG cell=cg2150m arm=own0 rep=1 rc=0 wall=6.5 set=603c33479dfaab6d majflt=11 refault=252284 read_mb=3034 peak_mb=2150
+TIMING cg2150m/own0/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2150m/own0/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2254438400 current=6021120 cache=3624960 unreclaimable=2396160 available=2252042240 [anon=1175552 file=3624960 kernel=823296 kernel_stack=81920 pagetables=118784 percpu=3720 sock=0 shmem=0 file_mapped=2002944 file_dirty=659456 file_writeback=0 slab=373464 active_anon=1150976 inactive_anon=0 active_file=2781184 inactive_file=1028096]
+TIMING cg2150m/own0/r1 INFO repair-timing: create map gate: self vsize=423288832 rss=5566464 shared=4034560 anon=1531904 smaps_rss_kb=5444 anonymous_kb=1504 private_dirty_kb=1504 shared_clean_kb=1412
+TIMING cg2150m/own0/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2150m/own0/r1 INFO repair-timing: create map headroom: net 268099584 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 0 B (gross 268099584, own anon none)
+TIMING cg2150m/own0/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2254438400 current=185561088 cache=71553024 unreclaimable=114008064 available=2140430336 [anon=112140288 file=71553024 kernel=1118208 kernel_stack=131072 pagetables=364544 percpu=3720 sock=0 shmem=0 file_mapped=2002944 file_dirty=659456 file_writeback=0 slab=548072 active_anon=112111616 inactive_anon=0 active_file=2781184 inactive_file=68685824]
+TIMING cg2150m/own0/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116187136 shared=4165632 anon=112021504 smaps_rss_kb=113468 anonymous_kb=109400 private_dirty_kb=109400 shared_clean_kb=1412
+TIMING cg2150m/own0/r1 INFO repair-timing: create map refused: payload 2147483648 B + headroom 268099584 B against host 31265992704 B, cgroup 2140430336 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2150m/own0/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2150m/own0/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, 6 window(s) of 6147, W=512, 64 stripe(s), threads=8, probe ok): 4.58s
+TIMING cg2150m/own0/r1 INFO repair-timing: create recovery batch 0+1638: 4.67s (total 4.68s) (fold width 8 of 8)
+TIMING cg2150m/own0/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 7.403446ms
+TIMING cg2150m/own0/r1 INFO repair-timing: create scan + fold: 5.35s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2150m/own0/r1 INFO repair-timing: plan prep: 9.24ms over 6 cold build(s), 384 stripe use(s) - 0.172% of the 5.37s create
+LEG cell=cg2150m arm=def rep=1 rc=0 wall=5.7 set=603c33479dfaab6d majflt=2 refault=279234 read_mb=3138 peak_mb=2150
+TIMING cg2150m/def/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2150m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2254438400 current=3244032 cache=708608 unreclaimable=2535424 available=2251902976 [anon=1183744 file=708608 kernel=798720 kernel_stack=81920 pagetables=131072 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=368032 active_anon=1155072 inactive_anon=0 active_file=16384 inactive_file=692224]
+TIMING cg2150m/def/r1 INFO repair-timing: create map gate: self vsize=289046528 rss=5287936 shared=4038656 anon=1249280 smaps_rss_kb=5180 anonymous_kb=1236 private_dirty_kb=1236 shared_clean_kb=1348
+TIMING cg2150m/def/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2150m/def/r1 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112029696)
+TIMING cg2150m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2254438400 current=210440192 cache=95862784 unreclaimable=114577408 available=2139860992 [anon=112148480 file=95862784 kernel=1191936 kernel_stack=131072 pagetables=380928 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=607120 active_anon=112115712 inactive_anon=0 active_file=16384 inactive_file=96485376]
+TIMING cg2150m/def/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116199424 shared=4169728 anon=112029696 smaps_rss_kb=113480 anonymous_kb=109408 private_dirty_kb=109408 shared_clean_kb=1348
+TIMING cg2150m/def/r1 INFO repair-timing: create map refused: payload 2147483648 B + headroom 160751616 B against host 31212367872 B, cgroup 2140123136 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2150m/def/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2150m/def/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, 6 window(s) of 6147, W=512, 64 stripe(s), threads=8, probe ok): 4.50s
+TIMING cg2150m/def/r1 INFO repair-timing: create recovery batch 0+1638: 4.62s (total 4.63s) (fold width 8 of 8)
+TIMING cg2150m/def/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 6.550349ms
+TIMING cg2150m/def/r1 INFO repair-timing: create scan + fold: 5.12s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2150m/def/r1 INFO repair-timing: plan prep: 8.67ms over 6 cold build(s), 384 stripe use(s) - 0.169% of the 5.13s create
+LEG cell=cg2320m arm=own0 rep=1 rc=0 wall=5.2 set=603c33479dfaab6d majflt=0 refault=26287 read_mb=2150 peak_mb=2320
+TIMING cg2320m/own0/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2320m/own0/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=3543040 cache=692224 unreclaimable=2850816 available=2429845504 [anon=1187840 file=692224 kernel=1200128 kernel_stack=81920 pagetables=135168 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=445312 active_anon=1159168 inactive_anon=0 active_file=0 inactive_file=942080]
+TIMING cg2320m/own0/r1 INFO repair-timing: create map gate: self vsize=423288832 rss=5648384 shared=4100096 anon=1548288 smaps_rss_kb=5516 anonymous_kb=1512 private_dirty_kb=1512 shared_clean_kb=1264
+TIMING cg2320m/own0/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2320m/own0/r1 INFO repair-timing: create map headroom: net 268099584 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 0 B (gross 268099584, own anon none)
+TIMING cg2320m/own0/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=198647808 cache=84611072 unreclaimable=114036736 available=2318659584 [anon=112152576 file=84611072 kernel=1159168 kernel_stack=131072 pagetables=380928 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=574008 active_anon=112111616 inactive_anon=0 active_file=0 inactive_file=84443136]
+TIMING cg2320m/own0/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116260864 shared=4231168 anon=112029696 smaps_rss_kb=113536 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1264
+TIMING cg2320m/own0/r1 INFO repair-timing: create map refused: payload 2147483648 B + headroom 268099584 B against host 31040122880 B, cgroup 2318659584 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2320m/own0/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2320m/own0/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 6827, W=512, 64 stripe(s), threads=8, probe ok): 4.47s
+TIMING cg2320m/own0/r1 INFO repair-timing: create recovery batch 0+1638: 4.57s (total 4.58s) (fold width 8 of 8)
+TIMING cg2320m/own0/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 5.725762ms
+TIMING cg2320m/own0/r1 INFO repair-timing: create scan + fold: 4.63s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2320m/own0/r1 INFO repair-timing: plan prep: 7.54ms over 5 cold build(s), 320 stripe use(s) - 0.163% of the 4.63s create
+LEG cell=cg2320m arm=def rep=1 rc=0 wall=4.8 set=603c33479dfaab6d majflt=14642 refault=0 read_mb=2048 peak_mb=2318
+TIMING cg2320m/def/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2320m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=3825664 cache=692224 unreclaimable=3133440 available=2429562880 [anon=1183744 file=692224 kernel=1236992 kernel_stack=81920 pagetables=126976 percpu=3880 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=433392 active_anon=1155072 inactive_anon=0 active_file=0 inactive_file=692224]
+TIMING cg2320m/def/r1 INFO repair-timing: create map gate: self vsize=356167680 rss=5439488 shared=4112384 anon=1327104 smaps_rss_kb=5388 anonymous_kb=1372 private_dirty_kb=1372 shared_clean_kb=1284
+TIMING cg2320m/def/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2320m/def/r1 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112029696)
+TIMING cg2320m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=192872448 cache=78909440 unreclaimable=113963008 available=2318733312 [anon=112148480 file=78909440 kernel=1134592 kernel_stack=131072 pagetables=372736 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=564784 active_anon=112103424 inactive_anon=0 active_file=0 inactive_file=78807040]
+TIMING cg2320m/def/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116338688 shared=4308992 anon=112029696 smaps_rss_kb=113612 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1284
+TIMING cg2320m/def/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2320m/def/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 3.84s
+TIMING cg2320m/def/r1 INFO repair-timing: create recovery batch 0+1638: 4.04s (total 4.04s) (fold width 8 of 8)
+TIMING cg2320m/def/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 7.261285ms
+TIMING cg2320m/def/r1 INFO repair-timing: create scan + fold: 4.24s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2320m/def/r1 INFO repair-timing: plan prep: 3.70ms over 1 cold build(s), 64 stripe use(s) - 0.087% of the 4.25s create
+LEG cell=cg3072m arm=own0 rep=1 rc=0 wall=4.6 set=603c33479dfaab6d majflt=15426 refault=0 read_mb=2048 peak_mb=2317
+TIMING cg3072m/own0/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg3072m/own0/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=3221225472 current=3604480 cache=692224 unreclaimable=2912256 available=3218313216 [anon=1187840 file=692224 kernel=1126400 kernel_stack=98304 pagetables=131072 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=442160 active_anon=1474560 inactive_anon=0 active_file=0 inactive_file=1757184]
+TIMING cg3072m/own0/r1 INFO repair-timing: create map gate: self vsize=423288832 rss=5619712 shared=4079616 anon=1540096 smaps_rss_kb=5488 anonymous_kb=1504 private_dirty_kb=1504 shared_clean_kb=1404
+TIMING cg3072m/own0/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg3072m/own0/r1 INFO repair-timing: create map headroom: net 268099584 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 0 B (gross 268099584, own anon none)
+TIMING cg3072m/own0/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=3221225472 current=192163840 cache=78295040 unreclaimable=113868800 available=3107356672 [anon=112148480 file=78295040 kernel=1142784 kernel_stack=131072 pagetables=372736 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=560888 active_anon=112115712 inactive_anon=0 active_file=0 inactive_file=78921728]
+TIMING cg3072m/own0/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116236288 shared=4210688 anon=112025600 smaps_rss_kb=113512 anonymous_kb=109400 private_dirty_kb=109400 shared_clean_kb=1404
+TIMING cg3072m/own0/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg3072m/own0/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 3.34s
+TIMING cg3072m/own0/r1 INFO repair-timing: create recovery batch 0+1638: 3.54s (total 3.55s) (fold width 8 of 8)
+TIMING cg3072m/own0/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 8.296592ms
+TIMING cg3072m/own0/r1 INFO repair-timing: create scan + fold: 4.05s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg3072m/own0/r1 INFO repair-timing: plan prep: 3.06ms over 1 cold build(s), 64 stripe use(s) - 0.075% of the 4.06s create
+LEG cell=cg3072m arm=def rep=1 rc=0 wall=4.9 set=603c33479dfaab6d majflt=15765 refault=0 read_mb=2048 peak_mb=2316
+TIMING cg3072m/def/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg3072m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=3221225472 current=4075520 cache=692224 unreclaimable=3383296 available=3217842176 [anon=1187840 file=692224 kernel=1474560 kernel_stack=81920 pagetables=131072 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=506128 active_anon=1576960 inactive_anon=0 active_file=0 inactive_file=1617920]
+TIMING cg3072m/def/r1 INFO repair-timing: create map gate: self vsize=423288832 rss=5500928 shared=3948544 anon=1552384 smaps_rss_kb=5384 anonymous_kb=1528 private_dirty_kb=1528 shared_clean_kb=1284
+TIMING cg3072m/def/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg3072m/def/r1 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112029696)
+TIMING cg3072m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=3221225472 current=200228864 cache=85491712 unreclaimable=114737152 available=3106488320 [anon=112152576 file=85491712 kernel=1159168 kernel_stack=131072 pagetables=376832 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=583528 active_anon=112123904 inactive_anon=0 active_file=0 inactive_file=86265856]
+TIMING cg3072m/def/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116109312 shared=4079616 anon=112029696 smaps_rss_kb=113388 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1284
+TIMING cg3072m/def/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg3072m/def/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 3.46s
+TIMING cg3072m/def/r1 INFO repair-timing: create recovery batch 0+1638: 3.68s (total 3.68s) (fold width 8 of 8)
+TIMING cg3072m/def/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 11.244925ms
+TIMING cg3072m/def/r1 INFO repair-timing: create scan + fold: 4.06s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg3072m/def/r1 INFO repair-timing: plan prep: 3.68ms over 1 cold build(s), 64 stripe use(s) - 0.090% of the 4.08s create
+SET-IDENTITY legs=6 distinct=1 digests=603c33479dfaab6d
+ALL DONE 2026-09-18T18:14:02Z
+=== 18:14:02Z PHASE A2 - the arena half DOUBLED by the worker pin; the charge must not move ===
+BOX Linux amd-epyc-vm 6.8.0-137-generic #137-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 17 20:28:23 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+BINARY /root/cgmap-18sep/parfast sha256=00f0deb9e5e23a9d4ba85e671554156ce86b4dde3979a9e55e9ed88cd057cfda
+FIXTURE-KEPT /root/cgmap-18sep/work/f2g.bin bytes=2147483648
+MEMAVAIL-HOST 30487964
+LEG cell=cg3072m arm=def rep=1 rc=0 wall=5.8 set=603c33479dfaab6d majflt=14579 refault=0 read_mb=2048 peak_mb=2420
+TIMING cg3072m/def/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg3072m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=3221225472 current=3399680 cache=692224 unreclaimable=2707456 available=3218518016 [anon=1179648 file=692224 kernel=647168 kernel_stack=81920 pagetables=126976 percpu=3880 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=388400 active_anon=1343488 inactive_anon=0 active_file=0 inactive_file=1003520]
+TIMING cg3072m/def/r1 INFO repair-timing: create map gate: self vsize=423276544 rss=5390336 shared=4079616 anon=1310720 smaps_rss_kb=5356 anonymous_kb=1372 private_dirty_kb=1372 shared_clean_kb=1388
+TIMING cg3072m/def/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg3072m/def/r1 INFO repair-timing: create map headroom: net 321503232 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 321503232 B - own-anon credit 107347968 B (gross 428851200, own anon 112029696)
+TIMING cg3072m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=3221225472 current=191655936 cache=76877824 unreclaimable=114778112 available=3106447360 [anon=112148480 file=76877824 kernel=1138688 kernel_stack=131072 pagetables=372736 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=556096 active_anon=112115712 inactive_anon=0 active_file=0 inactive_file=76705792]
+TIMING cg3072m/def/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116305920 shared=4276224 anon=112029696 smaps_rss_kb=113580 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1388
+TIMING cg3072m/def/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg3072m/def/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=16, probe ok): 4.13s
+TIMING cg3072m/def/r1 INFO repair-timing: create recovery batch 0+1638: 4.37s (total 4.38s) (fold width 8 of 8)
+TIMING cg3072m/def/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 11.660078ms
+TIMING cg3072m/def/r1 INFO repair-timing: create scan + fold: 5.15s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg3072m/def/r1 INFO repair-timing: plan prep: 3.33ms over 1 cold build(s), 64 stripe use(s) - 0.065% of the 5.16s create
+SET-IDENTITY legs=1 distinct=1 digests=603c33479dfaab6d
+ALL DONE 2026-09-18T18:14:08Z
+=== 18:14:08Z PHASE A3 - the ACCUMULATOR doubled by the redundancy; the charge must move with it ===
+BOX Linux amd-epyc-vm 6.8.0-137-generic #137-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 17 20:28:23 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+BINARY /root/cgmap-18sep/parfast sha256=00f0deb9e5e23a9d4ba85e671554156ce86b4dde3979a9e55e9ed88cd057cfda
+FIXTURE-KEPT /root/cgmap-18sep/work/f2g.bin bytes=2147483648
+MEMAVAIL-HOST 30441568
+LEG cell=cg3072m arm=def rep=1 rc=0 wall=4.8 set=beb98ad906593334 majflt=14809 refault=0 read_mb=2048 peak_mb=2534
+TIMING cg3072m/def/r1 INFO repair-timing: create arms: n=32768 rows=3277 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg3072m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=3221225472 current=2711552 cache=692224 unreclaimable=2019328 available=3219206144 [anon=1175552 file=692224 kernel=782336 kernel_stack=81920 pagetables=122880 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=378512 active_anon=1150976 inactive_anon=0 active_file=0 inactive_file=692224]
+TIMING cg3072m/def/r1 INFO repair-timing: create map gate: self vsize=490385408 rss=5267456 shared=4005888 anon=1261568 smaps_rss_kb=5284 anonymous_kb=1372 private_dirty_kb=1372 shared_clean_kb=1380
+TIMING cg3072m/def/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 3277 rows, n=32768, fused=false)
+TIMING cg3072m/def/r1 INFO repair-timing: create map headroom: net 281591808 B = accumulator 214761472 B (3277 rows x 65536 B) + arenas 281591808 B - own-anon credit 214761472 B (gross 496353280, own anon 219512832)
+TIMING cg3072m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=3221225472 current=357220352 cache=135458816 unreclaimable=221761536 available=2999463936 [anon=219631616 file=135458816 kernel=1474560 kernel_stack=131072 pagetables=581632 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=690944 active_anon=219561984 inactive_anon=0 active_file=0 inactive_file=135397376]
+TIMING cg3072m/def/r1 INFO repair-timing: create map gate: self vsize=706486272 rss=223653888 shared=4136960 anon=219516928 smaps_rss_kb=218412 anonymous_kb=214372 private_dirty_kb=214372 shared_clean_kb=1380
+TIMING cg3072m/def/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg3072m/def/r1 INFO repair-timing: create ntt rows 0+3277 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 3.48s
+TIMING cg3072m/def/r1 INFO repair-timing: create recovery batch 0+3277: 3.79s (total 3.79s) (fold width 8 of 8)
+TIMING cg3072m/def/r1 INFO repair-timing: create seals: mode=lanes rows=3277 in 13.804404ms
+TIMING cg3072m/def/r1 INFO repair-timing: create scan + fold: 4.29s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg3072m/def/r1 INFO repair-timing: plan prep: 4.19ms over 1 cold build(s), 64 stripe use(s) - 0.097% of the 4.30s create
+SET-IDENTITY legs=1 distinct=1 digests=beb98ad906593334
+ALL DONE 2026-09-18T18:14:14Z
+=== 18:14:14Z PHASE B - what the credit buys, 3 reps, ABBA-interleaved by cgmap.py ===
+BOX Linux amd-epyc-vm 6.8.0-137-generic #137-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 17 20:28:23 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+BINARY /root/cgmap-18sep/parfast sha256=00f0deb9e5e23a9d4ba85e671554156ce86b4dde3979a9e55e9ed88cd057cfda
+FIXTURE-KEPT /root/cgmap-18sep/work/f2g.bin bytes=2147483648
+MEMAVAIL-HOST 30309172
+LEG cell=cg2320m arm=own0 rep=1 rc=0 wall=5.1 set=603c33479dfaab6d majflt=0 refault=36595 read_mb=2190 peak_mb=2320
+TIMING cg2320m/own0/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2320m/own0/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=3231744 cache=692224 unreclaimable=2539520 available=2430156800 [anon=1183744 file=692224 kernel=790528 kernel_stack=81920 pagetables=135168 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=366368 active_anon=1155072 inactive_anon=0 active_file=0 inactive_file=880640]
+TIMING cg2320m/own0/r1 INFO repair-timing: create map gate: self vsize=356167680 rss=5296128 shared=3964928 anon=1331200 smaps_rss_kb=5172 anonymous_kb=1300 private_dirty_kb=1300 shared_clean_kb=1408
+TIMING cg2320m/own0/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2320m/own0/r1 INFO repair-timing: create map headroom: net 268099584 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 0 B (gross 268099584, own anon none)
+TIMING cg2320m/own0/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=186683392 cache=72314880 unreclaimable=114368512 available=2318327808 [anon=112152576 file=72314880 kernel=1130496 kernel_stack=131072 pagetables=380928 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=544608 active_anon=112123904 inactive_anon=0 active_file=0 inactive_file=72990720]
+TIMING cg2320m/own0/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116125696 shared=4096000 anon=112029696 smaps_rss_kb=113404 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1408
+TIMING cg2320m/own0/r1 INFO repair-timing: create map refused: payload 2147483648 B + headroom 268099584 B against host 30679670784 B, cgroup 2318589952 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2320m/own0/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2320m/own0/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 6827, W=512, 64 stripe(s), threads=8, probe ok): 4.43s
+TIMING cg2320m/own0/r1 INFO repair-timing: create recovery batch 0+1638: 4.55s (total 4.55s) (fold width 8 of 8)
+TIMING cg2320m/own0/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 4.795405ms
+TIMING cg2320m/own0/r1 INFO repair-timing: create scan + fold: 4.60s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2320m/own0/r1 INFO repair-timing: plan prep: 7.88ms over 5 cold build(s), 320 stripe use(s) - 0.171% of the 4.61s create
+LEG cell=cg2320m arm=def rep=1 rc=0 wall=4.5 set=603c33479dfaab6d majflt=16431 refault=0 read_mb=2048 peak_mb=2317
+TIMING cg2320m/def/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2320m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=3973120 cache=692224 unreclaimable=3280896 available=2429415424 [anon=1187840 file=692224 kernel=1032192 kernel_stack=98304 pagetables=131072 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=418848 active_anon=1150976 inactive_anon=0 active_file=0 inactive_file=942080]
+TIMING cg2320m/def/r1 INFO repair-timing: create map gate: self vsize=423288832 rss=5394432 shared=3928064 anon=1466368 smaps_rss_kb=5344 anonymous_kb=1508 private_dirty_kb=1508 shared_clean_kb=1352
+TIMING cg2320m/def/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2320m/def/r1 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112025600)
+TIMING cg2320m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=193937408 cache=79650816 unreclaimable=114286592 available=2318409728 [anon=112144384 file=79650816 kernel=1142784 kernel_stack=131072 pagetables=376832 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=571112 active_anon=112115712 inactive_anon=0 active_file=0 inactive_file=79462400]
+TIMING cg2320m/def/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116084736 shared=4059136 anon=112025600 smaps_rss_kb=113364 anonymous_kb=109400 private_dirty_kb=109400 shared_clean_kb=1352
+TIMING cg2320m/def/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2320m/def/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 3.41s
+TIMING cg2320m/def/r1 INFO repair-timing: create recovery batch 0+1638: 3.62s (total 3.63s) (fold width 8 of 8)
+TIMING cg2320m/def/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 10.098206ms
+TIMING cg2320m/def/r1 INFO repair-timing: create scan + fold: 3.99s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2320m/def/r1 INFO repair-timing: plan prep: 3.41ms over 1 cold build(s), 64 stripe use(s) - 0.085% of the 4.00s create
+LEG cell=cg2350m arm=own0 rep=1 rc=0 wall=5.4 set=603c33479dfaab6d majflt=0 refault=160693 read_mb=2675 peak_mb=2350
+TIMING cg2350m/own0/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2350m/own0/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2464153600 current=3407872 cache=692224 unreclaimable=2715648 available=2461437952 [anon=1179648 file=692224 kernel=868352 kernel_stack=98304 pagetables=126976 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=391112 active_anon=1155072 inactive_anon=0 active_file=0 inactive_file=942080]
+TIMING cg2350m/own0/r1 INFO repair-timing: create map gate: self vsize=356167680 rss=5410816 shared=4014080 anon=1396736 smaps_rss_kb=5284 anonymous_kb=1364 private_dirty_kb=1364 shared_clean_kb=1284
+TIMING cg2350m/own0/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2350m/own0/r1 INFO repair-timing: create map headroom: net 268099584 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 0 B (gross 268099584, own anon none)
+TIMING cg2350m/own0/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2464153600 current=199712768 cache=85659648 unreclaimable=114053120 available=2350100480 [anon=112140288 file=85659648 kernel=1150976 kernel_stack=131072 pagetables=368640 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=579464 active_anon=112099328 inactive_anon=0 active_file=0 inactive_file=85626880]
+TIMING cg2350m/own0/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116105216 shared=4079616 anon=112025600 smaps_rss_kb=113384 anonymous_kb=109400 private_dirty_kb=109400 shared_clean_kb=1284
+TIMING cg2350m/own0/r1 INFO repair-timing: create map refused: payload 2147483648 B + headroom 268099584 B against host 31154036736 B, cgroup 2350362624 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2350m/own0/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2350m/own0/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 6947, W=512, 64 stripe(s), threads=8, probe ok): 4.23s
+TIMING cg2350m/own0/r1 INFO repair-timing: create recovery batch 0+1638: 4.33s (total 4.34s) (fold width 8 of 8)
+TIMING cg2350m/own0/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 7.174455ms
+TIMING cg2350m/own0/r1 INFO repair-timing: create scan + fold: 4.97s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2350m/own0/r1 INFO repair-timing: plan prep: 7.81ms over 5 cold build(s), 320 stripe use(s) - 0.157% of the 4.99s create
+LEG cell=cg2350m arm=def rep=1 rc=0 wall=4.5 set=603c33479dfaab6d majflt=15539 refault=0 read_mb=2048 peak_mb=2317
+TIMING cg2350m/def/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2350m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2464153600 current=3657728 cache=692224 unreclaimable=2965504 available=2461188096 [anon=1183744 file=692224 kernel=1236992 kernel_stack=81920 pagetables=131072 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=460712 active_anon=1454080 inactive_anon=0 active_file=0 inactive_file=1699840]
+TIMING cg2350m/def/r1 INFO repair-timing: create map gate: self vsize=423288832 rss=5566464 shared=4022272 anon=1544192 smaps_rss_kb=5452 anonymous_kb=1524 private_dirty_kb=1524 shared_clean_kb=1304
+TIMING cg2350m/def/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2350m/def/r1 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112029696)
+TIMING cg2350m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2464153600 current=200134656 cache=86052864 unreclaimable=114081792 available=2350071808 [anon=112152576 file=86052864 kernel=1167360 kernel_stack=131072 pagetables=380928 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=579712 active_anon=112091136 inactive_anon=0 active_file=0 inactive_file=85929984]
+TIMING cg2350m/def/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116183040 shared=4153344 anon=112029696 smaps_rss_kb=113460 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1304
+TIMING cg2350m/def/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2350m/def/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 3.47s
+TIMING cg2350m/def/r1 INFO repair-timing: create recovery batch 0+1638: 3.68s (total 3.69s) (fold width 8 of 8)
+TIMING cg2350m/def/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 7.90322ms
+TIMING cg2350m/def/r1 INFO repair-timing: create scan + fold: 4.04s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2350m/def/r1 INFO repair-timing: plan prep: 3.35ms over 1 cold build(s), 64 stripe use(s) - 0.083% of the 4.06s create
+LEG cell=cg2400m arm=own0 rep=1 rc=0 wall=5.2 set=603c33479dfaab6d majflt=0 refault=21033 read_mb=2130 peak_mb=2400
+TIMING cg2400m/own0/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2400m/own0/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2516582400 current=3325952 cache=692224 unreclaimable=2633728 available=2513948672 [anon=1257472 file=692224 kernel=733184 kernel_stack=98304 pagetables=126976 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=399976 active_anon=1523712 inactive_anon=0 active_file=0 inactive_file=847872]
+TIMING cg2400m/own0/r1 INFO repair-timing: create map gate: self vsize=423288832 rss=5554176 shared=4005888 anon=1548288 smaps_rss_kb=5424 anonymous_kb=1512 private_dirty_kb=1512 shared_clean_kb=1404
+TIMING cg2400m/own0/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2400m/own0/r1 INFO repair-timing: create map headroom: net 268099584 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 0 B (gross 268099584, own anon none)
+TIMING cg2400m/own0/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2516582400 current=194170880 cache=79765504 unreclaimable=114405376 available=2402177024 [anon=112148480 file=79765504 kernel=1134592 kernel_stack=131072 pagetables=368640 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=565864 active_anon=112107520 inactive_anon=0 active_file=0 inactive_file=80326656]
+TIMING cg2400m/own0/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116166656 shared=4136960 anon=112029696 smaps_rss_kb=113444 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1404
+TIMING cg2400m/own0/r1 INFO repair-timing: create map refused: payload 2147483648 B + headroom 268099584 B against host 31087239168 B, cgroup 2402177024 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2400m/own0/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2400m/own0/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 7147, W=512, 64 stripe(s), threads=8, probe ok): 4.53s
+TIMING cg2400m/own0/r1 INFO repair-timing: create recovery batch 0+1638: 4.64s (total 4.65s) (fold width 8 of 8)
+TIMING cg2400m/own0/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 4.089791ms
+TIMING cg2400m/own0/r1 INFO repair-timing: create scan + fold: 4.70s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2400m/own0/r1 INFO repair-timing: plan prep: 7.92ms over 5 cold build(s), 320 stripe use(s) - 0.169% of the 4.70s create
+LEG cell=cg2400m arm=def rep=1 rc=0 wall=5.1 set=603c33479dfaab6d majflt=12203 refault=0 read_mb=2048 peak_mb=2316
+TIMING cg2400m/def/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2400m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2516582400 current=3522560 cache=692224 unreclaimable=2830336 available=2513752064 [anon=1179648 file=692224 kernel=749568 kernel_stack=98304 pagetables=126976 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=388184 active_anon=1142784 inactive_anon=0 active_file=0 inactive_file=880640]
+TIMING cg2400m/def/r1 INFO repair-timing: create map gate: self vsize=423288832 rss=5718016 shared=4177920 anon=1540096 smaps_rss_kb=5584 anonymous_kb=1504 private_dirty_kb=1504 shared_clean_kb=1336
+TIMING cg2400m/def/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2400m/def/r1 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112025600)
+TIMING cg2400m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2516582400 current=200253440 cache=86315008 unreclaimable=113938432 available=2402643968 [anon=112140288 file=86315008 kernel=1146880 kernel_stack=131072 pagetables=368640 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=576216 active_anon=112103424 inactive_anon=0 active_file=0 inactive_file=86167552]
+TIMING cg2400m/def/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116334592 shared=4308992 anon=112025600 smaps_rss_kb=113608 anonymous_kb=109400 private_dirty_kb=109400 shared_clean_kb=1336
+TIMING cg2400m/def/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2400m/def/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 4.08s
+TIMING cg2400m/def/r1 INFO repair-timing: create recovery batch 0+1638: 4.29s (total 4.29s) (fold width 8 of 8)
+TIMING cg2400m/def/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 7.89432ms
+TIMING cg2400m/def/r1 INFO repair-timing: create scan + fold: 4.55s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2400m/def/r1 INFO repair-timing: plan prep: 3.70ms over 1 cold build(s), 64 stripe use(s) - 0.081% of the 4.56s create
+LEG cell=cg2400m arm=def rep=2 rc=0 wall=4.6 set=603c33479dfaab6d majflt=15192 refault=0 read_mb=2048 peak_mb=2318
+TIMING cg2400m/def/r2 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2400m/def/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2516582400 current=3874816 cache=692224 unreclaimable=3182592 available=2513399808 [anon=1187840 file=692224 kernel=1015808 kernel_stack=98304 pagetables=131072 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=450464 active_anon=1343488 inactive_anon=0 active_file=0 inactive_file=1003520]
+TIMING cg2400m/def/r2 INFO repair-timing: create map gate: self vsize=423288832 rss=5558272 shared=4014080 anon=1544192 smaps_rss_kb=5436 anonymous_kb=1516 private_dirty_kb=1516 shared_clean_kb=1292
+TIMING cg2400m/def/r2 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2400m/def/r2 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112025600)
+TIMING cg2400m/def/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2516582400 current=200998912 cache=86577152 unreclaimable=114421760 available=2402160640 [anon=112144384 file=86577152 kernel=1159168 kernel_stack=131072 pagetables=372736 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=583400 active_anon=112103424 inactive_anon=0 active_file=0 inactive_file=86425600]
+TIMING cg2400m/def/r2 INFO repair-timing: create map gate: self vsize=599007232 rss=116170752 shared=4145152 anon=112025600 smaps_rss_kb=113452 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1292
+TIMING cg2400m/def/r2 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2400m/def/r2 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 3.52s
+TIMING cg2400m/def/r2 INFO repair-timing: create recovery batch 0+1638: 3.74s (total 3.74s) (fold width 8 of 8)
+TIMING cg2400m/def/r2 INFO repair-timing: create seals: mode=lanes rows=1638 in 8.540106ms
+TIMING cg2400m/def/r2 INFO repair-timing: create scan + fold: 4.13s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2400m/def/r2 INFO repair-timing: plan prep: 3.54ms over 1 cold build(s), 64 stripe use(s) - 0.085% of the 4.15s create
+LEG cell=cg2400m arm=own0 rep=2 rc=0 wall=4.9 set=603c33479dfaab6d majflt=0 refault=65451 read_mb=2303 peak_mb=2400
+TIMING cg2400m/own0/r2 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2400m/own0/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2516582400 current=2936832 cache=692224 unreclaimable=2244608 available=2514337792 [anon=1171456 file=692224 kernel=851968 kernel_stack=81920 pagetables=131072 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=369248 active_anon=1146880 inactive_anon=0 active_file=0 inactive_file=692224]
+TIMING cg2400m/own0/r2 INFO repair-timing: create map gate: self vsize=148500480 rss=4833280 shared=3772416 anon=1060864 smaps_rss_kb=4724 anonymous_kb=1040 private_dirty_kb=1040 shared_clean_kb=1272
+TIMING cg2400m/own0/r2 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2400m/own0/r2 INFO repair-timing: create map headroom: net 268099584 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 0 B (gross 268099584, own anon none)
+TIMING cg2400m/own0/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2516582400 current=197902336 cache=83693568 unreclaimable=114208768 available=2402373632 [anon=112144384 file=83693568 kernel=1150976 kernel_stack=131072 pagetables=380928 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=574920 active_anon=112095232 inactive_anon=0 active_file=0 inactive_file=83587072]
+TIMING cg2400m/own0/r2 INFO repair-timing: create map gate: self vsize=599007232 rss=116125696 shared=4100096 anon=112025600 smaps_rss_kb=113404 anonymous_kb=109400 private_dirty_kb=109400 shared_clean_kb=1272
+TIMING cg2400m/own0/r2 INFO repair-timing: create map refused: payload 2147483648 B + headroom 268099584 B against host 31017533440 B, cgroup 2402373632 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2400m/own0/r2 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2400m/own0/r2 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 7147, W=512, 64 stripe(s), threads=8, probe ok): 4.25s
+TIMING cg2400m/own0/r2 INFO repair-timing: create recovery batch 0+1638: 4.36s (total 4.37s) (fold width 8 of 8)
+TIMING cg2400m/own0/r2 INFO repair-timing: create seals: mode=lanes rows=1638 in 6.002185ms
+TIMING cg2400m/own0/r2 INFO repair-timing: create scan + fold: 4.42s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2400m/own0/r2 INFO repair-timing: plan prep: 8.22ms over 5 cold build(s), 320 stripe use(s) - 0.186% of the 4.42s create
+LEG cell=cg2350m arm=def rep=2 rc=0 wall=8.5 set=603c33479dfaab6d majflt=10062 refault=0 read_mb=2048 peak_mb=2314
+TIMING cg2350m/def/r2 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2350m/def/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2464153600 current=3608576 cache=692224 unreclaimable=2916352 available=2461237248 [anon=1196032 file=692224 kernel=770048 kernel_stack=98304 pagetables=126976 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=444168 active_anon=1355776 inactive_anon=0 active_file=0 inactive_file=1638400]
+TIMING cg2350m/def/r2 INFO repair-timing: create map gate: self vsize=423288832 rss=5611520 shared=4063232 anon=1548288 smaps_rss_kb=5496 anonymous_kb=1528 private_dirty_kb=1528 shared_clean_kb=1328
+TIMING cg2350m/def/r2 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2350m/def/r2 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112029696)
+TIMING cg2350m/def/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2464153600 current=207929344 cache=93655040 unreclaimable=114274304 available=2349879296 [anon=112152576 file=93655040 kernel=1175552 kernel_stack=131072 pagetables=372736 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=599568 active_anon=112119808 inactive_anon=0 active_file=0 inactive_file=94158848]
+TIMING cg2350m/def/r2 INFO repair-timing: create map gate: self vsize=599007232 rss=116289536 shared=4259840 anon=112029696 smaps_rss_kb=113568 anonymous_kb=109408 private_dirty_kb=109408 shared_clean_kb=1328
+TIMING cg2350m/def/r2 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2350m/def/r2 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 7.63s
+TIMING cg2350m/def/r2 INFO repair-timing: create recovery batch 0+1638: 7.86s (total 7.86s) (fold width 8 of 8)
+TIMING cg2350m/def/r2 INFO repair-timing: create seals: mode=lanes rows=1638 in 9.709994ms
+TIMING cg2350m/def/r2 INFO repair-timing: create scan + fold: 7.93s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2350m/def/r2 INFO repair-timing: plan prep: 3.44ms over 1 cold build(s), 64 stripe use(s) - 0.043% of the 7.93s create
+LEG cell=cg2350m arm=own0 rep=2 rc=0 wall=6.2 set=603c33479dfaab6d majflt=0 refault=26849 read_mb=2152 peak_mb=2350
+TIMING cg2350m/own0/r2 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2350m/own0/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2464153600 current=3624960 cache=692224 unreclaimable=2932736 available=2461220864 [anon=1183744 file=692224 kernel=888832 kernel_stack=98304 pagetables=131072 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=403624 active_anon=1150976 inactive_anon=0 active_file=0 inactive_file=692224]
+TIMING cg2350m/own0/r2 INFO repair-timing: create map gate: self vsize=356167680 rss=5296128 shared=3989504 anon=1306624 smaps_rss_kb=5264 anonymous_kb=1368 private_dirty_kb=1368 shared_clean_kb=1292
+TIMING cg2350m/own0/r2 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2350m/own0/r2 INFO repair-timing: create map headroom: net 268099584 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 0 B (gross 268099584, own anon none)
+TIMING cg2350m/own0/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2464153600 current=158822400 cache=44572672 unreclaimable=114249728 available=2349903872 [anon=112136192 file=44572672 kernel=1056768 kernel_stack=131072 pagetables=372736 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=480224 active_anon=112111616 inactive_anon=0 active_file=0 inactive_file=44470272]
+TIMING cg2350m/own0/r2 INFO repair-timing: create map gate: self vsize=599007232 rss=116137984 shared=4120576 anon=112017408 smaps_rss_kb=113416 anonymous_kb=109392 private_dirty_kb=109392 shared_clean_kb=1292
+TIMING cg2350m/own0/r2 INFO repair-timing: create map refused: payload 2147483648 B + headroom 268099584 B against host 31086800896 B, cgroup 2350428160 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2350m/own0/r2 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2350m/own0/r2 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 6947, W=512, 64 stripe(s), threads=8, probe ok): 5.35s
+TIMING cg2350m/own0/r2 INFO repair-timing: create recovery batch 0+1638: 5.49s (total 5.49s) (fold width 8 of 8)
+TIMING cg2350m/own0/r2 INFO repair-timing: create seals: mode=lanes rows=1638 in 8.383253ms
+TIMING cg2350m/own0/r2 INFO repair-timing: create scan + fold: 5.55s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2350m/own0/r2 INFO repair-timing: plan prep: 9.84ms over 5 cold build(s), 320 stripe use(s) - 0.177% of the 5.55s create
+LEG cell=cg2320m arm=def rep=2 rc=0 wall=4.9 set=603c33479dfaab6d majflt=14050 refault=0 read_mb=2048 peak_mb=2318
+TIMING cg2320m/def/r2 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2320m/def/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=3461120 cache=692224 unreclaimable=2768896 available=2429927424 [anon=1183744 file=692224 kernel=741376 kernel_stack=98304 pagetables=122880 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=373576 active_anon=1130496 inactive_anon=0 active_file=0 inactive_file=651264]
+TIMING cg2320m/def/r2 INFO repair-timing: create map gate: self vsize=423288832 rss=5435392 shared=4100096 anon=1335296 smaps_rss_kb=5488 anonymous_kb=1484 private_dirty_kb=1484 shared_clean_kb=1332
+TIMING cg2320m/def/r2 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2320m/def/r2 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112025600)
+TIMING cg2320m/def/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=180682752 cache=66523136 unreclaimable=114159616 available=2318536704 [anon=112144384 file=66523136 kernel=1105920 kernel_stack=131072 pagetables=368640 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=538016 active_anon=112119808 inactive_anon=0 active_file=0 inactive_file=66371584]
+TIMING cg2320m/def/r2 INFO repair-timing: create map gate: self vsize=599007232 rss=116260864 shared=4231168 anon=112029696 smaps_rss_kb=113536 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1332
+TIMING cg2320m/def/r2 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2320m/def/r2 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 3.74s
+TIMING cg2320m/def/r2 INFO repair-timing: create recovery batch 0+1638: 3.95s (total 3.95s) (fold width 8 of 8)
+TIMING cg2320m/def/r2 INFO repair-timing: create seals: mode=lanes rows=1638 in 8.110261ms
+TIMING cg2320m/def/r2 INFO repair-timing: create scan + fold: 4.36s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2320m/def/r2 INFO repair-timing: plan prep: 3.48ms over 1 cold build(s), 64 stripe use(s) - 0.080% of the 4.37s create
+LEG cell=cg2320m arm=own0 rep=2 rc=0 wall=5.2 set=603c33479dfaab6d majflt=0 refault=31047 read_mb=2169 peak_mb=2320
+TIMING cg2320m/own0/r2 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2320m/own0/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=3596288 cache=692224 unreclaimable=2904064 available=2429792256 [anon=1179648 file=692224 kernel=1241088 kernel_stack=81920 pagetables=126976 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=450744 active_anon=1150976 inactive_anon=0 active_file=0 inactive_file=692224]
+TIMING cg2320m/own0/r2 INFO repair-timing: create map gate: self vsize=356167680 rss=5480448 shared=4091904 anon=1388544 smaps_rss_kb=5364 anonymous_kb=1368 private_dirty_kb=1368 shared_clean_kb=1284
+TIMING cg2320m/own0/r2 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2320m/own0/r2 INFO repair-timing: create map headroom: net 268099584 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 0 B (gross 268099584, own anon none)
+TIMING cg2320m/own0/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=177418240 cache=63246336 unreclaimable=114171904 available=2318524416 [anon=112144384 file=63246336 kernel=1105920 kernel_stack=131072 pagetables=372736 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=526064 active_anon=112115712 inactive_anon=0 active_file=0 inactive_file=63029248]
+TIMING cg2320m/own0/r2 INFO repair-timing: create map gate: self vsize=599007232 rss=116248576 shared=4222976 anon=112025600 smaps_rss_kb=113528 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1284
+TIMING cg2320m/own0/r2 INFO repair-timing: create map refused: payload 2147483648 B + headroom 268099584 B against host 31071469568 B, cgroup 2318524416 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2320m/own0/r2 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2320m/own0/r2 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 6827, W=512, 64 stripe(s), threads=8, probe ok): 4.50s
+TIMING cg2320m/own0/r2 INFO repair-timing: create recovery batch 0+1638: 4.61s (total 4.62s) (fold width 8 of 8)
+TIMING cg2320m/own0/r2 INFO repair-timing: create seals: mode=lanes rows=1638 in 5.366011ms
+TIMING cg2320m/own0/r2 INFO repair-timing: create scan + fold: 4.67s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2320m/own0/r2 INFO repair-timing: plan prep: 8.41ms over 5 cold build(s), 320 stripe use(s) - 0.180% of the 4.67s create
+LEG cell=cg2320m arm=own0 rep=3 rc=0 wall=5.2 set=603c33479dfaab6d majflt=0 refault=49839 read_mb=2242 peak_mb=2320
+TIMING cg2320m/own0/r3 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2320m/own0/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=3956736 cache=692224 unreclaimable=3264512 available=2429431808 [anon=1179648 file=692224 kernel=1339392 kernel_stack=98304 pagetables=126976 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=437168 active_anon=1142784 inactive_anon=0 active_file=0 inactive_file=692224]
+TIMING cg2320m/own0/r3 INFO repair-timing: create map gate: self vsize=423288832 rss=5414912 shared=3977216 anon=1437696 smaps_rss_kb=5388 anonymous_kb=1504 private_dirty_kb=1504 shared_clean_kb=1376
+TIMING cg2320m/own0/r3 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2320m/own0/r3 INFO repair-timing: create map headroom: net 268099584 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 0 B (gross 268099584, own anon none)
+TIMING cg2320m/own0/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=193875968 cache=79958016 unreclaimable=113917952 available=2318778368 [anon=112140288 file=79958016 kernel=1138688 kernel_stack=131072 pagetables=368640 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=571744 active_anon=112095232 inactive_anon=0 active_file=0 inactive_file=79921152]
+TIMING cg2320m/own0/r3 INFO repair-timing: create map gate: self vsize=599007232 rss=116199424 shared=4173824 anon=112025600 smaps_rss_kb=113476 anonymous_kb=109400 private_dirty_kb=109400 shared_clean_kb=1376
+TIMING cg2320m/own0/r3 INFO repair-timing: create map refused: payload 2147483648 B + headroom 268099584 B against host 31009103872 B, cgroup 2318778368 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2320m/own0/r3 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2320m/own0/r3 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 6827, W=512, 64 stripe(s), threads=8, probe ok): 4.53s
+TIMING cg2320m/own0/r3 INFO repair-timing: create recovery batch 0+1638: 4.63s (total 4.63s) (fold width 8 of 8)
+TIMING cg2320m/own0/r3 INFO repair-timing: create seals: mode=lanes rows=1638 in 6.37682ms
+TIMING cg2320m/own0/r3 INFO repair-timing: create scan + fold: 4.68s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2320m/own0/r3 INFO repair-timing: plan prep: 7.82ms over 5 cold build(s), 320 stripe use(s) - 0.167% of the 4.68s create
+LEG cell=cg2320m arm=def rep=3 rc=0 wall=4.8 set=603c33479dfaab6d majflt=13946 refault=0 read_mb=2048 peak_mb=2318
+TIMING cg2320m/def/r3 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2320m/def/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=4296704 cache=1363968 unreclaimable=2932736 available=2429763584 [anon=1515520 file=1363968 kernel=835584 kernel_stack=131072 pagetables=159744 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=403272 active_anon=1499136 inactive_anon=0 active_file=0 inactive_file=2195456]
+TIMING cg2320m/def/r3 INFO repair-timing: create map gate: self vsize=423288832 rss=5484544 shared=4030464 anon=1454080 smaps_rss_kb=5444 anonymous_kb=1508 private_dirty_kb=1508 shared_clean_kb=1256
+TIMING cg2320m/def/r3 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2320m/def/r3 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112029696)
+TIMING cg2320m/def/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=194445312 cache=80154624 unreclaimable=114290688 available=2318405632 [anon=112152576 file=80154624 kernel=1150976 kernel_stack=131072 pagetables=380928 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=565000 active_anon=112107520 inactive_anon=0 active_file=0 inactive_file=80023552]
+TIMING cg2320m/def/r3 INFO repair-timing: create map gate: self vsize=599007232 rss=116256768 shared=4227072 anon=112029696 smaps_rss_kb=113532 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1256
+TIMING cg2320m/def/r3 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2320m/def/r3 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 3.67s
+TIMING cg2320m/def/r3 INFO repair-timing: create recovery batch 0+1638: 3.90s (total 3.91s) (fold width 8 of 8)
+TIMING cg2320m/def/r3 INFO repair-timing: create seals: mode=lanes rows=1638 in 9.835725ms
+TIMING cg2320m/def/r3 INFO repair-timing: create scan + fold: 4.23s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2320m/def/r3 INFO repair-timing: plan prep: 4.27ms over 1 cold build(s), 64 stripe use(s) - 0.101% of the 4.24s create
+LEG cell=cg2350m arm=own0 rep=3 rc=0 wall=5.7 set=603c33479dfaab6d majflt=0 refault=193213 read_mb=2802 peak_mb=2350
+TIMING cg2350m/own0/r3 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2350m/own0/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2464153600 current=3481600 cache=692224 unreclaimable=2789376 available=2461364224 [anon=1187840 file=692224 kernel=1179648 kernel_stack=98304 pagetables=131072 percpu=3880 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=421216 active_anon=1163264 inactive_anon=0 active_file=0 inactive_file=942080]
+TIMING cg2350m/own0/r3 INFO repair-timing: create map gate: self vsize=423288832 rss=5529600 shared=3985408 anon=1544192 smaps_rss_kb=5416 anonymous_kb=1524 private_dirty_kb=1524 shared_clean_kb=1200
+TIMING cg2350m/own0/r3 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2350m/own0/r3 INFO repair-timing: create map headroom: net 268099584 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 0 B (gross 268099584, own anon none)
+TIMING cg2350m/own0/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2464153600 current=192868352 cache=78974976 unreclaimable=113893376 available=2350260224 [anon=112148480 file=78974976 kernel=1134592 kernel_stack=131072 pagetables=372736 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=570248 active_anon=112074752 inactive_anon=0 active_file=0 inactive_file=78893056]
+TIMING cg2350m/own0/r3 INFO repair-timing: create map gate: self vsize=599007232 rss=116211712 shared=4182016 anon=112029696 smaps_rss_kb=113488 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1200
+TIMING cg2350m/own0/r3 INFO repair-timing: create map refused: payload 2147483648 B + headroom 268099584 B against host 31120400384 B, cgroup 2350522368 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2350m/own0/r3 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2350m/own0/r3 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 6947, W=512, 64 stripe(s), threads=8, probe ok): 4.48s
+TIMING cg2350m/own0/r3 INFO repair-timing: create recovery batch 0+1638: 4.58s (total 4.59s) (fold width 8 of 8)
+TIMING cg2350m/own0/r3 INFO repair-timing: create seals: mode=lanes rows=1638 in 7.497208ms
+TIMING cg2350m/own0/r3 INFO repair-timing: create scan + fold: 5.15s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2350m/own0/r3 INFO repair-timing: plan prep: 7.98ms over 5 cold build(s), 320 stripe use(s) - 0.154% of the 5.17s create
+LEG cell=cg2350m arm=def rep=3 rc=0 wall=4.7 set=603c33479dfaab6d majflt=15096 refault=0 read_mb=2048 peak_mb=2317
+TIMING cg2350m/def/r3 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2350m/def/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2464153600 current=3870720 cache=692224 unreclaimable=3178496 available=2460975104 [anon=1191936 file=692224 kernel=1146880 kernel_stack=98304 pagetables=122880 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=458728 active_anon=1343488 inactive_anon=0 active_file=0 inactive_file=1003520]
+TIMING cg2350m/def/r3 INFO repair-timing: create map gate: self vsize=423288832 rss=5525504 shared=3981312 anon=1544192 smaps_rss_kb=5412 anonymous_kb=1524 private_dirty_kb=1524 shared_clean_kb=1260
+TIMING cg2350m/def/r3 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2350m/def/r3 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112029696)
+TIMING cg2350m/def/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2464153600 current=188289024 cache=73801728 unreclaimable=114487296 available=2349666304 [anon=112152576 file=73801728 kernel=1114112 kernel_stack=131072 pagetables=364544 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=550544 active_anon=112099328 inactive_anon=0 active_file=0 inactive_file=73707520]
+TIMING cg2350m/def/r3 INFO repair-timing: create map gate: self vsize=599007232 rss=116142080 shared=4112384 anon=112029696 smaps_rss_kb=113420 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1260
+TIMING cg2350m/def/r3 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2350m/def/r3 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 3.53s
+TIMING cg2350m/def/r3 INFO repair-timing: create recovery batch 0+1638: 3.73s (total 3.74s) (fold width 8 of 8)
+TIMING cg2350m/def/r3 INFO repair-timing: create seals: mode=lanes rows=1638 in 7.179655ms
+TIMING cg2350m/def/r3 INFO repair-timing: create scan + fold: 4.12s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2350m/def/r3 INFO repair-timing: plan prep: 3.71ms over 1 cold build(s), 64 stripe use(s) - 0.090% of the 4.13s create
+LEG cell=cg2400m arm=own0 rep=3 rc=0 wall=5.1 set=603c33479dfaab6d majflt=0 refault=27043 read_mb=2153 peak_mb=2400
+TIMING cg2400m/own0/r3 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2400m/own0/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2516582400 current=3477504 cache=692224 unreclaimable=2785280 available=2513797120 [anon=1175552 file=692224 kernel=1056768 kernel_stack=81920 pagetables=122880 percpu=3880 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=407824 active_anon=1159168 inactive_anon=0 active_file=0 inactive_file=692224]
+TIMING cg2400m/own0/r3 INFO repair-timing: create map gate: self vsize=284831744 rss=5115904 shared=4034560 anon=1081344 smaps_rss_kb=5064 anonymous_kb=1060 private_dirty_kb=1060 shared_clean_kb=1320
+TIMING cg2400m/own0/r3 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2400m/own0/r3 INFO repair-timing: create map headroom: net 268099584 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 0 B (gross 268099584, own anon none)
+TIMING cg2400m/own0/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2516582400 current=203894784 cache=89731072 unreclaimable=114163712 available=2402418688 [anon=112144384 file=89731072 kernel=1159168 kernel_stack=131072 pagetables=372736 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=584776 active_anon=112119808 inactive_anon=0 active_file=0 inactive_file=90337280]
+TIMING cg2400m/own0/r3 INFO repair-timing: create map gate: self vsize=599007232 rss=116256768 shared=4231168 anon=112025600 smaps_rss_kb=113532 anonymous_kb=109400 private_dirty_kb=109400 shared_clean_kb=1320
+TIMING cg2400m/own0/r3 INFO repair-timing: create map refused: payload 2147483648 B + headroom 268099584 B against host 31087624192 B, cgroup 2402680832 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2400m/own0/r3 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2400m/own0/r3 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 7147, W=512, 64 stripe(s), threads=8, probe ok): 4.41s
+TIMING cg2400m/own0/r3 INFO repair-timing: create recovery batch 0+1638: 4.53s (total 4.54s) (fold width 8 of 8)
+TIMING cg2400m/own0/r3 INFO repair-timing: create seals: mode=lanes rows=1638 in 4.577766ms
+TIMING cg2400m/own0/r3 INFO repair-timing: create scan + fold: 4.59s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2400m/own0/r3 INFO repair-timing: plan prep: 9.28ms over 5 cold build(s), 320 stripe use(s) - 0.202% of the 4.59s create
+LEG cell=cg2400m arm=def rep=3 rc=0 wall=4.9 set=603c33479dfaab6d majflt=14058 refault=0 read_mb=2048 peak_mb=2316
+TIMING cg2400m/def/r3 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2400m/def/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2516582400 current=4042752 cache=692224 unreclaimable=3350528 available=2513231872 [anon=1196032 file=692224 kernel=1339392 kernel_stack=98304 pagetables=122880 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=465624 active_anon=1519616 inactive_anon=0 active_file=0 inactive_file=1126400]
+TIMING cg2400m/def/r3 INFO repair-timing: create map gate: self vsize=423288832 rss=5595136 shared=4046848 anon=1548288 smaps_rss_kb=5464 anonymous_kb=1512 private_dirty_kb=1512 shared_clean_kb=1268
+TIMING cg2400m/def/r3 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2400m/def/r3 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112029696)
+TIMING cg2400m/def/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2516582400 current=199364608 cache=85446656 unreclaimable=113917952 available=2402664448 [anon=112152576 file=85446656 kernel=1150976 kernel_stack=131072 pagetables=368640 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=581120 active_anon=112115712 inactive_anon=0 active_file=0 inactive_file=85295104]
+TIMING cg2400m/def/r3 INFO repair-timing: create map gate: self vsize=599007232 rss=116207616 shared=4177920 anon=112029696 smaps_rss_kb=113484 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1268
+TIMING cg2400m/def/r3 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2400m/def/r3 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 3.83s
+TIMING cg2400m/def/r3 INFO repair-timing: create recovery batch 0+1638: 4.05s (total 4.05s) (fold width 8 of 8)
+TIMING cg2400m/def/r3 INFO repair-timing: create seals: mode=lanes rows=1638 in 11.344137ms
+TIMING cg2400m/def/r3 INFO repair-timing: create scan + fold: 4.30s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2400m/def/r3 INFO repair-timing: plan prep: 3.95ms over 1 cold build(s), 64 stripe use(s) - 0.092% of the 4.31s create
+SET-IDENTITY legs=18 distinct=1 digests=603c33479dfaab6d
+ALL DONE 2026-09-18T18:15:59Z
+=== 18:15:59Z PHASE B2 - the boundary bracketed at 10 MiB, def arm against its own wall ===
+BOX Linux amd-epyc-vm 6.8.0-137-generic #137-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 17 20:28:23 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+BINARY /root/cgmap-18sep/parfast sha256=00f0deb9e5e23a9d4ba85e671554156ce86b4dde3979a9e55e9ed88cd057cfda
+FIXTURE-KEPT /root/cgmap-18sep/work/f2g.bin bytes=2147483648
+MEMAVAIL-HOST 30496436
+LEG cell=cg2300m arm=def rep=1 rc=0 wall=7.2 set=603c33479dfaab6d majflt=0 refault=28929 read_mb=2161 peak_mb=2300
+TIMING cg2300m/def/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2300m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2411724800 current=3055616 cache=692224 unreclaimable=2363392 available=2409361408 [anon=1187840 file=692224 kernel=684032 kernel_stack=81920 pagetables=131072 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=373872 active_anon=1146880 inactive_anon=0 active_file=0 inactive_file=692224]
+TIMING cg2300m/def/r1 INFO repair-timing: create map gate: self vsize=284844032 rss=5238784 shared=4153344 anon=1085440 smaps_rss_kb=5248 anonymous_kb=1192 private_dirty_kb=1192 shared_clean_kb=1328
+TIMING cg2300m/def/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2300m/def/r1 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112017408)
+TIMING cg2300m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2411724800 current=160751616 cache=46665728 unreclaimable=114085888 available=2297638912 [anon=112136192 file=46665728 kernel=1060864 kernel_stack=131072 pagetables=372736 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=485784 active_anon=112082944 inactive_anon=0 active_file=0 inactive_file=46616576]
+TIMING cg2300m/def/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116301824 shared=4284416 anon=112017408 smaps_rss_kb=113576 anonymous_kb=109392 private_dirty_kb=109392 shared_clean_kb=1328
+TIMING cg2300m/def/r1 INFO repair-timing: create map refused: payload 2147483648 B + headroom 160751616 B against host 30957957120 B, cgroup 2297638912 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2300m/def/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2300m/def/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 6747, W=512, 64 stripe(s), threads=8, probe ok): 6.20s
+TIMING cg2300m/def/r1 INFO repair-timing: create recovery batch 0+1638: 6.34s (total 6.35s) (fold width 8 of 8)
+TIMING cg2300m/def/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 5.758074ms
+TIMING cg2300m/def/r1 INFO repair-timing: create scan + fold: 6.41s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2300m/def/r1 INFO repair-timing: plan prep: 11.57ms over 5 cold build(s), 320 stripe use(s) - 0.181% of the 6.41s create
+LEG cell=cg2310m arm=def rep=1 rc=0 wall=5.6 set=603c33479dfaab6d majflt=0 refault=7171 read_mb=2076 peak_mb=2310
+TIMING cg2310m/def/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2310m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2422210560 current=3252224 cache=692224 unreclaimable=2560000 available=2419650560 [anon=1187840 file=692224 kernel=888832 kernel_stack=98304 pagetables=131072 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=401216 active_anon=1155072 inactive_anon=0 active_file=0 inactive_file=819200]
+TIMING cg2310m/def/r1 INFO repair-timing: create map gate: self vsize=356167680 rss=5468160 shared=4067328 anon=1400832 smaps_rss_kb=5340 anonymous_kb=1368 private_dirty_kb=1368 shared_clean_kb=1296
+TIMING cg2310m/def/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2310m/def/r1 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112021504)
+TIMING cg2310m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2422210560 current=181886976 cache=67612672 unreclaimable=114274304 available=2307936256 [anon=112140288 file=67612672 kernel=1118208 kernel_stack=131072 pagetables=372736 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=538320 active_anon=112091136 inactive_anon=0 active_file=0 inactive_file=67440640]
+TIMING cg2310m/def/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116285440 shared=4263936 anon=112021504 smaps_rss_kb=113564 anonymous_kb=109400 private_dirty_kb=109400 shared_clean_kb=1296
+TIMING cg2310m/def/r1 INFO repair-timing: create map refused: payload 2147483648 B + headroom 160751616 B against host 31205732352 B, cgroup 2307936256 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2310m/def/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2310m/def/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 6787, W=512, 64 stripe(s), threads=8, probe ok): 4.83s
+TIMING cg2310m/def/r1 INFO repair-timing: create recovery batch 0+1638: 4.93s (total 4.94s) (fold width 8 of 8)
+TIMING cg2310m/def/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 5.734344ms
+TIMING cg2310m/def/r1 INFO repair-timing: create scan + fold: 5.00s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2310m/def/r1 INFO repair-timing: plan prep: 8.32ms over 5 cold build(s), 320 stripe use(s) - 0.166% of the 5.00s create
+LEG cell=cg2320m arm=def rep=1 rc=0 wall=5.0 set=603c33479dfaab6d majflt=13722 refault=0 read_mb=2048 peak_mb=2316
+TIMING cg2320m/def/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2320m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=3547136 cache=692224 unreclaimable=2854912 available=2429841408 [anon=1179648 file=692224 kernel=937984 kernel_stack=81920 pagetables=135168 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=404336 active_anon=1163264 inactive_anon=0 active_file=0 inactive_file=942080]
+TIMING cg2320m/def/r1 INFO repair-timing: create map gate: self vsize=423288832 rss=5369856 shared=3997696 anon=1372160 smaps_rss_kb=5432 anonymous_kb=1528 private_dirty_kb=1528 shared_clean_kb=1300
+TIMING cg2320m/def/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2320m/def/r1 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112025600)
+TIMING cg2320m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=184475648 cache=70520832 unreclaimable=113954816 available=2318741504 [anon=112144384 file=70520832 kernel=1130496 kernel_stack=131072 pagetables=380928 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=540016 active_anon=112115712 inactive_anon=0 active_file=0 inactive_file=71237632]
+TIMING cg2320m/def/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116219904 shared=4194304 anon=112025600 smaps_rss_kb=113500 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1300
+TIMING cg2320m/def/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2320m/def/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 3.95s
+TIMING cg2320m/def/r1 INFO repair-timing: create recovery batch 0+1638: 4.17s (total 4.18s) (fold width 8 of 8)
+TIMING cg2320m/def/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 9.441962ms
+TIMING cg2320m/def/r1 INFO repair-timing: create scan + fold: 4.37s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2320m/def/r1 INFO repair-timing: plan prep: 4.03ms over 1 cold build(s), 64 stripe use(s) - 0.092% of the 4.38s create
+LEG cell=cg2330m arm=def rep=1 rc=0 wall=5.1 set=603c33479dfaab6d majflt=13294 refault=0 read_mb=2048 peak_mb=2316
+TIMING cg2330m/def/r1 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2330m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2443182080 current=3571712 cache=692224 unreclaimable=2879488 available=2440302592 [anon=1183744 file=692224 kernel=1093632 kernel_stack=81920 pagetables=126976 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=403200 active_anon=1155072 inactive_anon=0 active_file=0 inactive_file=942080]
+TIMING cg2330m/def/r1 INFO repair-timing: create map gate: self vsize=356167680 rss=5464064 shared=4059136 anon=1404928 smaps_rss_kb=5336 anonymous_kb=1372 private_dirty_kb=1372 shared_clean_kb=1376
+TIMING cg2330m/def/r1 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2330m/def/r1 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112029696)
+TIMING cg2330m/def/r1 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2443182080 current=192864256 cache=78397440 unreclaimable=114466816 available=2328715264 [anon=112148480 file=78397440 kernel=1138688 kernel_stack=131072 pagetables=368640 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=562480 active_anon=112107520 inactive_anon=0 active_file=0 inactive_file=78299136]
+TIMING cg2330m/def/r1 INFO repair-timing: create map gate: self vsize=599007232 rss=116219904 shared=4190208 anon=112029696 smaps_rss_kb=113496 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1376
+TIMING cg2330m/def/r1 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2330m/def/r1 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 4.03s
+TIMING cg2330m/def/r1 INFO repair-timing: create recovery batch 0+1638: 4.25s (total 4.25s) (fold width 8 of 8)
+TIMING cg2330m/def/r1 INFO repair-timing: create seals: mode=lanes rows=1638 in 8.838407ms
+TIMING cg2330m/def/r1 INFO repair-timing: create scan + fold: 4.52s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2330m/def/r1 INFO repair-timing: plan prep: 4.60ms over 1 cold build(s), 64 stripe use(s) - 0.101% of the 4.53s create
+LEG cell=cg2330m arm=def rep=2 rc=0 wall=4.6 set=603c33479dfaab6d majflt=15296 refault=0 read_mb=2048 peak_mb=2317
+TIMING cg2330m/def/r2 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2330m/def/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2443182080 current=3420160 cache=692224 unreclaimable=2727936 available=2440454144 [anon=1196032 file=692224 kernel=819200 kernel_stack=98304 pagetables=135168 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=375912 active_anon=1167360 inactive_anon=0 active_file=0 inactive_file=942080]
+TIMING cg2330m/def/r2 INFO repair-timing: create map gate: self vsize=423288832 rss=5509120 shared=3989504 anon=1519616 smaps_rss_kb=5408 anonymous_kb=1512 private_dirty_kb=1512 shared_clean_kb=1304
+TIMING cg2330m/def/r2 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2330m/def/r2 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112029696)
+TIMING cg2330m/def/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2443182080 current=208261120 cache=94318592 unreclaimable=113942528 available=2329239552 [anon=112152576 file=94318592 kernel=1179648 kernel_stack=131072 pagetables=380928 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=597896 active_anon=112107520 inactive_anon=0 active_file=0 inactive_file=94228480]
+TIMING cg2330m/def/r2 INFO repair-timing: create map gate: self vsize=599007232 rss=116150272 shared=4120576 anon=112029696 smaps_rss_kb=113432 anonymous_kb=109408 private_dirty_kb=109408 shared_clean_kb=1304
+TIMING cg2330m/def/r2 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2330m/def/r2 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 3.53s
+TIMING cg2330m/def/r2 INFO repair-timing: create recovery batch 0+1638: 3.75s (total 3.76s) (fold width 8 of 8)
+TIMING cg2330m/def/r2 INFO repair-timing: create seals: mode=lanes rows=1638 in 8.155763ms
+TIMING cg2330m/def/r2 INFO repair-timing: create scan + fold: 4.14s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2330m/def/r2 INFO repair-timing: plan prep: 6.32ms over 1 cold build(s), 64 stripe use(s) - 0.152% of the 4.15s create
+LEG cell=cg2320m arm=def rep=2 rc=0 wall=4.9 set=603c33479dfaab6d majflt=14613 refault=0 read_mb=2048 peak_mb=2315
+TIMING cg2320m/def/r2 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2320m/def/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=4005888 cache=692224 unreclaimable=3313664 available=2429382656 [anon=1187840 file=692224 kernel=1454080 kernel_stack=98304 pagetables=118784 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=492384 active_anon=1630208 inactive_anon=0 active_file=0 inactive_file=1884160]
+TIMING cg2320m/def/r2 INFO repair-timing: create map gate: self vsize=423288832 rss=5603328 shared=4050944 anon=1552384 smaps_rss_kb=5480 anonymous_kb=1524 private_dirty_kb=1524 shared_clean_kb=1356
+TIMING cg2320m/def/r2 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2320m/def/r2 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112029696)
+TIMING cg2320m/def/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=186392576 cache=72048640 unreclaimable=114343936 available=2318352384 [anon=112148480 file=72048640 kernel=1114112 kernel_stack=131072 pagetables=364544 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=547456 active_anon=112111616 inactive_anon=0 active_file=0 inactive_file=72589312]
+TIMING cg2320m/def/r2 INFO repair-timing: create map gate: self vsize=599007232 rss=116211712 shared=4182016 anon=112029696 smaps_rss_kb=113488 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1356
+TIMING cg2320m/def/r2 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2320m/def/r2 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 3.72s
+TIMING cg2320m/def/r2 INFO repair-timing: create recovery batch 0+1638: 3.94s (total 3.94s) (fold width 8 of 8)
+TIMING cg2320m/def/r2 INFO repair-timing: create seals: mode=lanes rows=1638 in 7.544838ms
+TIMING cg2320m/def/r2 INFO repair-timing: create scan + fold: 4.37s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2320m/def/r2 INFO repair-timing: plan prep: 3.69ms over 1 cold build(s), 64 stripe use(s) - 0.084% of the 4.39s create
+LEG cell=cg2310m arm=def rep=2 rc=0 wall=5.2 set=603c33479dfaab6d majflt=0 refault=201931 read_mb=2836 peak_mb=2310
+TIMING cg2310m/def/r2 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2310m/def/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2422210560 current=3715072 cache=692224 unreclaimable=3022848 available=2419187712 [anon=1183744 file=692224 kernel=1269760 kernel_stack=81920 pagetables=131072 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=447928 active_anon=1335296 inactive_anon=0 active_file=0 inactive_file=1064960]
+TIMING cg2310m/def/r2 INFO repair-timing: create map gate: self vsize=423288832 rss=5595136 shared=4046848 anon=1548288 smaps_rss_kb=5480 anonymous_kb=1528 private_dirty_kb=1528 shared_clean_kb=1440
+TIMING cg2310m/def/r2 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2310m/def/r2 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112029696)
+TIMING cg2310m/def/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2422210560 current=202301440 cache=88281088 unreclaimable=114020352 available=2308190208 [anon=112148480 file=88281088 kernel=1163264 kernel_stack=131072 pagetables=372736 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=584488 active_anon=112091136 inactive_anon=0 active_file=0 inactive_file=88145920]
+TIMING cg2310m/def/r2 INFO repair-timing: create map gate: self vsize=599007232 rss=116207616 shared=4177920 anon=112029696 smaps_rss_kb=113488 anonymous_kb=109408 private_dirty_kb=109408 shared_clean_kb=1440
+TIMING cg2310m/def/r2 INFO repair-timing: create map refused: payload 2147483648 B + headroom 160751616 B against host 31079882752 B, cgroup 2308222976 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2310m/def/r2 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2310m/def/r2 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 6787, W=512, 64 stripe(s), threads=8, probe ok): 4.33s
+TIMING cg2310m/def/r2 INFO repair-timing: create recovery batch 0+1638: 4.44s (total 4.45s) (fold width 8 of 8)
+TIMING cg2310m/def/r2 INFO repair-timing: create seals: mode=lanes rows=1638 in 8.385714ms
+TIMING cg2310m/def/r2 INFO repair-timing: create scan + fold: 4.71s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2310m/def/r2 INFO repair-timing: plan prep: 7.96ms over 5 cold build(s), 320 stripe use(s) - 0.169% of the 4.72s create
+LEG cell=cg2300m arm=def rep=2 rc=0 wall=5.1 set=603c33479dfaab6d majflt=0 refault=37616 read_mb=2194 peak_mb=2300
+TIMING cg2300m/def/r2 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2300m/def/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2411724800 current=3977216 cache=692224 unreclaimable=3284992 available=2408439808 [anon=1183744 file=692224 kernel=1241088 kernel_stack=81920 pagetables=126976 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=424760 active_anon=1167360 inactive_anon=0 active_file=0 inactive_file=692224]
+TIMING cg2300m/def/r2 INFO repair-timing: create map gate: self vsize=289046528 rss=5230592 shared=3969024 anon=1261568 smaps_rss_kb=5112 anonymous_kb=1236 private_dirty_kb=1236 shared_clean_kb=1304
+TIMING cg2300m/def/r2 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2300m/def/r2 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112033792)
+TIMING cg2300m/def/r2 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2411724800 current=216199168 cache=102436864 unreclaimable=113762304 available=2297962496 [anon=112152576 file=102436864 kernel=1196032 kernel_stack=131072 pagetables=368640 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=614848 active_anon=112107520 inactive_anon=0 active_file=0 inactive_file=102334464]
+TIMING cg2300m/def/r2 INFO repair-timing: create map gate: self vsize=599007232 rss=116133888 shared=4100096 anon=112033792 smaps_rss_kb=113412 anonymous_kb=109408 private_dirty_kb=109408 shared_clean_kb=1304
+TIMING cg2300m/def/r2 INFO repair-timing: create map refused: payload 2147483648 B + headroom 160751616 B against host 30877253632 B, cgroup 2297962496 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2300m/def/r2 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2300m/def/r2 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 6747, W=512, 64 stripe(s), threads=8, probe ok): 4.41s
+TIMING cg2300m/def/r2 INFO repair-timing: create recovery batch 0+1638: 4.52s (total 4.52s) (fold width 8 of 8)
+TIMING cg2300m/def/r2 INFO repair-timing: create seals: mode=lanes rows=1638 in 3.83702ms
+TIMING cg2300m/def/r2 INFO repair-timing: create scan + fold: 4.58s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2300m/def/r2 INFO repair-timing: plan prep: 9.36ms over 5 cold build(s), 320 stripe use(s) - 0.205% of the 4.58s create
+LEG cell=cg2300m arm=def rep=3 rc=0 wall=4.9 set=603c33479dfaab6d majflt=0 refault=46060 read_mb=2227 peak_mb=2300
+TIMING cg2300m/def/r3 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2300m/def/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2411724800 current=3522560 cache=692224 unreclaimable=2830336 available=2408894464 [anon=1187840 file=692224 kernel=811008 kernel_stack=81920 pagetables=135168 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=387672 active_anon=1155072 inactive_anon=0 active_file=0 inactive_file=880640]
+TIMING cg2300m/def/r3 INFO repair-timing: create map gate: self vsize=423288832 rss=5607424 shared=4083712 anon=1523712 smaps_rss_kb=5512 anonymous_kb=1524 private_dirty_kb=1524 shared_clean_kb=1440
+TIMING cg2300m/def/r3 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2300m/def/r3 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112025600)
+TIMING cg2300m/def/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2411724800 current=193470464 cache=79446016 unreclaimable=114024448 available=2297700352 [anon=112144384 file=79446016 kernel=1138688 kernel_stack=131072 pagetables=372736 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=561928 active_anon=112115712 inactive_anon=0 active_file=0 inactive_file=79339520]
+TIMING cg2300m/def/r3 INFO repair-timing: create map gate: self vsize=599007232 rss=116240384 shared=4214784 anon=112025600 smaps_rss_kb=113516 anonymous_kb=109400 private_dirty_kb=109400 shared_clean_kb=1440
+TIMING cg2300m/def/r3 INFO repair-timing: create map refused: payload 2147483648 B + headroom 160751616 B against host 31084572672 B, cgroup 2297700352 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2300m/def/r3 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2300m/def/r3 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 6747, W=512, 64 stripe(s), threads=8, probe ok): 4.21s
+TIMING cg2300m/def/r3 INFO repair-timing: create recovery batch 0+1638: 4.31s (total 4.32s) (fold width 8 of 8)
+TIMING cg2300m/def/r3 INFO repair-timing: create seals: mode=lanes rows=1638 in 4.712526ms
+TIMING cg2300m/def/r3 INFO repair-timing: create scan + fold: 4.37s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2300m/def/r3 INFO repair-timing: plan prep: 8.45ms over 5 cold build(s), 320 stripe use(s) - 0.193% of the 4.37s create
+LEG cell=cg2310m arm=def rep=3 rc=0 wall=5.4 set=603c33479dfaab6d majflt=0 refault=195127 read_mb=2810 peak_mb=2310
+TIMING cg2310m/def/r3 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2310m/def/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2422210560 current=4030464 cache=692224 unreclaimable=3338240 available=2418872320 [anon=1183744 file=692224 kernel=1142784 kernel_stack=98304 pagetables=135168 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=416048 active_anon=1146880 inactive_anon=0 active_file=0 inactive_file=1003520]
+TIMING cg2310m/def/r3 INFO repair-timing: create map gate: self vsize=289046528 rss=5255168 shared=4001792 anon=1253376 smaps_rss_kb=5132 anonymous_kb=1224 private_dirty_kb=1224 shared_clean_kb=1308
+TIMING cg2310m/def/r3 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2310m/def/r3 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112025600)
+TIMING cg2310m/def/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2422210560 current=197070848 cache=83083264 unreclaimable=113987584 available=2308222976 [anon=112144384 file=83083264 kernel=1155072 kernel_stack=131072 pagetables=376832 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=575200 active_anon=112107520 inactive_anon=0 active_file=0 inactive_file=82960384]
+TIMING cg2310m/def/r3 INFO repair-timing: create map gate: self vsize=599007232 rss=116158464 shared=4132864 anon=112025600 smaps_rss_kb=113436 anonymous_kb=109400 private_dirty_kb=109400 shared_clean_kb=1308
+TIMING cg2310m/def/r3 INFO repair-timing: create map refused: payload 2147483648 B + headroom 160751616 B against host 31341363200 B, cgroup 2308222976 B (the headroom binds the cgroup reading only) - the copied windows take it
+TIMING cg2310m/def/r3 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2310m/def/r3 INFO repair-timing: create ntt rows 0+1638 (n=32768, 5 window(s) of 6787, W=512, 64 stripe(s), threads=8, probe ok): 4.37s
+TIMING cg2310m/def/r3 INFO repair-timing: create recovery batch 0+1638: 4.47s (total 4.48s) (fold width 8 of 8)
+TIMING cg2310m/def/r3 INFO repair-timing: create seals: mode=lanes rows=1638 in 6.40111ms
+TIMING cg2310m/def/r3 INFO repair-timing: create scan + fold: 4.96s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2310m/def/r3 INFO repair-timing: plan prep: 8.67ms over 5 cold build(s), 320 stripe use(s) - 0.174% of the 4.97s create
+LEG cell=cg2320m arm=def rep=3 rc=0 wall=6.3 set=603c33479dfaab6d majflt=10662 refault=0 read_mb=2048 peak_mb=2317
+TIMING cg2320m/def/r3 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2320m/def/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=4333568 cache=692224 unreclaimable=3641344 available=2429054976 [anon=1183744 file=692224 kernel=1245184 kernel_stack=81920 pagetables=135168 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=466072 active_anon=1466368 inactive_anon=0 active_file=0 inactive_file=1695744]
+TIMING cg2320m/def/r3 INFO repair-timing: create map gate: self vsize=423288832 rss=5636096 shared=4096000 anon=1540096 smaps_rss_kb=5504 anonymous_kb=1504 private_dirty_kb=1504 shared_clean_kb=1328
+TIMING cg2320m/def/r3 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2320m/def/r3 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112025600)
+TIMING cg2320m/def/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2432696320 current=194465792 cache=80547840 unreclaimable=113917952 available=2318778368 [anon=112144384 file=80547840 kernel=1155072 kernel_stack=131072 pagetables=380928 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=571608 active_anon=112111616 inactive_anon=0 active_file=0 inactive_file=80965632]
+TIMING cg2320m/def/r3 INFO repair-timing: create map gate: self vsize=599007232 rss=116252672 shared=4227072 anon=112025600 smaps_rss_kb=113528 anonymous_kb=109400 private_dirty_kb=109400 shared_clean_kb=1328
+TIMING cg2320m/def/r3 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2320m/def/r3 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 5.53s
+TIMING cg2320m/def/r3 INFO repair-timing: create recovery batch 0+1638: 5.74s (total 5.75s) (fold width 8 of 8)
+TIMING cg2320m/def/r3 INFO repair-timing: create seals: mode=lanes rows=1638 in 12.568537ms
+TIMING cg2320m/def/r3 INFO repair-timing: create scan + fold: 5.80s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2320m/def/r3 INFO repair-timing: plan prep: 3.88ms over 1 cold build(s), 64 stripe use(s) - 0.067% of the 5.82s create
+LEG cell=cg2330m arm=def rep=3 rc=0 wall=5.0 set=603c33479dfaab6d majflt=12946 refault=0 read_mb=2048 peak_mb=2318
+TIMING cg2330m/def/r3 INFO repair-timing: create arms: n=32768 rows=1638 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+TIMING cg2330m/def/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2443182080 current=5713920 cache=2441216 unreclaimable=3272704 available=2439909376 [anon=1654784 file=2441216 kernel=790528 kernel_stack=131072 pagetables=155648 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=420832 active_anon=1630208 inactive_anon=0 active_file=0 inactive_file=2375680]
+TIMING cg2330m/def/r3 INFO repair-timing: create map gate: self vsize=423288832 rss=5558272 shared=3997696 anon=1560576 smaps_rss_kb=5428 anonymous_kb=1524 private_dirty_kb=1524 shared_clean_kb=1328
+TIMING cg2330m/def/r3 INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 1638 rows, n=32768, fused=false)
+TIMING cg2330m/def/r3 INFO repair-timing: create map headroom: net 160751616 B = accumulator 107347968 B (1638 rows x 65536 B) + arenas 160751616 B - own-anon credit 107347968 B (gross 268099584, own anon 112025600)
+TIMING cg2330m/def/r3 INFO repair-timing: create map gate: cgroup /sys/fs/cgroup/ v2=true limit=2443182080 current=201396224 cache=87494656 unreclaimable=113901568 available=2329280512 [anon=112144384 file=87494656 kernel=1155072 kernel_stack=131072 pagetables=368640 percpu=3720 sock=0 shmem=0 file_mapped=0 file_dirty=659456 file_writeback=0 slab=586816 active_anon=112111616 inactive_anon=0 active_file=0 inactive_file=87396352]
+TIMING cg2330m/def/r3 INFO repair-timing: create map gate: self vsize=599007232 rss=116158464 shared=4128768 anon=112029696 smaps_rss_kb=113436 anonymous_kb=109404 private_dirty_kb=109404 shared_clean_kb=1328
+TIMING cg2330m/def/r3 INFO repair-timing: fold tile budget 32 KiB (L2 per core 512 KiB)
+TIMING cg2330m/def/r3 INFO repair-timing: create ntt rows 0+1638 (n=32768, mapped, 0 tail(s) padded, W=512, 64 stripe(s), threads=8, probe ok): 4.00s
+TIMING cg2330m/def/r3 INFO repair-timing: create recovery batch 0+1638: 4.25s (total 4.26s) (fold width 8 of 8)
+TIMING cg2330m/def/r3 INFO repair-timing: create seals: mode=lanes rows=1638 in 9.365433ms
+TIMING cg2330m/def/r3 INFO repair-timing: create scan + fold: 4.44s; batch fold width 8 of 8 a priori (0 restore(s)); scan lanes 2 of 8 a priori
+TIMING cg2330m/def/r3 INFO repair-timing: plan prep: 3.75ms over 1 cold build(s), 64 stripe use(s) - 0.084% of the 4.46s create
+SET-IDENTITY legs=12 distinct=1 digests=603c33479dfaab6d
+ALL DONE 2026-09-18T18:17:11Z
+=== 18:17:11Z ROUND DONE ===
+RIGLOCK RELEASING rc=0 18:17:11Z
+CHAIN DONE rc=0 18:17:11Z

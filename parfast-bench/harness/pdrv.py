@@ -1049,11 +1049,38 @@ def warm(directory):
 
 
 def box_facts():
-    """Print what machine this is. Platform-aware on purpose: the first VPS run
-    printed `cpu=? cores=? os=macOS ?` because this was mac-only, on the one box
-    in the fleet whose figures MUST carry a label (it is a VM slice). A log that
-    cannot say what it ran on is the same defect as a binary that cannot say
-    what it was built from."""
+    """Print what machine this is, to stdout. The composing half is `box_line`.
+
+    A driver that tees its round log through a local `log` / `say` helper must
+    call THAT with `box_line()` instead - see `box_line`'s note, and
+    `harness_lines` above, which is the same split one field over.
+    """
+    print(box_line(), flush=True)
+
+
+def box_line():
+    """The BOX line, RETURNED and not printed. Platform-aware on purpose: the
+    first VPS run printed `cpu=? cores=? os=macOS ?` because this was mac-only,
+    on the one box in the fleet whose figures MUST carry a label (it is a VM
+    slice). A log that cannot say what it ran on is the same defect as a binary
+    that cannot say what it was built from.
+
+    THE SPLIT EXISTS BECAUSE A BARE `print` IS THE WRONG SINK FOR SOME DRIVERS,
+    and getting that wrong looks fixed from the terminal - the identical
+    finding `harness_lines` above carries, and the identical fix. A driver
+    whose own helper writes the banked FILE and stdout, while this library
+    prints, puts BOX on the terminal and leaves the BANKED log with no BOX line
+    in it at all. Eleven banked logs of two round families were measured that
+    way on 21 Sep 2026 (an internal note): every
+    one carries BIN lines the driver wrote itself and LEG lines, and zero BOX
+    lines, so the evidence those rounds banked cannot say what box measured
+    them - which is the one fact this function exists to record.
+
+    IT RETURNS ONE STRING AND EMITS NOTHING, for `harness_lines`' reason: a
+    stray print in here would land in the sink the caller was trying not to
+    use. The subprocess probes below are the only thing that writes anywhere,
+    and their output is captured.
+    """
     # `shutil.disk_usage`, not `os.statvfs`: statvfs does not exist on Windows,
     # and this is the same free-space figure on every platform. `.free` is the
     # unprivileged caller's free space, which is what `f_bavail` meant here.
@@ -1123,8 +1150,8 @@ def box_facts():
         osver = "%s (kernel %s)" % (osver, os.uname().release)
     # `socket.gethostname()`, not `os.uname().nodename`: `os.uname` is POSIX
     # only. It is the same string on every box in this fleet.
-    print("BOX host=%s cpu=%s cores=%s ram_gb=%s os=%s free_gb=%s"
-          % (socket.gethostname(), cpu, cores, mem_gb, osver, free_gb), flush=True)
+    return ("BOX host=%s cpu=%s cores=%s ram_gb=%s os=%s free_gb=%s"
+            % (socket.gethostname(), cpu, cores, mem_gb, osver, free_gb))
 
 
 # --------------------------------------------------------------------------
@@ -1250,6 +1277,32 @@ def harness_facts(paths=None):
     whole list. Either way the set is REGISTERED, and every LEG line's
     `rig_stamp` then re-reads exactly the files the HARNESS lines named.
     """
+    for line in harness_lines(paths, missing_is_fatal=True):
+        print(line, flush=True)
+
+
+def harness_lines(paths=None, missing_is_fatal=False):
+    """`harness_facts` without the printing: REGISTERS the set and RETURNS the
+    lines, for a driver that tees its log through a local `say` / `log`.
+
+    THE SPLIT EXISTS BECAUSE A BARE `print` IS THE WRONG SINK FOR HALF THE
+    DRIVERS, and getting that wrong looks fixed from the terminal. A driver
+    whose own helper writes the banked FILE and stdout, while this library
+    prints, puts the stamp on stdout and leaves the BANKED log unstamped -
+    which is the exact defect the stamp exists to fix. Two drivers in
+    `harness/` met that in the first census
+    (an internal note section 3) and grew a
+    local composer each; this is that composer, once, where the format lives,
+    so the second population did not need a third and fourth copy
+    (an internal note).
+
+    `missing_is_fatal` is how `harness_facts` keeps its own contract: a MISSING
+    file there is `PREFLIGHT-FAIL` and exit 9, because a round that cannot find
+    what it sources has not established anything. An UNREADABLE one is stamped
+    `unreadable` either way, for `rig_stamp`'s reason - an absent token is
+    indistinguishable from a harness older than this block, which never had
+    one. Missing and unreadable are not the same fact and are not merged.
+    """
     global _HARNESS_SET
     paths = [os.path.abspath(p) for p in (paths if paths is not None
                                           else _default_harness_set())]
@@ -1259,17 +1312,24 @@ def harness_facts(paths=None):
             seen.add(p)
             ordered.append(p)
     _HARNESS_SET = sorted(ordered, key=lambda q: (os.path.basename(q), q))
+    out = []
     for p in _HARNESS_SET:
-        if not os.path.exists(p):
+        if missing_is_fatal and not os.path.exists(p):
             print("PREFLIGHT-FAIL missing %s" % p, flush=True)
             sys.exit(9)
-        print("HARNESS %s sha256=%s bytes=%d"
-              % (os.path.basename(p), sha256_file(p), os.path.getsize(p)),
-              flush=True)
-    # The token the legs will carry, printed ONCE at round start too, so a
+        try:
+            sha, n = sha256_file(p), os.path.getsize(p)
+        except OSError:
+            out.append("HARNESS %s sha256=unreadable bytes=0"
+                       % os.path.basename(p))
+            continue
+        out.append("HARNESS %s sha256=%s bytes=%d"
+                   % (os.path.basename(p), sha, n))
+    # The token the legs will carry, emitted ONCE at round start too, so a
     # reader who greps the head of a log sees the same string the legs carry
     # and does not have to compose it from the HARNESS lines by hand.
-    print("HARNESS-RIG %s" % rig_stamp(), flush=True)
+    out.append("HARNESS-RIG %s" % rig_stamp())
+    return out
 
 
 def rig_vol_facts(rig):
@@ -1332,16 +1392,67 @@ def rig_vol_facts(rig):
 
 
 def bin_facts(paths):
+    """Print which build this round measured, to stdout. Composing half:
+    `bin_lines`. A MISSING binary is `PREFLIGHT-FAIL` and exit 9 here, which is
+    this function's whole preflight contract and is unchanged by the split."""
+    for line in bin_lines(paths, missing_is_fatal=True):
+        print(line, flush=True)
+
+
+def bin_lines(paths, missing_is_fatal=False):
+    """`bin_facts` without the printing: RETURNS the lines, for a driver that
+    tees its log through a local `say` / `log`.
+
+    Same split, same reason and the same shape as `box_line` and
+    `harness_lines` above: a bare `print` here puts BIN on the terminal and
+    leaves the banked log without it, which looks fixed from where the operator
+    is sitting (an internal note).
+
+    `missing_is_fatal` keeps `bin_facts`' contract exactly where that is what
+    the caller wants: a binary this round cannot find has established nothing,
+    so it is `PREFLIGHT-FAIL` and exit 9 rather than a line saying so. That
+    arm PRINTS, deliberately and unlike every other line here - the process is
+    about to end, there is no round log left to bank, and the operator's
+    terminal is the only sink that will still be read. A caller that wants the
+    refusal in its own sink checks the path itself first.
+
+    Off, a path that is not there is stamped `unreadable`, for `rig_stamp`'s
+    reason: missing and unreadable are not the same fact and are not merged,
+    and an absent line is indistinguishable from a harness older than this
+    block. The field SHAPE is held either way, because `jsum.py` and `s2sum.py`
+    bank the whole line verbatim.
+
+    THE PROBE BODY BELOW IS BYTE-FOR-BYTE THE ONE `bin_facts` HAD, and that is
+    the constraint this split is written under rather than a missed
+    opportunity. `plib.ps1`'s `Write-BinFacts` wraps its own `-VV` in a
+    swallowed try, having killed the seven-tool field round two seconds in at
+    the phpar2 entry - but the defect there was PowerShell's
+    `$ErrorActionPreference = 'Stop'` making a write to stderr a TERMINATING
+    error, and python has no equivalent trap: `subprocess.run` without
+    `check=True` already returns a non-zero rc and unknown-flag noise on either
+    stream without raising, so the case that voided that round cannot reach
+    here. What IS unguarded on this side is narrower and was never measured - a
+    path that exists and will not execute or will not hash raises out of the
+    round - and hardening it is a change to what this function promises, which
+    is not what a sink fix is for. Recorded in section 6 of the census above,
+    not taken here.
+    """
+    out = []
     for p in paths:
         if not os.path.exists(p):
-            print("PREFLIGHT-FAIL missing %s" % p, flush=True)
-            sys.exit(9)
+            if missing_is_fatal:
+                print("PREFLIGHT-FAIL missing %s" % p, flush=True)
+                sys.exit(9)
+            out.append("BIN %s sha256=unreadable bytes=0 version=? built from ?"
+                       % os.path.basename(p))
+            continue
         # -VV, not -V: parfast stamps the commit it was built from on the
         # SECOND line, and a benchmark log that cannot name the source of its
         # own binary is the defect that voided a day of rounds on 10 Sep.
         ver = subprocess.run([p, "-VV"], capture_output=True, text=True)
         line = (ver.stdout + ver.stderr).strip().splitlines()
         stamp = next((l.strip() for l in line if l.startswith("built from ")), "built from ?")
-        print("BIN %s sha256=%s bytes=%d version=%s %s"
-              % (os.path.basename(p), sha256_file(p), os.path.getsize(p),
-                 line[0] if line else "?", stamp), flush=True)
+        out.append("BIN %s sha256=%s bytes=%d version=%s %s"
+                   % (os.path.basename(p), sha256_file(p), os.path.getsize(p),
+                      line[0] if line else "?", stamp))
+    return out

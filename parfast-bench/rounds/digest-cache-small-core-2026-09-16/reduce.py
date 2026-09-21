@@ -5,6 +5,9 @@ import re, sys, statistics
 def parse(path):
     legs = []
     for line in open(path, errors='replace'):
+        # harness-rig-gate: a reducer over the LEG lines of a banked round.
+        #   dcsmall.ps1 is the driver and carries the stamp; this reads what it
+        #   wrote.
         if not line.startswith('LEG '):
             continue
         d = dict(re.findall(r'(\w+)=([^\s\[]+|\[[^\]]*\])', line))

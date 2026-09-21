@@ -33,6 +33,16 @@ against mqueue.lock_hold(), which is the waiter that actually failed. It pins
 $BOXGATE_COORD at a temp file for the duration, so the orphan NOTE it asserts
 lands there and never on this box's real coordination file.
 
+RETIGHTENED 20 Sep 2026: arm 1 stopped being a synthetic "orphan" and became
+what it actually is - an ORDINARY HAND-OVER. `riglock.py`'s `release()`
+truncates rather than unlinks, so a zero-byte lock is that function's own
+spelling for "released", and until this day `lock_state()` could not tell it
+apart from the 16 Sep crash-before-write case above, so every normal
+hand-over on apple-m3-ultra announced RIG-LOCK-ORPHAN and posted a NOTE two lanes
+read as a double-booking that never happened
+(an internal note). Arm 1 now asserts
+SILENCE; arm 2 (a dead pid, a genuine orphan) still asserts the announcement.
+
 SINCE 16 Sep 2026 (later the same day) the same three arms also cover
 riglock.take()/release() - the shell-round wrapper, not a class like the other
 two, so check_riglock_orphans() below is its own function rather than a
@@ -89,8 +99,9 @@ def _coord_pinned(d):
     """Pin $BOXGATE_COORD at a file of OUR OWN for the block.
 
     EVERY take() IN THIS SCRIPT NEEDS THIS, not just the ones that are ABOUT
-    orphans. `riglock.release()` truncates, so the next take() on the same
-    temp lock sees zero bytes, calls `announce_orphan`, and that falls back to
+    orphans. Until 20 Sep 2026 `riglock.release()`'s truncate meant the next
+    take() on the same temp lock saw zero bytes, called `announce_orphan` for
+    a perfectly ordinary hand-over, and that fell back to
     `riglock_state.coordination_file()` - which on a box with exactly one
     ~/bench-out/COORDINATION-*.txt is the REAL one. The handover arms take and
     release a holder lock several times per rep IN THE PARENT, so running this
@@ -100,7 +111,11 @@ def _coord_pinned(d):
     it on the two spinning-disk-nas boxes, which have exactly one coordination file
     each; the dev Mac and amd-epyc-vm have two, so `coordination_file()`
     returned None there and the defect was invisible on every box it had been
-    run on until then.
+    run on until then. `lock_state()` no longer reads a zero-byte file as an
+    orphan at all (an internal note), so the
+    handover arms cannot trigger this any more either way - this pin now
+    guards only the genuine-orphan arms below and is kept for every take()
+    rather than re-litigated per call site.
     """
     original = os.environ.get("BOXGATE_COORD")
     os.environ["BOXGATE_COORD"] = os.path.join(d, "COORDINATION-selftest.txt")
@@ -227,21 +242,27 @@ def check_orphans(name, cls, ctor_args):
         # file, and pinning it here is also what lets arm 1 ASSERT the NOTE.
         os.environ["BOXGATE_COORD"] = coord
 
-        # --- 1. ZERO BYTES: the apple-m3-ultra file itself. It names nobody, so it
-        # is nobody's, at any age - take() must clear it and say so.
+        # --- 1. ZERO BYTES: release()'s own spelling for an ordinary
+        # hand-over, not the 02:17Z crash-before-write case any more -
+        # lock_state() tells them apart since 20 Sep 2026. take() must still
+        # clear it, but SILENTLY: folding this into "orphan" and announcing
+        # it is what made every ordinary riglock.py hand-over on apple-m3-ultra
+        # print a false RIG-LOCK-ORPHAN on 20 Sep 2026
+        # (an internal note).
         _write_lock(lock, "")
         a = cls(*ctor_args, lock_path=lock)
         a.take()
         with open(lock) as fh:
             assert "pid=%d" % os.getpid() in fh.read(), \
-                f"{name}: FAIL: a zero-byte orphan did not hand the lock over"
+                f"{name}: FAIL: a released (zero-byte) lock did not hand over"
         a.release()
-        assert os.path.exists(coord), f"{name}: FAIL: clearing an orphan wrote no coordination NOTE"
-        with open(coord) as fh:
-            assert "ORPHAN" in fh.read(), f"{name}: FAIL: the coordination NOTE does not name the orphan"
+        assert not os.path.exists(coord), \
+            f"{name}: FAIL: an ordinary hand-over (zero bytes) announced an orphan"
 
         # --- 2. A DEAD PID: the ordinary crash, with an identity line intact.
         # Age is deliberately large here to prove age is NOT what decides.
+        # This one is a GENUINE orphan (a non-empty, parseable-but-dead
+        # identity), unlike arm 1, so it must still be cleared AND announced.
         _write_lock(lock, "round=ghost pid=%d started=2026-09-16T02:17:45Z\n" % _dead_pid())
         b = cls(*ctor_args, lock_path=lock)
         b.take()
@@ -249,6 +270,9 @@ def check_orphans(name, cls, ctor_args):
             assert "pid=%d" % os.getpid() in fh.read(), \
                 f"{name}: FAIL: a lock naming a dead pid did not hand over"
         b.release()
+        assert os.path.exists(coord), f"{name}: FAIL: clearing a dead-pid orphan wrote no coordination NOTE"
+        with open(coord) as fh:
+            assert "ORPHAN" in fh.read(), f"{name}: FAIL: the coordination NOTE does not name the orphan"
 
         # --- 3. A LIVE PID, NO FLOCK: the shell taker (`set -o noclobber`),
         # which has no flock to lose, so a flock-based taker wins the flock and
@@ -323,24 +347,34 @@ def check_riglock_orphans():
         coord = os.path.join(d, "COORDINATION-selftest.txt")
         os.environ["BOXGATE_COORD"] = coord
 
-        # --- 1. ZERO BYTES ---
-        _write_lock(lock, "")
+        # --- 1. AN ORDINARY HAND-OVER: take, release, take again. This is the
+        # real production shape - riglock.release() truncates to zero bytes
+        # and never unlinks - and it reproduces the two false-orphan
+        # hand-overs on apple-m3-ultra on 20 Sep 2026 (22:32Z, 22:35Z) rather than
+        # only a synthetic zero-byte file
+        # (an internal note). Must hand
+        # over SILENTLY: no coordination NOTE.
+        first_fd = riglock.take("first-round", tries=5, wait=0, lock_path=lock)
+        riglock.release(first_fd)
         fd = riglock.take("selftest-round", tries=5, wait=0, lock_path=lock)
         with open(lock) as fh:
             assert "pid=%d" % os.getpid() in fh.read(), \
-                "riglock.take: FAIL: a zero-byte orphan did not hand the lock over"
+                "riglock.take: FAIL: a released (zero-byte) lock did not hand over"
         riglock.release(fd)
-        assert os.path.exists(coord), "riglock.take: FAIL: clearing an orphan wrote no coordination NOTE"
-        with open(coord) as fh:
-            assert "ORPHAN" in fh.read(), "riglock.take: FAIL: the coordination NOTE does not name the orphan"
+        assert not os.path.exists(coord), \
+            "riglock.take: FAIL: an ordinary hand-over (zero bytes) announced an orphan"
 
-        # --- 2. A DEAD PID ---
+        # --- 2. A DEAD PID: a genuine orphan, unlike arm 1 - must still be
+        # cleared AND announced.
         _write_lock(lock, "round=ghost pid=%d started=2026-09-16T02:17:45Z\n" % _dead_pid())
         fd = riglock.take("selftest-round", tries=5, wait=0, lock_path=lock)
         with open(lock) as fh:
             assert "pid=%d" % os.getpid() in fh.read(), \
                 "riglock.take: FAIL: a lock naming a dead pid did not hand over"
         riglock.release(fd)
+        assert os.path.exists(coord), "riglock.take: FAIL: clearing a dead-pid orphan wrote no coordination NOTE"
+        with open(coord) as fh:
+            assert "ORPHAN" in fh.read(), "riglock.take: FAIL: the coordination NOTE does not name the orphan"
 
         # --- 3. A LIVE PID, NO FLOCK ---
         sleeper = _live_pid()
@@ -686,6 +720,240 @@ def check_riglock_fairness():
               "can still fail)" % (OLD_DEFAULT_WAIT, lost))
 
 
+# ---------------------------------------------------------------------------
+# THE 18 Sep 2026 ARMS: mqueue's coordination reader and its process census.
+#
+# `mqueue.busy()` is the ONE probe-then-act gate on the unix side - `main()`
+# breaks out of its loop and THEN spawns a round - so it is where both halves
+# of the Windows fix had to land here. Until that day it asked the rig lock and
+# a four-name `ps` list and nothing else, so a lane holding the box by an open
+# CLAIM in prose was invisible, and so was any tool the list did not name.
+#
+# EVERYTHING BELOW IS HERMETIC. The coordination arms drive a temp file through
+# $BOXGATE_COORD; the census arms drive `mqueue.attribute()` with canned `ps`
+# samples and a known window, which is what makes the heavy-process predicate
+# testable at all - the alternative is generating real load, and an orphaned
+# load generator on a shared box is its own incident in this repo's history.
+# One arm at the end runs the REAL `ps`, because six canned arms all pass on a
+# box where `_ps_rows()` parses nothing.
+# ---------------------------------------------------------------------------
+
+
+def _coord(d, *lines):
+    path = os.path.join(d, "COORDINATION-selftest.txt")
+    with open(path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return path
+
+
+def check_mqueue_coord_hold():
+    """mqueue.coord_hold(): another lane's OPEN marker is a hold, and every
+    uncertainty resolves that way too."""
+    import mqueue
+
+    if mqueue._box_gate() is None:
+        # Not a pass. On a rig box the gate is not deployed and these arms
+        # cannot run; say so in words rather than printing PASS over nothing.
+        DISARMED.append(
+            "mqueue.coord_hold: no bench-box-gate.py reachable from here, so the "
+            "coordination arms did NOT run. That is also what mqueue itself does "
+            "on such a box (MQUEUE-COORD-BLIND) - deploy tools/bench-box-gate.py "
+            "or set $MQUEUE_BOX_GATE to cover it.")
+        print("DISARMED mqueue.coord_hold (no bench-box-gate.py on this box)")
+        return
+
+    with tempfile.TemporaryDirectory() as d:
+        live = "CLAIM 2026-09-18T04:00:00Z other-lane-18sep ACCOUNTS=none - running."
+        done = "DONE 2026-09-18T04:30:00Z other-lane-18sep ACCOUNTS=none - finished."
+
+        held = mqueue.coord_hold(_coord(d, live))
+        assert held and "other-lane-18sep" in held, \
+            "FAIL: an open CLAIM read as a FREE box - that hands a running lane's box away"
+
+        assert mqueue.coord_hold(_coord(d, live, done)) is None, \
+            "FAIL: a CLAIM closed by a DONE still blocks - this queue would never start"
+
+        # Failure 1 of bench-box-gate's own history, inherited rather than
+        # re-decided: a QUEUED line is a queue POSITION and opens no hold. One
+        # lane logged `waiting on ...` for 213 minutes through a free box.
+        assert mqueue.coord_hold(_coord(
+            d, "QUEUED 2026-09-18T04:00:00Z other-lane-18sep ACCOUNTS=none - BEHIND x.")) is None, \
+            "FAIL: a QUEUED line opened a hold - that is the 213-minute wait on a free box"
+
+        # A marker NOBODY HAS CLASSIFIED is a hold AND a report. Fix it by
+        # classifying the marker in .claude/tools/bench-accounts-parse.py,
+        # never by teaching this side to ignore it.
+        held = mqueue.coord_hold(_coord(
+            d, "FLURBLE 2026-09-18T04:00:00Z other-lane-18sep ACCOUNTS=none - ?"))
+        assert held and "FLURBLE" in held and "CLASSIFIED" in held, \
+            "FAIL: an unclassified marker did not block - a gate's own blindness must block"
+
+        # THE STAMP SPELLING. 18 Sep 2026: bench-box-gate's parse_events read
+        # ONE spelling and missed 28 OPEN markers across the four live
+        # coordination files - 19 CLAIM, 6 ACTIVATING - which reads as TAKE THE
+        # BOX. It imports the roster's MARKER_TS_RE now. These two are live
+        # spellings off those files.
+        for odd in ("CLAIM 2026-09-18T04:00:00 other-lane-18sep - no trailing Z.",
+                    "ACTIVATING 2026-09-18T04:00Z other-lane-18sep - minute precision."):
+            held = mqueue.coord_hold(_coord(d, odd))
+            assert held and "other-lane-18sep" in held, \
+                "FAIL: %r was invisible - a stamp spelling is a way to lose a holder" % odd
+        # ...and the lane token as a human types it, with punctuation attached.
+        held = mqueue.coord_hold(_coord(
+            d, "CLAIM 2026-09-18T04:00:00Z other-lane-18sep: taking the box."))
+        assert held and "other-lane-18sep" in held, \
+            "FAIL: a lane token with a trailing colon was invisible"
+
+        # MY OWN claim is not somebody else's.
+        os.environ["BOXGATE_ID"] = "other-lane-18sep"
+        try:
+            assert mqueue.coord_hold(_coord(d, live)) is None, \
+                "FAIL: this lane blocked on its OWN open claim"
+        finally:
+            os.environ.pop("BOXGATE_ID", None)
+
+        # A STALE hold still blocks HERE, and says so. bench-box-gate REFUSES on
+        # one because a lane running it can adjudicate; a queue has nobody to
+        # ask, so it waits and names it. Do not add an age bound to make this
+        # pass - liveness comes from the holder, never the clock.
+        held = mqueue.coord_hold(_coord(
+            d, "CLAIM 2020-01-01T00:00:00Z ancient-lane ACCOUNTS=none - long ago."))
+        assert held and "STALE" in held, \
+            "FAIL: a stale un-overtaken hold did not block, or did not say it was stale"
+
+        # A PHANTOM - stale AND overtaken by a whole round since - blocks nothing.
+        assert mqueue.coord_hold(_coord(
+            d,
+            "CLAIM 2020-01-01T00:00:00Z ancient-lane ACCOUNTS=none - long ago.",
+            "CLAIM 2020-02-01T00:00:00Z later-lane ACCOUNTS=none - after it.",
+            "DONE 2020-02-01T01:00:00Z later-lane ACCOUNTS=none - and gave it back.")) is None, \
+            "FAIL: a phantom blocked - the box demonstrably turned over since"
+
+        # AN UNREADABLE FILE IS NOT AN EMPTY ONE, and this is the arm that
+        # matters most: "no open claim" reads as TAKE THE BOX, so a permissions
+        # error must never come back as None.
+        bad = _coord(d, live)
+        os.chmod(bad, 0o000)
+        try:
+            if os.access(bad, os.R_OK):  # root, or a filesystem with no modes
+                print("  (skipped the unreadable-file arm: this user can read a 0000 file)")
+            else:
+                held = mqueue.coord_hold(bad)
+                assert held and "CANNOT BE READ" in held, \
+                    "FAIL: an UNREADABLE coordination file read as a free box"
+        finally:
+            os.chmod(bad, 0o644)
+
+        # A file that is not there at all is a box nobody has claimed on, which
+        # is a different statement from one we cannot read. Reported, not a hold.
+        assert mqueue.coord_hold(os.path.join(d, "no-such-file.txt")) is None, \
+            "FAIL: a MISSING coordination file blocked - that is not the same as unreadable"
+
+    print("PASS mqueue.coord_hold (open claim, QUEUED, unknown marker, stamp "
+          "spellings, self, stale, phantom, unreadable)")
+
+
+def check_mqueue_census():
+    """mqueue.attribute()/census(): CPU attribution decides, the name list
+    corroborates, and the reading is printed whichever way the verdict goes.
+
+    Driven through `attribute()` with canned samples and a known window, so
+    these arms neither sleep nor generate load. An orphaned load generator on a
+    shared box is its own incident in this repo's history, and a test that has
+    to sleep to reach the arithmetic is measuring the sleep.
+    """
+    import mqueue
+
+    me = os.getpid()
+    W = 10.0  # the window, in seconds: cpu_seconds/W*100 is the percentage
+
+    def pair(*procs):
+        """procs: (pid, ppid, comm, percent_of_one_core) -> two samples."""
+        a = [(pid, ppid, 0.0, comm) for pid, ppid, comm, _pct in procs]
+        b = [(pid, ppid, pct / 100.0 * W, comm) for pid, ppid, comm, pct in procs]
+        a.append((me, 1, 0.0, "python3"))
+        b.append((me, 1, 0.0, "python3"))
+        return a, b
+
+    # --- 1. AN IDLE-DESKTOP SHAPE IS FREE. Many processes at 17-40% is what a
+    # box somebody is sitting at looks like, and a dial on the TOTAL calls it
+    # busy and wedges this queue for 24 hours. Measured on the dev Mac 18 Sep
+    # 2026 at total 310%, heavy 0% - these are those five processes.
+    a, b = pair((100, 1, "WindowServer", 40), (101, 1, "Chrome Helper", 20),
+                (102, 1, "Chrome Helper", 19), (103, 1, "fseventsd", 17),
+                (104, 1, "mds_stores", 15))
+    verdict, reading = mqueue.attribute(a, b, W, self_pid=me)
+    assert verdict is None, \
+        "FAIL: an idle interactive desktop read as BUSY (%s) - a dial on the TOTAL " \
+        "rather than on the heavy processes does exactly this" % reading
+    assert "census over" in reading and "of which" in reading, \
+        "FAIL: a FREE census printed no reading - that figure is the one the 13:26Z probe lacked"
+
+    # --- 2. A FEW SATURATED PROCESSES IS BUSY, AND NO NAME LIST SEES THEM.
+    # This is the ISCC case exactly: an Inno Setup compile is in no TOOLS list
+    # and never will be, and the box read genuinely free through 90 seconds of
+    # one while a waiter queued behind it.
+    a, b = pair((200, 1, "iscc", 100), (201, 1, "iscc", 95))
+    verdict, reading = mqueue.attribute(a, b, W, self_pid=me)
+    assert verdict and "iscc" in verdict, \
+        "FAIL: two saturated processes no name list knows read as FREE (%s)" % reading
+    assert "%d%%" % int(mqueue.CPU_BUSY_PCT) in verdict or "dial" in verdict, \
+        "FAIL: the busy verdict does not say what it was measured against"
+
+    # --- 3. ONE HEAVY PROCESS UNDER THE DIAL IS NOT A ROUND. A single busy
+    # core is a compile or a tail, and blocking on it is the wrong direction
+    # for a gate nobody can override.
+    a, b = pair((210, 1, "iscc", 99))
+    verdict, _r = mqueue.attribute(a, b, W, self_pid=me)
+    assert verdict is None, "FAIL: one saturated process alone blocked the queue"
+
+    # --- 4. THE NAME LIST STILL CORROBORATES, AND IT IS WIDER THAN IT WAS.
+    # `cargo` and `rustc` were missing from a list of four, on a fleet that
+    # certainly runs them. A resident tool with no CPU in the window still
+    # counts - that is the whole point of keeping the list.
+    for tool in ("cargo", "rustc", "parfast", "par2"):
+        assert tool in mqueue.TOOLS, "FAIL: %s is not in mqueue.TOOLS" % tool
+    a, b = pair((300, 1, "cargo", 0))
+    verdict, _r = mqueue.attribute(a, b, W, self_pid=me)
+    assert verdict and "cargo" in verdict, \
+        "FAIL: a resident `cargo` burning nothing in the window read as FREE"
+
+    # --- 5. OUR OWN TREE IS NOT A FOREIGN LANE, in BOTH directions: a child we
+    # spawned and the shell that spawned us.
+    a, b = pair((400, me, "python3", 400), (401, 400, "cc", 400))
+    verdict, reading = mqueue.attribute(a, b, W, self_pid=me)
+    assert verdict is None, "FAIL: our own children read as a foreign lane (%s)" % reading
+    a, b = pair((500, 1, "zsh", 0), (me + 100000, 500, "other", 400))
+    a.append((me, 500, 0.0, "python3"))
+    b.append((me, 500, 0.0, "python3"))
+    verdict, _r = mqueue.attribute(a, b, W, self_pid=me)
+    assert verdict is None, "FAIL: a sibling under OUR OWN parent read as a foreign lane"
+
+    # --- 6. A BOX WE CANNOT LOOK AT IS NEVER A CLEAR BOX.
+    real_rows = mqueue._ps_rows
+    try:
+        mqueue._ps_rows = lambda: None
+        verdict, reading = mqueue.census(sample_s=0.0)
+        assert verdict and "BLIND" in verdict, \
+            "FAIL: `ps` failing read as a clear box - blindness is a hold, never a pass"
+    finally:
+        mqueue._ps_rows = real_rows
+
+    # --- 7. AND THE REAL `ps` PARSES ON THIS BOX. Arms 1-6 are all canned, so
+    # every one of them passes on a box where `_ps_rows()` returns nothing
+    # usable - which is the rubber stamp this repo keeps paying for.
+    rows = mqueue._ps_rows()
+    assert rows and len(rows) > 5, "FAIL: mqueue._ps_rows() read no processes on this box"
+    assert any(pid == me for pid, _pp, _s, _c in rows), \
+        "FAIL: mqueue._ps_rows() did not even find THIS process"
+    assert any(secs > 0 for _p, _pp, secs, _c in rows), \
+        "FAIL: every process parsed to zero CPU seconds - the time column is not being read"
+
+    print("PASS mqueue.census (idle desktop free, unnamed saturated work busy, one "
+          "core is not a round, widened name list, own tree excluded both ways, "
+          "ps-blind is a hold, real ps parses)")
+
+
 def _real_coord_stamp():
     """(path, size, mtime) of the BOX's own coordination file, asked with
     $BOXGATE_COORD out of the way so it is the real one - or None when this
@@ -727,6 +995,8 @@ def main():
     check_orphans("ladder.RigLock", ladder.RigLock, ("selftest-round",))
 
     check_mqueue_lock_hold()
+    check_mqueue_coord_hold()
+    check_mqueue_census()
     check_riglock_orphans()
     check_riglock_fairness()
 

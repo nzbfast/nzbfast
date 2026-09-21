@@ -1,0 +1,16 @@
+== 1m-n16384 repair threads=4  CPU-s: median of both copies of each arm (n legs); A/A = worst |X - X2| / min over the reps; verdict clears the A/A floor or is UNRESOLVED
+      m |     fold    force     F/T |   aa_F   aa_T  floor | verdict |      wF      wT  wF/wT | foreign max | peak MB force/fold
+    320 |   161.04   182.77   0.881 |   3.0%   3.9%   3.9% | fold    |   32.61   41.95  0.777 | 16% (8 legs) | 16428/922
+    384 |   179.91   186.77   0.963 |   0.9%   3.8%   3.8% | fold    |   37.43   43.22  0.866 | 27% (8 legs) | 16429/1057
+    448 |   200.41   189.49   1.058 |   1.3%   1.8%   1.8% | ntt     |   42.68   43.84  0.974 | 17% (8 legs) | 16431/1193
+    512 |   216.36   186.35   1.161 |   0.7%   0.7%   0.7% | ntt     |   46.90   43.55  1.077 | 41% (8 legs) | 16433/1330
+  crossover (log-interpolated, median): CPU m ~ 408   wall m ~ 464
+  foreign CPU over 32 legs: median 11% of a core, max 41% (after-leg median 67%)
+== 1m-n16384 repair threads=16  CPU-s: median of both copies of each arm (n legs); A/A = worst |X - X2| / min over the reps; verdict clears the A/A floor or is UNRESOLVED
+      m |     fold    force     F/T |   aa_F   aa_T  floor | verdict |      wF      wT  wF/wT | foreign max | peak MB force/fold
+    320 |   284.09   297.02   0.956 |   2.1%   0.8%   2.1% | fold    |   20.77   26.85  0.774 | 19% (8 legs) | 16514/924
+    384 |   329.86   304.55   1.083 |   2.7%   1.9%   2.7% | ntt     |   23.62   27.64  0.855 | 44% (8 legs) | 16516/1058
+    448 |   369.02   311.16   1.186 |   1.3%   0.8%   1.3% | ntt     |   26.07   28.11  0.927 | 19% (8 legs) | 16523/1193
+    512 |   413.62   308.88   1.339 |   1.4%   0.8%   1.4% | ntt     |   29.03   27.93  1.039 | 39% (8 legs) | 16531/1329
+  crossover (log-interpolated, median): CPU m ~ 342   wall m ~ 489
+  foreign CPU over 32 legs: median 11% of a core, max 44% (after-leg median 169%)

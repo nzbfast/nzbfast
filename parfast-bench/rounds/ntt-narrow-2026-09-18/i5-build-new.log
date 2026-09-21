@@ -1,0 +1,52 @@
+warning: constant `ENCODE_WAVE_MEMORY_BUDGET_MIN` is never used
+    --> vendor\rars\src\codec\rar50.rs:1057:7
+     |
+1057 | const ENCODE_WAVE_MEMORY_BUDGET_MIN: usize = 1 << 30;
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `TREE_WALKER_CAP` is never used
+    --> vendor\rars\src\codec\rar50.rs:1753:7
+     |
+1753 | const TREE_WALKER_CAP: usize = 4;
+     |       ^^^^^^^^^^^^^^^
+
+warning: method `with_member_ends` is never used
+    --> vendor\rars\src\codec\rar50.rs:6773:8
+     |
+6711 | impl StreamingOutput {
+     | -------------------- method in this implementation
+...
+6773 |     fn with_member_ends(mut self, member_ends: Vec<usize>) -> Self {
+     |        ^^^^^^^^^^^^^^^^
+
+warning: field `shares` is never read
+   --> vendor\rars\src\codec\rar50\tree.rs:269:5
+    |
+238 | pub(super) struct TreeMatchFinder {
+    |                   --------------- field in this struct
+...
+269 |     shares: Vec<Vec<u32>>,
+    |     ^^^^^^
+
+warning: method `walk` is never used
+   --> vendor\rars\src\codec\rar50\tree.rs:549:8
+    |
+275 | impl TreeMatchFinder {
+    | -------------------- method in this implementation
+...
+549 |     fn walk(
+    |        ^^^^
+
+warning: constant `STREAMED_FOLD_PARALLEL` is never used
+    --> vendor\rars\src\recovery\rar5.rs:1932:7
+     |
+1932 | const STREAMED_FOLD_PARALLEL: bool = true;
+     |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `rars` (lib) generated 6 warnings
+   Compiling nzbkit-base v1.0.0 (<rig>\narrow-nibble-15sep\src\crates\nzbkit-base)
+   Compiling nzbkit v1.0.0 (<rig>\narrow-nibble-15sep\src\crates\nzbkit)
+   Compiling parfast v1.5.0-beta.3 (<rig>\narrow-nibble-15sep\src\crates\parfast)
+    Finished `release` profile [optimized] target(s) in 1m 20s

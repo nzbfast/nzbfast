@@ -1,0 +1,12 @@
+RECURSIVE leg census over research/, tracked files only
+  dirs holding *.jsonl          : 177
+  dirs holding *.jsonl or *.log : 321
+  *.jsonl files                 : 709
+  *.log files                   : 1818
+  committed *.py under research/: 1078
+
+ARITHMETIC-SHAPE grep for the two-line-crossing construction (the 18 Sep lane's lesson):
+harness/nttfwsum.py
+an internal note
+rounds/w3win-nibble-2026-09-18/w3winred.py
+rounds/wask-nibble-2026-09-16/waskred.py

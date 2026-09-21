@@ -303,6 +303,11 @@ def run_ladder():
 
 def main():
     build_fixture()
+    # The HARNESS's own provenance, and the round-start twin of the
+    # per-leg `rig=` token - see `pdrv.harness_facts`. Without it a
+    # banked log cannot be traced to the harness revision that wrote
+    # it (census an internal note).
+    pdrv.harness_facts()
     if len(sys.argv) > 1 and sys.argv[1] == "probe":
         run_probe()
     else:

@@ -1,0 +1,16 @@
+ok   median of ten known values
+ok   min and max are the ends
+ok   sd is the SAMPLE sd (n-1)
+ok   a float 0.0 is DATA, not absence
+ok   the string n/a is absence
+ok   a missing field is absence
+ok   the ladder opens unfiltered
+ok   the ladder descends after that
+ok   a threshold outside the round is not offered
+ok   keep is STRICTLY less than the threshold (4.0 is OUT)
+ok   measured() accepts a file with SOME floats
+ok   measured() REFUSES a file with no float
+ok   sample is reproducible under its seed
+ok   sample is WITHOUT replacement
+---
+stealsub selftest green on darwin (14 arms).

@@ -179,7 +179,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pdrv import apply_damage, damage_picks, remove_strays, restore_slices  # noqa: E402
+from pdrv import apply_damage, damage_picks, harness_facts, remove_strays, restore_slices  # noqa: E402
 
 R = os.environ.get("R", "/root/cg512-15sep")
 BIN = os.environ.get("BIN") or os.path.join(R, "parfast")
@@ -509,6 +509,11 @@ def series_flag(s):
 
 
 def main():
+    # The HARNESS's own provenance, and the round-start twin of the
+    # per-leg `rig=` token - see `pdrv.harness_facts`. Without it a
+    # banked log cannot be traced to the harness revision that wrote
+    # it (census an internal note).
+    harness_facts()
     for fixname, _, _ in SETS:
         pristine, work, members, gold, keep = cell_setup(fixname)
         if gate(work, members, gold):

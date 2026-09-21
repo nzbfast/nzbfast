@@ -1,0 +1,94 @@
+== i5-nibble-rot-validate.log  metric=wall  160 gated leg(s), 0 refused, reps=[1, 2, 3, 4], rungs=[256, 288, 304, 312, 320, 384, 448, 512, 640, 768]
+
+-- arm order, as banked (position derived from LEG timestamps within each rep and rung) --
+   rep 1 driver NARROW-REP arms=fold,force,auto,autoalt
+   rep 2 driver NARROW-REP arms=force,auto,autoalt,fold
+   rep 3 driver NARROW-REP arms=auto,autoalt,fold,force
+   rep 4 driver NARROW-REP arms=autoalt,fold,force,auto
+   0 (rep, rung) group(s) disagree with the driver's banked order
+   arm      pos0  pos1  pos2  pos3
+   auto       10    10    10    10
+   autoalt    10    10    10    10
+   fold       10    10    10    10
+   force      10    10    10    10
+   BALANCED: every arm in every position equally often (counts [10])
+
+-- box state, min / median / max over all gated legs --
+   foreign_cpu before leg (% of one core, other processes): 3.1 / 17.2 / 71.9
+   foreign_cpu after leg:                                    6.2 / 29.7 / 60.9
+   load_before (Win32_Processor LoadPercentage, whole box):  0.0 / 3.0 / 19.0
+   load_after:                                               0.0 / 3.0 / 14.0
+   five legs with the most foreign CPU either side: m640-autoalt-r1 72/27, m448-fold-r2 16/61, m384-autoalt-r1 28/59, m768-autoalt-r1 19/59, m384-fold-r1 34/56
+   first leg ts=2026-09-18T23:21:48.5722997Z  last leg ts=2026-09-18T23:49:47.0860302Z
+
+-- decisions per arm (path / stripe width W / window count), and whether every rep agreed --
+   m=256   auto=fold  autoalt=fold  fold=fold  force=W 512, 7 win
+   m=288   auto=fold  autoalt=fold  fold=fold  force=W 512, 7 win
+   m=304   auto=fold  autoalt=W 64, 8 win  fold=fold  force=W 512, 7 win
+   m=312   auto=fold  autoalt=W 256, 8 win  fold=fold  force=W 512, 7 win
+   m=320   auto=W 512, 10 win  autoalt=W 512, 10 win  fold=fold  force=W 512, 7 win
+   m=384   auto=W 512, 10 win  autoalt=W 512, 10 win  fold=fold  force=W 512, 7 win
+   m=448   auto=W 512, 10 win  autoalt=W 512, 10 win  fold=fold  force=W 512, 7 win
+   m=512   auto=W 512, 10 win  autoalt=W 512, 10 win  fold=fold  force=W 512, 7 win
+   m=640   auto=W 512, 11 win  autoalt=W 512, 11 win  fold=fold  force=W 512, 7 win
+   m=768   auto=W 512, 11 win  autoalt=W 512, 11 win  fold=fold  force=W 512, 7 win
+
+-- PAIRED fold minus force per rep (positive = force is cheaper) --
+        m    n   fold med  force med  med diff    med %  min diff  max diff   sign       p
+      256    4       3.75       3.61    +0.182   +4.84%    +0.039    +0.298   4/4   0.1250  n.s.
+      288    4       4.12       3.55    +0.589  +14.31%    +0.377    +0.605   4/4   0.1250  n.s.
+      304    4       4.32       3.73    +0.563  +13.05%    +0.452    +0.774   4/4   0.1250  n.s.
+      312    4       4.32       3.73    +0.558  +12.91%    +0.311    +0.692   4/4   0.1250  n.s.
+      320    4       4.54       3.74    +0.804  +17.72%    +0.584    +0.857   4/4   0.1250  n.s.
+      384    4       5.29       3.91    +1.399  +26.43%    +1.316    +1.463   4/4   0.1250  n.s.
+      448    4       6.13       4.01    +2.103  +34.32%    +2.015    +2.244   4/4   0.1250  n.s.
+      512    4       6.92       4.07    +2.826  +40.81%    +2.655    +2.923   4/4   0.1250  n.s.
+      640    4       8.67       4.35    +4.401  +50.78%    +4.147    +4.470   4/4   0.1250  n.s.
+      768    4      10.50       4.74    +5.727  +54.57%    +5.445    +5.864   4/4   0.1250  n.s.
+   sign = reps where force was cheaper; p = exact two-sided binomial. At n=4 the floor is p=0.125.
+   unanimous fold:  none
+   mixed signs:     none
+   unanimous force: [256, 288, 304, 312, 320, 384, 448, 512, 640, 768]
+   => force wins unanimously at the lowest rung measured (m=256): the crossover is BELOW the ladder
+
+-- PAIRED autoalt (base) minus auto (change) per rep (positive = the change is cheaper) --
+        m    n autoalt med   auto med  med diff    med %  min diff  max diff   sign       p
+      256    4       3.75       3.71    +0.040   +1.07%    -0.023    +0.128   3/4   0.6250  n.s.
+      288    4       4.10       4.17    -0.089   -2.17%    -0.098    -0.043   0/4   0.1250  n.s.
+      304    4       7.15       4.34    +2.813  +39.36%    +2.547    +3.241   4/4   0.1250  n.s.
+      312    4       4.26       4.40    -0.156   -3.67%    -0.283    -0.062   0/4   0.1250  n.s.
+      320    4       4.04       4.05    -0.056   -1.39%    -0.126    +0.045   1/4   0.6250  n.s.
+      384    4       4.24       4.37    -0.072   -1.69%    -0.573    +0.146   1/4   0.6250  n.s.
+      448    4       4.42       4.36    +0.104   +2.35%    -0.128    +0.264   2/4   1.0000  n.s.
+      512    4       4.59       4.63    -0.015   -0.34%    -0.065    +0.106   1/4   0.6250  n.s.
+      640    4       5.19       5.20    -0.015   -0.30%    -0.164    +0.223   2/4   1.0000  n.s.
+      768    4       5.54       5.73    -0.171   -3.08%    -0.339    -0.094   0/4   0.1250  n.s.
+   the narrowing rule's verdict: read only where the two arms DECIDED differently (section 3).
+
+-- auto over min(fold, force) OF THE SAME REP (the brief's acceptance ratio), median and range of per-rep ratios --
+   m=256   n=4 median 1.031  range 1.009-1.075
+   m=288   n=4 median 1.176  range 1.119-1.212
+   m=304   n=4 median 1.161  range 1.115-1.223
+   m=312   n=4 median 1.176  range 1.095-1.198
+   m=320   n=4 median 1.093  range 1.059-1.112
+   m=384   n=4 median 1.120  range 1.060-1.237
+   m=448   n=4 median 1.094  range 1.011-1.151
+   m=512   n=4 median 1.121  range 1.073-1.160
+   m=640   n=4 median 1.206  range 1.179-1.236
+   m=768   n=4 median 1.208  range 1.194-1.237
+
+-- position effect, two-way (arm level then rep level divided out): what running Nth is worth, per rung --
+        m      pos0       pos1       pos2       pos3   pos0-pos3
+      256    -0.79%     +0.22%     -0.32%     +1.36%   -2.15%
+      288    +0.35%     -0.48%     -0.89%     +0.80%   -0.45%
+      304    -0.41%     -0.97%     -0.18%     +1.19%   -1.60%
+      312    -0.53%     -0.62%     -0.12%     +0.57%   -1.10%
+      320    +0.85%     -0.52%     -0.58%     -0.21%   +1.06%
+      384    -1.55%     -1.65%     +3.75%     -1.95%   +0.40%
+      448    +2.79%     -0.16%     -2.62%     -0.33%   +3.12%
+      512    -0.67%     -1.61%     -0.08%     +0.84%   -1.51%
+      640    +0.44%     -0.28%     -0.96%     +1.15%   -0.71%
+      768    +0.70%     +0.18%     -0.77%     +0.07%   +0.63%
+   across rungs, median by position: -0.03%  -0.50%  -0.45%  +0.69%
+   read the GAP between positions, not the levels (they are centred). A FIXED order banks pos0 minus the
+   position each arm always held as a systematic term it cannot see.

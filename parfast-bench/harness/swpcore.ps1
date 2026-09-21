@@ -73,6 +73,12 @@ try {
   "SWP-START $((Get-Date).ToUniversalTime().ToString('o'))"
   Write-BoxFacts
   Write-BinFacts $bin @('parfast','par2turbo')
+  # The HARNESS's own provenance, and the round-start twin of the per-leg
+  # `rig=` token - see plib.ps1's Get-RigStamp. $PSCommandPath is THIS driver;
+  # plib.ps1 adds itself. Without it a banked log cannot be traced to the
+  # harness revision that wrote it (census
+  # an internal note).
+  Write-HarnessFacts @($PSCommandPath)
   $armbase = @('parfast','parfast-mcap','turbo')
   $cellno = 0
   "PROTOCOL sizes_gib=[$($sizes -join ', ')] redundancy_pct=[$($reds -join ', ')] threads=$threads recovery=in-place slice_cap=$SLICE_CAP base_slice=$BASE_SLICE mem_arm_mb=$membudget_mb arms=$($armbase -join '/') arm_order=rotating-by-cell"

@@ -1,0 +1,43 @@
+floornull --joint: the whole table under the d-matched null (every rung's drop size held at the steal filter's, only WHICH legs randomised)
+
+  cell     m  d |     n | v0     -> vS     | P(a random d-drop flips this rung)
+  t4      96  3 |    56 | unres  -> fold  *| 0.7143
+  t4     128  0 |     1 | fold   -> fold   | 0.0000
+  t4     160  1 |     8 | fold   -> fold   | 0.0000
+  t4     192  0 |     1 | unres  -> unres  | 0.0000
+  t4     224  1 |     8 | unres  -> unres  | 0.0000
+  t4     256  0 |     1 | unres  -> unres  | 0.0000
+  t4     288  1 |     8 | unres  -> ntt   *| 0.2500
+  t4     320  2 |    28 | unres  -> ntt   *| 0.8214
+  t4     384  1 |     8 | unres  -> ntt   *| 0.7500
+  t4     512  1 |     8 | ntt    -> ntt    | 0.0000
+  t8      96  2 |    28 | fold   -> fold   | 0.0000
+  t8     128  2 |    28 | unres  -> fold  *| 0.2143
+  t8     160  2 |    28 | unres  -> fold  *| 0.5357
+  t8     192  0 |     1 | unres  -> unres  | 0.0000
+  t8     224  1 |     8 | unres  -> ntt   *| 0.2500
+  t8     256  0 |     1 | ntt    -> ntt    | 0.0000
+  t8     288  0 |     1 | ntt    -> ntt    | 0.0000
+  t8     320  0 |     1 | ntt    -> ntt    | 0.0000
+  t8     384  3 |    56 | ntt    -> ntt    | 0.0000
+  t8     512  0 |     1 | ntt    -> ntt    | 0.0000
+
+  the steal filter flips 7 of 20 rungs.
+  under the d-matched null the EXPECTED number of flips is 3.54, sd 1.15,
+  and P(a random same-size drop flips 7 or more) = 0.0032.
+
+  distribution of the flip count under that null:
+    0:0.003  1:0.032  2:0.145  3:0.307  4:0.317  5:0.157  6:0.036  7:0.003
+
+  READ THIS AGAINST THE PER-RUNG TABLE AND NOT INSTEAD OF IT. The two
+  answer different questions and both answers are real: no INDIVIDUAL
+  flip is established (every one is reproduced by chance 21% to 82% of
+  the time, and three of them sit in 8-member nulls whose smallest
+  attainable P is 0.125), while the SET of them is not chance - which
+  says steal predicts WHICH leg owns the A/A worst, and nothing about
+  whether any one rung's verdict can now be read.
+
+  AND THIS IS A CALIBRATION, NOT A SIZED HYPOTHESIS TEST. The statistic
+  is computed on the round that raised the question, so 0.0032 prices
+  the coincidence and does not license a decision - the same limit the
+  guest-steal retrospective states about its own nulls.

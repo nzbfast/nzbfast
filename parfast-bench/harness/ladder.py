@@ -224,6 +224,38 @@ def quiet(max_load):
         time.sleep(5); waited += 5
     return waited
 
+def harness_lines(paths):
+    """The round-start harness stamp, `plib.ps1` / `pdrv.py` format exactly:
+    one `HARNESS <basename> sha256=... bytes=...` per file the round sources,
+    then `HARNESS-RIG <basename>:<sha16>+...` sorted by basename.
+
+    COMPOSED HERE RATHER THAN CALLED FROM `pdrv.harness_facts`, and that is
+    the whole reason this exists: this driver tees its log through `say`,
+    writing the banked file AND stdout, where `pdrv.harness_facts` uses a bare
+    `print` - so calling it would put the stamp on stdout and leave the BANKED
+    log unstamped, which is the exact defect being fixed
+    (an internal note). Returns the lines for
+    the caller to `say`; it prints nothing itself.
+
+    An unreadable file is stamped `unreadable` rather than left off, for
+    pdrv.rig_stamp's reason: an absent token is indistinguishable from a
+    harness older than this block, which never had one.
+    """
+    out, parts = [], []
+    for p in sorted((os.path.abspath(q) for q in paths), key=os.path.basename):
+        nm = os.path.basename(p)
+        try:
+            sha, n = sha256_file(p), os.path.getsize(p)
+        except OSError:
+            out.append(f"HARNESS {nm} sha256=unreadable bytes=0")
+            parts.append(f"{nm}:unreadable")
+            continue
+        out.append(f"HARNESS {nm} sha256={sha} bytes={n}")
+        parts.append(f"{nm}:{sha[:16]}")
+    out.append("HARNESS-RIG " + ("+".join(parts) if parts else "unknown"))
+    return out
+
+
 def box_line():
     host = socket.gethostname()
     cpu = platform.processor() or platform.machine()
@@ -447,6 +479,12 @@ def main():
     try:
         say(f"RIG-LOCK-TAKEN {lock} pid={os.getpid()}")
         say(f"LAD-START {now()}")
+        # The HARNESS's own provenance, so a banked round can be traced to
+        # the harness revision that wrote it. riglock_state.py and winproc.py
+        # are named because this driver imports them, the way plib.ps1 hashes
+        # both itself and its caller.
+        for _l in harness_lines([__file__, riglock_state.__file__,
+                                 winproc.__file__]): say(_l)
         say(box_line())
         for nm, p in tools.items(): say(bin_line(nm, p))
         src_blocks = a.members * (-(-a.member_bytes // a.slice))

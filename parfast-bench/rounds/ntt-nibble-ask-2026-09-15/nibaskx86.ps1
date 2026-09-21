@@ -88,6 +88,9 @@ function Run-Wcomb([string]$tag, [string]$extra) {
 function Read-Legs([string]$log) {
   foreach ($line in (Get-Content $log)) {
     $t = $line.TrimStart([char]0xFEFF)
+    # harness-rig-gate: a reducer. This StartsWith reads the LEG lines of a
+    #   banked round it is handed; it writes no round log, so it has nothing to
+    #   stamp.
     if (-not $t.StartsWith('LEG ')) { continue }
     $kv = @{}
     foreach ($tok in $t.Split(' ')) { $i = $tok.IndexOf('='); if ($i -gt 0) { $kv[$tok.Substring(0, $i)] = $tok.Substring($i + 1) } }

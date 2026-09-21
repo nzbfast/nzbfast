@@ -1,0 +1,22 @@
+== 1m repair threads=4  CPU-s: median of both copies of each arm (n legs); A/A = worst |X - X2| / min over the reps; verdict clears the A/A floor or is UNRESOLVED
+      m |     fold    force     F/T |   aa_F   aa_T  floor | verdict |      wF      wT  wF/wT | foreign max | peak MB force/fold
+    192 |    29.56    40.15   0.736 |   4.4%   1.3%   4.4% | fold    |    5.44    8.57  0.635 | 20% (8 legs) | 4132/655
+    256 |    33.89    41.05   0.826 |   1.5%   1.3%   1.5% | fold    |    6.63    8.80  0.753 | 17% (8 legs) | 4133/788
+    320 |    38.51    40.39   0.953 |   2.3%   0.4%   2.3% | fold    |    7.76    8.72  0.890 | 30% (8 legs) | 4136/921
+    384 |    42.61    41.57   1.025 |   2.6%   1.1%   2.6% | unres   |    8.85    9.00  0.983 | 80% (8 legs) | 4136/1056
+    448 |    47.12    42.34   1.113 |   0.8%   2.4%   2.4% | ntt     |   10.06    9.30  1.081 | 12% (8 legs) | 4139/1191
+    512 |    51.33    43.30   1.185 |   0.4%   0.9%   0.9% | ntt     |   11.18    9.57  1.167 | 14% (8 legs) | 4141/1329
+    640 |    60.21    45.54   1.322 |   1.2%   3.5%   3.5% | ntt     |   13.42   10.21  1.315 | 14% (8 legs) | 4145/1554
+  crossover (log-interpolated, median): CPU m ~ 361   wall m ~ 395
+  foreign CPU over 56 legs: median 9% of a core, max 80% (after-leg median 25%)
+== 1m repair threads=16  CPU-s: median of both copies of each arm (n legs); A/A = worst |X - X2| / min over the reps; verdict clears the A/A floor or is UNRESOLVED
+      m |     fold    force     F/T |   aa_F   aa_T  floor | verdict |      wF      wT  wF/wT | foreign max | peak MB force/fold
+    192 |    43.98    62.70   0.701 |   1.9%   1.5%   1.9% | fold    |    3.68    5.56  0.661 | 12% (8 legs) | 4207/657
+    256 |    51.87    63.48   0.817 |   2.8%   0.6%   2.8% | fold    |    4.25    5.49  0.775 | 84% (8 legs) | 4213/789
+    320 |    60.71    64.40   0.943 |   1.0%   0.1%   1.0% | fold    |    4.84    5.60  0.865 | 27% (8 legs) | 4221/922
+    384 |    68.60    65.51   1.047 |   1.0%   1.9%   1.9% | ntt     |    5.34    5.72  0.933 | 27% (8 legs) | 4224/1056
+    448 |    76.34    67.02   1.139 |   3.2%   0.7%   3.2% | ntt     |    5.92    5.87  1.009 | 23% (8 legs) | 4231/1192
+    512 |    85.10    68.34   1.245 |   3.7%   1.7%   3.7% | ntt     |    6.58    6.04  1.090 | 34% (8 legs) | 4238/1328
+    640 |   102.96    72.34   1.423 |   0.5%   0.6%   0.6% | ntt     |    7.71    6.32  1.219 | 12% (8 legs) | 4253/1554
+  crossover (log-interpolated, median): CPU m ~ 354   wall m ~ 440
+  foreign CPU over 56 legs: median 8% of a core, max 84% (after-leg median 30%)

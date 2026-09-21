@@ -1,0 +1,49 @@
+2026-09-18T00:57:57.6531802Z CFLOAD start root=<rig>\cfload16sep lane=parfast-load-term-and-third-binary-i5
+2026-09-18T00:57:57.7479987Z HARNESS plib.ps1 sha256=20CB3299332113BD
+2026-09-18T00:57:57.7479987Z HARNESS wcomb.ps1 sha256=60DED61D70BC4ABD
+2026-09-18T00:57:57.7479987Z HARNESS loadgen.ps1 sha256=9698D5DEB71A399D
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=cfload pid=3208 started=2026-09-18T00:57:57.7637223Z
+2026-09-18T00:57:57.7794614Z EXTRACT <rig>\cfload16sep\src-4fedd8b33.tar.gz -> <rig>\cfload16sep\src
+2026-09-18T00:58:02.7791440Z EXTRACT done secs=5
+2026-09-18T00:58:02.7791440Z FIXTURE copying <rig>\wcomb-16sep\fix -> <rig>\cfload16sep\fix
+2026-09-18T00:58:04.4129279Z FIXTURE copied secs=1.6
+2026-09-18T01:00:16.3187578Z BUILD rc=0 secs=130.4 log=<rig>\cfload16sep\build.log
+2026-09-18T01:00:16.3379846Z BIN sha256=8480631C5BD98B7A1BB3CF9A8D69987002AD93A77D536B0BB7FEE3B59C8CEE06 <rig>\cfload16sep\src\target\release\parfast.exe
+2026-09-18T01:00:16.3379846Z GEN-SELFTEST start
+2026-09-18T01:00:37.5596985Z GEN-SELFTEST foreign_cpu_with_generator=128.1 (box idles near 18)
+2026-09-18T01:01:02.5986341Z GEN-SELFTEST ok pid=14352 died on its own deadline after 25 s of nobody helping it
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+2026-09-18T01:08:59.1357079Z LEGSET q1 rc=0 legs=22 log=<rig>\cfload16sep\q1.log
+2026-09-18T01:15:59.3370775Z LEGSET q2 rc=0 legs=22 log=<rig>\cfload16sep\q2.log
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=cfload pid=3208 started=2026-09-18T01:15:59.3370775Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+2026-09-18T01:15:59.3370775Z LOCKPROBE l90a lock was free on try 1 - starting load now
+2026-09-18T01:15:59.3671189Z GEN-START pid=4288 target_pct=72 deadline=2026-09-18T01:40:59.3510577Z
+2026-09-18T01:22:43.9278800Z LEGSET l90a rc=0 legs=22 log=<rig>\cfload16sep\l90a.log
+2026-09-18T01:22:43.9498908Z GEN-STOP pid=4288 kill sent
+2026-09-18T01:22:45.9695356Z GEN-STOP pid=4288 confirmed gone
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=cfload pid=3208 started=2026-09-18T01:22:45.9695356Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+2026-09-18T01:22:45.9695356Z LOCKPROBE l50a lock was free on try 1 - starting load now
+2026-09-18T01:22:45.9992912Z GEN-START pid=1880 target_pct=32 deadline=2026-09-18T01:47:45.9695356Z
+2026-09-18T01:29:54.9522352Z LEGSET l50a rc=0 legs=22 log=<rig>\cfload16sep\l50a.log
+2026-09-18T01:29:54.9522352Z GEN-STOP pid=1880 kill sent
+2026-09-18T01:29:56.9577303Z GEN-STOP pid=1880 confirmed gone
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=cfload pid=3208 started=2026-09-18T01:29:56.9577303Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+2026-09-18T01:29:56.9734270Z LOCKPROBE l50b lock was free on try 1 - starting load now
+2026-09-18T01:29:57.0255282Z GEN-START pid=15816 target_pct=32 deadline=2026-09-18T01:54:56.9734270Z
+2026-09-18T01:36:31.4822912Z LEGSET l50b rc=0 legs=22 log=<rig>\cfload16sep\l50b.log
+2026-09-18T01:36:31.4822912Z GEN-STOP pid=15816 kill sent
+2026-09-18T01:36:33.5019740Z GEN-STOP pid=15816 confirmed gone
+RIG-LOCK-TAKEN <rig>\.parfast-rig.lock round=cfload pid=3208 started=2026-09-18T01:36:33.5060016Z
+RIG-LOCK-RELEASED <rig>\.parfast-rig.lock
+2026-09-18T01:36:33.5130526Z LOCKPROBE l90b lock was free on try 1 - starting load now
+2026-09-18T01:36:33.5678422Z GEN-START pid=496 target_pct=72 deadline=2026-09-18T02:01:33.5130526Z
+2026-09-18T01:43:22.7950507Z LEGSET l90b rc=0 legs=22 log=<rig>\cfload16sep\l90b.log
+2026-09-18T01:43:22.7980627Z GEN-STOP pid=496 kill sent
+2026-09-18T01:43:24.8094778Z GEN-STOP pid=496 confirmed gone
+2026-09-18T01:49:48.2191864Z LEGSET qp rc=0 legs=22 log=<rig>\cfload16sep\qp.log
+2026-09-18T01:49:48.2372175Z CFLOAD-CLEAN no generator pid of mine is alive
+2026-09-18T01:49:49.2775760Z CFLOAD foreign_cpu_after=17.2
+2026-09-18T01:49:49.2775760Z CFLOAD ALL DONE

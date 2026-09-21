@@ -1,0 +1,51 @@
+==============================================================================
+8.17 shipped arm, gate 128
+  PUBLISHED as a located crossing; the census brackets the truth
+  rungs 37, line sizes [25, 9], EXCLUDED 3 (16000, 16384, 16768)
+  location 1: re-fit    17760.9   published    17760.9   (0.000% apart)
+  NULL: 7770 exhaustive draws (0 degenerate), 200 sampled (0 degenerate), 200 bootstrap (0 degenerate)
+
+  loc    published    null med     null p5    null p95    pctile     boot sd
+  1        17760.9     17555.5     17496.1     17637.7   100.00%        56.1
+         [sampled]     17562.0     17510.8     17647.1   100.00%   (200 sampled draws)
+       truth 16384-16896: published is +6.74% of it; the NULL's own 5-95 span is 0.85% of the truth, and the truth sits at pctile 0.00% of the null
+
+==============================================================================
+8.17 ADDITIVE_MIN=64 arm
+  computed by the same reducer, NOT published - 8.17.5 quotes the bracket
+  rungs 24, line sizes [13, 9], EXCLUDED 2 (8000, 8512)
+  location 1: re-fit    18115.1   published    18115.1   (0.000% apart)
+  NULL: 276 exhaustive draws (0 degenerate), 200 sampled (0 degenerate), 200 bootstrap (0 degenerate)
+
+  loc    published    null med     null p5    null p95    pctile     boot sd
+  1        18115.1     16038.4     12757.2     18079.9    96.01%        65.0
+         [sampled]     16040.2     12757.2     17891.7    98.50%   (200 sampled draws)
+       truth 8192-8192: published is +121.13% of it; the NULL's own 5-95 span is 64.97% of the truth, and the truth sits at pctile 0.00% of the null
+
+==============================================================================
+8.17 ADDITIVE=0 arm (control)
+  the causal control: no break exists, so no location should
+  rungs 21, line sizes [14, 5], EXCLUDED 2 (16032, 16416)
+  location 1: re-fit     -576.9   published     -576.9   (0.008% apart)
+  NULL: 210 exhaustive draws (0 degenerate), 200 sampled (0 degenerate), 200 bootstrap (0 degenerate)
+
+  loc    published    null med     null p5    null p95    pctile     boot sd
+  1         -576.9     -1804.7     -3861.6     10006.1    57.14%      8320.5
+         [sampled]     -1750.9     -4061.5     10169.3    56.00%   (200 sampled draws)
+
+==============================================================================
+8.21 depth-1 nibble, two tile knees
+  the depth-2 and depth-1 tiles, both structural
+  rungs 17, line sizes [5, 6, 4], EXCLUDED 2 (4369, 21845)
+  location 1: re-fit     4230.4   published     4216.4   (0.331% apart)
+  location 2: re-fit    21932.1   published    21932.1   (0.000% apart)
+  NULL: 136 exhaustive draws (0 degenerate), 200 sampled (0 degenerate), 152 bootstrap (48 degenerate)
+
+  loc    published    null med     null p5    null p95    pctile     boot sd
+  1         4230.4      4268.1      4213.5      5018.6    19.12%        29.1
+         [sampled]      4259.1      4213.5      5039.4    25.00%   (200 sampled draws)
+       truth 4369-4369: published is -3.17% of it; the NULL's own 5-95 span is 18.43% of the truth, and the truth sits at pctile 88.97% of the null
+  2        21932.1     21932.1     21578.1     22806.9    51.47%       493.8
+         [sampled]     21932.1     21560.2     22806.9    53.50%   (200 sampled draws)
+       truth 21845-21845: published is +0.40% of it; the NULL's own 5-95 span is 5.62% of the truth, and the truth sits at pctile 45.59% of the null
+

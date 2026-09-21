@@ -1,0 +1,6 @@
+ INFO repair-timing: create arms: n=32768 rows=4915 batches=2 fused=false (fusable shape=false, fusion displaced by the transform=false)
+ INFO repair-timing: create stripe-first admitted: 2 batches, 4915 rows, n=32768
+ INFO repair-timing: fold tile budget 32 KiB (L2 per core 256 KiB)
+ INFO repair-timing: create stripe-first: 4915 rows in 60 chunk(s) of 24 stripes (n=32768, mapped, W=1024, threads=12, probe ok): 1168.37s
+ INFO repair-timing: create scan + fold: 1168.43s
+ INFO repair-timing: plan prep: 15.59ms over 1 cold build(s), 1440 stripe use(s) - 0.001% of the 1168.53s create

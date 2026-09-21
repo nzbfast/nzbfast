@@ -1,0 +1,26 @@
+ok   the round is the banked 64 KiB EPYC ladder
+ok   every cell is 8 legs (4 arms x 2 reps)
+ok   stealsub keeps the 179 legs the retrospective's 4.1 table names
+ok   unfiltered: every rowgate row is reproduced here (20 rows)
+ok   unfiltered: floor to rowgate's own 0.1% and verdict exact
+ok   unfiltered: reached a non-trivial number of rows
+ok   steal < 8.00: every rowgate row is reproduced here (20 rows)
+ok   steal < 8.00: floor to rowgate's own 0.1% and verdict exact
+ok   steal < 8.00: reached a non-trivial number of rows
+ok   t8 m=224 drops ONE leg, so its whole null is EIGHT members
+ok   every member of an 8-choose-7 family still reduces
+ok   t8 m=128 drops TWO, so C(8,2) = 28
+ok   the full-8 reduction is not a member of a d>0 family
+ok   call() is strict - an effect EQUAL to the floor is unresolved
+ok   call() is symmetric about 1.0
+ok   a drop that empties an arm group is not a verdict
+ok   pct_le puts a maximum at 100 and a unique minimum at its share
+ok   of the C(8,4) = 70 four-leg keeps, exactly 68 are a verdict
+ok   SEVEN rungs flip at steal < 8.00%, not the three the handoff names
+ok   the flipping rungs are EXACTLY the straddled ones
+ok   the three the handoff names are among them
+ok   no flip is reproduced by chance less than 20% of the time
+ok   at steal < 5.00% t8 m=160 keeps one leg
+ok   a rung cut to one leg has NO verdict and NO null
+---
+floornull selftest green on darwin: the reduction reproduces rowgate.py's own table at both settings.

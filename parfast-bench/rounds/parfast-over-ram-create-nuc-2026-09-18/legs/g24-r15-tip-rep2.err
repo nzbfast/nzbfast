@@ -1,0 +1,10 @@
+ INFO repair-timing: create arms: n=32768 rows=4915 batches=1 fused=false (fusable shape=false, fusion displaced by the transform=false)
+ INFO repair-timing: create stripe-first refused: one batch - the batched path already makes a single pass (1 batch(es), 4915 rows, n=32768, fused=false)
+ INFO repair-timing: fold tile budget 32 KiB (L2 per core 256 KiB)
+ INFO repair-timing: create ntt rows 0+4915 (n=32768, mapped, 0 tail(s) padded, W=512, 768 stripe(s), threads=12, probe ok): 25.18s
+ INFO repair-timing: create recovery batch 0+4915: 28.68s (total 28.69s) (fold width 12 of 12)
+ INFO repair-timing: create seals: mode=lanes rows=4915 in 220.3344ms
+ INFO repair-timing: create scan + fold: 39.80s; batch fold width 12 of 12 a priori (0 restore(s)); scan lanes 2 of 12 a priori
+ INFO repair-timing: plan prep: 15.32ms over 1 cold build(s), 768 stripe use(s) - 0.038% of the 39.82s create
+mem-floor: live high-water ┬À ru_maxrss 29929 MB ┬À rss 29922 MB ┬À footprint 29922 MB ┬À rss over footprint 0 MB ┬À repair work 0 MB (own peak 0) ┬À scan reads 0 MB (own peak 0) ┬À verifier tables 0 MB ┬À unattributed 29922 MB
+mem-floor: sampled peak rss ┬À ru_maxrss 29929 MB ┬À rss 29922 MB ┬À footprint 29922 MB ┬À rss over footprint 0 MB ┬À repair work 0 MB (own peak 0) ┬À scan reads 0 MB (own peak 0) ┬À verifier tables 0 MB ┬À unattributed 29922 MB

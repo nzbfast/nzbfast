@@ -1,0 +1,28 @@
+=== P0c-128m-cold-floor-w8-PIN32-vs-PIN20   set=set-4x128 cache=cold runs=32   box_before:  2.21 2.31 2.27   foreign_1core: 101.5 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P0c-128m-cold-floor-w8-PIN32-vs-PIN20  drop=2 width=default runs=32/arm cache=cold
+  base   median  215.456 ms   min  213.065   span 213.1-227.2   process CPU   805.4 ms
+  new    median  204.314 ms   min  201.711   span 201.7-210.2   process CPU   581.1 ms
+  new/base  median 0.948   min/min 0.947
+  cache cold: resident before 49154-49154/49154 (100.00-100.00%), after 0-0/49154 (0.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  4.22 2.75 2.43
+
+=== P0c-128m-cold-floor-w8-AA-PIN32   set=set-4x128 cache=cold runs=32   box_before:  4.22 2.75 2.43   foreign_1core:  99.8 /usr/libexec/spotlightknowledged.updater
+  ... 16/64
+  ... 32/64
+  ... 48/64
+  ... 64/64
+
+P0c-128m-cold-floor-w8-AA-PIN32  drop=2 width=default runs=32/arm cache=cold
+  base   median  215.786 ms   min  213.635   span 213.6-220.2   process CPU   803.3 ms
+  new    median  215.782 ms   min  211.865   span 211.9-221.1   process CPU   809.5 ms
+  new/base  median 1.000   min/min 0.992
+  cache cold: resident before 49154-49154/49154 (100.00-100.00%), after 0-0/49154 (0.00% worst)
+  kept set sha256 41fa3d0eb56f7311 unchanged
+    box_after:  3.60 2.70 2.42
+
