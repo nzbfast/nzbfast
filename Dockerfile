@@ -47,7 +47,7 @@ RUN touch crates/nzbkit/src/lib.rs crates/nzbfast/src/main.rs \
     && objcopy --strip-all --add-gnu-debuglink=target/release/nzbfast.debug \
          target/release/nzbfast
 
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 # unrar (non-free) is the real unrar, and unrar-free chokes on too many
 # real-world RAR sets. This line used to say it "matches the real unrar
 # the desktop bundles embed"; they embed nothing. packaging/
