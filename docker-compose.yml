@@ -60,7 +60,7 @@ services:
     #   SETUID, SETGID   the privilege drop itself
     #   CHOWN            give a freshly created bind mount to PUID/PGID
     #   FOWNER           chmod the config file to 0600 once it is theirs
-    #   KILL             kill processes to allow stop and restart to wrok
+    #   KILL             kill processes to allow stop and restart to work
     #   DAC_OVERRIDE     read and fix up a /config a previous run left
     #                    owned by somebody else
     #
