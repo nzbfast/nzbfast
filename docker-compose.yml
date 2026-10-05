@@ -60,19 +60,21 @@ services:
     #   SETUID, SETGID   the privilege drop itself
     #   CHOWN            give a freshly created bind mount to PUID/PGID
     #   FOWNER           chmod the config file to 0600 once it is theirs
+    #   KILL             kill processes to allow stop and restart to wrok
     #   DAC_OVERRIDE     read and fix up a /config a previous run left
     #                    owned by somebody else
     #
     # What that removes, relative to the fourteen Docker grants by default:
-    # NET_RAW (raw sockets), MKNOD, SETPCAP, SETFCAP, SYS_CHROOT, KILL,
-    # FSETID, AUDIT_WRITE and NET_BIND_SERVICE. The daemon itself runs with
-    # no capabilities at all either way.
+    # NET_RAW (raw sockets), MKNOD, SETPCAP, SETFCAP, SYS_CHROOT, FSETID,
+    # AUDIT_WRITE and NET_BIND_SERVICE. The daemon itself runs with no
+    # capabilities at all either way.
     cap_drop:
       - ALL
     cap_add:
       - CHOWN
       - DAC_OVERRIDE
       - FOWNER
+      - KILL
       - SETGID
       - SETUID
     # Nothing in the container is setuid, so this costs nothing and closes
