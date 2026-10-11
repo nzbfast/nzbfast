@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Benchmarks - nzbfast</title>
-<meta name="description" content="nzbfast medido contra outros quatro clientes de Usenet em hardware idêntico: tempo até um arquivo utilizável, mais o disco, o espaço livre e a memória que cada trabalho custa. Cada tabela nomeia os builds que correram nela. Inclui os legs que o nzbfast não vence.">
+<meta name="description" content="nzbfast medido contra outros três clientes de Usenet em hardware idêntico: tempo até um arquivo utilizável, mais o disco, o espaço livre e a memória que cada trabalho custa. Cada tabela nomeia os builds que correram nela. Inclui os legs que o nzbfast não vence.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="benchmarks.html">
@@ -62,18 +62,16 @@
     <h2>Nenhum cliente medido é mais barato em processador, memória e disco juntos</h2>
     <p class="lead">As rodadas mais recentes desta página correram em 23 e 24 de agosto de 2026 - a
     mais recente delas no próprio <b>build de lançamento v1.2.2</b> - contra os
-    builds atuais de outros quatro clientes no mesmo hardware, linhas e provedores: duas formas
+    builds atuais de outros três clientes no mesmo hardware, linhas e provedores: duas formas
     de trabalho de 6,5 a 87 GB, e taxas de linha de 250 Mbit a 10 GbE. Nessas
     rodadas nenhum cliente foi mais barato que o nzbfast em processador, memória e disco juntos:
-    cada um custa mais em pelo menos dois dos três, o máximo que qualquer um deles economizou em qualquer
-    eixo isolado foi cerca de 2 por cento - um empate estatístico, dentro da própria variação
-    entre execuções desse cliente - e em disco cada um deles moveu pelo menos o dobro dos bytes
+    cada um custa mais nos três, e em disco cada um deles moveu pelo menos o dobro dos bytes
     para um resultado byte a byte idêntico. Como distribuído, o nzbfast também segurou a menor memória de
     todo cliente medido, em cada fixture, por 2,0x a 4,5x contra o rival mais próximo.</p>
     <p><b>Qual desses é você?</b></p>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px">
       <div class="callout" style="margin:0"><b>Um NAS, um mini PC, ou um pequeno servidor doméstico.</b>
-      O nzbfast segurou 143 MB de memória em um trabalho em que o rival mais próximo segurou 531 MB e o
+      O nzbfast segurou 143 MB de memória em um trabalho em que o rival mais próximo segurou 628 MB e o
       mais pesado 1,6 GB, termina com cerca de 50 MB de espaço livre de sobra onde outros
       clientes precisam de aproximadamente o dobro do download livre, e a escada de pouca memória colocou um
       trabalho de 87 GB no disco em 286 MB de RAM nas predefinições de fábrica. E porque move cada byte pelo seu disco
@@ -117,16 +115,16 @@
     <p class="kicker">Metodologia primeiro</p>
     <h2>A configuração</h2>
     <ul class="plain">
-      <li><b>Clientes:</b> nzbfast · SABnzbd · NZBGet · rustnzb · Weaver, cada tabela nos
+      <li><b>Clientes:</b> nzbfast · SABnzbd · NZBGet · rustnzb, cada tabela nos
       builds que ela nomeia. As rodadas mais recentes (23 de agosto de 2026) correram contra os builds
-      então atuais do campo - SABnzbd 5.1.1, NZBGet 26.3-testing, rustnzb 1.4.5 e Weaver 0.7.8, seu
-      binário distribuído mais recente, identidade provada por hash - contra a linha de código que foi lançada
+      então atuais do campo - SABnzbd 5.1.1, NZBGet 26.3-testing e rustnzb 1.4.5 - contra a linha de código que foi lançada
       naquela noite como <b>nzbfast 1.2.2</b>, então o build que produziu os números novos é
       o mesmo que você pode baixar. Essas rodadas correram em uma máquina Apple Silicon de 20 núcleos em uma
       linha de 1&nbsp;Gbit. Tabelas mais antigas mantêm os builds e máquinas contra os quais correram (máquinas Apple
       série M: "Europa" M1 Ultra em 10&nbsp;GbE, "costa leste" M3 Ultra
       linha de ~2,4-3,0 Gbps) e dizem isso; elas subestimam o build distribuído em vez de
-      favorecê-lo.</li>
+      favorecê-lo. Os resultados do Weaver foram removidos desta página porque seus builds avançaram
+      desde estas rodadas; eles voltarão com a próxima repetição completa.</li>
       <li><b>Justiça:</b> os mesmos provedores e TLS em todo lugar para cada cliente, legs corridos um atrás do outro intercalados. Cada concorrente ajustado ao seu melhor documentado: o SABnzbd recebeu <code>pipelining_requests=8</code> (<b>ele é distribuído com 1, ou seja, sem pipelining</b>, e o ajuste vale porcentagens de dois dígitos em trabalhos grandes), o NZBGet recebeu ArticleCache/DirectWrite/DirectUnpack/ParQuick, o rustnzb sua configuração documentada. Desde 20 de agosto de 2026 cada rodada corre com <b>cinco provedores</b> em vez de seis - o número de provedores não é uma alavanca de throughput nessas máquinas, onde um único provedor sozinho já alcança o teto da linha, e um conjunto fixo mantém as rodadas comparáveis - então um número de seis provedores nesta página não é diretamente comparável com um número mais novo de cinco provedores, e cada tabela diz qual dos dois rodou.</li>
       <li><b>Estado final:</b> um arquivo verificado, extraído, utilizável, não "download terminado". É isso que você realmente espera.</li>
       <li><b>Reprodutibilidade:</b> cada afirmação é datada e medida da mesma forma: tempo decorrido + contadores de bytes da interface + pico de RSS da árvore de processos, resolução de 1-2 s. Onde um leg roda sobre um NZB publicado publicamente, nós o nomeamos para que você possa rodá-lo você mesmo.</li>
@@ -149,11 +147,11 @@
   <div class="wrap">
     <p class="kicker">A rodada de 23 de agosto de 2026</p>
     <h2>O que um trabalho custa: cada cliente atual, uma noite, uma máquina</h2>
-    <p class="lead">Seis braços em uma máquina Apple Silicon de 20 núcleos em uma linha de 1 Gbit: o nzbfast nas
+    <p class="lead">Cinco braços em uma máquina Apple Silicon de 20 núcleos em uma linha de 1 Gbit: o nzbfast nas
     predefinições de fábrica, o mesmo binário com seu regulador de conexões desligado, e os
-    builds atuais dos outros quatro clientes. Cinco provedores, TLS em todo lugar, três
+    builds atuais dos outros três clientes. Cinco provedores, TLS em todo lugar, três
     repetições por cliente por fixture com a ordem alternada dentro de cada rodada, e
-    a saída de cada leg verificada byte a byte: 36 de 36 legs produziram o payload exato.
+    a saída de cada leg verificada byte a byte: 30 de 30 legs produziram o payload exato.
     A 1 Gbit a linha dita o ritmo e os tempos de término convergem por definição, então a
     coluna de tempo está lá para mostrar essa convergência; as colunas de recursos são o que a
     rodada existe para medir.</p>
@@ -165,12 +163,11 @@
     <div class="tblwrap"><table>
       <thead><tr><th>release nomeado de 6,5 GB, extração no caminho</th><th>tempo até arquivo utilizável</th><th>memória de pico (RSS)</th><th>tempo de CPU</th><th>E/S de dispositivo (GiB)</th><th>rede (GB)</th></tr></thead>
       <tbody>
-        <tr><td><b>nzbfast, distribuído (25 conexões)</b></td><td class="win">58 s</td><td class="win num">143 MB</td><td class="num">35,7 s</td><td class="win num">6,2</td><td class="num">6,5</td></tr>
+        <tr><td><b>nzbfast, distribuído (25 conexões)</b></td><td class="win">58 s</td><td class="win num">143 MB</td><td class="win num">35,7 s</td><td class="win num">6,2</td><td class="num">6,5</td></tr>
         <tr><td>nzbfast, regulador desligado (360)</td><td class="num">60 s</td><td class="num">583 MB</td><td class="num">38,0 s</td><td class="num">6,1</td><td class="num">6,6</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">61 s</td><td class="num">801 MB</td><td class="num">40,1 s</td><td class="num">12,5</td><td class="num">6,5</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">63 s</td><td class="num">1.588 MB</td><td class="num">69,5 s</td><td class="num">13,8</td><td class="num">6,5</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">67 s</td><td class="num">628 MB</td><td class="num">61,9 s</td><td class="num">13,4</td><td class="num">7,2</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">110 s</td><td class="num">531 MB</td><td class="win num">34,9 s&sup1;</td><td class="num">12,5</td><td class="num">6,5</td></tr>
       </tbody>
     </table></div>
     <div class="tblwrap"><table>
@@ -181,24 +178,15 @@
         <tr><td>NZBGet 26.3-testing</td><td class="num">306 s</td><td class="num">900 MB</td><td class="num">221,3 s</td><td class="num">68,1</td><td class="num">34,4</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">308 s</td><td class="num">1.607 MB</td><td class="num">356,5 s</td><td class="num">72,5</td><td class="num">34,4</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">343 s</td><td class="num">445 MB</td><td class="num">332,6 s</td><td class="num">69,8</td><td class="num">37,8</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">511 s</td><td class="num">1.076 MB</td><td class="num">373,8 s</td><td class="num">98,0</td><td class="num">34,4</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>Medido em 23 de agosto de 2026</b> contra
-    SABnzbd 5.1.1, NZBGet 26.3-testing, rustnzb 1.4.5 e Weaver 0.7.8, medianas de
+    SABnzbd 5.1.1, NZBGet 26.3-testing e rustnzb 1.4.5, medianas de
     três com cada leg verificado byte a byte, cinco provedores, tudo TLS. Os braços do nzbfast rodaram
     um build da mesma linha de código, feito mais cedo naquele dia, cerca de sete horas
     antes do build de lançamento v1.2.2, por isso suas linhas não trazem número de
     versão; as tabelas de 500 Mbit e 87 GB desta página correram de fato o build de
-    lançamento e dizem isso. &sup1; A mediana de
-    CPU do Weaver no fixture de 6,5 GB é 2% abaixo da nossa (34,9 contra 35,7) com seus próprios
-    três legs variando de 34,1 a 56,1 s, então leia como um empate estatístico; é a única
-    célula em qualquer uma das duas tabelas que um rival segura, e ela é repetida em <a
-    href="#legs-we-lose">os legs que não vencemos</a>. No fixture de 34 GB nosso CPU é
-    o mais baixo de forma absoluta. O 0.8.3 mais novo do Weaver não distribui binário; nosso build a partir do código-fonte dele
-    mediu um padrão de processador que não conseguimos atribuir com clareza à versão em vez de
-    ao build, então esta tabela corre o release 0.7.8 comprovado por hash e
-    diz isso em vez de publicar um número confundido. O rustnzb 1.4.5 completou cada
+    lançamento e dizem isso. O rustnzb 1.4.5 completou cada
     leg aqui, incluindo o fixture ofuscado.</p>
     <p class="note" style="text-align:start"><b>A coluna de rede, com precisão.</b>
     6,5 GB no fixture limpo - o mesmo número que o NZBGet e o SABnzbd informam para
@@ -224,8 +212,8 @@
     <p class="lead">Em uma linha lenta o suficiente, o tempo de término de cada cliente é o fio da rede e
     nada mais, então uma linha lenta esconde muitos pecados. O que ela não consegue esconder é o que cada
     cliente queima para preenchê-la. Moldamos o equipamento de 1 Gbit para duas taxas que planos reais realmente
-    têm e corremos os seis braços em cada uma - a mesma máquina, os mesmos cinco provedores, três
-    repetições por cliente com a ordem alternada, cada leg verificado byte a byte, 36 de 36
+    têm e corremos os cinco braços em cada uma - a mesma máquina, os mesmos cinco provedores, três
+    repetições por cliente com a ordem alternada, cada leg verificado byte a byte, 30 de 30
     corretos nas duas rodadas. O braço do nzbfast a 500 Mbit é o próprio build de
     lançamento v1.2.2.</p>
     <div class="tblwrap"><table>
@@ -235,7 +223,6 @@
         <tr><td>nzbfast 1.2.2, regulador desligado</td><td class="num">115 s</td><td class="num">592 MB</td><td class="num">59,0 s</td><td class="num">6,2</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">125 s</td><td class="num">1.665 MB</td><td class="num">99,2 s</td><td class="num">14,2</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">131 s</td><td class="num">626 MB</td><td class="num">92,6 s</td><td class="num">14,5</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">138 s</td><td class="num">564 MB</td><td class="num">48,5 s</td><td class="num">12,4</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">145 s&sup1;</td><td class="num">846 MB</td><td class="num">64,3 s</td><td class="num">13,2</td></tr>
       </tbody>
     </table></div>
@@ -246,7 +233,6 @@
         <tr><td>nzbfast, regulador desligado</td><td class="num">219 s</td><td class="num">651 MB</td><td class="num">67,9 s</td><td class="num">6,2</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">227 s</td><td class="num">826 MB</td><td class="num">78,4 s</td><td class="num">13,3</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">230 s</td><td class="num">1.667 MB</td><td class="num">162,4 s</td><td class="num">15,2</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">230 s</td><td class="num">789 MB</td><td class="num">62,0 s</td><td class="num">12,9</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">256 s</td><td class="num">644 MB</td><td class="num">122,4 s</td><td class="num">15,4</td></tr>
       </tbody>
     </table></div>
@@ -283,9 +269,9 @@
     <p class="kicker">O arquivo grande &middot; medido em 24 de agosto de 2026 no nzbfast 1.2.2</p>
     <h2>Um post de 87 GB até um arquivo utilizável de 77 GB, a 10 GbE</h2>
     <p class="lead">O outro extremo da história de taxa de linha: uma máquina 10 GbE, cinco provedores,
-    um post de 87 GB cujo payload é um único vídeo de 76,6 GB, seis braços, três repetições
-    alternadas, e a saída de cada leg verificada byte a byte - 18 de 18 legs produziram o
-    arquivo idêntico, todos os seis clientes concordando quanto ao seu checksum. Os braços do nzbfast são o
+    um post de 87 GB cujo payload é um único vídeo de 76,6 GB, cinco braços, três repetições
+    alternadas, e a saída de cada leg verificada byte a byte - 15 de 15 legs produziram o
+    arquivo idêntico, todos os cinco braços concordando quanto ao seu checksum. Os braços do nzbfast são o
     build de lançamento v1.2.2.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>post de 87 GB, 10 GbE</th><th>tempo até arquivo utilizável</th><th>memória de pico (RSS)</th><th>tempo de CPU</th><th>E/S de dispositivo (GiB)</th><th>rede (GB)</th></tr></thead>
@@ -294,14 +280,13 @@
         <tr><td>nzbfast 1.2.2, regulador de conexões ligado (25)</td><td class="num">90 s</td><td class="win num">336 MB</td><td class="win num">130,5 s</td><td class="win num">72,9</td><td class="num">77,4</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">93 s</td><td class="num">1.195 MB</td><td class="num">443 s</td><td class="num">183,7</td><td class="num">77,2</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">113 s</td><td class="num">1.910 MB</td><td class="num">234 s</td><td class="num">235,1</td><td class="num">77,2</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">645 s</td><td class="num">1.825 MB</td><td class="num">631 s</td><td class="num">435,1&sup2;</td><td class="num">77,3</td></tr>
-        <tr><td>rustnzb 1.4.5</td><td class="num">869 s&sup3;</td><td class="num">681 MB</td><td class="num">2.444 s</td><td class="num">216,1</td><td class="num">86,9</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">869 s&sup2;</td><td class="num">681 MB</td><td class="num">2.444 s</td><td class="num">216,1</td><td class="num">86,9</td></tr>
       </tbody>
     </table></div>
     <p><b>A história do disco na sua maior escala até agora.</b> Nosso pico de disco durante o trabalho é
     70,8 GiB - ABAIXO da saída de 76,6 GB, porque a cauda do payload ainda está
     chegando enquanto a cabeça já está finalizada - e a E/S de dispositivo total é 1,00x o
-    payload. Os rivais movem de 2,5x a 6,0x os bytes para o mesmo arquivo. E o braço mais rápido
+    payload. Os rivais movem de 2,5x a 3,2x os bytes para o mesmo arquivo. E o braço mais rápido
     sustenta cerca de 8,7 Gbps <em>incluindo</em> a verificação e a extração em fluxo; no
     momento em que a barra de download se enche, o arquivo está pronto.</p>
     <p class="note" style="text-align:start">&sup1; Cada cliente nesta página é corrido em seus ajustes documentados como melhores, e em uma
@@ -318,10 +303,7 @@
     segundos de CPU. Escalar o regulador com a taxa da linha automaticamente - para que o melhor
     comportamento também seja o padrão, no joelho da curva em vez do máximo - está na fila para
     o próximo lançamento.
-    &sup2; Os 435 GiB de E/S de dispositivo do Weaver para um download de 77 GB são o armazenamento criptografado em
-    repouso dele relendo e reescrevendo quase tudo à medida que o trabalho cresce - o
-    padrão superlinear que nossas rodadas instrumentadas de julho mediram, ainda presente no
-    build atual. &sup3; O rustnzb 1.4.5 completa com bytes corretos e seu custo é
+    &sup2; O rustnzb 1.4.5 completa com bytes corretos e seu custo é
     tempo de processador e rede: cerca de 2.444 segundos de CPU contra um relógio de 869 s nas
     três repetições, e 86,9 GB puxados onde o plano ávido é 77,2 (ele busca o conjunto de recuperação
     completo incondicionalmente). Medido em 24 de agosto de 2026, medianas de três, cada
@@ -423,8 +405,7 @@
     build mais novo de cada cliente, incluindo o nzbfast v1.2.2: máquina 10 GbE Europa, cinco
     provedores, 100 conexões por cliente, o mesmo release de 6,5 GB envenenado em três
     níveis de dano, três repetições por braço com a ordem alternada, cada leg
-    verificado byte a byte contra o arquivo limpo. 63 de 65 legs voltaram byte a byte idênticos; os
-    dois que não voltaram estão nomeados abaixo, porque são resultados.</p>
+    verificado byte a byte contra o arquivo limpo, e todos voltaram byte a byte idênticos.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>tempo até um arquivo verificado e utilizável (média de 3)</th><th>60 artigos mortos</th><th>20 mortos</th><th>5 mortos</th></tr></thead>
       <tbody>
@@ -433,7 +414,6 @@
         <tr><td>NZBGet 26.3-testing</td><td class="num">33,0 s</td><td class="num">23,7 s</td><td class="num">23,0 s</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">48,0 s&sup1;</td><td class="num">28,0 s</td><td class="num">24,3 s</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">107,3 s&sup2;</td><td class="num">51,3 s</td><td class="num">47,0 s</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="bad">não terminou&sup3;</td><td class="bad">não terminou&sup3;</td><td class="num">194,0 s</td></tr>
       </tbody>
     </table></div>
     <p><b>Por que o post danificado é rápido aqui.</b> Quando um artigo está faltando, um cliente
@@ -457,14 +437,10 @@
     e seu custo está no tempo de processador e não na confiabilidade: cerca de 1.620
     segundos de CPU contra um relógio de 107 s no dano mais pesado - cerca de quinze núcleos
     ocupados durante todo o leg - onde a mesma saída reparada nos custa cerca de 50
-    segundos de CPU. &sup3; O Weaver moveu 1,5 GB e 4,9 GB dos 6,5 dentro do nosso corte de 20 minutos
-    nos dois níveis de dano mais pesados - o mesmo não-término nas três rodadas
-    que já o correram, em três noites separadas. Nos 5 artigos mortos ele completou corretamente
-    as três vezes. Seu custo de processador ali é sua própria história: cerca de 2.325 segundos de CPU
-    para o leg de 194 s, contra os nossos 20.</p>
+    segundos de CPU.</p>
     <p class="note" style="text-align:start">Medido em 24 de agosto de 2026, todos os builds
     atuais: nzbfast v1.2.2 (a própria tag de lançamento), NZBGet 26.3-testing (build de 20 de agosto),
-    SABnzbd 5.1.1, rustnzb 1.4.5, Weaver 0.7.8. Um braço de continuidade correu o build do nzbfast
+    SABnzbd 5.1.1, rustnzb 1.4.5. Um braço de continuidade correu o build do nzbfast
     da noite anterior dentro desta mesma rodada e caiu a menos de um segundo da v1.2.2 em cada
     fixture, então nada aqui depende de uma noite de sorte; e as configurações dos rivais diferem
     das da rodada anterior apenas no caminho do aplicativo, verificadas parâmetro por parâmetro antes de a
@@ -480,13 +456,6 @@
     <p class="lead">Esta seção existe para os legs que um rival vence, e é remedida a cada rodada em vez de curada: qualquer coisa que percamos vai aqui, nomeada, ao lado da tabela que mostra isso. No build atual, nesta rodada, ela está vazia de perdas de velocidade - o que vale a pena tratar com cautela em vez de com satisfação, então as trocas que restam estão declaradas abaixo.</p>
 
     <p class="lead">O que <em>não</em> desapareceu é a troca por trás desses números, então é isso que esta seção diz agora: <b>gastamos mais memória do que as ferramentas independentes gastam</b>, e o caminho rápido de reparo pesado gasta a mais. Nosso extrator e reparador são construídos para acompanhar um download ao vivo em vez de rodar uma única vez a partir de uma linha de comando, e isso custa memória residente; o detalhe está ao lado das tabelas de componentes. Se sua restrição é a menor pegada possível para um trabalho único, as ferramentas dedicadas vencem essa coluna e não vamos fingir o contrário.</p>
-
-    <p class="lead">E a rodada de 23 de agosto de 2026 acrescenta uma entrada, que preferimos
-    listar aqui do que deixar em uma nota de rodapé: no fixture de 6,5 GB, a mediana de processador do
-    Weaver está 2% abaixo da nossa - 34,9 contra 35,7 segundos de CPU, com seus próprios três
-    legs variando de 34,1 a 56,1 s - então chamamos de empate estatístico, e ela fica em
-    <a href="#cost">a tabela de custo</a> marcada como a única célula que não seguramos. No
-    fixture de 34 GB na mesma rodada nosso CPU é o mais baixo de forma absoluta.</p>
     <div class="callout">Por que mostrar uma derrota? Porque as vitórias só são acreditáveis ao lado dela.
     Cada número nesta página vem das mesmas execuções intercaladas, e um leg que perdemos fica
     publicado até uma nova execução o substituir.</div>
@@ -510,7 +479,7 @@
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Um único leg por orçamento no build de
-    lançamento, contido contra o mesmo checksum de saída da rodada de seis braços. O orçamento mais apertado
+    lançamento, contido contra o mesmo checksum de saída da rodada de cinco braços. O orçamento mais apertado
     custa cerca de 9% do relógio, e só porque essa linha é 10 GbE - blocos derramados
     custam tempo só quando a linha ultrapassa o disco, então em uma conexão doméstica típica um orçamento
     pequeno é praticamente de graça. A escada inteira, incluindo um download de 87 GB,
@@ -522,8 +491,8 @@
     o NZBGet a um limite de cache equivalente mais que dobrou seu CPU (215,5 para 453,0
     segundos de CPU, 2,10x) para comprar um corte de 52% em seu pico de memória, e o limite do SABnzbd foi
     quase de graça mas alcançou só parte de sua pegada. O ajuste de cache do rustnzb era
-    decorativo no build corrido, e o Weaver não tem nenhum ajuste de memória, então os dois rodaram
-    sem limite como colunas de referência em vez de serem avaliados em um orçamento que não conseguem
+    decorativo no build corrido, então ele rodou
+    sem limite como coluna de referência em vez de ser avaliado em um orçamento que não consegue
     manter. Nosso próprio lado dessa rodada foi superado pela escada v1.2.2 acima, que
     diz a mesma coisa a 2,5x o tamanho: o orçamento nunca é a restrição limitante,
     porque a passagem única já retém tão pouco de início.</p>
@@ -547,12 +516,11 @@
         <tr><td>NZBGet 26.3-testing</td><td class="num">~2,1x o payload</td><td class="num">~2,1x (37,6 GB acima da saída)</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">~2,1x o payload</td><td class="num">~2,1x (37,6 GB acima da saída)</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">~2,25x o payload</td><td class="num">~2,25x (42,7 GB acima da saída)</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">~2,25x o payload</td><td class="num">~2,25x (42,7 GB acima da saída)&sup1;</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Medido em uma máquina Apple Silicon de 20 núcleos, linha de 1 Gbit, cinco provedores, três
     repetições em cada limite, cada leg completado verificado byte a byte - as linhas rivais em
-    22-23 de agosto de 2026 (célula de 34 GB do Weaver repetida em 24 de agosto, nota 1), e a linha do nzbfast recortada de novo no build de lançamento v1.2.2 em 24
+    22-23 de agosto de 2026, e a linha do nzbfast recortada de novo no build de lançamento v1.2.2 em 24
     de agosto, que reproduziu os dois limites exatamente, 12 de 12 legs unânimes nos
     dois fixtures. Nossas células são um piso medido: o trabalho
     completa 3 de 3 com 48,6 MB e 51,0 MB de folga, e recusa 3 de 3 cerca de
@@ -567,17 +535,7 @@
     importa tanto quanto o número. A 17 MB abaixo do seu piso o nzbfast bate na recusa do disco
     em uma escrita, para de forma limpa com "sem espaço em disco", mantém tudo o que
     chegou registrado em diário, e uma nova tentativa retoma sem baixar de novo - um parcial que você mantém,
-    não um trabalho falho. &sup1; A célula do fixture grande do Weaver foi resolvida por uma repetição em
-    24 de agosto: três de três legs corretos byte a byte na mesma proporção de ~2,25x,
-    cada um mais rápido que o leg bom da primeira tentativa, com o espaço livre idêntico
-    até o byte. Na primeira tentativa, em 23 de agosto, dois de seus três legs tinham
-    travado a velocidades de um único dígito de MB/s com mais de 60 GB ainda livres e
-    bateram no corte de 40 minutos da rodada. Essas travadas não voltaram, e a
-    instrumentação de travamento da bancada estava ativa e silenciosa nos três legs da
-    repetição, o que é uma medida positiva e não a ausência de uma. O que as causou
-    continua desconhecido, e uma repetição limpa não é um diagnóstico: existem agora
-    seis legs nessa proporção, quatro completos, e as duas falhas vêm de uma única
-    janela de 80 minutos na primeira noite.</p>
+    não um trabalho falho.</p>
   </div>
 </section>
 
@@ -702,9 +660,8 @@
       <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">5 de 10</td><td class="num">3</td><td class="num">2</td></tr>
       <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10 de 10</td><td class="win num">0</td><td class="win num">0</td></tr>
       <tr><td><b>rustnzb 1.4.5</b></td><td class="num">7 de 10</td><td class="num">1</td><td class="num">2</td></tr>
-      <tr><td><b>Weaver 0.7.8</b></td><td class="num">1 de 10</td><td class="num">1</td><td class="num">8</td></tr>
     </table></div>
-    <p><b>O nzbfast é o único que termina as dez sem ajuda.</b> O NZBGet também chega ao ficheiro em todas as formas, mas precisa de 16 rondas de reparação e extração manuais em oito delas. O SABnzbd conclui cinco sem ajuda e duas ficam inalcançáveis mesmo à mão. O Weaver chega ao ficheiro em duas.</p>
+    <p><b>O nzbfast é o único que termina as dez sem ajuda.</b> O NZBGet também chega ao ficheiro em todas as formas, mas precisa de 16 rondas de reparação e extração manuais em oito delas. O SABnzbd conclui cinco sem ajuda e duas ficam inalcançáveis mesmo à mão.</p>
     <p>O padrão não é aleatório. As formas que o nzbfast percorre e as outras não são as embrulhadas e as danificadas: um arquivo dentro de um arquivo, uma mudança de formato a meio da cadeia, uma cadeia de cinco níveis e, sobretudo, um arquivo que chega corrompido com os seus próprios dados de recuperação ao lado. Nesta última, quatro clientes extraem o conjunto exterior na perfeição, entregam-lhe o arquivo defeituoso juntamente com o conjunto de recuperação que o repararia, e param.</p>
     <p>Onde os clientes fazem o mesmo trabalho, a diferença não é pequena. Estas são as sete formas que os quatro clientes principais alcançam, contando a reparação manual de que cada um precisou:</p>
     <div class="tblwrap"><table>
@@ -745,19 +702,19 @@
     <div class="chips">
       <span class="chip"><b>4</b> máquinas, de laptop a 32 núcleos</span>
       <span class="chip"><b>7</b> formas de arquivo RAR</span>
-      <span class="chip"><b>6</b> extratores corridos</span>
+      <span class="chip"><b>5</b> extratores corridos</span>
       <span class="chip"><b>1 GB</b> de payload por forma</span>
       <span class="chip"><b>melhor de 3</b> intercalados, cache quente</span>
     </div>
 
-    <h3 style="margin:38px 0 4px">Extração RAR: 7 formas de arquivo, 6 ferramentas</h3>
+    <h3 style="margin:38px 0 4px">Extração RAR: 7 formas de arquivo, 5 ferramentas</h3>
     <p class="note" style="text-align:start;margin-top:6px">A rodada anterior desta tabela usava de 100 MB a 200 MB por forma, o que foi um erro: cerca de 28 ms de lançamento de processo eram 40% do leg de armazenamento, e a ordenação que isso produziu não se sustenta em um tamanho realista. Esta rodada usa <b>1 GB de payload por forma</b>, e isso muda várias respostas, incluindo algumas na direção contrária. Os arquivos são criados com o <code>rar</code> 7.23 oficial, então nenhuma ferramenta é julgada com entrada do seu próprio codificador, e os mesmos bytes são corridos em cada máquina.</p>
 
     <p class="note" style="text-align:start"><b>O que está no payload importa mais do que parece.</b> Um payload construído com cópias de blocos torna cada forma comprimida um benchmark de cópia de memória; um payload de texto puro torna isso um benchmark de literal-e-Huffman; medimos os dois e eles não concordam sobre quem vence. Então as quatro formas comprimidas usam terços iguais de texto, registros estruturados e bytes incompressíveis, e as duas formas nos extremos dessa faixa são legs separados de propósito: <code>store</code> é incompressível e <code>repetitive</code> é quase tudo correspondências. O construtor e o harness estão no repositório, então o corpus pode ser reconstruído byte a byte.</p>
 
     <p class="note" style="text-align:start"><b>Recorrido em 23 de agosto de 2026 no
-    motor 1.2.2, e a varredura se mantém.</b> As três ferramentas que um leitor mais frequentemente
-    considera - a nossa, unrar 7.23 e rarpar 0.2.5 - foram recorridas no desktop de 32 núcleos no
+    motor 1.2.2, e a varredura se mantém.</b> As duas ferramentas que um leitor mais frequentemente
+    considera - a nossa e o unrar 7.23 - foram recorridas no desktop de 32 núcleos no
     motor de lançamento (o código de extração corrido é byte a byte idêntico à tag 1.2.2), seis
     rodadas intercaladas, mínimo por ferramenta, a saída de cada leg verificada contra o manifesto
     do payload. Segundos, quanto menor melhor:</p>
@@ -766,14 +723,13 @@
       <tbody>
         <tr><td><b>nzbfast 1.2.2</b></td><td><b>0,119</b></td><td><b>0,474</b></td><td><b>1,515</b></td><td><b>0,120</b></td><td><b>1,118</b></td><td><b>1,137</b></td><td><b>1,146</b></td></tr>
         <tr><td>unrar 7.23</td><td>0,190</td><td>2,032</td><td>1,784</td><td>0,139</td><td>1,655</td><td>1,846</td><td>1,420</td></tr>
-        <tr><td>rarpar 0.2.5</td><td>0,206</td><td>2,563</td><td>2,395</td><td>0,237</td><td>1,852</td><td>1,857</td><td>1,725</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Todas as sete formas nossas, na mínima e
     na mediana, de 1,16x a 4,29x contra o unrar. Esses tempos não são comparáveis
     célula a célula com a tabela mais ampla abaixo - o harness foi revisado desde as rodadas
     dessa tabela e o número de rodadas difere - então leia cada tabela contra si mesma.
-    A tabela mais ampla mantém suas próprias datas e seu campo de seis ferramentas, e sua coluna nzbfast
+    A tabela mais ampla mantém suas próprias datas e seu campo de cinco ferramentas, e sua coluna nzbfast
     descreve o motor que a 1.2.2 distribui: a nova corrida acima mediu o motor atual nivelado com o build daquela tabela nas sete formas, resolvido por contagens de instruções de
     hardware (0,14% menos para o mesmo relógio), então essas células não são os números de um
     build superado usando um rótulo atual. <b>Esta nova corrida é
@@ -788,42 +744,38 @@
     então não houve regressão. Cada comparação de nosso build contra nosso build que publicamos agora
     carrega esse controle.</p>
 
-    <p class="note" style="text-align:start"><b>O campo inteiro, segundos, quanto menor melhor.</b> Melhor de três, ferramentas intercaladas dentro de cada rodada em vez de corridas em blocos, saída verificada contra o payload de origem em cada execução isolada. Uma ferramenta que produziu os bytes errados recebe uma nota de correção, nunca um tempo rápido. <code>rarpar</code> é o código próprio de RAR e PAR2 do Weaver, construído a partir do código-fonte em <code>bd87611</code>; fixamos o commit em vez de uma versão porque suas crates carregam três números de versão diferentes.</p>
+    <p class="note" style="text-align:start"><b>O campo inteiro, segundos, quanto menor melhor.</b> Melhor de três, ferramentas intercaladas dentro de cada rodada em vez de corridas em blocos, saída verificada contra o payload de origem em cada execução isolada. Uma ferramenta que produziu os bytes errados recebe uma nota de correção, nunca um tempo rápido.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>segundos, 1 GB por forma</th><th>store</th><th>400 arquivos pequenos</th><th>solid</th><th>repetitive</th><th>grande, 4 volumes</th><th>criptografado</th><th>dicionário 128 MiB</th></tr></thead>
       <tbody>
         <tr><td colspan="8" class="grp">Desktop de ponta, 32 núcleos</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,21</b></td><td><b>0,47</b></td><td><b>1,26</b></td><td><b>0,14</b></td><td><b>1,08</b></td><td><b>1,09</b></td><td><b>1,07</b></td></tr>
         <tr><td>unrar 7.23</td><td><b>0,21</b></td><td>2,02</td><td>1,62</td><td>0,16</td><td>1,61</td><td>1,82</td><td>1,37</td></tr>
-        <tr><td>rarpar</td><td>0,23</td><td>2,55</td><td>2,22</td><td>0,26</td><td>1,75</td><td>1,74</td><td>1,64</td></tr>
         <tr><td>unar 1.10.7</td><td>0,60</td><td>6,40</td><td>5,29</td><td>0,69</td><td>5,41</td><td>6,88</td><td>4,03</td></tr>
         <tr><td>bsdtar</td><td>0,34</td><td>13,67</td><td>11,48</td><td>1,86</td><td class="no">saída errada&sup2;</td><td class="no">sem cripto&sup3;</td><td class="no">sem dicionário grande&#8308;</td></tr>
         <tr><td>7-Zip</td><td>0,30</td><td class="no">sem suporte&sup1;</td><td class="no">sem suporte&sup1;</td><td class="no">sem suporte&sup1;</td><td class="no">sem suporte&sup1;</td><td class="no">sem suporte&sup1;</td><td class="no">sem suporte&sup1;</td></tr>
         <tr><td colspan="8" class="grp">Desktop mais antigo, 20 núcleos</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,16</b></td><td><b>0,57</b></td><td><b>1,83</b></td><td><b>0,15</b></td><td><b>1,50</b></td><td><b>1,51</b></td><td><b>1,40</b></td></tr>
         <tr><td>unrar 7.23</td><td>0,25</td><td>2,48</td><td>2,31</td><td>0,20</td><td>2,28</td><td>2,49</td><td>1,84</td></tr>
-        <tr><td>rarpar</td><td>0,28</td><td>3,15</td><td>3,00</td><td>0,31</td><td>2,26</td><td>2,26</td><td>1,97</td></tr>
         <tr><td>unar 1.10.7</td><td>0,67</td><td>7,49</td><td>6,93</td><td>0,85</td><td>6,85</td><td>8,49</td><td>5,29</td></tr>
         <tr><td>bsdtar</td><td>0,33</td><td>15,58</td><td>13,97</td><td>2,18</td><td class="no">saída errada&sup2;</td><td class="no">sem cripto&sup3;</td><td class="no">sem dicionário grande&#8308;</td></tr>
         <tr><td>7-Zip</td><td>0,33</td><td class="no">sem suporte&sup1;</td><td class="no">sem suporte&sup1;</td><td class="no">sem suporte&sup1;</td><td class="no">sem suporte&sup1;</td><td class="no">sem suporte&sup1;</td><td class="no">sem suporte&sup1;</td></tr>
         <tr><td colspan="8" class="grp">Laptop, 14 núcleos / 20 threads, Windows&#8309;</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,35</b></td><td><b>1,05</b></td><td><b>2,92</b></td><td><b>0,32</b></td><td><b>2,32</b></td><td><b>2,22</b></td><td><b>2,04</b></td></tr>
         <tr><td>unrar 7.23</td><td>0,63</td><td>6,37</td><td>6,14</td><td>0,62</td><td>2,92</td><td>3,33</td><td>2,44</td></tr>
-        <tr><td>rarpar</td><td>0,74</td><td>11,58</td><td>9,76</td><td>0,54</td><td>2,72</td><td>2,85</td><td>2,38</td></tr>
         <tr><td>unar</td><td class="no">sem CLI&#8309;</td><td class="no">sem CLI&#8309;</td><td class="no">sem CLI&#8309;</td><td class="no">sem CLI&#8309;</td><td class="no">sem CLI&#8309;</td><td class="no">sem CLI&#8309;</td><td class="no">sem CLI&#8309;</td></tr>
         <tr><td>bsdtar</td><td>0,81</td><td>16,72</td><td>15,14</td><td>1,13</td><td class="no">saída errada&sup2;</td><td class="no">sem cripto&sup3;</td><td class="no">sem dicionário grande&#8308;</td></tr>
         <tr><td>7-Zip</td><td>0,76</td><td>5,45</td><td>5,79</td><td>0,65</td><td>4,21</td><td>4,13</td><td>2,51</td></tr>
         <tr><td colspan="8" class="grp">Laptop, Apple M5 Max&#8310;</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,10</b></td><td><b>0,40</b></td><td><b>1,15</b></td><td><b>0,10</b></td><td><b>0,98</b></td><td><b>0,99</b></td><td><b>0,94</b></td></tr>
         <tr><td>unrar 7.22</td><td>0,16</td><td>1,94</td><td>1,87</td><td>0,15</td><td>1,75</td><td>1,91</td><td>1,52</td></tr>
-        <tr><td>rarpar</td><td>0,11</td><td>2,09</td><td>1,97</td><td>0,18</td><td>1,54</td><td>1,55</td><td>1,33</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Onde o campo não conseguiu competir, e por quê.</b> ¹ O 7-Zip corrido aqui é o pacote Homebrew, que recusa toda forma comprimida com <code>ERROR: Unsupported Method</code> e só lê a forma armazenada no macOS. Uma versão anterior desta página atribuiu isso ao build do 7-Zip para macOS, o que estava errado: o Homebrew o compila sem o codec unRAR não livre, enquanto o build de macOS que a 7-zip.org distribui carrega o codec e decodifica as sete formas, como o build do Windows faz. Remedido em 14 de agosto de 2026. Se você instala o 7-Zip a partir do projeto em vez do Homebrew, esta coluna não descreve o que você tem. ² O bsdtar não tem suporte a múltiplos volumes RAR5 e produziu um arquivo truncado sem relatar erro, então esse leg é uma falha de correção e não um tempo lento; nosso harness capturou isso verificando a saída, o que é por que vale a pena verificar a saída. ³ <code>bsdtar: Encryption is not supported</code>. ⁴ <code>bsdtar: Declared dictionary size is not supported</code>. ⁵ o unar não distribui ferramenta de linha de comando para Windows, então o campo do laptop é cinco. ⁶ O grupo M5 Max corre as três ferramentas que um leitor de macOS realmente buscaria - unrar, <code>rarpar</code> e nós; unar, bsdtar e 7-Zip não foram corridos nessa máquina. O unrar dela é o 7.22, o build mais novo que roda sem supervisão ali.</p>
+    <p class="note" style="text-align:start"><b>Onde o campo não conseguiu competir, e por quê.</b> ¹ O 7-Zip corrido aqui é o pacote Homebrew, que recusa toda forma comprimida com <code>ERROR: Unsupported Method</code> e só lê a forma armazenada no macOS. Uma versão anterior desta página atribuiu isso ao build do 7-Zip para macOS, o que estava errado: o Homebrew o compila sem o codec unRAR não livre, enquanto o build de macOS que a 7-zip.org distribui carrega o codec e decodifica as sete formas, como o build do Windows faz. Remedido em 14 de agosto de 2026. Se você instala o 7-Zip a partir do projeto em vez do Homebrew, esta coluna não descreve o que você tem. ² O bsdtar não tem suporte a múltiplos volumes RAR5 e produziu um arquivo truncado sem relatar erro, então esse leg é uma falha de correção e não um tempo lento; nosso harness capturou isso verificando a saída, o que é por que vale a pena verificar a saída. ³ <code>bsdtar: Encryption is not supported</code>. ⁴ <code>bsdtar: Declared dictionary size is not supported</code>. ⁵ o unar não distribui ferramenta de linha de comando para Windows, então o campo do laptop é quatro. ⁶ O grupo M5 Max corre o unrar contra nós; unar, bsdtar e 7-Zip não foram corridos nessa máquina. O unrar dela é o 7.22, o build mais novo que roda sem supervisão ali.</p>
 
     <p class="note" style="text-align:start"><b>Cada forma em cada máquina exceto uma, e essa é um empate.</b> As formas de correspondência curta se resumem a duas coisas específicas em nosso decodificador. Uma correspondência de dois a trinta e dois bytes costumava pagar por uma chamada completa à rotina de cópia de memória da plataforma, e a chamada custava mais que a cópia; copiar trinta e dois bytes fixos por meio de um registrador em vez disso é por que <code>repetitive</code>, <code>solid</code> e o dicionário de 128 MiB - as três formas construídas com correspondências curtas - são todas rápidas de uma vez. E o checksum roda a jusante da thread do escritor em vez de nela. A única célula que não vencemos de forma clara é a forma armazenada no desktop de 32 núcleos, onde o unrar e nós ficamos a três milissegundos de diferença em um leg que é puramente mover bytes - idêntico na precisão desta tabela, então as duas células são marcadas e isso é pontuado como empate, não como derrota e não como vitória.</p>
 
-    <p class="note" style="text-align:start">A forma que vencemos por mais margem é a que a usenet realmente publica às centenas de cada vez: <b>400 arquivos pequenos, 4,3× e 4,4× contra o unrar</b> e 5,4× a 5,5× contra o <code>rarpar</code>. Isso é paralelismo por membro, e é a diferença entre um extrator escrito para uma fila de download e um escrito para uma linha de comando. A forma armazenada, que o <a href="#census">censo acima</a> diz ser 84% dos bytes na rede, é um quase empate para as três ferramentas sérias, porque nesse ponto todo mundo está só movendo bytes.</p>
+    <p class="note" style="text-align:start">A forma que vencemos por mais margem é a que a usenet realmente publica às centenas de cada vez: <b>400 arquivos pequenos, 4,3× e 4,4× contra o unrar</b>. Isso é paralelismo por membro, e é a diferença entre um extrator escrito para uma fila de download e um escrito para uma linha de comando. A forma armazenada, que o <a href="#census">censo acima</a> diz ser 84% dos bytes na rede, é um quase empate entre nós e o unrar, porque nesse ponto todo mundo está só movendo bytes.</p>
 
     <p class="note" style="text-align:start"><b>Uma escolha que vale a pena declarar.</b> Os arquivos são empacotados com o compressor fixado em quatro threads. Sem isso, a divisão de blocos do RAR segue o número de núcleos de qualquer máquina que empacotou o arquivo, então um desktop de 32 núcleos e um de 20 núcleos produzem bytes diferentes a partir da mesma entrada e as máquinas deixam de ser comparáveis. Fixar isso torna o corpus de extração byte a byte idêntico em todo lugar, que é o objetivo, mas também limita quanto da decodificação pode rodar em paralelo - então quando as duas formas mais próximas eram derrotas, nós as recorremos contra arquivos empacotados com todas as 32 threads, para verificar que a fixação não era a causa. Não era: solid foi de 4,2% atrás para 2,4% atrás e o dicionário de 128 MiB de 6,6% para 6,3%, a mesma ordem de qualquer forma. Ambas agora são vitórias no corpus fixado por uma margem mais ampla do que essa verificação poderia explicar.</p>
 
@@ -838,7 +790,7 @@
 
     <p class="note" style="text-align:start"><b>Confirmado no build distribuído contra o rival atual, 24 de agosto de 2026.</b> Essas tabelas foram medidas antes de a 1.2.2 ser lançada e antes de o <code>par2cmdline-turbo</code> lançar a 1.5.0 (20 de agosto de 2026), então a coluna de 20 núcleos foi recorrida nos dois: nosso build de lançamento 1.2.2 contra o turbo 1.5.0, três rodadas intercaladas por leg, cada arquivo reparado comparado com o conjunto pristino. Os quatro legs se reproduzem - o nosso 0,18 / 0,30 / 0,75 / 2,02 contra o 0,19 / 0,33 / 0,74 / 2,07 impresso aqui, e o turbo 1.5.0 fica dentro de poucos por cento do build da tabela em cada leg e nas duas configurações. As células permanecem como publicadas; as outras três máquinas mantêm suas próprias datas.</p>
 
-    <p class="note" style="text-align:start"><b>Então a concorrência aparece duas vezes, e uma dessas colunas é o melhor caso dela e não o padrão.</b> O binário distribuído que você baixaria é compilado para uma CPU genérica de referência e faz hash de só alguns arquivos por vez; compilar o mesmo código-fonte para a CPU real da máquina e passar <code>-T16</code> deixa usar as instruções que essa máquina realmente tem e fazer hash de dezesseis arquivos de uma vez. No laptop isso vale até 2,6x, inteiramente do build e dos parâmetros. Julgue-nos pela coluna ajustada, que é a comparação mais difícil; a coluna distribuída é o que alguém que baixa o programa realmente experimenta. <code>par2cmdline</code> é o original, versão 1.2.0, compilado a partir do código-fonte em cada máquina. <code>rarpar</code> é a implementação própria de PAR2 do Weaver, compilada a partir do código-fonte com seu backend Metal de GPU habilitado. O <code>par2j</code> do MultiPar é exclusivo do Windows, então aparece só nas linhas do laptop Windows. As linhas do M5 Max correm as duas ferramentas com builds atuais de macOS arm64 ao lado das duas colunas turbo; o <code>par2cmdline</code> clássico não foi corrido nessa máquina.</p>
+    <p class="note" style="text-align:start"><b>Então a concorrência aparece duas vezes, e uma dessas colunas é o melhor caso dela e não o padrão.</b> O binário distribuído que você baixaria é compilado para uma CPU genérica de referência e faz hash de só alguns arquivos por vez; compilar o mesmo código-fonte para a CPU real da máquina e passar <code>-T16</code> deixa usar as instruções que essa máquina realmente tem e fazer hash de dezesseis arquivos de uma vez. No laptop isso vale até 2,6x, inteiramente do build e dos parâmetros. Julgue-nos pela coluna ajustada, que é a comparação mais difícil; a coluna distribuída é o que alguém que baixa o programa realmente experimenta. <code>par2cmdline</code> é o original, versão 1.2.0, compilado a partir do código-fonte em cada máquina. O <code>par2j</code> do MultiPar é exclusivo do Windows, então aparece só nas linhas do laptop Windows. As linhas do M5 Max correm o nzbfast contra as duas colunas turbo; o <code>par2cmdline</code> clássico não foi corrido nessa máquina.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>segundos, conjunto de 1 GiB</th><th>desktop, 32 núcleos</th><th>desktop, 20 núcleos</th><th>laptop, 14 núcleos</th><th>laptop, M5 Max</th></tr></thead>
@@ -848,28 +800,24 @@
         <tr><td>par2-turbo, ajustado</td><td>0,31</td><td>0,38</td><td>0,42</td><td>0,28</td></tr>
         <tr><td>par2-turbo, distribuído</td><td>0,86</td><td>1,12</td><td>1,06</td><td>0,80</td></tr>
         <tr><td>par2cmdline</td><td>3,03</td><td>3,84</td><td>3,81</td><td class="no">não corrido</td></tr>
-        <tr><td>rarpar</td><td>2,62</td><td>3,45</td><td>2,96</td><td>2,32</td></tr>
         <tr><td>MultiPar</td><td class="no">só Windows</td><td class="no">só Windows</td><td>1,34</td><td class="no">só Windows</td></tr>
         <tr><td colspan="5" class="grp">3 blocos danificados - poucos artigos mortos</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,22</b></td><td><b>0,33</b></td><td><b>0,46</b></td><td><b>0,26</b></td></tr>
         <tr><td>par2-turbo, ajustado</td><td>0,51</td><td>0,66</td><td>0,78</td><td>0,48</td></tr>
         <tr><td>par2-turbo, distribuído</td><td>1,08</td><td>1,46</td><td>1,42</td><td>1,00</td></tr>
         <tr><td>par2cmdline</td><td>3,64</td><td>4,58</td><td>4,98</td><td class="no">não corrido</td></tr>
-        <tr><td>rarpar</td><td>4,27</td><td>5,53</td><td>4,99</td><td>3,64</td></tr>
         <tr><td>MultiPar</td><td class="no">só Windows</td><td class="no">só Windows</td><td>1,71</td><td class="no">só Windows</td></tr>
         <tr><td colspan="5" class="grp">101 blocos danificados</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,48</b></td><td><b>0,74</b></td><td><b>0,96</b></td><td><b>0,66</b></td></tr>
         <tr><td>par2-turbo, ajustado</td><td>0,88</td><td>1,17</td><td>1,40</td><td>0,85</td></tr>
         <tr><td>par2-turbo, distribuído</td><td>2,04</td><td>2,65</td><td>2,69</td><td>1,84</td></tr>
         <tr><td>par2cmdline</td><td>5,57</td><td>7,57</td><td>11,7</td><td class="no">não corrido</td></tr>
-        <tr><td>rarpar</td><td>4,73</td><td>5,73</td><td>5,74</td><td>4,17</td></tr>
         <tr><td>MultiPar</td><td class="no">só Windows</td><td class="no">só Windows</td><td>2,65</td><td class="no">só Windows</td></tr>
         <tr><td colspan="5" class="grp">1.500 blocos danificados - 91% da recuperação usada</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>1,00</b></td><td><b>2,07</b></td><td><b>2,46</b></td><td><b>1,61</b></td></tr>
         <tr><td>par2-turbo, ajustado</td><td>3,00</td><td>5,52</td><td>6,73</td><td>4,07</td></tr>
         <tr><td>par2-turbo, distribuído</td><td>5,21</td><td>8,20</td><td>9,30</td><td>6,01</td></tr>
         <tr><td>par2cmdline</td><td>67,7</td><td>86,1</td><td>403</td><td class="no">não corrido</td></tr>
-        <tr><td>rarpar</td><td>7,15</td><td>11,49</td><td>14,22</td><td>6,91</td></tr>
         <tr><td>MultiPar</td><td class="no">só Windows</td><td class="no">só Windows</td><td>5,40</td><td class="no">só Windows</td></tr>
       </tbody>
     </table></div>
@@ -884,7 +832,7 @@
 
     <p class="note" style="text-align:start"><b>Um caminho mais rápido só vale a pena se não puder estar errado.</b> Os dois caminhos calculam a mesma quantidade e são idênticos bit a bit por construção, e cada reparo nesta página foi condicionado a que os arquivos reconstruídos batessem com o conjunto pristino: 228 reparos cronometrados nas máquinas desta rodada, zero divergências. O build distribuído não depende só desse histórico. Cada reparo verifica sua própria saída contra os hashes dos arquivos, e um que falhasse seria refeito com o caminho clássico automaticamente, registraria a divergência, e manteria o caminho clássico pelo resto daquela execução. O ajuste está no painel como <b>modo PAR rápido</b> se você preferir não usá-lo de jeito nenhum, e máquinas com pouca memória para isso o recusam sozinhas em vez de tentar e falhar. Remedido em 2 de agosto no build atual: os dois desktops ficam a poucos por cento desta tabela, e com o <b>modo PAR rápido</b> desligado o desktop de 20 núcleos volta a exatamente o tempo mais lento do caminho clássico, o que diz que a vitória é o método e não as condições.</p>
 
-    <p class="note" style="text-align:start"><b>A coluna do laptop Windows precisou de uma correção, e ela vai contra nós.</b> O Windows rebaixa trabalho contínuo em segundo plano para os núcleos de eficiência depois de alguns segundos. Nosso daemon opta por sair disso na inicialização e nenhuma das outras ferramentas consegue, então uma versão anterior desta página publicou os tempos limitados delas como se fossem os tempos próprios das ferramentas. Rodar de novo essa máquina com cada ferramenta elevada a prioridade alta move o campo inteiro: no nível de dano mais pesado o <code>par2-turbo</code> vai de 22,4 s para 6,41 e o <code>rarpar</code> de 59,2 s para 14,4, e para um corte desta página isso transformou a coluna de nossa vitória em uma que perdemos. A coluna do laptop inteira é medida assim agora - a correção permanece mesmo que a linha tenha sido reconquistada pela mudança de algoritmo acima, porque os tempos do campo naquela máquina só são honestos com o limitador removido.</p>
+    <p class="note" style="text-align:start"><b>A coluna do laptop Windows precisou de uma correção, e ela vai contra nós.</b> O Windows rebaixa trabalho contínuo em segundo plano para os núcleos de eficiência depois de alguns segundos. Nosso daemon opta por sair disso na inicialização e nenhuma das outras ferramentas consegue, então uma versão anterior desta página publicou os tempos limitados delas como se fossem os tempos próprios das ferramentas. Rodar de novo essa máquina com cada ferramenta elevada a prioridade alta move o campo inteiro: no nível de dano mais pesado o <code>par2-turbo</code> vai de 22,4 s para 6,41, e para um corte desta página isso transformou a coluna de nossa vitória em uma que perdemos. A coluna do laptop inteira é medida assim agora - a correção permanece mesmo que a linha tenha sido reconquistada pela mudança de algoritmo acima, porque os tempos do campo naquela máquina só são honestos com o limitador removido.</p>
 
     <h3 style="margin:44px 0 4px">Registros de recuperação RAR: reparando sem PAR2</h3>
     <p class="note" style="text-align:start;margin-top:6px">Quando o PAR2 não consegue cobrir o dano, o registro de recuperação dentro do próprio RAR é a última linha de defesa. Até a 1.0.8 o nosso falhava em qualquer arquivo acima de cerca de 13 MB, então esse leg não podia rodar de jeito nenhum. O dano é três buracos de 3.000 bytes a 20%, 50% e 80% da região protegida. As duas ferramentas produziram saída byte a byte idêntica ao arquivo pristino, e a nossa é byte a byte idêntica ao que o próprio <code>rar r</code> escreve. Melhor de três, desktop de 32 núcleos, as duas ferramentas recorridas juntas em 2 de agosto.</p>
@@ -899,7 +847,6 @@
     <p class="note" style="text-align:start">Uma versão anterior desta página mostrava o tamanho de 512 MB como uma derrota, e explicava isso como o preço de percorrer o volume em pedaços em vez de segurar tudo em memória. Essa explicação estava correta na época e agora está obsoleta: o custo era um CRC64 bit a bit no caminho de reparo, substituído por um baseado em tabela, e a derrota foi junto. Não há mais um cruzamento, e o conjunto de trabalho limitado foi mantido. O tamanho de 2 GB está aqui porque os volumes que um daemon realmente encontra vão de 8 GB a 20 GB, não 512 MB, e um leg que para abaixo da faixa real não é muito de um teste.</p>
     <p class="note" style="text-align:start"><b>O que mudou este corte, e o controle que confirma isso.</b> Encontrar quais blocos estão danificados tinha se tornado a maior fase deste reparo - maior que a própria aritmética de reparo - e rodava em uma única thread, lendo 64 KB de cada grupo pelo arquivo, uma vez por grupo. Agora faz uma única passagem sequencial em ordem de arquivo com os checksums por fragmento calculados em paralelo, e o volume reparado é clonado em vez de copiado onde o sistema de arquivos consegue fazer isso. A detecção sozinha caiu de cerca de 300 ms para 18 ms no arquivo de 512 MB, o que é a maior parte do que mudou acima. O controle é a coluna ao lado da nossa: o <code>rar r</code> foi recorrido nas mesmas rodadas na mesma máquina e voltou a poucos por cento de seus tempos anteriores, então a mudança no intervalo é nossa e não do benchmark.</p>
     <p class="note" style="text-align:start">O M5 Max repete o padrão, corrido em 31 de julho com o mesmo corpus e os mesmos filtros: 0,050 / 0,066 / 0,171 / 0,581 s contra os 0,211 / 0,335 / 0,751 / 1,735 do <code>rar r</code> nos tamanhos de 16 MB a 512 MB - 3,0&times; a 5,1&times; mais rápido; o tamanho de 2 GB não foi corrido nessa máquina. Esses números são anteriores à reescrita de detecção descrita acima, então são de um build mais antigo, mantidos aqui como a segunda máquina em vez de como um número atual.</p>
-    <p class="note" style="text-align:start">O <code>rarpar</code> do Weaver está ausente desta tabela sozinha, e não por escolha: ele não implementa esse reparo. Pedido para consertar um desses arquivos ele responde <i>"embedded Rar5 recovery record detected ... this API restores standalone .rev recovery volumes only and does not consume embedded RR/protect data"</i>, e deixa o arquivo danificado. Ele aparece em toda outra comparação nesta página: os quatro legs de PAR2 acima, as sete formas de extração acima disso, e o leg de volumes de recuperação logo abaixo, que é o trabalho que ele diz que faz - e que ele vence.</p>
 
     <h3 style="margin:44px 0 4px">Volumes de recuperação: reconstruindo arquivos <code>.rev</code> ausentes por inteiro</h3>
     <p class="note" style="text-align:start;margin-top:6px">A outra metade da própria história de recuperação do RAR, e até esta rodada a maior derrota desta página. Um arquivo <code>.rev</code> é um volume de recuperação independente: três deles ao lado de um conjunto de 21 volumes conseguem reconstruir quaisquer três volumes que nunca chegaram. Corpus: 1 GiB armazenado em 21 volumes de 50 MB com <code>rar rv3</code>, depois os volumes 4, 11 e 19 apagados - três perdidos contra três volumes de recuperação, que é o pior caso que o conjunto ainda consegue sobreviver. Melhor de três, cada volume reconstruído comparado com o pristino.</p>
@@ -908,11 +855,9 @@
       <tbody>
         <tr><td><b>nzbfast</b></td><td><b>0,44</b></td><td><b>0,50</b></td></tr>
         <tr><td>rar 7.23 <code>rc</code></td><td>0,46</td><td>0,58</td></tr>
-        <tr><td>rarpar <code>restore-volumes</code></td><td>0,48</td><td>0,61</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>A célula de 32 núcleos aqui era 3,12 s contra os 0,47 do <code>rar rc</code> no corte anterior desta página, publicada como 6,6× mais lenta e o pior número nela.</b> A causa era a resolução de apagamento rodando a cerca de 48 MB/s de saída reconstruída onde a RARLab administrava 320; agora roda na mesma aritmética baseada em tabela do resto do código de recuperação, o que é uma melhoria de sete vezes e transforma a derrota em vitória nas duas máquinas. As margens são 3% e 14%, então é uma vitória para declarar com clareza e não para destacar como manchete, e o motivo de ser declarada de jeito nenhum é que a derrota foi declarada primeiro.</p>
-    <p class="note" style="text-align:start">Este leg existe porque o <code>rarpar</code> do Weaver implementa exatamente isso e pediu para ser medido nisso. Estava vencendo com folga quando o publicamos pela primeira vez, e o publicamos naquela época por esse motivo.</p>
     <p class="note" style="text-align:start">A correspondência de arquivos nunca foi o custo, o que vale a pena registrar porque era o suspeito intuitivo: volumes de recuperação não carregam nomes de arquivo, então identificamos quais posições sobreviveram fazendo o checksum de cada volume em disco em vez de confiar em como são chamados, e contra um conjunto intacto, onde a correspondência é tudo que acontece, a passagem inteira leva 0,18 s.</p>
 
     <p class="note" style="text-align:start"><b>O que mais mudou, e onde isso não aparece.</b> Duas outras mudanças de motor entraram que esses corpora não conseguem ver, listadas aqui para que os números acima não sejam lidos como a história inteira: arquivos RAR5 com dezenas de milhares de membros resolvem cada membro uma vez em vez de percorrer a lista por worker, o que é 3× menos tempo de processador em 40.000 membros; e o leitor de bits do RAR1.3 trabalha uma palavra por vez, o que é 2×. Nenhum dos dois aparece acima, porque as formas aqui têm 400 membros e nenhum RAR1.3.</p>
@@ -940,23 +885,23 @@
     <p class="kicker">Capacidade, não micro-benchmarks</p>
     <h2>O que cada cliente sabe fazer</h2>
     <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5</th><th>NZBGet 26</th><th>rustnzb</th><th>Weaver</th><th>Usenapp</th><th>Newsbin</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5</th><th>NZBGet 26</th><th>rustnzb</th><th>Usenapp</th><th>Newsbin</th></tr></thead>
       <tbody>
-        <tr><td>NNTP com pipelining</td><td class="yes">sim</td><td class="half">desligado por padrão</td><td class="no">não</td><td class="yes">sim</td><td class="no">-⁷</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>verificação completa durante o download</td><td class="yes">cada bloco</td><td class="no">depois</td><td class="half">verificação rápida</td><td class="no">depois</td><td class="no">depois</td><td class="no">depois</td><td class="no">depois</td></tr>
-        <tr><td>extração durante o download</td><td class="yes">em fluxo, nenhum volume no disco</td><td class="half">desempacotamento direto⁴</td><td class="half">desempacotamento direto⁴</td><td class="half">faz estágio, depois desempacota⁵</td><td class="no">não</td><td class="no">não</td><td class="no">não</td></tr>
-        <tr><td>disco necessário para um post de N GB</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
-        <tr><td>veredito de completude antes do download</td><td class="yes">exato por bloco</td><td class="no">não</td><td class="half">% de saúde</td><td class="no">não</td><td class="no">-⁷</td><td class="yes">verificação de artigo</td><td class="no">não</td></tr>
-        <tr><td>memória limitada (nunca troca para disco)</td><td class="yes">com orçamento</td><td class="half">ajuste de limite de cache</td><td class="half">ajuste de cache</td><td class="no">não</td><td class="no">não</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>eleva seu próprio limite de arquivos abertos</td><td class="yes">sim, na inicialização</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td></tr>
-        <tr><td>verificar o arquivo a qualquer momento durante o download</td><td class="yes">sim</td><td class="no">não</td><td class="no">não</td><td class="no">não</td><td class="no">não</td><td class="half">sequencial</td><td class="no">não</td></tr>
-        <tr><td>indexador embutido + mural de posters</td><td class="yes">sim, sem chave</td><td class="no">não</td><td class="no">não</td><td class="no">não</td><td class="no">não</td><td class="half">interface de busca</td><td class="half">navegador de grupos</td></tr>
-        <tr><td>integração Sonarr/Radarr</td><td class="yes">API SAB + Newznab</td><td class="yes">nativa</td><td class="yes">nativa</td><td class="yes">API compatível com SAB</td><td class="half">RPC compatível com NZBGet⁷</td><td class="no">não</td><td class="no">não</td></tr>
-        <tr><td>controles remotos de celular (nzb360/LunaSea)</td><td class="yes">sim</td><td class="yes">sim</td><td class="yes">sim</td><td class="no">não</td><td class="no">-⁷</td><td class="no">não</td><td class="no">não</td></tr>
-        <tr><td>lista de observação com captura e upgrades automáticos</td><td class="yes">embutido</td><td class="no">via *arr</td><td class="no">via *arr</td><td class="no">não</td><td class="no">não</td><td class="yes">Watchdog</td><td class="half">regras</td></tr>
-        <tr><td>binário único e autocontido</td><td class="yes">sim</td><td class="half">pacotes de app; Python no Linux</td><td class="yes">sim</td><td class="yes">sim</td><td class="yes">sim</td><td class="yes">.app</td><td class="yes">.exe</td></tr>
-        <tr><td>código aberto</td><td class="yes">GPL⁶</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">MIT</td><td class="yes">sim</td><td class="no">pago</td><td class="no">pago</td></tr>
-        <tr><td>plataformas</td><td class="yes">mac/win/linux (x64 + ARM)/docker/flatpak</td><td class="yes">mac/win/linux/docker/pacotes NAS</td><td class="yes">mac/win/linux/docker/NAS + embarcado</td><td class="half">linux/win (mac a partir do código-fonte)</td><td class="half">binário mac; código-fonte em outro lugar⁷</td><td class="no">só mac</td><td class="no">só win</td></tr>
+        <tr><td>NNTP com pipelining</td><td class="yes">sim</td><td class="half">desligado por padrão</td><td class="no">não</td><td class="yes">sim</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>verificação completa durante o download</td><td class="yes">cada bloco</td><td class="no">depois</td><td class="half">verificação rápida</td><td class="no">depois</td><td class="no">depois</td><td class="no">depois</td></tr>
+        <tr><td>extração durante o download</td><td class="yes">em fluxo, nenhum volume no disco</td><td class="half">desempacotamento direto⁴</td><td class="half">desempacotamento direto⁴</td><td class="half">faz estágio, depois desempacota⁵</td><td class="no">não</td><td class="no">não</td></tr>
+        <tr><td>disco necessário para um post de N GB</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
+        <tr><td>veredito de completude antes do download</td><td class="yes">exato por bloco</td><td class="no">não</td><td class="half">% de saúde</td><td class="no">não</td><td class="yes">verificação de artigo</td><td class="no">não</td></tr>
+        <tr><td>memória limitada (nunca troca para disco)</td><td class="yes">com orçamento</td><td class="half">ajuste de limite de cache</td><td class="half">ajuste de cache</td><td class="no">não</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>eleva seu próprio limite de arquivos abertos</td><td class="yes">sim, na inicialização</td><td class="no">-⁷</td><td class="no">-⁷</td><td class="no">-⁷</td><td class="no">-⁷</td><td class="no">-⁷</td></tr>
+        <tr><td>verificar o arquivo a qualquer momento durante o download</td><td class="yes">sim</td><td class="no">não</td><td class="no">não</td><td class="no">não</td><td class="half">sequencial</td><td class="no">não</td></tr>
+        <tr><td>indexador embutido + mural de posters</td><td class="yes">sim, sem chave</td><td class="no">não</td><td class="no">não</td><td class="no">não</td><td class="half">interface de busca</td><td class="half">navegador de grupos</td></tr>
+        <tr><td>integração Sonarr/Radarr</td><td class="yes">API SAB + Newznab</td><td class="yes">nativa</td><td class="yes">nativa</td><td class="yes">API compatível com SAB</td><td class="no">não</td><td class="no">não</td></tr>
+        <tr><td>controles remotos de celular (nzb360/LunaSea)</td><td class="yes">sim</td><td class="yes">sim</td><td class="yes">sim</td><td class="no">não</td><td class="no">não</td><td class="no">não</td></tr>
+        <tr><td>lista de observação com captura e upgrades automáticos</td><td class="yes">embutido</td><td class="no">via *arr</td><td class="no">via *arr</td><td class="no">não</td><td class="yes">Watchdog</td><td class="half">regras</td></tr>
+        <tr><td>binário único e autocontido</td><td class="yes">sim</td><td class="half">pacotes de app; Python no Linux</td><td class="yes">sim</td><td class="yes">sim</td><td class="yes">.app</td><td class="yes">.exe</td></tr>
+        <tr><td>código aberto</td><td class="yes">GPL⁶</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">MIT</td><td class="no">pago</td><td class="no">pago</td></tr>
+        <tr><td>plataformas</td><td class="yes">mac/win/linux (x64 + ARM)/docker/flatpak</td><td class="yes">mac/win/linux/docker/pacotes NAS</td><td class="yes">mac/win/linux/docker/NAS + embarcado</td><td class="half">linux/win (mac a partir do código-fonte)</td><td class="no">só mac</td><td class="no">só win</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">⁴ O desempacotamento direto ainda materializa os volumes primeiro:
@@ -966,14 +911,9 @@
     href="#cost">as tabelas de custo</a>). Seus builds mais antigos (1.3.4-1.3.9) distribuíam
     volumes ofuscados marcados "Completed" sem extrair; essa falha foi corrigida a montante na 1.4.5.
     ⁶ GPL-3.0-or-later.
-    ⁷ Weaver 0.7.8, o binário distribuído mais novo, identidade provada por hash (o sha256 do
-    tarball do release publicado e do binário dentro dele batem com o que corremos); suas linhas medidas vêm
-    da rodada de custo de 23 de agosto, suas células de capacidade marcadas "-" são recursos que não
-    avaliamos em vez de ausências confirmadas; ele fala um RPC compatível com NZBGet, que é como
-    nosso harness o conduz, mas não tentamos os controles remotos de celular contra ele.
     Usenapp/Newsbin são leitores comerciais de plataforma única com recursos de downloader; eles estão
     listados porque as pessoas perguntam, não porque competem em velocidade.</p>
-    <p class="note" style="text-align:start">⁸ O macOS inicia um programa com um limite de 256 arquivos
+    <p class="note" style="text-align:start">⁷ O macOS inicia um programa com um limite de 256 arquivos
     abertos, e um conjunto completo de conexões em vários servidores pode ultrapassar isso. O nzbfast eleva seu próprio
     limite na inicialização no macOS e no Linux: pede 65.536, reduz até o sistema concordar,
     nunca passa do limite rígido do sistema, e continua com o que tinha se todo passo for
@@ -1031,8 +971,7 @@
   <p class="fine">Dados de benchmark nesta página: as rodadas de <b>23 e 24 de agosto de 2026</b> -
   as tabelas de custo, a nova corrida de rede, a rodada de post danificado, o piso de espaço livre,
   o equipamento de teto de disco e a nova corrida de extração - correndo contra SABnzbd 5.1.1 (5.1.0 na
-  rodada de dano), NZBGet 26.3-testing (build de 20 de agosto), rustnzb 1.4.5 e Weaver 0.7.8
-  (seu binário distribuído mais novo, identidade provada por hash), cinco provedores, tudo TLS - as
+  rodada de dano), NZBGet 26.3-testing (build de 20 de agosto) e rustnzb 1.4.5, cinco provedores, tudo TLS - as
   rodadas mais recentes no próprio <b>build de lançamento v1.2.2</b>, o resto na linha de código
   que foi distribuída como ele. O piso de espaço livre foi recortado de novo no build de lançamento em 24
   de agosto e reproduziu seus limites exatamente; as células rivais da rodada de limite de memória mantêm

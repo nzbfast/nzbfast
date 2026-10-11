@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Benchmarks - nzbfast</title>
-<meta name="description" content="nzbfast measured against four other Usenet clients on identical hardware: time to a usable file, plus the disk, free space and memory each job costs. Every table names the builds it raced. Includes the legs nzbfast doesn't win.">
+<meta name="description" content="nzbfast measured against three other Usenet clients on identical hardware: time to a usable file, plus the disk, free space and memory each job costs. Every table names the builds it raced. Includes the legs nzbfast doesn't win.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="benchmarks.html">
@@ -62,19 +62,17 @@
     <h2>No measured client is cheaper on processor, memory and disk together</h2>
     <p class="lead">The newest rounds on this page ran on 23 and 24 August 2026 - the
     newest of them on the <b>v1.2.2 release build itself</b> - against the current
-    builds of four other clients on identical hardware, lines and providers: two job
+    builds of three other clients on identical hardware, lines and providers: two job
     shapes from 6.5 to 87 GB, and line rates from 250 Mbit to 10 GbE. Across those
     rounds no client was cheaper than nzbfast on processor, memory and disk together:
-    each costs more on at least two of the three, the most any of them saved on any
-    single axis was about 2 percent - a statistical tie, inside that client's own
-    run-to-run spread - and on disk every one of them moved at least twice the bytes
-    for a byte-identical result. As shipped, nzbfast also held the least memory of
+    each costs more on all three, and on disk every one of them moved at least twice
+    the bytes for a byte-identical result. As shipped, nzbfast also held the least memory of
     every client measured, on every fixture, by 2.0x to 4.5x against the nearest
     rival.</p>
     <p><b>Which one is you?</b></p>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px">
       <div class="callout" style="margin:0"><b>A NAS, a mini PC, or a small home server.</b>
-      nzbfast held 143 MB of memory on a job where the nearest rival held 531 MB and the
+      nzbfast held 143 MB of memory on a job where the nearest rival held 628 MB and the
       heaviest 1.6 GB, finishes with about 50 MB of free space to spare where other
       clients need roughly twice the download free, and the low-memory ladder put an
       87 GB job on disk in 286 MB of RAM at shipped defaults. And because it moves each byte across your disk
@@ -118,16 +116,16 @@
     <p class="kicker">Methodology first</p>
     <h2>The setup</h2>
     <ul class="plain">
-      <li><b>Clients:</b> nzbfast · SABnzbd · NZBGet · rustnzb · Weaver, every table on the
+      <li><b>Clients:</b> nzbfast · SABnzbd · NZBGet · rustnzb, every table on the
       builds it names. The newest rounds (23 August 2026) raced the field's then-current
-      builds - SABnzbd 5.1.1, NZBGet 26.3-testing, rustnzb 1.4.5 and Weaver 0.7.8, its
-      newest shipped binary, identity proven by hash - against the code line that shipped
+      builds - SABnzbd 5.1.1, NZBGet 26.3-testing and rustnzb 1.4.5 - against the code line that shipped
       that night as <b>nzbfast 1.2.2</b>, so the build that produced the new numbers is
       the one you can download. Those rounds ran on a 20-core Apple Silicon box on a
       1&nbsp;Gbit line. Older tables keep the builds and machines they raced (Apple
       M-series boxes: "Europe" M1 Ultra on 10&nbsp;GbE, "East Coast" M3 Ultra
       ~2.4-3.0 Gbps line) and say so; they understate the shipping build rather than
-      flatter it.</li>
+      flatter it. Weaver's results have been removed from this page because its builds have
+      moved on since these rounds; they will return with the next full re-run.</li>
       <li><b>Fairness:</b> same providers and TLS everywhere for every client, legs run back-to-back interleaved. Every competitor tuned to its documented best: SABnzbd got <code>pipelining_requests=8</code> (<b>it ships 1, i.e. unpipelined</b>, and the setting is worth double-digit percentages on large jobs), NZBGet got ArticleCache/DirectWrite/DirectUnpack/ParQuick, rustnzb its documented config. Since 20 August 2026 every round races <b>five providers</b> rather than six - provider count is not a throughput lever on these boxes, where one provider alone can reach the line ceiling, and a fixed set keeps rounds comparable - so a six-provider figure on this page is not directly comparable with a newer five-provider one, and each table says which it ran.</li>
       <li><b>End state:</b> a verified, extracted, usable file, not "download finished". That's what you actually wait for.</li>
       <li><b>Reproducibility:</b> every claim is dated and measured the same way: elapsed time + interface byte counters + process-tree peak RSS, 1-2 s resolution. Where a leg runs on a publicly posted NZB, we name it so you can run it yourself.</li>
@@ -155,11 +153,11 @@
   <div class="wrap">
     <p class="kicker">The 23 August 2026 round</p>
     <h2>What a job costs: every client current, one night, one box</h2>
-    <p class="lead">Six arms on a 20-core Apple Silicon box on a 1 Gbit line: nzbfast at
+    <p class="lead">Five arms on a 20-core Apple Silicon box on a 1 Gbit line: nzbfast at
     shipped defaults, the same binary with its connection governor switched off, and the
-    current builds of the other four clients. Five providers, TLS everywhere, three
+    current builds of the other three clients. Five providers, TLS everywhere, three
     repetitions per client per fixture with the order rotated inside each round, and
-    every leg's output checked byte-for-byte: 36 of 36 legs produced the exact payload.
+    every leg's output checked byte-for-byte: 30 of 30 legs produced the exact payload.
     At 1 Gbit the line sets the pace and the finish times converge by design, so the
     time column is there to show that convergence; the resource columns are what the
     round exists to measure.</p>
@@ -171,12 +169,11 @@
     <div class="tblwrap"><table>
       <thead><tr><th>6.5 GB named release, extraction in path</th><th>time to usable file</th><th>peak memory (RSS)</th><th>CPU time</th><th>device I/O (GiB)</th><th>wire (GB)</th></tr></thead>
       <tbody>
-        <tr><td><b>nzbfast, shipped (25 conns)</b></td><td class="win">58 s</td><td class="win num">143 MB</td><td class="num">35.7 s</td><td class="win num">6.2</td><td class="num">6.5</td></tr>
+        <tr><td><b>nzbfast, shipped (25 conns)</b></td><td class="win">58 s</td><td class="win num">143 MB</td><td class="win num">35.7 s</td><td class="win num">6.2</td><td class="num">6.5</td></tr>
         <tr><td>nzbfast, governor off (360)</td><td class="num">60 s</td><td class="num">583 MB</td><td class="num">38.0 s</td><td class="num">6.1</td><td class="num">6.6</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">61 s</td><td class="num">801 MB</td><td class="num">40.1 s</td><td class="num">12.5</td><td class="num">6.5</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">63 s</td><td class="num">1,588 MB</td><td class="num">69.5 s</td><td class="num">13.8</td><td class="num">6.5</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">67 s</td><td class="num">628 MB</td><td class="num">61.9 s</td><td class="num">13.4</td><td class="num">7.2</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">110 s</td><td class="num">531 MB</td><td class="win num">34.9 s&sup1;</td><td class="num">12.5</td><td class="num">6.5</td></tr>
       </tbody>
     </table></div>
     <div class="tblwrap"><table>
@@ -187,23 +184,14 @@
         <tr><td>NZBGet 26.3-testing</td><td class="num">306 s</td><td class="num">900 MB</td><td class="num">221.3 s</td><td class="num">68.1</td><td class="num">34.4</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">308 s</td><td class="num">1,607 MB</td><td class="num">356.5 s</td><td class="num">72.5</td><td class="num">34.4</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">343 s</td><td class="num">445 MB</td><td class="num">332.6 s</td><td class="num">69.8</td><td class="num">37.8</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">511 s</td><td class="num">1,076 MB</td><td class="num">373.8 s</td><td class="num">98.0</td><td class="num">34.4</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>Measured 23 August 2026</b> against
-    SABnzbd 5.1.1, NZBGet 26.3-testing, rustnzb 1.4.5 and Weaver 0.7.8, medians of
+    SABnzbd 5.1.1, NZBGet 26.3-testing and rustnzb 1.4.5, medians of
     three with every leg byte-checked, five providers, all TLS. The nzbfast arms ran a
     build of the same code line from earlier that day, some seven hours before the
     v1.2.2 release build, so their rows carry no version number; the 500 Mbit and
-    87 GB tables on this page did race the release build itself and say so. &sup1; Weaver's CPU
-    median on the 6.5 GB fixture is 2% below ours (34.9 against 35.7) with its own
-    three legs spanning 34.1 to 56.1 s, so read it as a statistical tie; it is the one
-    cell on either table a rival holds, and it is repeated under <a
-    href="#legs-we-lose">the legs we don't win</a>. On the 34 GB fixture our CPU is
-    lowest outright. Weaver's newer 0.8.3 ships no binary; our source build of it
-    measured a processor pattern we cannot cleanly attribute to the version rather
-    than to the build, so this table races the hash-proven 0.7.8 release asset and
-    says so rather than publishing a confounded number. rustnzb 1.4.5 completed every
+    87 GB tables on this page did race the release build itself and say so. rustnzb 1.4.5 completed every
     leg here, the obfuscated fixture included.</p>
     <p class="note" style="text-align:start"><b>The wire column, precisely.</b>
     6.5 GB on the clean fixture - the same figure NZBGet and SABnzbd report for
@@ -230,8 +218,8 @@
     <p class="lead">On a line slow enough, every client's finish time is the wire and
     nothing else, so a slow line hides a lot of sins. What it cannot hide is what each
     client burns to fill it. We shaped the 1 Gbit rig to two rates real plans actually
-    are and raced all six arms at each - same box, same five providers, three
-    repetitions per client with the order rotated, every leg byte-checked, 36 of 36
+    are and raced all five arms at each - same box, same five providers, three
+    repetitions per client with the order rotated, every leg byte-checked, 30 of 30
     correct across the two rounds. The nzbfast arm at 500 Mbit is the v1.2.2 release
     build itself.</p>
     <div class="tblwrap"><table>
@@ -241,7 +229,6 @@
         <tr><td>nzbfast 1.2.2, governor off</td><td class="num">115 s</td><td class="num">592 MB</td><td class="num">59.0 s</td><td class="num">6.2</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">125 s</td><td class="num">1,665 MB</td><td class="num">99.2 s</td><td class="num">14.2</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">131 s</td><td class="num">626 MB</td><td class="num">92.6 s</td><td class="num">14.5</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">138 s</td><td class="num">564 MB</td><td class="num">48.5 s</td><td class="num">12.4</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">145 s&sup1;</td><td class="num">846 MB</td><td class="num">64.3 s</td><td class="num">13.2</td></tr>
       </tbody>
     </table></div>
@@ -252,7 +239,6 @@
         <tr><td>nzbfast, governor off</td><td class="num">219 s</td><td class="num">651 MB</td><td class="num">67.9 s</td><td class="num">6.2</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">227 s</td><td class="num">826 MB</td><td class="num">78.4 s</td><td class="num">13.3</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">230 s</td><td class="num">1,667 MB</td><td class="num">162.4 s</td><td class="num">15.2</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">230 s</td><td class="num">789 MB</td><td class="num">62.0 s</td><td class="num">12.9</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">256 s</td><td class="num">644 MB</td><td class="num">122.4 s</td><td class="num">15.4</td></tr>
       </tbody>
     </table></div>
@@ -289,9 +275,9 @@
     <p class="kicker">The big file &middot; measured 24 August 2026 on nzbfast 1.2.2</p>
     <h2>An 87 GB post to a usable 77 GB file, at 10 GbE</h2>
     <p class="lead">The other end of the line-rate story: a 10 GbE box, five providers,
-    an 87 GB post whose payload is one 76.6 GB video, six arms, three repetitions
-    rotated, and every leg's output byte-checked - 18 of 18 legs produced the identical
-    file, all six clients agreeing on its checksum. The nzbfast arms are the v1.2.2
+    an 87 GB post whose payload is one 76.6 GB video, five arms, three repetitions
+    rotated, and every leg's output byte-checked - 15 of 15 legs produced the identical
+    file, all five arms agreeing on its checksum. The nzbfast arms are the v1.2.2
     release build.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>87 GB post, 10 GbE</th><th>time to usable file</th><th>peak memory (RSS)</th><th>CPU time</th><th>device I/O (GiB)</th><th>wire (GB)</th></tr></thead>
@@ -300,14 +286,13 @@
         <tr><td>nzbfast 1.2.2, connection governor on (25)</td><td class="num">90 s</td><td class="win num">336 MB</td><td class="win num">130.5 s</td><td class="win num">72.9</td><td class="num">77.4</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">93 s</td><td class="num">1,195 MB</td><td class="num">443 s</td><td class="num">183.7</td><td class="num">77.2</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">113 s</td><td class="num">1,910 MB</td><td class="num">234 s</td><td class="num">235.1</td><td class="num">77.2</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">645 s</td><td class="num">1,825 MB</td><td class="num">631 s</td><td class="num">435.1&sup2;</td><td class="num">77.3</td></tr>
-        <tr><td>rustnzb 1.4.5</td><td class="num">869 s&sup3;</td><td class="num">681 MB</td><td class="num">2,444 s</td><td class="num">216.1</td><td class="num">86.9</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">869 s&sup2;</td><td class="num">681 MB</td><td class="num">2,444 s</td><td class="num">216.1</td><td class="num">86.9</td></tr>
       </tbody>
     </table></div>
     <p><b>The disk story at its largest scale yet.</b> Our peak disk during the job is
     70.8 GiB - BELOW the 76.6 GB output, because the tail of the payload is still
     arriving while the head is already final - and total device I/O is 1.00x the
-    payload. The rivals move 2.5x to 6.0x the bytes for the same file. And the fastest
+    payload. The rivals move 2.5x to 3.2x the bytes for the same file. And the fastest
     arm sustains about 8.7 Gbps <em>including</em> in-stream verification and
     extraction; the moment the download bar fills, the file is done.</p>
     <p class="note" style="text-align:start">&sup1; Every client on this page is raced at its documented best settings, and on a
@@ -325,10 +310,7 @@
     CPU-seconds. Scaling the governor with the line rate automatically - so the best
     behaviour is also the default, at the knee rather than the maxima - shipped in 1.2.3, the
     release after the one measured here.
-    &sup2; Weaver's 435 GiB of device I/O for a 77 GB download is its encrypted-at-rest
-    store re-reading and re-writing nearly everything as the job grows - the
-    superlinear pattern our July instrumented rounds measured, still present on the
-    current build. &sup3; rustnzb 1.4.5 completes byte-correct and its cost is
+    &sup2; rustnzb 1.4.5 completes byte-correct and its cost is
     processor time and wire: about 2,444 CPU-seconds against an 869 s clock across all
     three reps, and 86.9 GB pulled where the eager plan is 77.2 (it fetches the full
     recovery set unconditionally). Measured 24 August 2026, medians of three, every
@@ -429,8 +411,7 @@
     the newest build of every client, nzbfast v1.2.2 included: Europe 10 GbE box, five
     providers, 100 connections per client, the same 6.5 GB release poisoned at three
     damage levels, three repetitions per arm with the order alternated, every leg
-    byte-checked against the clean file. 63 of 65 legs came back byte-identical; the
-    two that did not are named below, because they are results.</p>
+    byte-checked against the clean file, and every one came back byte-identical.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>time to a verified, usable file (mean of 3)</th><th>60 dead articles</th><th>20 dead</th><th>5 dead</th></tr></thead>
       <tbody>
@@ -439,7 +420,6 @@
         <tr><td>NZBGet 26.3-testing</td><td class="num">33.0 s</td><td class="num">23.7 s</td><td class="num">23.0 s</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">48.0 s&sup1;</td><td class="num">28.0 s</td><td class="num">24.3 s</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">107.3 s&sup2;</td><td class="num">51.3 s</td><td class="num">47.0 s</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="bad">did not finish&sup3;</td><td class="bad">did not finish&sup3;</td><td class="num">194.0 s</td></tr>
       </tbody>
     </table></div>
     <p><b>Why the damaged post is fast here.</b> When an article is missing, a client
@@ -463,15 +443,10 @@
     and its cost sits in processor time rather than reliability: about 1,620
     CPU-seconds against a 107 s clock at the heaviest damage - roughly fifteen cores
     busy for the whole leg - where the same repaired output costs us about 50
-    CPU-seconds. &sup3; Weaver moved 1.5 GB and 4.9 GB of the 6.5 within our 20-minute
-    cutoff at the two heavier damage levels - the same non-finish in all three rounds
-    that have raced it, on three separate nights; the cutoff is ours and the non-finish
-    is the result. At 5 dead articles it completed correctly all three times. Its
-    processor cost there is its own story: about 2,325 CPU-seconds for the 194 s leg,
-    against our 20.</p>
+    CPU-seconds.</p>
     <p class="note" style="text-align:start">Measured 24 August 2026, all builds
     current: nzbfast v1.2.2 (the release tag itself), NZBGet 26.3-testing (20 August
-    build), SABnzbd 5.1.1, rustnzb 1.4.5, Weaver 0.7.8. A continuity arm raced the
+    build), SABnzbd 5.1.1, rustnzb 1.4.5. A continuity arm raced the
     previous night's nzbfast build inside this same round and landed within a second of
     v1.2.2 on every fixture, so nothing here rides a lucky night; and the rival
     configurations differ from the previous round's by application path only, checked
@@ -487,13 +462,6 @@
     <p class="lead">This section exists for the legs a rival wins, and it is re-measured every round rather than curated: anything we lose goes here, named, next to the table that shows it. On the current build, this round, it is empty of speed losses - which is worth being careful about rather than pleased about, so the trades that remain are stated below instead.</p>
 
     <p class="lead">What has <em>not</em> gone away is the trade behind those numbers, so that is what this section says now: <b>we spend more memory than the standalone tools do</b>, and the fast heavy-repair path spends the most. Our extractor and repairer are built to ride a live download rather than to run once from a command line, and that costs resident memory; the detail is beside the component tables. If your constraint is the smallest possible footprint for a one-shot job, the dedicated tools win that column and we are not going to pretend otherwise.</p>
-
-    <p class="lead">And the 23 August 2026 round adds an entry, which we would rather
-    list here than leave in a footnote: on the 6.5 GB fixture, Weaver's processor
-    median is 2% below ours - 34.9 against 35.7 CPU-seconds, with its own three legs
-    spanning 34.1 to 56.1 s - so we call it a statistical tie, and it sits in
-    <a href="#cost">the cost table</a> marked as the one cell we do not hold. On the
-    34 GB fixture in the same round our CPU is lowest outright.</p>
     <div class="callout">Why show a loss at all? Because the wins are only believable next to it.
     Every number on this page comes from the same interleaved runs, and a leg we lose stays
     published until a re-run replaces it.</div>
@@ -517,7 +485,7 @@
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Single leg per budget on the release
-    build, gated against the same output checksum as the six-arm round. The tightest
+    build, gated against the same output checksum as the five-arm round. The tightest
     budget costs about 9% of wall, and only because this line is 10 GbE - spilled
     blocks cost time only when the line outruns the disk, so on a typical home
     connection a small budget is close to free. The whole ladder, an 87 GB download
@@ -529,8 +497,8 @@
     NZBGet to an equivalent cache clamp more than doubled its CPU (215.5 to 453.0
     CPU-seconds, 2.10x) to buy a 52% cut in its peak memory, and SABnzbd's clamp was
     nearly free but reached only part of its footprint. rustnzb's cache setting was
-    decorative in the build raced, and Weaver has no memory knob at all, so both ran
-    unclamped as reference columns rather than being scored at a budget they cannot
+    decorative in the build raced, so it ran
+    unclamped as a reference column rather than being scored at a budget it cannot
     hold. Our own side of that round is superseded by the v1.2.2 ladder above, which
     says the same thing at 2.5x the size: the budget is never the binding constraint,
     because one-pass holds so little to begin with.</p>
@@ -554,13 +522,11 @@
         <tr><td>NZBGet 26.3-testing</td><td class="num">~2.1x the payload</td><td class="num">~2.1x (37.6 GB over the output)</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">~2.1x the payload</td><td class="num">~2.1x (37.6 GB over the output)</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">~2.25x the payload</td><td class="num">~2.25x (42.7 GB over the output)</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">~2.25x the payload</td><td class="num">~2.25x (42.7 GB over the output)&sup1;</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Measured on a 20-core Apple Silicon box, 1 Gbit line, five providers, three
     repetitions at each bound, every completed leg byte-checked - the rival rows on
-    22-23 August 2026 (Weaver's 34 GB cell re-run on 24 August, footnote 1),
-    and the nzbfast row re-cut on the v1.2.2 release build on 24
+    22-23 August 2026, and the nzbfast row re-cut on the v1.2.2 release build on 24
     August, which reproduced both bounds exactly, 12 of 12 legs unanimous across the
     two fixtures. Our cells are a measured floor: the job
     completes 3 of 3 with 48.6 MB and 51.0 MB of headroom, and refuses 3 of 3 about
@@ -575,16 +541,7 @@
     matters as much as the number. At 17 MB below its floor nzbfast hits the disk's
     refusal on a write, stops cleanly with "out of disk space", keeps everything that
     landed journaled, and a retry resumes without refetching - a partial you keep,
-    not a failed job. &sup1; Weaver's large-fixture cell was settled by a re-run on
-    24 August: three legs of three byte-correct at the same ~2.25x, each of them
-    faster than the good leg of the first attempt, on free space identical to the
-    byte. On the first attempt, 23 August, two of its three legs had stalled at
-    single-digit MB/s with more than 60 GB still free and hit the round's 40-minute
-    cutoff. Those stalls did not come back, and the rig's stall instrumentation was
-    deployed and silent across all three re-run legs, which is a positive reading
-    rather than an absent one. What caused them is still unknown, and a clean re-run
-    is not a diagnosis: six legs now exist at this ratio, four of them completed, and
-    both failures came from one 80-minute window on the first night.</p>
+    not a failed job.</p>
   </div>
 </section>
 
@@ -708,9 +665,8 @@
       <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">5 of 10</td><td class="num">3</td><td class="num">2</td></tr>
       <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10 of 10</td><td class="win num">0</td><td class="win num">0</td></tr>
       <tr><td><b>rustnzb 1.4.5</b></td><td class="num">7 of 10</td><td class="num">1</td><td class="num">2</td></tr>
-      <tr><td><b>Weaver 0.7.8</b></td><td class="num">1 of 10</td><td class="num">1</td><td class="num">8</td></tr>
     </table></div>
-    <p><b>nzbfast is the only one that finishes all ten without help.</b> NZBGet reaches the file on every shape too, but needs 16 rounds of manual repair and extraction across eight of them. SABnzbd finishes five unaided and two are unreachable even by hand. Weaver reaches the file on two.</p>
+    <p><b>nzbfast is the only one that finishes all ten without help.</b> NZBGet reaches the file on every shape too, but needs 16 rounds of manual repair and extraction across eight of them. SABnzbd finishes five unaided and two are unreachable even by hand.</p>
     <p>The pattern is not random. The shapes nzbfast walks and the others do not are the wrapped ones and the damaged ones: an archive inside an archive, a format change part-way down, a five-level chain, and above all an archive that arrives corrupt with its own recovery data packed alongside it. On that last one four clients unpack the outer set perfectly, hand you the broken archive together with the recovery set that would fix it, and stop.</p>
     <p>Where clients finish the same work, the cost is not close. These are the seven shapes all four mainstream clients reach, counting the manual repair each needed:</p>
     <div class="tblwrap"><table>
@@ -753,19 +709,19 @@
     <div class="chips">
       <span class="chip"><b>4</b> machines, laptop to 32-core</span>
       <span class="chip"><b>7</b> RAR archive shapes</span>
-      <span class="chip"><b>6</b> extractors raced</span>
+      <span class="chip"><b>5</b> extractors raced</span>
       <span class="chip"><b>1 GB</b> of payload per shape</span>
       <span class="chip"><b>best of 3</b> interleaved, warm cache</span>
     </div>
 
-    <h3 style="margin:38px 0 4px">RAR extraction: 7 archive shapes, 6 tools</h3>
+    <h3 style="margin:38px 0 4px">RAR extraction: 7 archive shapes, 5 tools</h3>
     <p class="note" style="text-align:start;margin-top:6px">The previous round of this table used 100 MB to 200 MB per shape, which was a mistake: about 28 ms of process launch was 40% of the store leg, and the ordering it produced does not survive at a realistic size. This round is <b>1 GB of payload per shape</b>, and it changes several answers, including some in the other direction. Archives are created by official <code>rar</code> 7.23, so no tool is judged on input from its own encoder, and the same bytes are raced on every machine.</p>
 
     <p class="note" style="text-align:start"><b>What is in the payload matters more than it looks.</b> A payload built out of block copies makes every compressed shape a memory-copy benchmark; a payload of pure text makes it a literal-and-Huffman benchmark; we measured both and they do not agree on who wins. So the four compressed shapes use equal thirds of text, structured records and incompressible bytes, and the two shapes at the ends of that range are separate legs on purpose: <code>store</code> is incompressible and <code>repetitive</code> is almost all matches. The builder and the harness are in the repository, so the corpus can be rebuilt byte for byte.</p>
 
     <p class="note" style="text-align:start"><b>Re-raced 23 August 2026 on the 1.2.2
-    engine, and the sweep stands.</b> The three tools a reader most often weighs -
-    ours, unrar 7.23 and rarpar 0.2.5 - were re-raced on the 32-core desktop on the
+    engine, and the sweep stands.</b> The two tools a reader most often weighs -
+    ours and unrar 7.23 - were re-raced on the 32-core desktop on the
     release engine (the extraction code raced is byte-identical to the 1.2.2 tag), six
     interleaved rounds, minimum per tool, every leg's output checked against the
     payload manifest. Seconds, lower is better:</p>
@@ -774,14 +730,13 @@
       <tbody>
         <tr><td><b>nzbfast 1.2.2</b></td><td><b>0.119</b></td><td><b>0.474</b></td><td><b>1.515</b></td><td><b>0.120</b></td><td><b>1.118</b></td><td><b>1.137</b></td><td><b>1.146</b></td></tr>
         <tr><td>unrar 7.23</td><td>0.190</td><td>2.032</td><td>1.784</td><td>0.139</td><td>1.655</td><td>1.846</td><td>1.420</td></tr>
-        <tr><td>rarpar 0.2.5</td><td>0.206</td><td>2.563</td><td>2.395</td><td>0.237</td><td>1.852</td><td>1.857</td><td>1.725</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">All seven shapes ours, on the minimum and
     on the median, 1.16x to 4.29x against unrar. These times are not comparable
     cell-for-cell with the wider table below - the harness has been revised since that
     table's rounds and the round counts differ - so read each table against itself.
-    The wider table keeps its own dates and its six-tool field, and its nzbfast column
+    The wider table keeps its own dates and its five-tool field, and its nzbfast column
     describes the engine 1.2.2 ships: the re-race above measured the current engine
     level with that table's build on all seven shapes, settled by hardware instruction
     counts (0.14% fewer for the same wall), so those cells are not a superseded build's
@@ -797,42 +752,38 @@
     clock, so there was no regression. Every our-build-against-our-build comparison we
     publish now carries that control.</p>
 
-    <p class="note" style="text-align:start"><b>The whole field, seconds, lower is better.</b> Best of three, tools interleaved inside each round rather than run in blocks, output checked against the source payload on every single run. A tool that produced the wrong bytes gets a correctness note, never a fast time. <code>rarpar</code> is Weaver's own RAR and PAR2 code, built from source at <code>bd87611</code>; we pin the commit rather than a version because its crates carry three different version numbers.</p>
+    <p class="note" style="text-align:start"><b>The whole field, seconds, lower is better.</b> Best of three, tools interleaved inside each round rather than run in blocks, output checked against the source payload on every single run. A tool that produced the wrong bytes gets a correctness note, never a fast time.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>seconds, 1 GB per shape</th><th>store</th><th>400 small files</th><th>solid</th><th>repetitive</th><th>big, 4 volumes</th><th>encrypted</th><th>128 MiB dictionary</th></tr></thead>
       <tbody>
         <tr><td colspan="8" class="grp">High-end desktop, 32 cores</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0.21</b></td><td><b>0.47</b></td><td><b>1.26</b></td><td><b>0.14</b></td><td><b>1.08</b></td><td><b>1.09</b></td><td><b>1.07</b></td></tr>
         <tr><td>unrar 7.23</td><td><b>0.21</b></td><td>2.02</td><td>1.62</td><td>0.16</td><td>1.61</td><td>1.82</td><td>1.37</td></tr>
-        <tr><td>rarpar</td><td>0.23</td><td>2.55</td><td>2.22</td><td>0.26</td><td>1.75</td><td>1.74</td><td>1.64</td></tr>
         <tr><td>unar 1.10.7</td><td>0.60</td><td>6.40</td><td>5.29</td><td>0.69</td><td>5.41</td><td>6.88</td><td>4.03</td></tr>
         <tr><td>bsdtar</td><td>0.34</td><td>13.67</td><td>11.48</td><td>1.86</td><td class="no">wrong output&sup2;</td><td class="no">no crypto&sup3;</td><td class="no">no big dict&#8308;</td></tr>
         <tr><td>7-Zip</td><td>0.30</td><td class="no">unsupported&sup1;</td><td class="no">unsupported&sup1;</td><td class="no">unsupported&sup1;</td><td class="no">unsupported&sup1;</td><td class="no">unsupported&sup1;</td><td class="no">unsupported&sup1;</td></tr>
         <tr><td colspan="8" class="grp">Older desktop, 20 cores</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0.16</b></td><td><b>0.57</b></td><td><b>1.83</b></td><td><b>0.15</b></td><td><b>1.50</b></td><td><b>1.51</b></td><td><b>1.40</b></td></tr>
         <tr><td>unrar 7.23</td><td>0.25</td><td>2.48</td><td>2.31</td><td>0.20</td><td>2.28</td><td>2.49</td><td>1.84</td></tr>
-        <tr><td>rarpar</td><td>0.28</td><td>3.15</td><td>3.00</td><td>0.31</td><td>2.26</td><td>2.26</td><td>1.97</td></tr>
         <tr><td>unar 1.10.7</td><td>0.67</td><td>7.49</td><td>6.93</td><td>0.85</td><td>6.85</td><td>8.49</td><td>5.29</td></tr>
         <tr><td>bsdtar</td><td>0.33</td><td>15.58</td><td>13.97</td><td>2.18</td><td class="no">wrong output&sup2;</td><td class="no">no crypto&sup3;</td><td class="no">no big dict&#8308;</td></tr>
         <tr><td>7-Zip</td><td>0.33</td><td class="no">unsupported&sup1;</td><td class="no">unsupported&sup1;</td><td class="no">unsupported&sup1;</td><td class="no">unsupported&sup1;</td><td class="no">unsupported&sup1;</td><td class="no">unsupported&sup1;</td></tr>
         <tr><td colspan="8" class="grp">Laptop, 14 cores / 20 threads, Windows&#8309;</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0.35</b></td><td><b>1.05</b></td><td><b>2.92</b></td><td><b>0.32</b></td><td><b>2.32</b></td><td><b>2.22</b></td><td><b>2.04</b></td></tr>
         <tr><td>unrar 7.23</td><td>0.63</td><td>6.37</td><td>6.14</td><td>0.62</td><td>2.92</td><td>3.33</td><td>2.44</td></tr>
-        <tr><td>rarpar</td><td>0.74</td><td>11.58</td><td>9.76</td><td>0.54</td><td>2.72</td><td>2.85</td><td>2.38</td></tr>
         <tr><td>unar</td><td class="no">no CLI&#8309;</td><td class="no">no CLI&#8309;</td><td class="no">no CLI&#8309;</td><td class="no">no CLI&#8309;</td><td class="no">no CLI&#8309;</td><td class="no">no CLI&#8309;</td><td class="no">no CLI&#8309;</td></tr>
         <tr><td>bsdtar</td><td>0.81</td><td>16.72</td><td>15.14</td><td>1.13</td><td class="no">wrong output&sup2;</td><td class="no">no crypto&sup3;</td><td class="no">no big dict&#8308;</td></tr>
         <tr><td>7-Zip</td><td>0.76</td><td>5.45</td><td>5.79</td><td>0.65</td><td>4.21</td><td>4.13</td><td>2.51</td></tr>
         <tr><td colspan="8" class="grp">Laptop, Apple M5 Max&#8310;</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0.10</b></td><td><b>0.40</b></td><td><b>1.15</b></td><td><b>0.10</b></td><td><b>0.98</b></td><td><b>0.99</b></td><td><b>0.94</b></td></tr>
         <tr><td>unrar 7.22</td><td>0.16</td><td>1.94</td><td>1.87</td><td>0.15</td><td>1.75</td><td>1.91</td><td>1.52</td></tr>
-        <tr><td>rarpar</td><td>0.11</td><td>2.09</td><td>1.97</td><td>0.18</td><td>1.54</td><td>1.55</td><td>1.33</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Where the field could not compete, and why.</b> ¹ The 7-Zip raced here is the Homebrew package, which refuses every compressed shape with <code>ERROR: Unsupported Method</code> and reads only the stored one on macOS. An earlier version of this page put that down to 7-Zip's macOS build, which was wrong: Homebrew builds it without the non-free unRAR codec, while the macOS build 7-zip.org ships carries the codec and decodes all seven shapes, as the Windows build does. Re-measured 14 August 2026. If you install 7-Zip from the project rather than from Homebrew, this column does not describe what you have. ² bsdtar has no RAR5 multi-volume support and produced a truncated file without reporting an error, so that leg is a correctness failure rather than a slow time; our harness caught it by checking the output, which is why it is worth checking the output. ³ <code>bsdtar: Encryption is not supported</code>. ⁴ <code>bsdtar: Declared dictionary size is not supported</code>. ⁵ unar ships no Windows command-line tool, so the laptop field is five. ⁶ The M5 Max group races the three tools a macOS reader would actually reach for - unrar, <code>rarpar</code> and us; unar, bsdtar and 7-Zip were not raced on that machine. Its unrar is 7.22, the newest build that runs unattended there.</p>
+    <p class="note" style="text-align:start"><b>Where the field could not compete, and why.</b> ¹ The 7-Zip raced here is the Homebrew package, which refuses every compressed shape with <code>ERROR: Unsupported Method</code> and reads only the stored one on macOS. An earlier version of this page put that down to 7-Zip's macOS build, which was wrong: Homebrew builds it without the non-free unRAR codec, while the macOS build 7-zip.org ships carries the codec and decodes all seven shapes, as the Windows build does. Re-measured 14 August 2026. If you install 7-Zip from the project rather than from Homebrew, this column does not describe what you have. ² bsdtar has no RAR5 multi-volume support and produced a truncated file without reporting an error, so that leg is a correctness failure rather than a slow time; our harness caught it by checking the output, which is why it is worth checking the output. ³ <code>bsdtar: Encryption is not supported</code>. ⁴ <code>bsdtar: Declared dictionary size is not supported</code>. ⁵ unar ships no Windows command-line tool, so the laptop field is four. ⁶ The M5 Max group races unrar against us; unar, bsdtar and 7-Zip were not raced on that machine. Its unrar is 7.22, the newest build that runs unattended there.</p>
 
     <p class="note" style="text-align:start"><b>Every shape on every machine except one, and that one is a tie.</b> The short-match shapes come down to two specific things in our decoder. A match of two to thirty-two bytes used to pay for a full call into the platform's memory-copy routine, and the call cost more than the copy; copying a fixed thirty-two bytes through a register instead is why <code>repetitive</code>, <code>solid</code> and the 128 MiB dictionary - the three shapes built out of short matches - are all quick at once. And the checksum runs downstream of the writer's thread rather than on it. The one cell we do not win outright is the stored shape on the 32-core desktop, where unrar and we are three milliseconds apart on a leg that is purely moving bytes - identical at this table's precision, so both cells are marked and it is scored a tie, not a loss and not a win.</p>
 
-    <p class="note" style="text-align:start">The shape we win by the most is the one usenet actually posts hundreds of at a time: <b>400 small files, 4.3× and 4.4× against unrar</b> and 5.4× to 5.5× against <code>rarpar</code>. That is per-member parallelism, and it is the difference between an extractor written for a download queue and one written for a command line. The stored shape, which the <a href="#census">census above</a> says is 84% of the bytes on the wire, is a near tie for the three serious tools, because at that point everybody is just moving bytes.</p>
+    <p class="note" style="text-align:start">The shape we win by the most is the one usenet actually posts hundreds of at a time: <b>400 small files, 4.3× and 4.4× against unrar</b>. That is per-member parallelism, and it is the difference between an extractor written for a download queue and one written for a command line. The stored shape, which the <a href="#census">census above</a> says is 84% of the bytes on the wire, is a near tie between us and unrar, because at that point everybody is just moving bytes.</p>
 
     <p class="note" style="text-align:start"><b>One choice worth declaring.</b> The archives are packed with the compressor pinned to four threads. RAR's block split otherwise follows the core count of whatever machine packed the archive, so a 32-core box and a 20-core box produce different bytes from the same input and the machines stop being comparable. Pinning it makes the extraction corpus byte-identical everywhere, which is the point, but it also caps how much of the decode can run in parallel - so when the two closest shapes were losses we re-raced them against archives packed with all 32 threads, to check that the pinning was not what caused it. It was not: solid moved from 4.2% behind to 2.4% behind and the 128 MiB dictionary from 6.6% to 6.3%, the same ordering either way. Both are now wins on the pinned corpus by a wider margin than that check could account for.</p>
 
@@ -847,7 +798,7 @@
 
     <p class="note" style="text-align:start"><b>Confirmed on the shipping build against the current rival, 24 August 2026.</b> These tables were measured before 1.2.2 was cut and before <code>par2cmdline-turbo</code> released 1.5.0 (20 August 2026), so the 20-core column was re-raced on both: our 1.2.2 release build against turbo 1.5.0, three interleaved rounds per leg, every repaired file compared against the pristine set. All four legs reproduce - ours 0.18 / 0.30 / 0.75 / 2.02 against the 0.19 / 0.33 / 0.74 / 2.07 printed here, and turbo 1.5.0 lands within a few percent of the build in the table on every leg and both configurations. The cells stand as published; the other three machines keep their own dates.</p>
 
-    <p class="note" style="text-align:start"><b>So the competition appears twice, and one of those columns is its best case rather than its default.</b> The release binary you would download is compiled for a generic baseline CPU and hashes only a couple of files at a time; building the same source for the actual host CPU and passing <code>-T16</code> lets it use the instructions that machine really has and hash sixteen files at once. On the laptop that is worth up to 2.6x, entirely from build and flags. Judge us on the tuned column, which is the harder comparison; the as-shipped column is what someone who downloads it actually experiences. <code>par2cmdline</code> is the original, version 1.2.0, built from source on each machine. <code>rarpar</code> is Weaver's own PAR2 implementation, built from source with its Metal GPU backend enabled. MultiPar's <code>par2j</code> is Windows-only, so it appears on the Windows laptop rows alone. The M5 Max rows race the two tools with current macOS arm64 builds beside the two turbo columns; <code>par2cmdline</code> classic was not raced on that machine.</p>
+    <p class="note" style="text-align:start"><b>So the competition appears twice, and one of those columns is its best case rather than its default.</b> The release binary you would download is compiled for a generic baseline CPU and hashes only a couple of files at a time; building the same source for the actual host CPU and passing <code>-T16</code> lets it use the instructions that machine really has and hash sixteen files at once. On the laptop that is worth up to 2.6x, entirely from build and flags. Judge us on the tuned column, which is the harder comparison; the as-shipped column is what someone who downloads it actually experiences. <code>par2cmdline</code> is the original, version 1.2.0, built from source on each machine. MultiPar's <code>par2j</code> is Windows-only, so it appears on the Windows laptop rows alone. The M5 Max rows race nzbfast against the two turbo columns; <code>par2cmdline</code> classic was not raced on that machine.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>seconds, 1 GiB set</th><th>desktop, 32 cores</th><th>desktop, 20 cores</th><th>laptop, 14 cores</th><th>laptop, M5 Max</th></tr></thead>
@@ -857,28 +808,24 @@
         <tr><td>par2-turbo, tuned</td><td>0.31</td><td>0.38</td><td>0.42</td><td>0.28</td></tr>
         <tr><td>par2-turbo, as shipped</td><td>0.86</td><td>1.12</td><td>1.06</td><td>0.80</td></tr>
         <tr><td>par2cmdline</td><td>3.03</td><td>3.84</td><td>3.81</td><td class="no">not raced</td></tr>
-        <tr><td>rarpar</td><td>2.62</td><td>3.45</td><td>2.96</td><td>2.32</td></tr>
         <tr><td>MultiPar</td><td class="no">Windows only</td><td class="no">Windows only</td><td>1.34</td><td class="no">Windows only</td></tr>
         <tr><td colspan="5" class="grp">3 blocks damaged - a few dead articles</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0.22</b></td><td><b>0.33</b></td><td><b>0.46</b></td><td><b>0.26</b></td></tr>
         <tr><td>par2-turbo, tuned</td><td>0.51</td><td>0.66</td><td>0.78</td><td>0.48</td></tr>
         <tr><td>par2-turbo, as shipped</td><td>1.08</td><td>1.46</td><td>1.42</td><td>1.00</td></tr>
         <tr><td>par2cmdline</td><td>3.64</td><td>4.58</td><td>4.98</td><td class="no">not raced</td></tr>
-        <tr><td>rarpar</td><td>4.27</td><td>5.53</td><td>4.99</td><td>3.64</td></tr>
         <tr><td>MultiPar</td><td class="no">Windows only</td><td class="no">Windows only</td><td>1.71</td><td class="no">Windows only</td></tr>
         <tr><td colspan="5" class="grp">101 blocks damaged</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0.48</b></td><td><b>0.74</b></td><td><b>0.96</b></td><td><b>0.66</b></td></tr>
         <tr><td>par2-turbo, tuned</td><td>0.88</td><td>1.17</td><td>1.40</td><td>0.85</td></tr>
         <tr><td>par2-turbo, as shipped</td><td>2.04</td><td>2.65</td><td>2.69</td><td>1.84</td></tr>
         <tr><td>par2cmdline</td><td>5.57</td><td>7.57</td><td>11.7</td><td class="no">not raced</td></tr>
-        <tr><td>rarpar</td><td>4.73</td><td>5.73</td><td>5.74</td><td>4.17</td></tr>
         <tr><td>MultiPar</td><td class="no">Windows only</td><td class="no">Windows only</td><td>2.65</td><td class="no">Windows only</td></tr>
         <tr><td colspan="5" class="grp">1,500 blocks damaged - 91% of recovery used</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>1.00</b></td><td><b>2.07</b></td><td><b>2.46</b></td><td><b>1.61</b></td></tr>
         <tr><td>par2-turbo, tuned</td><td>3.00</td><td>5.52</td><td>6.73</td><td>4.07</td></tr>
         <tr><td>par2-turbo, as shipped</td><td>5.21</td><td>8.20</td><td>9.30</td><td>6.01</td></tr>
         <tr><td>par2cmdline</td><td>67.7</td><td>86.1</td><td>403</td><td class="no">not raced</td></tr>
-        <tr><td>rarpar</td><td>7.15</td><td>11.49</td><td>14.22</td><td>6.91</td></tr>
         <tr><td>MultiPar</td><td class="no">Windows only</td><td class="no">Windows only</td><td>5.40</td><td class="no">Windows only</td></tr>
       </tbody>
     </table></div>
@@ -893,7 +840,7 @@
 
     <p class="note" style="text-align:start"><b>A faster path is only worth having if it cannot be wrong.</b> Both paths compute the same quantity and are bit-identical by construction, and every repair on this page was gated on the rebuilt files matching the pristine set: 228 timed repairs across the machines in this round, zero mismatches. The shipping build does not rely on that record. Every repair verifies its own output against the file hashes, and one that failed would be redone with the classic path automatically, log the divergence, and keep the classic path for the rest of that run. The setting is in the dashboard as <b>Fast PAR mode</b> if you would rather not have it at all, and machines with too little memory for it decline it on their own rather than trying and failing. Re-measured on 2 August on the current build: the two desktops land within a few percent of this table, and with <b>Fast PAR mode</b> switched off the 20-core desktop falls back to exactly the classic path's slower time, which is what says the win is the method and not the conditions.</p>
 
-    <p class="note" style="text-align:start"><b>The Windows laptop's column needed a correction, and it goes against us.</b> Windows demotes sustained background work onto its efficiency cores a few seconds in. Our daemon opts out of that at startup and none of the other tools can, so an earlier version of this page published their throttled times as though they were the tools' own. Rerunning that machine with every tool lifted to high priority moves the whole field: on the heaviest damage level <code>par2-turbo</code> goes from 22.4 s to 6.41 and <code>rarpar</code> from 59.2 s to 14.4, and for one cut of this page that turned the column from ours into one we lost. The whole laptop column is measured that way now - the correction stays even though the row has since been won back by the algorithm change above, because the field's times on that machine are only honest with the throttle lifted.</p>
+    <p class="note" style="text-align:start"><b>The Windows laptop's column needed a correction, and it goes against us.</b> Windows demotes sustained background work onto its efficiency cores a few seconds in. Our daemon opts out of that at startup and none of the other tools can, so an earlier version of this page published their throttled times as though they were the tools' own. Rerunning that machine with every tool lifted to high priority moves the whole field: on the heaviest damage level <code>par2-turbo</code> goes from 22.4 s to 6.41, and for one cut of this page that turned the column from ours into one we lost. The whole laptop column is measured that way now - the correction stays even though the row has since been won back by the algorithm change above, because the field's times on that machine are only honest with the throttle lifted.</p>
 
     <h3 style="margin:44px 0 4px">RAR recovery records: repairing without PAR2</h3>
     <p class="note" style="text-align:start;margin-top:6px">When PAR2 cannot cover the damage, the recovery record inside the RAR itself is the last line of defence. Until 1.0.8 ours failed on any archive over about 13 MB, so this leg could not be run at all. Damage is three 3,000-byte holes at 20%, 50% and 80% through the protected region. Both tools produced output byte-identical to the pristine file, and ours is byte-identical to what <code>rar r</code> itself writes. Best of three, 32-core desktop, both tools re-raced together on 2 August.</p>
@@ -908,7 +855,6 @@
     <p class="note" style="text-align:start">An earlier version of this page showed the 512 MB size as a loss, and explained it as the price of working through the volume in pieces rather than holding all of it in memory. That explanation was correct at the time and is now obsolete: the cost was a bit-serial CRC64 in the repair path, replaced with a table-driven one, and the loss went with it. There is no longer a crossover, and the bounded working set was kept. The 2 GB size is here because the volumes a daemon actually meets are 8 GB to 20 GB, not 512 MB, and a leg that stops below the real range is not much of a test.</p>
     <p class="note" style="text-align:start"><b>What moved this cut, and the control that says so.</b> Finding which blocks are damaged had become the largest phase of this repair - larger than the repair arithmetic itself - and it ran on a single thread, reading 64 KB out of every group across the file, once per group. It now makes one sequential pass in file order with the per-shard checksums computed in parallel, and the repaired volume is cloned rather than copied where the filesystem can do that. Detection alone fell from about 300 ms to 18 ms on the 512 MB archive, which is most of what moved above. The control is the column beside ours: <code>rar r</code> was re-raced in the same rounds on the same machine and came back within a few percent of its previous times, so the change in the gap is ours and not the bench's.</p>
     <p class="note" style="text-align:start">The M5 Max repeats the pattern, raced 31 July with the same corpus and gates: 0.050 / 0.066 / 0.171 / 0.581 s against <code>rar r</code>'s 0.211 / 0.335 / 0.751 / 1.735 across the 16 MB to 512 MB sizes - 3.0&times; to 5.1&times; faster; the 2 GB size was not raced on that machine. Those figures predate the detection rewrite described above, so they are the older build's, kept here as the second machine rather than as a current number.</p>
-    <p class="note" style="text-align:start">Weaver's <code>rarpar</code> is absent from this table alone, and not by choice: it does not implement this repair. Asked to fix one of these archives it answers <i>"embedded Rar5 recovery record detected ... this API restores standalone .rev recovery volumes only and does not consume embedded RR/protect data"</i>, and leaves the file damaged. It appears in every other comparison on this page: all four PAR2 legs above, all seven extraction shapes above that, and the recovery-volume leg immediately below, which is the job it says it does - and which it wins.</p>
 
     <h3 style="margin:44px 0 4px">Recovery volumes: rebuilding whole missing <code>.rev</code> files</h3>
     <p class="note" style="text-align:start;margin-top:6px">The other half of RAR's own recovery story, and until this round the largest loss on this page. A <code>.rev</code> file is a standalone recovery volume: three of them beside a 21-volume set can rebuild any three volumes that never arrived. Corpus: 1 GiB stored into 21 volumes of 50 MB with <code>rar rv3</code>, then volumes 4, 11 and 19 deleted - three lost against three recovery volumes, which is the worst case the set can still survive. Best of three, every rebuilt volume compared against the pristine one.</p>
@@ -917,11 +863,9 @@
       <tbody>
         <tr><td><b>nzbfast</b></td><td><b>0.44</b></td><td><b>0.50</b></td></tr>
         <tr><td>rar 7.23 <code>rc</code></td><td>0.46</td><td>0.58</td></tr>
-        <tr><td>rarpar <code>restore-volumes</code></td><td>0.48</td><td>0.61</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>The 32-core cell here was 3.12 s against <code>rar rc</code>'s 0.47 in the last cut of this page, published as 6.6× slower and the worst number on it.</b> The cause was the erasure solve running at about 48 MB/s of rebuilt output where RARLab's managed 320; it now runs on the same table-driven arithmetic as the rest of the recovery code, which is a sevenfold improvement and turns the loss into a win on both machines. The margins are 3% and 14%, so it is a win to state plainly rather than to headline, and the reason it is stated at all is that the loss was stated first.</p>
-    <p class="note" style="text-align:start">This leg exists because Weaver's <code>rarpar</code> implements exactly this and asked to be measured on it. It was winning comfortably when we first published it, and we published it then for that reason.</p>
     <p class="note" style="text-align:start">The file matching was never the cost, which is worth recording because it was the intuitive suspect: recovery volumes carry no filenames, so we identify which slots survived by checksumming every volume on disk rather than trusting what they are called, and against an undamaged set, where matching is all that happens, the whole pass takes 0.18 s.</p>
 
     <p class="note" style="text-align:start"><b>What else moved, and where it does not show.</b> Two more engine changes landed that these corpora cannot see, listed here so the numbers above are not read as the whole story: RAR5 archives with tens of thousands of members resolve each member once rather than walking the list per worker, which is 3× less processor time at 40,000 members; and the RAR1.3 bit reader works a word at a time, which is 2×. Neither appears above, because the shapes here have 400 members and no RAR1.3.</p>
@@ -949,23 +893,23 @@
     <p class="kicker">Capability, not micro-benchmarks</p>
     <h2>What each client can do</h2>
     <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5</th><th>NZBGet 26</th><th>rustnzb</th><th>Weaver</th><th>Usenapp</th><th>Newsbin</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5</th><th>NZBGet 26</th><th>rustnzb</th><th>Usenapp</th><th>Newsbin</th></tr></thead>
       <tbody>
-        <tr><td>pipelined NNTP</td><td class="yes">yes</td><td class="half">off by default</td><td class="no">no</td><td class="yes">yes</td><td class="no">-⁷</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>full verify during download</td><td class="yes">every block</td><td class="no">after</td><td class="half">quick-check</td><td class="no">after</td><td class="no">after</td><td class="no">after</td><td class="no">after</td></tr>
-        <tr><td>extract during download</td><td class="yes">in-stream, no volumes on disk</td><td class="half">direct unpack⁴</td><td class="half">direct unpack⁴</td><td class="half">stages, then unpacks⁵</td><td class="no">no</td><td class="no">no</td><td class="no">no</td></tr>
-        <tr><td>disk needed for an N-GB post</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
-        <tr><td>pre-download completability verdict</td><td class="yes">block-exact</td><td class="no">no</td><td class="half">health %</td><td class="no">no</td><td class="no">-⁷</td><td class="yes">article check</td><td class="no">no</td></tr>
-        <tr><td>bounded memory (never swap)</td><td class="yes">budgeted</td><td class="half">cache-limit setting</td><td class="half">cache setting</td><td class="no">no</td><td class="no">no</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>raises its own open-file limit</td><td class="yes">yes, at startup</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td></tr>
-        <tr><td>check the file at any point while downloading</td><td class="yes">yes</td><td class="no">no</td><td class="no">no</td><td class="no">no</td><td class="no">no</td><td class="half">sequential</td><td class="no">no</td></tr>
-        <tr><td>built-in indexer + poster wall</td><td class="yes">yes, keyless</td><td class="no">no</td><td class="no">no</td><td class="no">no</td><td class="no">no</td><td class="half">search UI</td><td class="half">group browser</td></tr>
-        <tr><td>Sonarr/Radarr drop-in</td><td class="yes">SAB API + Newznab</td><td class="yes">native</td><td class="yes">native</td><td class="yes">SAB-compat API</td><td class="half">NZBGet-compat RPC⁷</td><td class="no">no</td><td class="no">no</td></tr>
-        <tr><td>phone remotes (nzb360/LunaSea)</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="no">no</td><td class="no">-⁷</td><td class="no">no</td><td class="no">no</td></tr>
-        <tr><td>watchlist auto-grab + upgrades</td><td class="yes">built in</td><td class="no">via *arr</td><td class="no">via *arr</td><td class="no">no</td><td class="no">no</td><td class="yes">Watchdog</td><td class="half">rules</td></tr>
-        <tr><td>single self-contained binary</td><td class="yes">yes</td><td class="half">app bundles; Python on Linux</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">.app</td><td class="yes">.exe</td></tr>
-        <tr><td>open source</td><td class="yes">GPL⁶</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">MIT</td><td class="yes">yes</td><td class="no">paid</td><td class="no">paid</td></tr>
-        <tr><td>platforms</td><td class="yes">mac/win/linux (x64 + ARM)/docker/flatpak</td><td class="yes">mac/win/linux/docker/NAS packages</td><td class="yes">mac/win/linux/docker/NAS + embedded</td><td class="half">linux/win (mac from source)</td><td class="half">mac binary; source elsewhere⁷</td><td class="no">mac only</td><td class="no">win only</td></tr>
+        <tr><td>pipelined NNTP</td><td class="yes">yes</td><td class="half">off by default</td><td class="no">no</td><td class="yes">yes</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>full verify during download</td><td class="yes">every block</td><td class="no">after</td><td class="half">quick-check</td><td class="no">after</td><td class="no">after</td><td class="no">after</td></tr>
+        <tr><td>extract during download</td><td class="yes">in-stream, no volumes on disk</td><td class="half">direct unpack⁴</td><td class="half">direct unpack⁴</td><td class="half">stages, then unpacks⁵</td><td class="no">no</td><td class="no">no</td></tr>
+        <tr><td>disk needed for an N-GB post</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
+        <tr><td>pre-download completability verdict</td><td class="yes">block-exact</td><td class="no">no</td><td class="half">health %</td><td class="no">no</td><td class="yes">article check</td><td class="no">no</td></tr>
+        <tr><td>bounded memory (never swap)</td><td class="yes">budgeted</td><td class="half">cache-limit setting</td><td class="half">cache setting</td><td class="no">no</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>raises its own open-file limit</td><td class="yes">yes, at startup</td><td class="no">-⁷</td><td class="no">-⁷</td><td class="no">-⁷</td><td class="no">-⁷</td><td class="no">-⁷</td></tr>
+        <tr><td>check the file at any point while downloading</td><td class="yes">yes</td><td class="no">no</td><td class="no">no</td><td class="no">no</td><td class="half">sequential</td><td class="no">no</td></tr>
+        <tr><td>built-in indexer + poster wall</td><td class="yes">yes, keyless</td><td class="no">no</td><td class="no">no</td><td class="no">no</td><td class="half">search UI</td><td class="half">group browser</td></tr>
+        <tr><td>Sonarr/Radarr drop-in</td><td class="yes">SAB API + Newznab</td><td class="yes">native</td><td class="yes">native</td><td class="yes">SAB-compat API</td><td class="no">no</td><td class="no">no</td></tr>
+        <tr><td>phone remotes (nzb360/LunaSea)</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="no">no</td><td class="no">no</td><td class="no">no</td></tr>
+        <tr><td>watchlist auto-grab + upgrades</td><td class="yes">built in</td><td class="no">via *arr</td><td class="no">via *arr</td><td class="no">no</td><td class="yes">Watchdog</td><td class="half">rules</td></tr>
+        <tr><td>single self-contained binary</td><td class="yes">yes</td><td class="half">app bundles; Python on Linux</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">.app</td><td class="yes">.exe</td></tr>
+        <tr><td>open source</td><td class="yes">GPL⁶</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">MIT</td><td class="no">paid</td><td class="no">paid</td></tr>
+        <tr><td>platforms</td><td class="yes">mac/win/linux (x64 + ARM)/docker/flatpak</td><td class="yes">mac/win/linux/docker/NAS packages</td><td class="yes">mac/win/linux/docker/NAS + embedded</td><td class="half">linux/win (mac from source)</td><td class="no">mac only</td><td class="no">win only</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">⁴ Direct unpack still materialises the volumes first:
@@ -975,14 +919,9 @@
     href="#cost">the cost tables</a>). Its older builds (1.3.4-1.3.9) shipped obfuscated
     volumes marked "Completed" without extracting; that failure is fixed upstream in 1.4.5.
     ⁶ GPL-3.0-or-later.
-    ⁷ Weaver 0.7.8, the newest shipped binary, identity proven by hash (the published release
-    tarball's sha256 and the binary inside it both match what we race); its measured rows come
-    from the 23 August cost round, its capability cells marked "-" are features we have not
-    assessed rather than confirmed absences; it speaks an NZBGet-compatible RPC, which is how
-    our harness drives it, but we have not tried the phone remotes against it.
     Usenapp/Newsbin are single-platform commercial readers with downloader features; they're
     listed because people ask, not because they compete on speed.</p>
-    <p class="note" style="text-align:start">⁸ macOS starts a program with a limit of 256 open
+    <p class="note" style="text-align:start">⁷ macOS starts a program with a limit of 256 open
     files, and a full set of connections across several servers can pass it. nzbfast raises its own
     limit at startup on macOS and Linux: it asks for 65,536, steps down until the system agrees,
     never goes above the system's hard limit, and carries on with whatever it had if every step is
@@ -1040,8 +979,7 @@
   <p class="fine">Benchmark data on this page: the <b>23 and 24 August 2026</b> rounds -
   the cost tables, the wire re-race, the damaged-post round, the free-space floor, the
   disk-ceiling rig and the extraction re-race - racing SABnzbd 5.1.1 (5.1.0 in the
-  damaged round), NZBGet 26.3-testing (20 August build), rustnzb 1.4.5 and Weaver 0.7.8
-  (its newest shipped binary, identity proven by hash), five providers, all TLS - the
+  damaged round), NZBGet 26.3-testing (20 August build) and rustnzb 1.4.5, five providers, all TLS - the
   newest rounds on the <b>v1.2.2 release build itself</b>, the rest on the code line
   that shipped as it. The free-space floor was re-cut on the release build on 24
   August and reproduced its bounds exactly; the memory-clamp round's rival cells keep

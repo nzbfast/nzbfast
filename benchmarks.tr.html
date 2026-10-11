@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Kıyaslamalar - nzbfast</title>
-<meta name="description" content="nzbfast, özdeş donanımda dört başka Usenet istemcisine karşı ölçüldü: kullanılabilir bir dosyaya kadar geçen süre, ayrıca her işin bedeli olan disk, boş alan ve bellek. Her tablo, yarıştırdığı derlemeleri adlandırır. nzbfast'in kazanmadığı ayaklar dahil.">
+<meta name="description" content="nzbfast, özdeş donanımda üç başka Usenet istemcisine karşı ölçüldü: kullanılabilir bir dosyaya kadar geçen süre, ayrıca her işin bedeli olan disk, boş alan ve bellek. Her tablo, yarıştırdığı derlemeleri adlandırır. nzbfast'in kazanmadığı ayaklar dahil.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="benchmarks.html">
@@ -62,19 +62,17 @@
     <h2>Ölçülen hiçbir istemci işlemci, bellek ve diskte birlikte daha ucuz değil</h2>
     <p class="lead">Bu sayfadaki en yeni ayaklar 23 ve 24 Ağustos 2026'da koştu - en
     yenisi <b>doğrudan v1.2.2 sürüm derlemesinde</b> - özdeş donanım, hat ve
-    sağlayıcılarda dört başka istemcinin güncel derlemelerine karşı: 6,5 ile 87 GB
+    sağlayıcılarda üç başka istemcinin güncel derlemelerine karşı: 6,5 ile 87 GB
     arasında iki iş biçimi, ve 250 Mbit'ten 10 GbE'ye hat hızları. Bu ayaklarda hiçbir
     istemci işlemci, bellek ve diskte birlikte nzbfast'ten ucuza gelmedi: her biri
-    üçünden en az ikisinde daha pahalıya mal oldu, herhangi birinin tek bir eksende
-    kazandığı en fazla şey yaklaşık yüzde 2 idi - o istemcinin kendi çalıştırmadan
-    çalıştırmaya değişen aralığının içinde kalan, istatistiksel bir berabere - ve
+    üçünde de daha pahalıya mal oldu, ve
     diskte, hepsi bayt-eşdeğeri bir sonuç için en az iki katı bayt taşıdı. Fabrika
     ayarlarıyla nzbfast, ölçülen her istemci arasında ölçülen her senaryoda da en az
     belleği tuttu, en yakın rakibe karşı 2,0x ile 4,5x arasında.</p>
     <p><b>Hangisi size uyar?</b></p>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px">
       <div class="callout" style="margin:0"><b>Bir NAS, bir mini PC, ya da küçük bir ev sunucusu.</b>
-      nzbfast, en yakın rakibin 531 MB ve en ağırının 1,6 GB tuttuğu bir işte 143 MB
+      nzbfast, en yakın rakibin 628 MB ve en ağırının 1,6 GB tuttuğu bir işte 143 MB
       bellek tuttu, diğer istemcilerin indirmenin yaklaşık iki katı boş alana ihtiyaç
       duyduğu yerde yaklaşık 50 MB boş alanla işi bitirdi, ve az bellek merdiveni
       fabrika ayarlarında 87 GB'lık bir işi diskte 286 MB RAM'e sığdırdı. Ve her baytı
@@ -118,16 +116,16 @@
     <p class="kicker">Önce yöntem</p>
     <h2>Kurulum</h2>
     <ul class="plain">
-      <li><b>İstemciler:</b> nzbfast · SABnzbd · NZBGet · rustnzb · Weaver, her tablo
+      <li><b>İstemciler:</b> nzbfast · SABnzbd · NZBGet · rustnzb, her tablo
       adlandırdığı derlemelerde. En yeni ayaklar (23 Ağustos 2026) alanın o anki güncel
-      derlemelerini yarıştırdı - SABnzbd 5.1.1, NZBGet 26.3-testing, rustnzb 1.4.5 ve
-      Weaver 0.7.8, en yeni yayımlanan ikili dosyası, kimliği hash ile kanıtlanmış - o
+      derlemelerini yarıştırdı - SABnzbd 5.1.1, NZBGet 26.3-testing ve rustnzb 1.4.5 - o
       gece <b>nzbfast 1.2.2</b> olarak yayımlanan kod hattına karşı, böylece yeni
       sayıları üreten derleme indirebileceğiniz derlemenin ta kendisi. Bu ayaklar
       1&nbsp;Gbit hatta 20 çekirdekli bir Apple Silicon kutuda koştu. Daha eski
       tablolar yarıştırdıkları derleme ve makineleri korur (Apple M serisi kutular:
       10&nbsp;GbE'de "Avrupa" M1 Ultra, ~2,4-3,0 Gbps hatta "Doğu Yakası" M3 Ultra) ve
-      bunu belirtir; yayımlanan derlemeyi pohpohlamak yerine olduğundan düşük gösterirler.</li>
+      bunu belirtir; yayımlanan derlemeyi pohpohlamak yerine olduğundan düşük gösterirler. Weaver'ın sonuçları bu sayfadan kaldırıldı, çünkü
+      derlemeleri bu ayaklardan bu yana ilerledi; bir sonraki tam yeniden koşuyla geri dönecekler.</li>
       <li><b>Adalet:</b> her istemci için her yerde aynı sağlayıcılar ve TLS, ayaklar
       art arda iç içe koşuldu. Her rakip kendi belgelenmiş en iyisine ayarlandı:
       SABnzbd'ye <code>pipelining_requests=8</code> verildi (<b>kendisi 1 ile, yani
@@ -165,11 +163,11 @@
   <div class="wrap">
     <p class="kicker">23 Ağustos 2026 ayağı</p>
     <h2>Bir işin bedeli: her istemci güncel, tek gece, tek makine</h2>
-    <p class="lead">1 Gbit hatta 20 çekirdekli bir Apple Silicon kutuda altı kol:
+    <p class="lead">1 Gbit hatta 20 çekirdekli bir Apple Silicon kutuda beş kol:
     fabrika ayarlarıyla nzbfast, bağlantı denetleyicisi kapatılmış aynı ikili dosya,
-    ve diğer dört istemcinin güncel derlemeleri. Beş sağlayıcı, her yerde TLS, senaryo
+    ve diğer üç istemcinin güncel derlemeleri. Beş sağlayıcı, her yerde TLS, senaryo
     başına istemci başına üç tekrar ve her ayak içinde sıra döndürülerek, ve her
-    ayağın çıktısı bayt bayt denetlendi: 36 ayaktan 36'sı tam olarak aynı yükü
+    ayağın çıktısı bayt bayt denetlendi: 30 ayaktan 30'u tam olarak aynı yükü
     üretti. 1 Gbit'te hat tempoyu belirler ve bitiş süreleri tasarım gereği birbirine
     yaklaşır, bu yüzden süre sütunu o yakınsamayı göstermek için orada; kaynak
     sütunları ise ayağın var oluş sebebi.</p>
@@ -182,12 +180,11 @@
     <div class="tblwrap"><table>
       <thead><tr><th>6,5 GB adlandırılmış sürüm, çıkarma yol üzerinde</th><th>kullanılabilir dosyaya süre</th><th>zirve bellek (RSS)</th><th>CPU süresi</th><th>aygıt G/Ç (GiB)</th><th>ağ (GB)</th></tr></thead>
       <tbody>
-        <tr><td><b>nzbfast, fabrika ayarları (25 bağ.)</b></td><td class="win">58 s</td><td class="win num">143 MB</td><td class="num">35,7 s</td><td class="win num">6,2</td><td class="num">6,5</td></tr>
+        <tr><td><b>nzbfast, fabrika ayarları (25 bağ.)</b></td><td class="win">58 s</td><td class="win num">143 MB</td><td class="win num">35,7 s</td><td class="win num">6,2</td><td class="num">6,5</td></tr>
         <tr><td>nzbfast, denetleyici kapalı (360)</td><td class="num">60 s</td><td class="num">583 MB</td><td class="num">38,0 s</td><td class="num">6,1</td><td class="num">6,6</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">61 s</td><td class="num">801 MB</td><td class="num">40,1 s</td><td class="num">12,5</td><td class="num">6,5</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">63 s</td><td class="num">1.588 MB</td><td class="num">69,5 s</td><td class="num">13,8</td><td class="num">6,5</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">67 s</td><td class="num">628 MB</td><td class="num">61,9 s</td><td class="num">13,4</td><td class="num">7,2</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">110 s</td><td class="num">531 MB</td><td class="win num">34,9 s&sup1;</td><td class="num">12,5</td><td class="num">6,5</td></tr>
       </tbody>
     </table></div>
     <div class="tblwrap"><table>
@@ -198,25 +195,15 @@
         <tr><td>NZBGet 26.3-testing</td><td class="num">306 s</td><td class="num">900 MB</td><td class="num">221,3 s</td><td class="num">68,1</td><td class="num">34,4</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">308 s</td><td class="num">1.607 MB</td><td class="num">356,5 s</td><td class="num">72,5</td><td class="num">34,4</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">343 s</td><td class="num">445 MB</td><td class="num">332,6 s</td><td class="num">69,8</td><td class="num">37,8</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">511 s</td><td class="num">1.076 MB</td><td class="num">373,8 s</td><td class="num">98,0</td><td class="num">34,4</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>23 Ağustos 2026'da ölçüldü</b>,
-    SABnzbd 5.1.1, NZBGet 26.3-testing, rustnzb 1.4.5 ve Weaver 0.7.8'e karşı, üçün
+    SABnzbd 5.1.1, NZBGet 26.3-testing ve rustnzb 1.4.5'e karşı, üçün
     ortancaları, her ayak bayt denetimli, beş sağlayıcı, hepsi TLS. nzbfast kolları,
     aynı kod hattının o gün daha erken alınmış, v1.2.2 yayım derlemesinden yaklaşık yedi
     saat önceki bir derlemesiyle koştu; bu yüzden satırları sürüm numarası taşımıyor. Bu
     sayfadaki 500 Mbit ve 87 GB tabloları ise gerçekten yayım derlemesinin kendisiyle
-    koştu ve bunu söylüyor. &sup1; Weaver'ın
-    6,5 GB senaryodaki CPU ortancası bizimkinin %2 altında (34,9'a karşı 35,7), kendi
-    üç ayağı 34,1 ile 56,1 s arasında yayılıyor, bu yüzden bunu istatistiksel bir
-    berabere olarak okuyun; bu, iki tablodan birinde bir rakibin tuttuğu tek hücre, ve
-    <a href="#legs-we-lose">kazanmadığımız ayaklar</a> altında tekrarlanıyor. 34 GB
-    senaryoda CPU'muz açık ara en düşük. Weaver'ın daha yeni 0.8.3'ü hiçbir ikili
-    dosya yayımlamıyor; kaynağından derlediğimiz sürümü, sürüme mi yoksa derlemeye mi
-    bağlı olduğunu temiz biçimde ayıramadığımız bir işlemci örüntüsü ölçtü, bu yüzden
-    bu tablo hash ile kanıtlanmış 0.7.8 sürüm dosyasını yarıştırıyor ve bunu
-    karmaşıklaşmış bir rakam yayımlamak yerine açıkça söylüyor. rustnzb 1.4.5, gizlenmiş
+    koştu ve bunu söylüyor. rustnzb 1.4.5, gizlenmiş
     senaryo dahil, buradaki her ayağı tamamladı.</p>
     <p class="note" style="text-align:start"><b>Ağ sütunu, tam olarak.</b>
     Temiz senaryoda 6,5 GB - NZBGet ve SABnzbd'nin kendileri için bildirdiği aynı
@@ -243,9 +230,9 @@
     <p class="lead">Yeterince yavaş bir hatta her istemcinin bitiş süresi yalnızca hattır,
     başka bir şey değil, bu yüzden yavaş bir hat pek çok günahı gizler. Gizleyemediği şey
     her istemcinin onu doldurmak için ne yaktığıdır. 1 Gbit düzeneği gerçek planların
-    gerçekten olduğu iki hıza şekillendirdik ve her hızda altı kolun tümünü yarıştırdık -
+    gerçekten olduğu iki hıza şekillendirdik ve her hızda beş kolun tümünü yarıştırdık -
     aynı kutu, aynı beş sağlayıcı, istemci başına üç tekrar, sıra döndürülerek, her ayak
-    bayt denetimli, iki ayaktaki 36 ayaktan 36'sı doğru. 500 Mbit'teki nzbfast kolu,
+    bayt denetimli, iki ayaktaki 30 ayaktan 30'u doğru. 500 Mbit'teki nzbfast kolu,
     v1.2.2 sürüm derlemesinin ta kendisi.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>500 Mbit hat, 6,5 GB sürüm</th><th>kullanılabilir dosyaya süre</th><th>zirve bellek (RSS)</th><th>CPU süresi</th><th>aygıt G/Ç (GiB)</th></tr></thead>
@@ -254,7 +241,6 @@
         <tr><td>nzbfast 1.2.2, denetleyici kapalı</td><td class="num">115 s</td><td class="num">592 MB</td><td class="num">59,0 s</td><td class="num">6,2</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">125 s</td><td class="num">1.665 MB</td><td class="num">99,2 s</td><td class="num">14,2</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">131 s</td><td class="num">626 MB</td><td class="num">92,6 s</td><td class="num">14,5</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">138 s</td><td class="num">564 MB</td><td class="num">48,5 s</td><td class="num">12,4</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">145 s&sup1;</td><td class="num">846 MB</td><td class="num">64,3 s</td><td class="num">13,2</td></tr>
       </tbody>
     </table></div>
@@ -265,7 +251,6 @@
         <tr><td>nzbfast, denetleyici kapalı</td><td class="num">219 s</td><td class="num">651 MB</td><td class="num">67,9 s</td><td class="num">6,2</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">227 s</td><td class="num">826 MB</td><td class="num">78,4 s</td><td class="num">13,3</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">230 s</td><td class="num">1.667 MB</td><td class="num">162,4 s</td><td class="num">15,2</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">230 s</td><td class="num">789 MB</td><td class="num">62,0 s</td><td class="num">12,9</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">256 s</td><td class="num">644 MB</td><td class="num">122,4 s</td><td class="num">15,4</td></tr>
       </tbody>
     </table></div>
@@ -304,9 +289,9 @@
     <p class="kicker">Büyük dosya &middot; 24 Ağustos 2026'da nzbfast 1.2.2 üzerinde ölçüldü</p>
     <h2>10 GbE'de 87 GB'lık bir gönderiden kullanılabilir 77 GB'lık bir dosyaya</h2>
     <p class="lead">Hat hızı hikayesinin öteki ucu: 10 GbE bir kutu, beş sağlayıcı,
-    yükü tek bir 76,6 GB'lık video olan 87 GB'lık bir gönderi, altı kol, döndürülen üç
-    tekrar, ve her ayağın çıktısı bayt denetimli - 18 ayaktan 18'i özdeş dosyayı
-    üretti, altı istemcinin tümü onun sağlama toplamında hemfikir. nzbfast kolları
+    yükü tek bir 76,6 GB'lık video olan 87 GB'lık bir gönderi, beş kol, döndürülen üç
+    tekrar, ve her ayağın çıktısı bayt denetimli - 15 ayaktan 15'i özdeş dosyayı
+    üretti, beş kolun tümü onun sağlama toplamında hemfikir. nzbfast kolları
     v1.2.2 sürüm derlemesi.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>87 GB gönderi, 10 GbE</th><th>kullanılabilir dosyaya süre</th><th>zirve bellek (RSS)</th><th>CPU süresi</th><th>aygıt G/Ç (GiB)</th><th>ağ (GB)</th></tr></thead>
@@ -315,14 +300,13 @@
         <tr><td>nzbfast 1.2.2, bağlantı denetleyicisi açık (25)</td><td class="num">90 s</td><td class="win num">336 MB</td><td class="win num">130,5 s</td><td class="win num">72,9</td><td class="num">77,4</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">93 s</td><td class="num">1.195 MB</td><td class="num">443 s</td><td class="num">183,7</td><td class="num">77,2</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">113 s</td><td class="num">1.910 MB</td><td class="num">234 s</td><td class="num">235,1</td><td class="num">77,2</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">645 s</td><td class="num">1.825 MB</td><td class="num">631 s</td><td class="num">435,1&sup2;</td><td class="num">77,3</td></tr>
-        <tr><td>rustnzb 1.4.5</td><td class="num">869 s&sup3;</td><td class="num">681 MB</td><td class="num">2.444 s</td><td class="num">216,1</td><td class="num">86,9</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">869 s&sup2;</td><td class="num">681 MB</td><td class="num">2.444 s</td><td class="num">216,1</td><td class="num">86,9</td></tr>
       </tbody>
     </table></div>
     <p><b>Disk hikayesi şimdiye dek en büyük ölçeğinde.</b> İş sırasındaki zirve
     diskimiz 70,8 GiB - 76,6 GB'lık çıktının ALTINDA, çünkü yükün kuyruğu hâlâ
     ulaşırken başı zaten kesinleşmiş durumda - ve toplam aygıt G/Ç'si yükün 1,00
-    katı. Rakipler aynı dosya için baytların 2,5 ile 6,0 katını taşıyor. Ve en hızlı
+    katı. Rakipler aynı dosya için baytların 2,5 ile 3,2 katını taşıyor. Ve en hızlı
     kol, doğrulama ve çıkarmayı <em>içeriyor</em> haldeyken yaklaşık 8,7 Gbps
     sürdürüyor; indirme çubuğu dolduğu anda dosya hazır.</p>
     <p class="note" style="text-align:start">&sup1; Bu sayfadaki her istemci kendi
@@ -341,10 +325,7 @@
     CPU-saniyesi satın alıyor. Denetleyiciyi hat hızıyla otomatik olarak ölçeklemek -
     böylece en iyi davranış aynı zamanda varsayılan olur, tavanlarda değil dizde -
     bir sonraki sürüm için kuyrukta.
-    &sup2; Weaver'ın 77 GB'lık bir indirme için 435 GiB'lık aygıt G/Ç'si, iş büyüdükçe
-    şifreli-dinlenme deposunun neredeyse her şeyi yeniden okuması ve yeniden yazması -
-    Temmuz araçlı ayaklarımızın ölçtüğü, güncel derlemede hâlâ mevcut olan doğrusal-üstü
-    örüntü. &sup3; rustnzb 1.4.5 bayt-doğru tamamlanıyor ve bedeli işlemci süresi ile
+    &sup2; rustnzb 1.4.5 bayt-doğru tamamlanıyor ve bedeli işlemci süresi ile
     ağda: üç tekrarın tümünde 869 s'lik saate karşı yaklaşık 2.444 CPU-saniyesi, ve
     açgözlü planın 77,2 olduğu yerde çekilen 86,9 GB (kurtarma setinin tamamını
     koşulsuz getiriyor). 24 Ağustos 2026'da ölçüldü, üçün ortancaları, her derleme
@@ -446,8 +427,7 @@
     bu yüzden nzbfast v1.2.2 dahil her istemcinin en yeni derlemesinde kendi ayağını
     alıyor: Avrupa'da 10 GbE kutu, beş sağlayıcı, istemci başına 100 bağlantı, üç hasar
     düzeyinde zehirlenmiş aynı 6,5 GB sürüm, sırası dönüşümlü kolda üç tekrar, her ayak
-    temiz dosyaya karşı bayt denetimli. 65 ayaktan 63'ü bayt-özdeş döndü; özdeş
-    dönmeyen iki tanesi aşağıda adlandırıldı, çünkü onlar da birer sonuç.</p>
+    temiz dosyaya karşı bayt denetimli, ve hepsi bayt-özdeş döndü.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>doğrulanmış, kullanılabilir bir dosyaya süre (3'ün ortalaması)</th><th>60 ölü makale</th><th>20 ölü</th><th>5 ölü</th></tr></thead>
       <tbody>
@@ -456,7 +436,6 @@
         <tr><td>NZBGet 26.3-testing</td><td class="num">33,0 s</td><td class="num">23,7 s</td><td class="num">23,0 s</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">48,0 s&sup1;</td><td class="num">28,0 s</td><td class="num">24,3 s</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">107,3 s&sup2;</td><td class="num">51,3 s</td><td class="num">47,0 s</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="bad">bitmedi&sup3;</td><td class="bad">bitmedi&sup3;</td><td class="num">194,0 s</td></tr>
       </tbody>
     </table></div>
     <p><b>Hasarlı gönderi burada neden hızlı.</b> Bir makale eksik olduğunda, bir
@@ -479,15 +458,10 @@
     teslim etti, ve bedeli güvenilirlik değil işlemci süresinde: en ağır hasarda
     107 s'lik saate karşı yaklaşık 1.620 CPU-saniyesi - neredeyse tüm ayak boyunca
     meşgul on beş çekirdek - aynı onarılmış çıktının bize yaklaşık 50 CPU-saniyesine
-    mal olduğu yerde. &sup3; Weaver, iki daha ağır hasar düzeyinde 20 dakikalık kesim
-    süremiz içinde 6,5'in 1,5 GB'ını ve 4,9 GB'ını taşıdı - onu yarıştıran üç ayrı
-    gecedeki üç ayağın da paylaştığı aynı bitmeme; kesim süresi bizim, bitmeme ise
-    sonuç. 5 ölü makalede üçünde de doğru biçimde tamamladı. Oradaki işlemci bedeli
-    kendi hikayesi: 194 s'lik ayak için yaklaşık 2.325 CPU-saniyesi, bizim 20'mize
-    karşı.</p>
+    mal olduğu yerde.</p>
     <p class="note" style="text-align:start">24 Ağustos 2026'da ölçüldü, her derleme
     güncel: nzbfast v1.2.2 (sürüm etiketinin ta kendisi), NZBGet 26.3-testing
-    (20 Ağustos derlemesi), SABnzbd 5.1.1, rustnzb 1.4.5, Weaver 0.7.8. Bir süreklilik
+    (20 Ağustos derlemesi), SABnzbd 5.1.1, rustnzb 1.4.5. Bir süreklilik
     kolu, önceki gecenin nzbfast derlemesini bu aynı ayak içinde yarıştırdı ve her
     senaryoda v1.2.2'nin bir saniye içine indi, bu yüzden burada hiçbir şey şanslı bir
     geceye binmiyor; ve rakip yapılandırmaları önceki ayaktan yalnızca uygulama yolunda
@@ -514,13 +488,6 @@
     ayrıntı bileşen tablolarının yanında. Kısıtınız tek seferlik bir iş için mümkün
     olan en küçük ayak iziyse, o sütunu özel araçlar kazanıyor ve bunun tersini
     iddia etmeyeceğiz.</p>
-
-    <p class="lead">Ve 23 Ağustos 2026 ayağı bir madde ekliyor, onu bir dipnotta
-    bırakmaktansa burada listelemeyi tercih ederiz: 6,5 GB senaryoda, Weaver'ın
-    işlemci ortancası bizimkinin %2 altında - 34,9'a karşı 35,7 CPU-saniyesi, kendi üç
-    ayağı 34,1 ile 56,1 s arasında yayılıyor - bu yüzden buna istatistiksel bir
-    berabere diyoruz, ve <a href="#cost">bedel tablosunda</a> tutmadığımız tek hücre
-    olarak işaretli duruyor. Aynı ayaktaki 34 GB senaryoda CPU'muz açık ara en düşük.</p>
     <div class="callout">Bir kaybı neden hiç göstermeli? Çünkü kazançlar ancak onun
     yanında inandırıcı. Bu sayfadaki her rakam aynı iç içe koşulardan geliyor, ve
     kaybettiğimiz bir ayak, bir yeniden koşu onun yerini alana dek yayımlı kalır.</div>
@@ -544,7 +511,7 @@
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Sürüm derlemede bütçe başına tek ayak,
-    altı-kollu ayakla aynı çıktı sağlama toplamına karşı geçitli. En sıkı bütçe
+    beş-kollu ayakla aynı çıktı sağlama toplamına karşı geçitli. En sıkı bütçe
     duvarın yaklaşık %9'una mal oluyor, ve yalnızca bu hat 10 GbE olduğu için - dökülen
     bloklar yalnızca hat diski geçtiğinde zaman kaybettirir, bu yüzden tipik bir ev
     bağlantısında küçük bir bütçe neredeyse bedava. 87 GB'lık bir indirme dahil tüm
@@ -557,8 +524,8 @@
     453,0 CPU-saniyesine, 2,10 kat), zirve belleğinde %52'lik bir kesinti satın almak
     için. SABnzbd'nin kelepçesi neredeyse bedavaydı ama ayak izinin yalnızca bir
     kısmına ulaştı. rustnzb'nin önbellek ayarı yarıştırılan derlemede süsten ibaretti,
-    ve Weaver'ın hiç bellek kadranı yok, bu yüzden ikisi de tutamayacakları bir bütçede
-    puanlanmak yerine referans sütunları olarak kelepçesiz koştu. Aynı ayağın bizim
+    bu yüzden tutamayacağı bir bütçede
+    puanlanmak yerine referans sütunu olarak kelepçesiz koştu. Aynı ayağın bizim
     tarafımız, aynı şeyi 2,5 kat boyutta söyleyen yukarıdaki v1.2.2 merdiveniyle
     aşılmış durumda: bütçe asla bağlayıcı kısıt değil, çünkü tek geçiş baştan bu kadar
     az tutuyor.</p>
@@ -582,12 +549,11 @@
         <tr><td>NZBGet 26.3-testing</td><td class="num">~yükün 2,1 katı</td><td class="num">~2,1 katı (çıktının 37,6 GB üstü)</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">~yükün 2,1 katı</td><td class="num">~2,1 katı (çıktının 37,6 GB üstü)</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">~yükün 2,25 katı</td><td class="num">~2,25 katı (çıktının 42,7 GB üstü)</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">~yükün 2,25 katı</td><td class="num">~2,25 katı (çıktının 42,7 GB üstü)&sup1;</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">20 çekirdekli bir Apple Silicon kutuda,
     1 Gbit hatta, beş sağlayıcıda, her sınırda üç tekrarla ölçüldü, tamamlanan her ayak
-    bayt denetimli - rakip satırlar 22-23 Ağustos 2026 (Weaver'ın 34 GB hücresi 24 Ağustos'ta yeniden koşuldu, dipnot 1)'da, ve nzbfast satırı 24 Ağustos'ta
+    bayt denetimli - rakip satırlar 22-23 Ağustos 2026'da, ve nzbfast satırı 24 Ağustos'ta
     v1.2.2 sürüm derlemesinde yeniden kesildi, bu da her iki sınırı da tam olarak
     yeniden üretti, iki senaryoda 12 ayaktan 12'si hemfikir. Hücrelerimiz ölçülmüş bir
     taban: iş 48,6 MB ve 51,0 MB payla 3'te 3 tamamlanıyor, ve bunun yaklaşık 17 MB
@@ -602,15 +568,7 @@
     kadar önemli. Tabanının 17 MB altında nzbfast, bir yazmada diskin reddiyle
     karşılaşır, "boş disk alanı yok" diyerek temiz durur, inen her şeyi güncel
     tutulmuş olarak korur, ve bir yeniden deneme yeniden çekmeden devam eder - tuttuğunuz
-    bir parça, başarısız bir iş değil. &sup1; Weaver'ın büyük-senaryo hücresi 24 Ağustos'taki bir tekrarla çözüldü: üç
-    ayağın üçü de aynı ~2,25 katta bayt bakımından doğru, her biri ilk denemenin iyi
-    ayağından hızlı ve boş alan bayta kadar aynı. İlk denemede, 23 Ağustos'ta, üç
-    ayağından ikisi 60 GB'dan fazla boş alan hâlâ varken tek haneli MB/s'de takılmış ve
-    turun 40 dakikalık kesim süresine çarpmıştı. O takılmalar geri gelmedi ve düzeneğin
-    takılma ölçümü tekrarın üç ayağında da devredeydi ve sessizdi; bu, eksik bir ölçüm
-    değil olumlu bir ölçümdür. Onlara neyin yol açtığı hâlâ bilinmiyor ve temiz bir
-    tekrar bir teşhis değildir: bu oranda artık altı ayak var, dördü tamamlandı ve iki
-    başarısızlık da ilk gecedeki tek bir 80 dakikalık pencereden geliyor.</p>
+    bir parça, başarısız bir iş değil.</p>
   </div>
 </section>
 
@@ -736,9 +694,8 @@
       <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">10 üzerinden 5</td><td class="num">3</td><td class="num">2</td></tr>
       <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10 üzerinden 10</td><td class="win num">0</td><td class="win num">0</td></tr>
       <tr><td><b>rustnzb 1.4.5</b></td><td class="num">10 üzerinden 7</td><td class="num">1</td><td class="num">2</td></tr>
-      <tr><td><b>Weaver 0.7.8</b></td><td class="num">10 üzerinden 1</td><td class="num">1</td><td class="num">8</td></tr>
     </table></div>
-    <p><b>Onunu da yardımsız bitiren tek istemci nzbfast.</b> NZBGet de her biçimde dosyaya ulaşıyor, ama bunların sekizinde 16 tur elle onarım ve açma gerekiyor. SABnzbd beşini yardımsız bitiriyor, ikisine elle bile ulaşılamıyor. Weaver dosyaya ikisinde ulaşıyor.</p>
+    <p><b>Onunu da yardımsız bitiren tek istemci nzbfast.</b> NZBGet de her biçimde dosyaya ulaşıyor, ama bunların sekizinde 16 tur elle onarım ve açma gerekiyor. SABnzbd beşini yardımsız bitiriyor, ikisine elle bile ulaşılamıyor.</p>
     <p>Bu örüntü rastlantı değil. nzbfast'in geçtiği, diğerlerinin geçemediği biçimler paketlenmiş ve hasarlı olanlar: arşiv içinde arşiv, zincirin ortasında biçim değişimi, beş katmanlı bir zincir ve hepsinden önemlisi kendi kurtarma verisiyle birlikte bozuk gelen bir arşiv. Bu sonuncusunda dört istemci dıştaki kümeyi kusursuz açıyor, bozuk arşivi onu onaracak kurtarma kümesiyle birlikte elinize verip duruyor.</p>
     <p>İstemcilerin aynı işi bitirdiği yerde fark küçük değil. Aşağıdakiler, yaygın dört istemcinin de ulaştığı yedi biçim; her birinin ihtiyaç duyduğu elle onarım dâhil:</p>
     <div class="tblwrap"><table>
@@ -783,12 +740,12 @@
     <div class="chips">
       <span class="chip"><b>4</b> makine, dizüstünden 32 çekirdeğe</span>
       <span class="chip"><b>7</b> RAR arşiv biçimi</span>
-      <span class="chip"><b>6</b> yarıştırılan çıkarıcı</span>
+      <span class="chip"><b>5</b> yarıştırılan çıkarıcı</span>
       <span class="chip"><b>1 GB</b> yük, biçim başına</span>
       <span class="chip">iç içe <b>3'ün en iyisi</b>, sıcak önbellek</span>
     </div>
 
-    <h3 style="margin:38px 0 4px">RAR çıkarma: 7 arşiv biçimi, 6 araç</h3>
+    <h3 style="margin:38px 0 4px">RAR çıkarma: 7 arşiv biçimi, 5 araç</h3>
     <p class="note" style="text-align:start;margin-top:6px">Bu tablonun önceki ayağı
     biçim başına 100 MB ile 200 MB kullandı, ki bu bir hataydı: yaklaşık 28 ms'lik
     süreç başlatma, depolama kolunun %40'ıydı, ve ürettiği sıralama gerçekçi bir
@@ -808,8 +765,8 @@
     bu yüzden korpus bayt bayt yeniden inşa edilebilir.</p>
 
     <p class="note" style="text-align:start"><b>1.2.2 motorunda 23 Ağustos 2026'da
-    yeniden yarıştırıldı, ve tarama ayakta.</b> Bir okuyucunun en çok tarttığı üç araç -
-    bizimki, unrar 7.23 ve rarpar 0.2.5 - 32 çekirdekli masaüstünde sürüm motorunda
+    yeniden yarıştırıldı, ve tarama ayakta.</b> Bir okuyucunun en çok tarttığı iki araç -
+    bizimki ve unrar 7.23 - 32 çekirdekli masaüstünde sürüm motorunda
     (yarıştırılan çıkarma kodu 1.2.2 etiketine bayt-eşdeğer) yeniden yarıştırıldı, altı
     iç içe tur, araç başına asgari, her ayağın çıktısı yük manifestine karşı
     denetlendi. Saniye, düşük olan iyi:</p>
@@ -818,14 +775,13 @@
       <tbody>
         <tr><td><b>nzbfast 1.2.2</b></td><td><b>0,119</b></td><td><b>0,474</b></td><td><b>1,515</b></td><td><b>0,120</b></td><td><b>1,118</b></td><td><b>1,137</b></td><td><b>1,146</b></td></tr>
         <tr><td>unrar 7.23</td><td>0,190</td><td>2,032</td><td>1,784</td><td>0,139</td><td>1,655</td><td>1,846</td><td>1,420</td></tr>
-        <tr><td>rarpar 0.2.5</td><td>0,206</td><td>2,563</td><td>2,395</td><td>0,237</td><td>1,852</td><td>1,857</td><td>1,725</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Yedi biçimin tümü bizim, hem asgaride hem
     ortancada, unrar'a karşı 1,16 ile 4,29 kat arasında. Bu süreler aşağıdaki daha
     geniş tabloyla hücre hücre karşılaştırılabilir değil - düzenek o tablonun
     ayaklarından beri gözden geçirildi ve tur sayıları farklı - bu yüzden her tabloyu
-    kendi içinde okuyun. Daha geniş tablo kendi tarihlerini ve altı-araçlı alanını
+    kendi içinde okuyun. Daha geniş tablo kendi tarihlerini ve beş-araçlı alanını
     koruyor, ve nzbfast sütunu 1.2.2'nin gönderdiği motoru anlatıyor: yukarıdaki
     yeniden yarış, güncel motoru o tablonun derlemesiyle yedi biçimin tümünde eşit
     ölçtü, donanım komut sayılarıyla çözüldü (aynı duvar için %0,14 daha az), bu
@@ -845,37 +801,31 @@
     <p class="note" style="text-align:start"><b>Alanın tümü, saniye, düşük olan iyi.</b>
     3'ün en iyisi, araçlar her tur içinde bloklar halinde değil iç içe koşuldu, çıktı
     her tek koşuda kaynak yüke karşı denetlendi. Yanlış bayt üreten bir araç bir
-    doğruluk notu alır, asla hızlı bir süre değil. <code>rarpar</code>, Weaver'ın kendi
-    RAR ve PAR2 kodu, <code>bd87611</code>'de kaynaktan derlenmiş; sürümü değil taahhüdü
-    sabitliyoruz çünkü paketleri üç farklı sürüm numarası taşıyor.</p>
+    doğruluk notu alır, asla hızlı bir süre değil.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>saniye, biçim başına 1 GB</th><th>store</th><th>400 küçük dosya</th><th>solid</th><th>repetitive</th><th>büyük, 4 birim</th><th>encrypted</th><th>128 MiB sözlük</th></tr></thead>
       <tbody>
         <tr><td colspan="8" class="grp">Üst düzey masaüstü, 32 çekirdek</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,21</b></td><td><b>0,47</b></td><td><b>1,26</b></td><td><b>0,14</b></td><td><b>1,08</b></td><td><b>1,09</b></td><td><b>1,07</b></td></tr>
         <tr><td>unrar 7.23</td><td><b>0,21</b></td><td>2,02</td><td>1,62</td><td>0,16</td><td>1,61</td><td>1,82</td><td>1,37</td></tr>
-        <tr><td>rarpar</td><td>0,23</td><td>2,55</td><td>2,22</td><td>0,26</td><td>1,75</td><td>1,74</td><td>1,64</td></tr>
         <tr><td>unar 1.10.7</td><td>0,60</td><td>6,40</td><td>5,29</td><td>0,69</td><td>5,41</td><td>6,88</td><td>4,03</td></tr>
         <tr><td>bsdtar</td><td>0,34</td><td>13,67</td><td>11,48</td><td>1,86</td><td class="no">yanlış çıktı&sup2;</td><td class="no">şifreleme yok&sup3;</td><td class="no">büyük sözlük yok&#8308;</td></tr>
         <tr><td>7-Zip</td><td>0,30</td><td class="no">desteklenmiyor&sup1;</td><td class="no">desteklenmiyor&sup1;</td><td class="no">desteklenmiyor&sup1;</td><td class="no">desteklenmiyor&sup1;</td><td class="no">desteklenmiyor&sup1;</td><td class="no">desteklenmiyor&sup1;</td></tr>
         <tr><td colspan="8" class="grp">Eski masaüstü, 20 çekirdek</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,16</b></td><td><b>0,57</b></td><td><b>1,83</b></td><td><b>0,15</b></td><td><b>1,50</b></td><td><b>1,51</b></td><td><b>1,40</b></td></tr>
         <tr><td>unrar 7.23</td><td>0,25</td><td>2,48</td><td>2,31</td><td>0,20</td><td>2,28</td><td>2,49</td><td>1,84</td></tr>
-        <tr><td>rarpar</td><td>0,28</td><td>3,15</td><td>3,00</td><td>0,31</td><td>2,26</td><td>2,26</td><td>1,97</td></tr>
         <tr><td>unar 1.10.7</td><td>0,67</td><td>7,49</td><td>6,93</td><td>0,85</td><td>6,85</td><td>8,49</td><td>5,29</td></tr>
         <tr><td>bsdtar</td><td>0,33</td><td>15,58</td><td>13,97</td><td>2,18</td><td class="no">yanlış çıktı&sup2;</td><td class="no">şifreleme yok&sup3;</td><td class="no">büyük sözlük yok&#8308;</td></tr>
         <tr><td>7-Zip</td><td>0,33</td><td class="no">desteklenmiyor&sup1;</td><td class="no">desteklenmiyor&sup1;</td><td class="no">desteklenmiyor&sup1;</td><td class="no">desteklenmiyor&sup1;</td><td class="no">desteklenmiyor&sup1;</td><td class="no">desteklenmiyor&sup1;</td></tr>
         <tr><td colspan="8" class="grp">Dizüstü, 14 çekirdek / 20 iş parçacığı, Windows&#8309;</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,35</b></td><td><b>1,05</b></td><td><b>2,92</b></td><td><b>0,32</b></td><td><b>2,32</b></td><td><b>2,22</b></td><td><b>2,04</b></td></tr>
         <tr><td>unrar 7.23</td><td>0,63</td><td>6,37</td><td>6,14</td><td>0,62</td><td>2,92</td><td>3,33</td><td>2,44</td></tr>
-        <tr><td>rarpar</td><td>0,74</td><td>11,58</td><td>9,76</td><td>0,54</td><td>2,72</td><td>2,85</td><td>2,38</td></tr>
         <tr><td>unar</td><td class="no">CLI yok&#8309;</td><td class="no">CLI yok&#8309;</td><td class="no">CLI yok&#8309;</td><td class="no">CLI yok&#8309;</td><td class="no">CLI yok&#8309;</td><td class="no">CLI yok&#8309;</td><td class="no">CLI yok&#8309;</td></tr>
         <tr><td>bsdtar</td><td>0,81</td><td>16,72</td><td>15,14</td><td>1,13</td><td class="no">yanlış çıktı&sup2;</td><td class="no">şifreleme yok&sup3;</td><td class="no">büyük sözlük yok&#8308;</td></tr>
         <tr><td>7-Zip</td><td>0,76</td><td>5,45</td><td>5,79</td><td>0,65</td><td>4,21</td><td>4,13</td><td>2,51</td></tr>
         <tr><td colspan="8" class="grp">Dizüstü, Apple M5 Max&#8310;</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,10</b></td><td><b>0,40</b></td><td><b>1,15</b></td><td><b>0,10</b></td><td><b>0,98</b></td><td><b>0,99</b></td><td><b>0,94</b></td></tr>
         <tr><td>unrar 7.22</td><td>0,16</td><td>1,94</td><td>1,87</td><td>0,15</td><td>1,75</td><td>1,91</td><td>1,52</td></tr>
-        <tr><td>rarpar</td><td>0,11</td><td>2,09</td><td>1,97</td><td>0,18</td><td>1,54</td><td>1,55</td><td>1,33</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>Alanın rekabet edemediği yer, ve
@@ -890,9 +840,8 @@
     bildirmeden kesik bir dosya üretti, bu yüzden o kol yavaş bir süre değil bir
     doğruluk başarısızlığı; düzeneğimiz çıktıyı denetleyerek bunu yakaladı, ki bu
     çıktıyı denetlemenin neden değerli olduğu. ³ <code>bsdtar: Encryption is not supported</code>. ⁴ <code>bsdtar: Declared dictionary size is not supported</code>.
-    ⁵ unar hiçbir Windows komut satırı aracı göndermiyor, bu yüzden dizüstü alanı beş.
-    ⁶ M5 Max grubu, bir macOS okuyucusunun gerçekten seçeceği üç aracı yarıştırıyor -
-    unrar, <code>rarpar</code> ve biz; unar, bsdtar ve 7-Zip o makinede yarıştırılmadı.
+    ⁵ unar hiçbir Windows komut satırı aracı göndermiyor, bu yüzden dizüstü alanı dört.
+    ⁶ M5 Max grubu unrar'ı bize karşı yarıştırıyor; unar, bsdtar ve 7-Zip o makinede yarıştırılmadı.
     Onun unrar'ı 7.22, orada gözetimsiz koşan en yeni derleme.</p>
 
     <p class="note" style="text-align:start"><b>Bir istisna dışında her makinede her
@@ -910,10 +859,10 @@
 
     <p class="note" style="text-align:start">En büyük farkla kazandığımız biçim,
     usenet'in gerçekte aynı anda yüzlercesini gönderdiği biçim: <b>400 küçük dosya,
-    unrar'a karşı 4,3× ve 4,4×</b> ve <code>rarpar</code>'a karşı 5,4× ile 5,5×. Bu,
+    unrar'a karşı 4,3× ve 4,4×</b>. Bu,
     üye-başına paralellik, ve bu bir indirme kuyruğu için yazılmış bir çıkarıcı ile
     bir komut satırı için yazılmış bir çıkarıcı arasındaki fark. <a href="#census">Yukarıdaki
-    sayımın</a> baytların %84'ü dediği depolanmış biçim, üç ciddi araç için neredeyse
+    sayımın</a> baytların %84'ü dediği depolanmış biçim, bizimle unrar arasında neredeyse
     bir berabere, çünkü o noktada herkes yalnızca bayt taşıyor.</p>
 
     <p class="note" style="text-align:start"><b>Belirtmeye değer bir seçim.</b>
@@ -986,10 +935,9 @@
     bu, salt derleme ve bayraklardan 2,6 kata kadar değer. Bizi ayarlanmış sütunda
     yargılayın, ki bu daha zor karşılaştırma; gönderilen sütun ise onu indiren birinin
     gerçekte yaşadığı şey. <code>par2cmdline</code> orijinali, sürüm 1.2.0, her
-    makinede kaynaktan derlenmiş. <code>rarpar</code>, Weaver'ın Metal GPU arka ucu
-    etkin kaynaktan derlenmiş kendi PAR2 uygulaması. MultiPar'ın <code>par2j</code>'si
+    makinede kaynaktan derlenmiş. MultiPar'ın <code>par2j</code>'si
     yalnızca Windows, bu yüzden yalnızca Windows dizüstü satırlarında beliriyor. M5 Max
-    satırları, iki turbo sütununun yanında güncel macOS arm64 derlemeli iki aracı
+    satırları nzbfast'i iki turbo sütununa karşı
     yarıştırıyor; <code>par2cmdline</code> klasiği o makinede yarıştırılmadı.</p>
 
     <div class="tblwrap"><table>
@@ -1000,28 +948,24 @@
         <tr><td>par2-turbo, ayarlanmış</td><td>0,31</td><td>0,38</td><td>0,42</td><td>0,28</td></tr>
         <tr><td>par2-turbo, gönderildiği hâliyle</td><td>0,86</td><td>1,12</td><td>1,06</td><td>0,80</td></tr>
         <tr><td>par2cmdline</td><td>3,03</td><td>3,84</td><td>3,81</td><td class="no">yarıştırılmadı</td></tr>
-        <tr><td>rarpar</td><td>2,62</td><td>3,45</td><td>2,96</td><td>2,32</td></tr>
         <tr><td>MultiPar</td><td class="no">yalnızca Windows</td><td class="no">yalnızca Windows</td><td>1,34</td><td class="no">yalnızca Windows</td></tr>
         <tr><td colspan="5" class="grp">3 blok hasarlı - birkaç ölü makale</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,22</b></td><td><b>0,33</b></td><td><b>0,46</b></td><td><b>0,26</b></td></tr>
         <tr><td>par2-turbo, ayarlanmış</td><td>0,51</td><td>0,66</td><td>0,78</td><td>0,48</td></tr>
         <tr><td>par2-turbo, gönderildiği hâliyle</td><td>1,08</td><td>1,46</td><td>1,42</td><td>1,00</td></tr>
         <tr><td>par2cmdline</td><td>3,64</td><td>4,58</td><td>4,98</td><td class="no">yarıştırılmadı</td></tr>
-        <tr><td>rarpar</td><td>4,27</td><td>5,53</td><td>4,99</td><td>3,64</td></tr>
         <tr><td>MultiPar</td><td class="no">yalnızca Windows</td><td class="no">yalnızca Windows</td><td>1,71</td><td class="no">yalnızca Windows</td></tr>
         <tr><td colspan="5" class="grp">101 blok hasarlı</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,48</b></td><td><b>0,74</b></td><td><b>0,96</b></td><td><b>0,66</b></td></tr>
         <tr><td>par2-turbo, ayarlanmış</td><td>0,88</td><td>1,17</td><td>1,40</td><td>0,85</td></tr>
         <tr><td>par2-turbo, gönderildiği hâliyle</td><td>2,04</td><td>2,65</td><td>2,69</td><td>1,84</td></tr>
         <tr><td>par2cmdline</td><td>5,57</td><td>7,57</td><td>11,7</td><td class="no">yarıştırılmadı</td></tr>
-        <tr><td>rarpar</td><td>4,73</td><td>5,73</td><td>5,74</td><td>4,17</td></tr>
         <tr><td>MultiPar</td><td class="no">yalnızca Windows</td><td class="no">yalnızca Windows</td><td>2,65</td><td class="no">yalnızca Windows</td></tr>
         <tr><td colspan="5" class="grp">1.500 blok hasarlı - fazlalığın %91'i kullanıldı</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>1,00</b></td><td><b>2,07</b></td><td><b>2,46</b></td><td><b>1,61</b></td></tr>
         <tr><td>par2-turbo, ayarlanmış</td><td>3,00</td><td>5,52</td><td>6,73</td><td>4,07</td></tr>
         <tr><td>par2-turbo, gönderildiği hâliyle</td><td>5,21</td><td>8,20</td><td>9,30</td><td>6,01</td></tr>
         <tr><td>par2cmdline</td><td>67,7</td><td>86,1</td><td>403</td><td class="no">yarıştırılmadı</td></tr>
-        <tr><td>rarpar</td><td>7,15</td><td>11,49</td><td>14,22</td><td>6,91</td></tr>
         <tr><td>MultiPar</td><td class="no">yalnızca Windows</td><td class="no">yalnızca Windows</td><td>5,40</td><td class="no">yalnızca Windows</td></tr>
       </tbody>
     </table></div>
@@ -1081,7 +1025,7 @@
     bir sürümü onların kısılmış sürelerini sanki araçların kendi süreleriymiş gibi
     yayımladı. O makineyi her aracı yüksek önceliğe kaldırarak yeniden koşturmak tüm
     alanı hareket ettiriyor: en ağır hasar düzeyinde <code>par2-turbo</code> 22,4 s'den
-    6,41'e, <code>rarpar</code> ise 59,2 s'den 14,4'e gidiyor, ve bu sayfanın bir
+    6,41'e gidiyor, ve bu sayfanın bir
     kesimi için bu, sütunu bizimkinden kaybettiğimiz bir sütuna çevirdi. Tüm dizüstü
     sütunu artık o şekilde ölçülüyor - düzeltme, yukarıdaki algoritma değişikliğiyle
     satır geri kazanılmış olsa bile kalıyor, çünkü o makinedeki alanın süreleri ancak
@@ -1130,14 +1074,6 @@
     boyutu o makinede yarıştırılmadı. Bu rakamlar yukarıda anlatılan saptama yeniden
     yazımından önce, bu yüzden burada güncel bir rakam değil eski derlemenin ikinci
     makine olarak tutulan rakamları.</p>
-    <p class="note" style="text-align:start">Weaver'ın <code>rarpar</code>'ı yalnızca
-    bu tablodan yok, ve bu bir seçim değil: bu onarımı uygulamıyor. Bu arşivlerden
-    birini onarması istendiğinde <i>"embedded Rar5 recovery record detected ... this
-    API restores standalone .rev recovery volumes only and does not consume embedded
-    RR/protect data"</i> yanıtını veriyor, ve dosyayı hasarlı bırakıyor. Bu sayfadaki
-    her başka karşılaştırmada beliriyor: yukarıdaki dört PAR2 ayağının tümünde, ondan
-    önceki yedi çıkarma biçiminin tümünde, ve hemen aşağıdaki, kendi yaptığını
-    söylediği - ve kazandığı - kurtarma birimi kolunda.</p>
 
     <h3 style="margin:44px 0 4px">Kurtarma birimleri: eksik tüm <code>.rev</code> dosyalarını yeniden inşa etmek</h3>
     <p class="note" style="text-align:start;margin-top:6px">RAR'ın kendi kurtarma
@@ -1153,7 +1089,6 @@
       <tbody>
         <tr><td><b>nzbfast</b></td><td><b>0,44</b></td><td><b>0,50</b></td></tr>
         <tr><td>rar 7.23 <code>rc</code></td><td>0,46</td><td>0,58</td></tr>
-        <tr><td>rarpar <code>restore-volumes</code></td><td>0,48</td><td>0,61</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>Buradaki 32 çekirdekli hücre, bu
@@ -1165,9 +1100,6 @@
     makinede de bir kazanca çeviriyor. Farklar %3 ve %14, bu yüzden bu manşete
     çıkarmak yerine açıkça söylenecek bir kazanç, ve hiç söylenmesinin sebebi kaybın
     önce söylenmiş olması.</p>
-    <p class="note" style="text-align:start">Bu kol var, çünkü Weaver'ın
-    <code>rarpar</code>'ı tam olarak bunu uyguluyor ve bununla ölçülmeyi istedi. Onu
-    ilk yayımladığımızda rahatça kazanıyordu, ve o sebeple o zaman yayımladık.</p>
     <p class="note" style="text-align:start">Dosya eşleştirme hiçbir zaman bedel
     olmadı, ki bu kaydetmeye değer çünkü sezgisel şüpheliydi: kurtarma birimleri hiçbir
     dosya adı taşımaz, bu yüzden hangi yuvaların hayatta kaldığını, ne çağrıldıklarına
@@ -1207,23 +1139,23 @@
     <p class="kicker">Yetenek, mikro-kıyaslama değil</p>
     <h2>Her istemci ne yapabilir</h2>
     <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5</th><th>NZBGet 26</th><th>rustnzb</th><th>Weaver</th><th>Usenapp</th><th>Newsbin</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5</th><th>NZBGet 26</th><th>rustnzb</th><th>Usenapp</th><th>Newsbin</th></tr></thead>
       <tbody>
-        <tr><td>hatlanmış NNTP</td><td class="yes">evet</td><td class="half">varsayılan kapalı</td><td class="no">hayır</td><td class="yes">evet</td><td class="no">-⁷</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>indirme sırasında tam doğrulama</td><td class="yes">her blok</td><td class="no">sonra</td><td class="half">hızlı denetim</td><td class="no">sonra</td><td class="no">sonra</td><td class="no">sonra</td><td class="no">sonra</td></tr>
-        <tr><td>indirme sırasında çıkarma</td><td class="yes">akış içi, diskte birim yok</td><td class="half">doğrudan açma⁴</td><td class="half">doğrudan açma⁴</td><td class="half">önce sahneler, sonra açar⁵</td><td class="no">hayır</td><td class="no">hayır</td><td class="no">hayır</td></tr>
-        <tr><td>N-GB'lık bir gönderi için gereken disk</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
-        <tr><td>indirme öncesi tamamlanabilirlik hükmü</td><td class="yes">blok-kesin</td><td class="no">hayır</td><td class="half">sağlık %</td><td class="no">hayır</td><td class="no">-⁷</td><td class="yes">makale denetimi</td><td class="no">hayır</td></tr>
-        <tr><td>sınırlı bellek (asla takas alanına düşmez)</td><td class="yes">bütçelenmiş</td><td class="half">önbellek-sınırı ayarı</td><td class="half">önbellek ayarı</td><td class="no">hayır</td><td class="no">hayır</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>kendi açık-dosya sınırını yükseltir</td><td class="yes">evet, başlangıçta</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td></tr>
-        <tr><td>indirme sırasında herhangi bir noktada dosyayı denetleme</td><td class="yes">evet</td><td class="no">hayır</td><td class="no">hayır</td><td class="no">hayır</td><td class="no">hayır</td><td class="half">sıralı</td><td class="no">hayır</td></tr>
-        <tr><td>yerleşik dizinleyici + gönderici duvarı</td><td class="yes">evet, anahtarsız</td><td class="no">hayır</td><td class="no">hayır</td><td class="no">hayır</td><td class="no">hayır</td><td class="half">arama arayüzü</td><td class="half">grup tarayıcı</td></tr>
-        <tr><td>Sonarr/Radarr takılabilirliği</td><td class="yes">SAB API + Newznab</td><td class="yes">yerli</td><td class="yes">yerli</td><td class="yes">SAB-uyumlu API</td><td class="half">NZBGet-uyumlu RPC⁷</td><td class="no">hayır</td><td class="no">hayır</td></tr>
-        <tr><td>telefon uzaktan kumandaları (nzb360/LunaSea)</td><td class="yes">evet</td><td class="yes">evet</td><td class="yes">evet</td><td class="no">hayır</td><td class="no">-⁷</td><td class="no">hayır</td><td class="no">hayır</td></tr>
-        <tr><td>izleme listesi otomatik-alma + yükseltmeler</td><td class="yes">yerleşik</td><td class="no">*arr üzerinden</td><td class="no">*arr üzerinden</td><td class="no">hayır</td><td class="no">hayır</td><td class="yes">Watchdog</td><td class="half">kurallar</td></tr>
-        <tr><td>tek başına yeten tek ikili dosya</td><td class="yes">evet</td><td class="half">uygulama paketleri; Linux'ta Python</td><td class="yes">evet</td><td class="yes">evet</td><td class="yes">evet</td><td class="yes">.app</td><td class="yes">.exe</td></tr>
-        <tr><td>açık kaynak</td><td class="yes">GPL⁶</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">MIT</td><td class="yes">evet</td><td class="no">ücretli</td><td class="no">ücretli</td></tr>
-        <tr><td>platformlar</td><td class="yes">mac/win/linux (x64 + ARM)/docker/flatpak</td><td class="yes">mac/win/linux/docker/NAS paketleri</td><td class="yes">mac/win/linux/docker/NAS + gömülü</td><td class="half">linux/win (mac kaynaktan)</td><td class="half">mac ikili dosyası; kaynak başka yerde⁷</td><td class="no">yalnızca mac</td><td class="no">yalnızca win</td></tr>
+        <tr><td>hatlanmış NNTP</td><td class="yes">evet</td><td class="half">varsayılan kapalı</td><td class="no">hayır</td><td class="yes">evet</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>indirme sırasında tam doğrulama</td><td class="yes">her blok</td><td class="no">sonra</td><td class="half">hızlı denetim</td><td class="no">sonra</td><td class="no">sonra</td><td class="no">sonra</td></tr>
+        <tr><td>indirme sırasında çıkarma</td><td class="yes">akış içi, diskte birim yok</td><td class="half">doğrudan açma⁴</td><td class="half">doğrudan açma⁴</td><td class="half">önce sahneler, sonra açar⁵</td><td class="no">hayır</td><td class="no">hayır</td></tr>
+        <tr><td>N-GB'lık bir gönderi için gereken disk</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
+        <tr><td>indirme öncesi tamamlanabilirlik hükmü</td><td class="yes">blok-kesin</td><td class="no">hayır</td><td class="half">sağlık %</td><td class="no">hayır</td><td class="yes">makale denetimi</td><td class="no">hayır</td></tr>
+        <tr><td>sınırlı bellek (asla takas alanına düşmez)</td><td class="yes">bütçelenmiş</td><td class="half">önbellek-sınırı ayarı</td><td class="half">önbellek ayarı</td><td class="no">hayır</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>kendi açık-dosya sınırını yükseltir</td><td class="yes">evet, başlangıçta</td><td class="no">-⁷</td><td class="no">-⁷</td><td class="no">-⁷</td><td class="no">-⁷</td><td class="no">-⁷</td></tr>
+        <tr><td>indirme sırasında herhangi bir noktada dosyayı denetleme</td><td class="yes">evet</td><td class="no">hayır</td><td class="no">hayır</td><td class="no">hayır</td><td class="half">sıralı</td><td class="no">hayır</td></tr>
+        <tr><td>yerleşik dizinleyici + gönderici duvarı</td><td class="yes">evet, anahtarsız</td><td class="no">hayır</td><td class="no">hayır</td><td class="no">hayır</td><td class="half">arama arayüzü</td><td class="half">grup tarayıcı</td></tr>
+        <tr><td>Sonarr/Radarr takılabilirliği</td><td class="yes">SAB API + Newznab</td><td class="yes">yerli</td><td class="yes">yerli</td><td class="yes">SAB-uyumlu API</td><td class="no">hayır</td><td class="no">hayır</td></tr>
+        <tr><td>telefon uzaktan kumandaları (nzb360/LunaSea)</td><td class="yes">evet</td><td class="yes">evet</td><td class="yes">evet</td><td class="no">hayır</td><td class="no">hayır</td><td class="no">hayır</td></tr>
+        <tr><td>izleme listesi otomatik-alma + yükseltmeler</td><td class="yes">yerleşik</td><td class="no">*arr üzerinden</td><td class="no">*arr üzerinden</td><td class="no">hayır</td><td class="yes">Watchdog</td><td class="half">kurallar</td></tr>
+        <tr><td>tek başına yeten tek ikili dosya</td><td class="yes">evet</td><td class="half">uygulama paketleri; Linux'ta Python</td><td class="yes">evet</td><td class="yes">evet</td><td class="yes">.app</td><td class="yes">.exe</td></tr>
+        <tr><td>açık kaynak</td><td class="yes">GPL⁶</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">MIT</td><td class="no">ücretli</td><td class="no">ücretli</td></tr>
+        <tr><td>platformlar</td><td class="yes">mac/win/linux (x64 + ARM)/docker/flatpak</td><td class="yes">mac/win/linux/docker/NAS paketleri</td><td class="yes">mac/win/linux/docker/NAS + gömülü</td><td class="half">linux/win (mac kaynaktan)</td><td class="no">yalnızca mac</td><td class="no">yalnızca win</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">⁴ Doğrudan açma birimleri yine de önce
@@ -1234,15 +1166,9 @@
     (1.3.4-1.3.9), açmadan "Completed" işaretlenmiş gizlenmiş birimler gönderiyordu; o
     hata 1.4.5'te üst akışta düzeltildi.
     ⁶ GPL-3.0-or-later.
-    ⁷ Weaver 0.7.8, en yeni yayımlanan ikili dosyası, kimliği hash ile kanıtlanmış
-    (yayımlanan sürüm tar dosyasının sha256'sı ve içindeki ikili dosya ikisi de
-    yarıştırdığımızla eşleşiyor); ölçülen satırları 23 Ağustos bedel ayağından geliyor,
-    "-" işaretli yetenek hücreleri doğrulanmış yokluklar değil değerlendirmediğimiz
-    özellikler; NZBGet-uyumlu bir RPC konuşuyor, ki düzeneğimiz onu bununla sürüyor,
-    ama telefon uzaktan kumandalarını ona karşı denemedik.
     Usenapp/Newsbin, indirici özellikli tek-platformlu ticari okuyucular; insanlar
     sorduğu için listeleniyorlar, hızda yarıştıkları için değil.</p>
-    <p class="note" style="text-align:start">⁸ macOS bir programı 256 açık dosya
+    <p class="note" style="text-align:start">⁷ macOS bir programı 256 açık dosya
     sınırıyla başlatır, ve birkaç sunucu boyunca tam bir bağlantı seti bunu aşabilir.
     nzbfast, başlangıçta macOS ve Linux'ta kendi sınırını yükseltir: 65.536 ister,
     sistem kabul edene kadar adım adım iner, hiçbir zaman sistemin sert sınırının
@@ -1302,8 +1228,7 @@
   <p class="fine">Bu sayfadaki kıyaslama verisi: <b>23 ve 24 Ağustos 2026</b> ayakları -
   bedel tabloları, ağ yeniden yarışı, hasarlı-gönderi ayağı, boş-alan tabanı,
   disk-tavanı düzeneği ve çıkarma yeniden yarışı - SABnzbd 5.1.1'e (hasar ayağında
-  5.1.0), NZBGet 26.3-testing'e (20 Ağustos derlemesi), rustnzb 1.4.5'e ve Weaver
-  0.7.8'e (en yeni yayımlanan ikili dosyası, kimliği hash ile kanıtlanmış) karşı, beş
+  5.1.0), NZBGet 26.3-testing'e (20 Ağustos derlemesi) ve rustnzb 1.4.5'e karşı, beş
   sağlayıcı, hepsi TLS - en yeni ayaklar <b>doğrudan v1.2.2 sürüm derlemesinde</b>,
   geri kalanı ona olarak gönderilen kod hattında. Boş-alan tabanı 24 Ağustos'ta sürüm
   derlemesinde yeniden kesildi ve sınırlarını tam olarak yeniden üretti; bellek-kelepçe

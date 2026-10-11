@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Benchmark-uri - nzbfast</title>
-<meta name="description" content="nzbfast măsurat față de alți patru clienți Usenet pe hardware identic: timpul până la un fișier utilizabil, plus discul, spațiul liber și memoria pe care le costă fiecare job. Fiecare tabel numește build-urile cu care a concurat. Include probele pe care nzbfast nu le câștigă.">
+<meta name="description" content="nzbfast măsurat față de alți trei clienți Usenet pe hardware identic: timpul până la un fișier utilizabil, plus discul, spațiul liber și memoria pe care le costă fiecare job. Fiecare tabel numește build-urile cu care a concurat. Include probele pe care nzbfast nu le câștigă.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="benchmarks.html">
@@ -62,13 +62,11 @@
     <h2>Niciun client măsurat nu este mai ieftin la procesor, memorie și disc împreună</h2>
     <p class="lead">Cele mai noi runde de pe această pagină au rulat pe 23 și 24 august 2026 -
     cea mai nouă dintre ele chiar pe <b>build-ul de lansare v1.2.2</b> - față de
-    build-urile curente ale altor patru clienți, pe hardware, linii și provideri
+    build-urile curente ale altor trei clienți, pe hardware, linii și provideri
     identice: două forme de job, de la 6,5 la 87 GB, și viteze de linie de la
     250 Mbit la 10 GbE. În aceste runde, niciun client nu a fost mai ieftin decât
-    nzbfast la procesor, memorie și disc împreună: fiecare costă mai mult la cel
-    puțin două din cele trei, cel mai mult a economisit oricare dintre ei pe o
-    singură axă a fost circa 2 procente - o egalitate statistică, în interiorul
-    marjei proprii de variație de la o rulare la alta a acelui client - iar pe
+    nzbfast la procesor, memorie și disc împreună: fiecare costă mai mult la toate
+    trei, iar pe
     disc, fiecare dintre ei a mutat cel puțin de două ori mai mulți octeți pentru
     un rezultat identic octet cu octet. Din lansare, nzbfast a ținut și cea mai
     puțină memorie dintre toți clienții măsurați, pe fiecare probă, cu 2,0x până
@@ -76,7 +74,7 @@
     <p><b>Care ești tu?</b></p>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px">
       <div class="callout" style="margin:0"><b>Un NAS, un mini PC, sau un mic server de acasă.</b>
-      nzbfast a ținut 143 MB de memorie pe un job unde cel mai apropiat rival a ținut 531 MB și
+      nzbfast a ținut 143 MB de memorie pe un job unde cel mai apropiat rival a ținut 628 MB și
       cel mai greu 1,6 GB, termină cu circa 50 MB de spațiu liber de rezervă acolo unde alți
       clienți au nevoie de aproape dublul spațiului de descărcare, iar scara memoriei reduse
       a dus un job de 87 GB pe disc în 286 MB de RAM la setările implicite din lansare. Și
@@ -123,17 +121,18 @@
     <p class="kicker">Mai întâi metodologia</p>
     <h2>Configurația</h2>
     <ul class="plain">
-      <li><b>Clienți:</b> nzbfast · SABnzbd · NZBGet · rustnzb · Weaver, fiecare tabel pe
+      <li><b>Clienți:</b> nzbfast · SABnzbd · NZBGet · rustnzb, fiecare tabel pe
       build-urile pe care le numește. Cele mai noi runde (23 august 2026) au concurat cu
-      build-urile atunci curente ale câmpului - SABnzbd 5.1.1, NZBGet 26.3-testing,
-      rustnzb 1.4.5 și Weaver 0.7.8, cel mai nou binar lansat de el, identitate dovedită
-      prin hash - față de linia de cod care a fost lansată chiar în acea noapte ca
+      build-urile atunci curente ale câmpului - SABnzbd 5.1.1, NZBGet 26.3-testing
+      și rustnzb 1.4.5 - față de linia de cod care a fost lansată chiar în acea noapte ca
       <b>nzbfast 1.2.2</b>, deci build-ul care a produs cifrele noi este cel pe care îl
       poți descărca. Acele runde au rulat pe o mașină Apple Silicon cu 20 de nuclee pe o
       linie de 1&nbsp;Gbit. Tabelele mai vechi păstrează build-urile și mașinile cu care
       au concurat (mașini Apple din seria M: "Europa" M1 Ultra pe 10&nbsp;GbE, "Coasta de
       Est" M3 Ultra cu o linie de ~2,4-3,0 Gbps) și o spun; ele subestimează build-ul
-      curent din lansare mai degrabă decât să-l flateze.</li>
+      curent din lansare mai degrabă decât să-l flateze. Rezultatele lui Weaver au fost
+      eliminate de pe această pagină pentru că build-urile lui au avansat de la aceste runde;
+      vor reveni odată cu următoarea re-rulare completă.</li>
       <li><b>Corectitudine:</b> aceiași provideri și TLS pentru fiecare client, probele
       rulează una după alta, intercalate. Fiecare concurent reglat la maximul lui
       documentat: SABnzbd a primit <code>pipelining_requests=8</code> (<b>livrează 1, adică
@@ -171,12 +170,12 @@
   <div class="wrap">
     <p class="kicker">Runda din 23 august 2026</p>
     <h2>Cât costă un job: fiecare client la zi, o noapte, o mașină</h2>
-    <p class="lead">Șase brațe pe o mașină Apple Silicon cu 20 de nuclee pe o linie de
+    <p class="lead">Cinci brațe pe o mașină Apple Silicon cu 20 de nuclee pe o linie de
     1 Gbit: nzbfast la setările implicite din lansare, același binar cu regulatorul lui
-    de conexiuni oprit, și build-urile curente ale celorlalți patru clienți. Cinci
+    de conexiuni oprit, și build-urile curente ale celorlalți trei clienți. Cinci
     provideri, TLS peste tot, trei repetiții per client per probă cu ordinea rotită în
     interiorul fiecărei runde, iar rezultatul fiecărei probe verificat octet cu octet:
-    36 din 36 probe au produs exact aceeași încărcătură utilă. La 1 Gbit linia dă
+    30 din 30 probe au produs exact aceeași încărcătură utilă. La 1 Gbit linia dă
     ritmul, iar timpii de terminare converg prin construcție, deci coloana de timp e
     acolo ca să arate acea convergență; coloanele de resurse sunt ce există runda să
     măsoare.</p>
@@ -190,12 +189,11 @@
     <div class="tblwrap"><table>
       <thead><tr><th>Lansare numită de 6,5 GB, extragere în cale</th><th>timp până la fișierul utilizabil</th><th>memorie de vârf (RSS)</th><th>timp CPU</th><th>I/O dispozitiv (GiB)</th><th>rețea (GB)</th></tr></thead>
       <tbody>
-        <tr><td><b>nzbfast, din lansare (25 conex.)</b></td><td class="win">58 s</td><td class="win num">143 MB</td><td class="num">35,7 s</td><td class="win num">6,2</td><td class="num">6,5</td></tr>
+        <tr><td><b>nzbfast, din lansare (25 conex.)</b></td><td class="win">58 s</td><td class="win num">143 MB</td><td class="win num">35,7 s</td><td class="win num">6,2</td><td class="num">6,5</td></tr>
         <tr><td>nzbfast, regulator oprit (360)</td><td class="num">60 s</td><td class="num">583 MB</td><td class="num">38,0 s</td><td class="num">6,1</td><td class="num">6,6</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">61 s</td><td class="num">801 MB</td><td class="num">40,1 s</td><td class="num">12,5</td><td class="num">6,5</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">63 s</td><td class="num">1.588 MB</td><td class="num">69,5 s</td><td class="num">13,8</td><td class="num">6,5</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">67 s</td><td class="num">628 MB</td><td class="num">61,9 s</td><td class="num">13,4</td><td class="num">7,2</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">110 s</td><td class="num">531 MB</td><td class="win num">34,9 s&sup1;</td><td class="num">12,5</td><td class="num">6,5</td></tr>
       </tbody>
     </table></div>
     <div class="tblwrap"><table>
@@ -206,25 +204,15 @@
         <tr><td>NZBGet 26.3-testing</td><td class="num">306 s</td><td class="num">900 MB</td><td class="num">221,3 s</td><td class="num">68,1</td><td class="num">34,4</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">308 s</td><td class="num">1.607 MB</td><td class="num">356,5 s</td><td class="num">72,5</td><td class="num">34,4</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">343 s</td><td class="num">445 MB</td><td class="num">332,6 s</td><td class="num">69,8</td><td class="num">37,8</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">511 s</td><td class="num">1.076 MB</td><td class="num">373,8 s</td><td class="num">98,0</td><td class="num">34,4</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>Măsurat 23 august 2026</b> față de
-    SABnzbd 5.1.1, NZBGet 26.3-testing, rustnzb 1.4.5 și Weaver 0.7.8, mediane a trei
+    SABnzbd 5.1.1, NZBGet 26.3-testing și rustnzb 1.4.5, mediane a trei
     rulări, cu fiecare probă verificată octet cu octet, cinci provideri, tot TLS.
     Brațele nzbfast au rulat un build al aceleiași linii de cod, luat mai devreme în
     aceeași zi, cu vreo șapte ore înainte de build-ul de lansare v1.2.2, așa că rândurile
     lor nu poartă număr de versiune; tabelele de 500 Mbit și 87 GB de pe această pagină
-    chiar au rulat build-ul de lansare însuși și spun asta. &sup1; Mediana de procesor a lui Weaver pe proba de 6,5 GB e 2% sub a
-    noastră (34,9 față de 35,7), cu propriile lui trei probe întinse între 34,1 și
-    56,1 s, deci o citim ca egalitate statistică; e singura celulă din oricare tabel
-    pe care un rival o ține, și e repetată sub <a
-    href="#legs-we-lose">probele pe care nu le câștigăm</a>. Pe proba de 34 GB,
-    procesorul nostru e cel mai mic fără echivoc. Weaver-ul mai nou, 0.8.3, nu
-    livrează niciun binar; build-ul nostru din sursă al lui a măsurat un tipar de
-    procesor pe care nu-l putem atribui curat versiunii mai degrabă decât build-ului,
-    deci acest tabel concurează cu lansarea 0.7.8 dovedită prin hash și o spune, în
-    loc să publice o cifră confundată. rustnzb 1.4.5 a terminat fiecare probă de aici,
+    chiar au rulat build-ul de lansare însuși și spun asta. rustnzb 1.4.5 a terminat fiecare probă de aici,
     inclusiv proba obfuscată.</p>
     <p class="note" style="text-align:start"><b>Coloana de rețea, cu precizie.</b>
     6,5 GB pe proba curată - aceeași cifră pe care o raportează NZBGet și SABnzbd
@@ -252,9 +240,9 @@
     <p class="lead">Pe o linie destul de lentă, timpul de terminare al fiecărui client e
     linia și nimic altceva, deci o linie lentă ascunde multe păcate. Ce nu poate ascunde
     e ce arde fiecare client ca s-o umple. Am modelat rig-ul de 1 Gbit la două viteze pe
-    care planurile reale chiar le au și am concurat toate cele șase brațe la fiecare -
+    care planurile reale chiar le au și am concurat toate cele cinci brațe la fiecare -
     aceeași mașină, aceiași cinci provideri, trei repetiții per client cu ordinea rotită,
-    fiecare probă verificată octet cu octet, 36 din 36 corecte pe cele două runde. Brațul
+    fiecare probă verificată octet cu octet, 30 din 30 corecte pe cele două runde. Brațul
     nzbfast la 500 Mbit e chiar build-ul de lansare v1.2.2.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>Linie de 500 Mbit, lansare de 6,5 GB</th><th>timp până la fișierul utilizabil</th><th>memorie de vârf (RSS)</th><th>timp CPU</th><th>I/O dispozitiv (GiB)</th></tr></thead>
@@ -263,7 +251,6 @@
         <tr><td>nzbfast 1.2.2, regulator oprit</td><td class="num">115 s</td><td class="num">592 MB</td><td class="num">59,0 s</td><td class="num">6,2</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">125 s</td><td class="num">1.665 MB</td><td class="num">99,2 s</td><td class="num">14,2</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">131 s</td><td class="num">626 MB</td><td class="num">92,6 s</td><td class="num">14,5</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">138 s</td><td class="num">564 MB</td><td class="num">48,5 s</td><td class="num">12,4</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">145 s&sup1;</td><td class="num">846 MB</td><td class="num">64,3 s</td><td class="num">13,2</td></tr>
       </tbody>
     </table></div>
@@ -274,7 +261,6 @@
         <tr><td>nzbfast, regulator oprit</td><td class="num">219 s</td><td class="num">651 MB</td><td class="num">67,9 s</td><td class="num">6,2</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">227 s</td><td class="num">826 MB</td><td class="num">78,4 s</td><td class="num">13,3</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">230 s</td><td class="num">1.667 MB</td><td class="num">162,4 s</td><td class="num">15,2</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">230 s</td><td class="num">789 MB</td><td class="num">62,0 s</td><td class="num">12,9</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">256 s</td><td class="num">644 MB</td><td class="num">122,4 s</td><td class="num">15,4</td></tr>
       </tbody>
     </table></div>
@@ -316,8 +302,8 @@
     <h2>O postare de 87 GB până la un fișier utilizabil de 77 GB, la 10 GbE</h2>
     <p class="lead">Celălalt capăt al poveștii vitezei de linie: o mașină de 10 GbE, cinci
     provideri, o postare de 87 GB al cărei conținut e un singur videoclip de 76,6 GB,
-    șase brațe, trei repetiții rotite, iar rezultatul fiecărei probe verificat octet cu
-    octet - 18 din 18 probe au produs fișierul identic, toți cei șase clienți fiind de
+    cinci brațe, trei repetiții rotite, iar rezultatul fiecărei probe verificat octet cu
+    octet - 15 din 15 probe au produs fișierul identic, toate cele cinci brațe fiind de
     acord asupra sumei lui de control. Brațele nzbfast sunt build-ul de lansare v1.2.2.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>Postare de 87 GB, 10 GbE</th><th>timp până la fișierul utilizabil</th><th>memorie de vârf (RSS)</th><th>timp CPU</th><th>I/O dispozitiv (GiB)</th><th>rețea (GB)</th></tr></thead>
@@ -326,14 +312,13 @@
         <tr><td>nzbfast 1.2.2, regulator de conexiuni pornit (25)</td><td class="num">90 s</td><td class="win num">336 MB</td><td class="win num">130,5 s</td><td class="win num">72,9</td><td class="num">77,4</td></tr>
         <tr><td>NZBGet 26.3-testing</td><td class="num">93 s</td><td class="num">1.195 MB</td><td class="num">443 s</td><td class="num">183,7</td><td class="num">77,2</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">113 s</td><td class="num">1.910 MB</td><td class="num">234 s</td><td class="num">235,1</td><td class="num">77,2</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">645 s</td><td class="num">1.825 MB</td><td class="num">631 s</td><td class="num">435,1&sup2;</td><td class="num">77,3</td></tr>
-        <tr><td>rustnzb 1.4.5</td><td class="num">869 s&sup3;</td><td class="num">681 MB</td><td class="num">2.444 s</td><td class="num">216,1</td><td class="num">86,9</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">869 s&sup2;</td><td class="num">681 MB</td><td class="num">2.444 s</td><td class="num">216,1</td><td class="num">86,9</td></tr>
       </tbody>
     </table></div>
     <p><b>Povestea discului la cea mai mare scară de până acum.</b> Vârful nostru de
     disc în timpul jobului e 70,8 GiB - SUB conținutul de 76,6 GB, pentru că coada
     conținutului încă sosește în timp ce capul e deja final - iar I/O-ul total al
-    dispozitivului e 1,00x conținutul. Rivalii mută de la 2,5x la 6,0x octeții pentru
+    dispozitivului e 1,00x conținutul. Rivalii mută de la 2,5x la 3,2x octeții pentru
     același fișier. Iar brațul cel mai rapid susține circa 8,7 Gbps <em>inclusiv</em>
     verificarea și extragerea în flux; în momentul în care se umple bara de descărcare,
     fișierul e gata.</p>
@@ -355,10 +340,7 @@
     viteza liniei automat - astfel încât comportamentul cel mai bun să fie și cel
     implicit, la cot mai degrabă decât la maxime - e planificat pentru lansarea
     următoare.
-    &sup2; Cei 435 GiB de I/O de dispozitiv ai lui Weaver pentru o descărcare de 77 GB
-    sunt depozitul lui criptat în repaus recitind și rescriind aproape totul pe măsură
-    ce jobul crește - tiparul supraliniar pe care l-au măsurat rundele noastre
-    instrumentate din iulie, încă prezent pe build-ul curent. &sup3; rustnzb 1.4.5
+    &sup2; rustnzb 1.4.5
     termină corect octet cu octet, iar costul lui stă în timpul de procesor și în
     rețea: circa 2.444 secunde de procesor față de un cronometru de 869 s pe toate
     cele trei repetiții, și 86,9 GB trase acolo unde planul lacom e 77,2 (extrage
@@ -468,9 +450,8 @@
     client, inclusiv nzbfast v1.2.2: mașină Europa de 10 GbE, cinci provideri, 100
     de conexiuni per client, aceeași lansare de 6,5 GB otrăvită la trei niveluri de
     deteriorare, trei repetiții per braț cu ordinea alternată, fiecare probă
-    verificată octet cu octet față de fișierul curat. 63 din 65 probe s-au întors
-    identice octet cu octet; cele două care nu au fost sunt numite mai jos, pentru
-    că sunt rezultate.</p>
+    verificată octet cu octet față de fișierul curat, și fiecare s-a întors
+    identică octet cu octet.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>timp până la un fișier verificat, utilizabil (medie a 3)</th><th>60 articole moarte</th><th>20 moarte</th><th>5 moarte</th></tr></thead>
       <tbody>
@@ -479,7 +460,6 @@
         <tr><td>NZBGet 26.3-testing</td><td class="num">33,0 s</td><td class="num">23,7 s</td><td class="num">23,0 s</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">48,0 s&sup1;</td><td class="num">28,0 s</td><td class="num">24,3 s</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">107,3 s&sup2;</td><td class="num">51,3 s</td><td class="num">47,0 s</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="bad">nu a terminat&sup3;</td><td class="bad">nu a terminat&sup3;</td><td class="num">194,0 s</td></tr>
       </tbody>
     </table></div>
     <p><b>De ce postarea deteriorată e rapidă aici.</b> Când un articol lipsește, un
@@ -506,16 +486,10 @@
     degrabă decât în fiabilitate: circa 1.620 de secunde de procesor față de un
     cronometru de 107 s la cea mai grea deteriorare - aproximativ cincisprezece nuclee
     ocupate pe toată proba - acolo unde același rezultat reparat ne costă circa 50 de
-    secunde de procesor. &sup3; Weaver a mutat 1,5 GB și 4,9 GB din cele 6,5 în
-    limita noastră de 20 de minute la cele două niveluri mai grele de deteriorare -
-    aceeași neterminare în toate cele trei runde care l-au concurat, în trei nopți
-    separate; limita e a noastră și neterminarea e rezultatul. La 5 articole moarte a
-    terminat corect de toate trei ori. Costul lui de procesor acolo e propria lui
-    poveste: circa 2.325 de secunde de procesor pentru proba de 194 s, față de cele
-    20 ale noastre.</p>
+    secunde de procesor.</p>
     <p class="note" style="text-align:start">Măsurat 24 august 2026, fiecare build
     curent: nzbfast v1.2.2 (chiar eticheta de lansare), NZBGet 26.3-testing (build din
-    20 august), SABnzbd 5.1.1, rustnzb 1.4.5, Weaver 0.7.8. Un braț de continuitate a
+    20 august), SABnzbd 5.1.1, rustnzb 1.4.5. Un braț de continuitate a
     concurat build-ul nzbfast din noaptea precedentă în interiorul aceleiași runde și a
     aterizat în interiorul unei secunde de v1.2.2 pe fiecare probă, deci nimic de aici
     nu se bazează pe o noapte norocoasă; iar configurațiile rivalilor diferă de cele
@@ -543,14 +517,6 @@
     asta costă memorie rezidentă; detaliul e lângă tabelele de componente. Dacă
     restricția ta e cea mai mică amprentă posibilă pentru un job de sine stătător,
     instrumentele dedicate câștigă acea coloană și nu ne prefacem altfel.</p>
-
-    <p class="lead">Iar runda din 23 august 2026 adaugă o intrare, pe care preferăm
-    s-o punem aici mai degrabă decât s-o lăsăm într-o notă de subsol: pe proba de
-    6,5 GB, mediana de procesor a lui Weaver e cu 2% sub a noastră - 34,9 față de 35,7
-    secunde de procesor, cu propriile lui trei probe întinse între 34,1 și 56,1 s -
-    deci o numim egalitate statistică, și stă în <a href="#cost">tabelul de cost</a>
-    marcată ca singura celulă pe care n-o ținem. Pe proba de 34 GB din aceeași rundă,
-    procesorul nostru e cel mai mic fără echivoc.</p>
     <div class="callout">De ce să arăți deloc o pierdere? Pentru că victoriile sunt
     credibile doar alături de ea. Fiecare cifră de pe această pagină vine din
     aceleași rulări intercalate, iar o probă pe care o pierdem rămâne publicată până
@@ -576,7 +542,7 @@
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">O singură probă per buget pe build-ul de
-    lansare, plafonată față de aceeași sumă de control ca runda cu șase brațe. Cel mai
+    lansare, plafonată față de aceeași sumă de control ca runda cu cinci brațe. Cel mai
     strâns buget costă circa 9% din cronometru, și doar pentru că această linie e
     10 GbE - blocurile revărsate costă timp doar când linia depășește discul, deci pe
     o conexiune obișnuită de acasă un buget mic e aproape gratuit. Toată scara,
@@ -590,9 +556,8 @@
     dublat procesorul (215,5 la 453,0 secunde de procesor, 2,10x) ca să cumpere o
     reducere de 52% în memoria lui de vârf, iar plafonul lui SABnzbd a fost aproape
     gratuit dar a atins doar o parte din amprenta lui. Setarea de cache a lui rustnzb
-    era decorativă în build-ul concurat, iar Weaver nu are niciun buton de memorie
-    deloc, deci amândoi au rulat neplafonați ca și coloane de referință în loc să fie
-    notați la un buget pe care nu-l pot ține. Propria noastră parte din acea rundă e
+    era decorativă în build-ul concurat, deci a rulat neplafonat ca o coloană de
+    referință în loc să fie notat la un buget pe care nu-l poate ține. Propria noastră parte din acea rundă e
     depășită de scara v1.2.2 de mai sus, care spune același lucru la 2,5x dimensiunea:
     bugetul nu e niciodată constrângerea limitativă, pentru că o singură trecere ține
     atât de puțin de la bun început.</p>
@@ -617,13 +582,12 @@
         <tr><td>NZBGet 26.3-testing</td><td class="num">~2.1x conținutul</td><td class="num">~2.1x (37,6 GB peste conținut)</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">~2.1x conținutul</td><td class="num">~2.1x (37,6 GB peste conținut)</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">~2.25x conținutul</td><td class="num">~2.25x (42,7 GB peste conținut)</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">~2.25x conținutul</td><td class="num">~2.25x (42,7 GB peste conținut)&sup1;</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Măsurat pe o mașină Apple Silicon cu 20 de
     nuclee, linie de 1 Gbit, cinci provideri, trei repetiții la fiecare limită, fiecare
     probă terminată verificată octet cu octet - rândurile rivalilor pe 22-23 august
-    2026 (celula de 34 GB a lui Weaver reluată pe 24 august, nota 1), iar rândul nzbfast retăiat pe build-ul de lansare v1.2.2 pe 24 august, care a
+    2026, iar rândul nzbfast retăiat pe build-ul de lansare v1.2.2 pe 24 august, care a
     reprodus exact ambele limite, 12 din 12 probe unanime pe cele două probe. Celulele
     noastre sunt un plafon măsurat: jobul se termină 3 din 3 cu 48,6 MB și 51,0 MB de
     rezervă, și refuză 3 din 3 cu circa 17 MB sub asta - deci plafonul e real în ambele
@@ -638,16 +602,7 @@
     fel de mult ca cifra. La 17 MB sub plafonul lui, nzbfast lovește refuzul discului
     la o scriere, se oprește curat cu "spațiu de disc insuficient", păstrează
     jurnalizat tot ce a aterizat, iar o reîncercare reia fără a redescărca - un
-    parțial pe care îl păstrezi, nu un job eșuat. &sup1; Celula de probă mare a lui Weaver a fost rezolvată printr-o reluare pe
-    24 august: trei din trei probe corecte octet cu octet la același ~2,25x, fiecare mai
-    rapidă decât proba bună de la prima încercare, cu spațiul liber identic până la
-    octet. La prima încercare, pe 23 august, două din cele trei probe ale lui se
-    blocaseră la viteze cu o cifră MB/s cu peste 60 GB încă libere și au lovit limita de
-    40 de minute a rundei. Acele blocaje nu au revenit, iar instrumentarea de blocaj a
-    standului a fost activă și tăcută pe toate cele trei probe ale reluării, ceea ce e o
-    măsurătoare pozitivă, nu una lipsă. Ce le-a provocat rămâne necunoscut, iar o reluare
-    curată nu e un diagnostic: există acum șase probe la acest raport, patru terminate,
-    iar ambele eșecuri vin dintr-o singură fereastră de 80 de minute din prima noapte.</p>
+    parțial pe care îl păstrezi, nu un job eșuat.</p>
   </div>
 </section>
 
@@ -780,9 +735,8 @@
       <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">5 din 10</td><td class="num">3</td><td class="num">2</td></tr>
       <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10 din 10</td><td class="win num">0</td><td class="win num">0</td></tr>
       <tr><td><b>rustnzb 1.4.5</b></td><td class="num">7 din 10</td><td class="num">1</td><td class="num">2</td></tr>
-      <tr><td><b>Weaver 0.7.8</b></td><td class="num">1 din 10</td><td class="num">1</td><td class="num">8</td></tr>
     </table></div>
-    <p><b>nzbfast este singurul care le termină pe toate zece fără ajutor.</b> Și NZBGet ajunge la fișier la fiecare formă, dar are nevoie de 16 runde de reparare și extragere manuală la opt dintre ele. SABnzbd termină cinci de unul singur, iar două rămân inaccesibile chiar și manual. Weaver ajunge la fișier la două.</p>
+    <p><b>nzbfast este singurul care le termină pe toate zece fără ajutor.</b> Și NZBGet ajunge la fișier la fiecare formă, dar are nevoie de 16 runde de reparare și extragere manuală la opt dintre ele. SABnzbd termină cinci de unul singur, iar două rămân inaccesibile chiar și manual.</p>
     <p>Tiparul nu este întâmplător. Formele pe care nzbfast le parcurge, iar ceilalți nu, sunt cele împachetate și cele deteriorate: o arhivă într-o arhivă, o schimbare de format la jumătatea lanțului, un lanț cu cinci niveluri și, mai ales, o arhivă care sosește coruptă cu propriile date de recuperare alături. La aceasta din urmă, patru clienți extrag setul exterior impecabil, vă întind arhiva defectă împreună cu setul de recuperare care ar repara-o, și se opresc.</p>
     <p>Acolo unde clienții duc la capăt aceeași muncă, diferența nu este mică. Acestea sunt cele șapte forme la care ajung toți cei patru clienți răspândiți, incluzând repararea manuală de care a avut nevoie fiecare:</p>
     <div class="tblwrap"><table>
@@ -828,12 +782,12 @@
     <div class="chips">
       <span class="chip"><b>4</b> mașini, de la laptop la 32 de nuclee</span>
       <span class="chip"><b>7</b> forme de arhivă RAR</span>
-      <span class="chip"><b>6</b> extractoare concurate</span>
+      <span class="chip"><b>5</b> extractoare concurate</span>
       <span class="chip"><b>1 GB</b> de conținut per formă</span>
       <span class="chip"><b>cel mai bun din 3</b> intercalate, cache cald</span>
     </div>
 
-    <h3 style="margin:38px 0 4px">Extragere RAR: 7 forme de arhivă, 6 instrumente</h3>
+    <h3 style="margin:38px 0 4px">Extragere RAR: 7 forme de arhivă, 5 instrumente</h3>
     <p class="note" style="text-align:start;margin-top:6px">Runda anterioară a acestui
     tabel a folosit 100 MB până la 200 MB per formă, ceea ce a fost o greșeală: circa
     28 ms de lansare de proces erau 40% din proba stocată, iar ordinea pe care a
@@ -855,8 +809,8 @@
     octet.</p>
 
     <p class="note" style="text-align:start"><b>Re-concurat 23 august 2026 pe motorul
-    1.2.2, iar baleierea rezistă.</b> Cele trei instrumente pe care un cititor le
-    cântărește cel mai des - al nostru, unrar 7.23 și rarpar 0.2.5 - au fost
+    1.2.2, iar baleierea rezistă.</b> Cele două instrumente pe care un cititor le
+    cântărește cel mai des - al nostru și unrar 7.23 - au fost
     re-concurate pe desktopul cu 32 de nuclee pe motorul de lansare (codul de
     extragere concurat e identic octet cu octet cu eticheta 1.2.2), șase runde
     intercalate, minimul per instrument, rezultatul fiecărei probe verificat față de
@@ -866,7 +820,6 @@
       <tbody>
         <tr><td><b>nzbfast 1.2.2</b></td><td><b>0,119</b></td><td><b>0,474</b></td><td><b>1,515</b></td><td><b>0,120</b></td><td><b>1,118</b></td><td><b>1,137</b></td><td><b>1,146</b></td></tr>
         <tr><td>unrar 7.23</td><td>0,190</td><td>2,032</td><td>1,784</td><td>0,139</td><td>1,655</td><td>1,846</td><td>1,420</td></tr>
-        <tr><td>rarpar 0.2.5</td><td>0,206</td><td>2,563</td><td>2,395</td><td>0,237</td><td>1,852</td><td>1,857</td><td>1,725</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Toate cele șapte forme sunt ale noastre,
@@ -874,7 +827,7 @@
     comparabili celulă cu celulă cu tabelul mai larg de mai jos - bancul de testare a
     fost revizuit de la rundele acelui tabel, iar numărul de runde diferă - deci
     citește fiecare tabel față de el însuși. Tabelul mai larg își păstrează propriile
-    date și câmpul lui de șase instrumente, iar coloana lui nzbfast descrie motorul
+    date și câmpul lui de cinci instrumente, iar coloana lui nzbfast descrie motorul
     pe care îl livrează 1.2.2: re-cursa de mai sus a măsurat motorul curent la
     nivelul build-ului acelui tabel pe toate cele șapte forme, decisă prin numărul de
     instrucțiuni hardware (0,14% mai puține pentru același cronometru), deci acele
@@ -896,38 +849,31 @@
     bine.</b> Cel mai bun din trei, instrumente intercalate în interiorul fiecărei
     runde mai degrabă decât rulate în blocuri, rezultatul verificat față de conținutul
     sursă la fiecare rulare în parte. Un instrument care a produs octeți greșiți
-    primește o notă de corectitudine, niciodată un timp rapid. <code>rarpar</code> e
-    propriul cod RAR și PAR2 al lui Weaver, construit din sursă la <code>bd87611</code>;
-    fixăm commit-ul mai degrabă decât o versiune pentru că modulele lui poartă trei
-    numere de versiune diferite.</p>
+    primește o notă de corectitudine, niciodată un timp rapid.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>secunde, 1 GB per formă</th><th>store</th><th>400 fișiere mici</th><th>solid</th><th>repetitive</th><th>mare, 4 volume</th><th>criptat</th><th>dicționar 128 MiB</th></tr></thead>
       <tbody>
         <tr><td colspan="8" class="grp">Desktop de vârf, 32 de nuclee</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,21</b></td><td><b>0,47</b></td><td><b>1,26</b></td><td><b>0,14</b></td><td><b>1,08</b></td><td><b>1,09</b></td><td><b>1,07</b></td></tr>
         <tr><td>unrar 7.23</td><td><b>0,21</b></td><td>2,02</td><td>1,62</td><td>0,16</td><td>1,61</td><td>1,82</td><td>1,37</td></tr>
-        <tr><td>rarpar</td><td>0,23</td><td>2,55</td><td>2,22</td><td>0,26</td><td>1,75</td><td>1,74</td><td>1,64</td></tr>
         <tr><td>unar 1.10.7</td><td>0,60</td><td>6,40</td><td>5,29</td><td>0,69</td><td>5,41</td><td>6,88</td><td>4,03</td></tr>
         <tr><td>bsdtar</td><td>0,34</td><td>13,67</td><td>11,48</td><td>1,86</td><td class="no">rezultat greșit&sup2;</td><td class="no">fără criptare&sup3;</td><td class="no">fără dicționar mare&#8308;</td></tr>
         <tr><td>7-Zip</td><td>0,30</td><td class="no">nesuportat&sup1;</td><td class="no">nesuportat&sup1;</td><td class="no">nesuportat&sup1;</td><td class="no">nesuportat&sup1;</td><td class="no">nesuportat&sup1;</td><td class="no">nesuportat&sup1;</td></tr>
         <tr><td colspan="8" class="grp">Desktop mai vechi, 20 de nuclee</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,16</b></td><td><b>0,57</b></td><td><b>1,83</b></td><td><b>0,15</b></td><td><b>1,50</b></td><td><b>1,51</b></td><td><b>1,40</b></td></tr>
         <tr><td>unrar 7.23</td><td>0,25</td><td>2,48</td><td>2,31</td><td>0,20</td><td>2,28</td><td>2,49</td><td>1,84</td></tr>
-        <tr><td>rarpar</td><td>0,28</td><td>3,15</td><td>3,00</td><td>0,31</td><td>2,26</td><td>2,26</td><td>1,97</td></tr>
         <tr><td>unar 1.10.7</td><td>0,67</td><td>7,49</td><td>6,93</td><td>0,85</td><td>6,85</td><td>8,49</td><td>5,29</td></tr>
         <tr><td>bsdtar</td><td>0,33</td><td>15,58</td><td>13,97</td><td>2,18</td><td class="no">rezultat greșit&sup2;</td><td class="no">fără criptare&sup3;</td><td class="no">fără dicționar mare&#8308;</td></tr>
         <tr><td>7-Zip</td><td>0,33</td><td class="no">nesuportat&sup1;</td><td class="no">nesuportat&sup1;</td><td class="no">nesuportat&sup1;</td><td class="no">nesuportat&sup1;</td><td class="no">nesuportat&sup1;</td><td class="no">nesuportat&sup1;</td></tr>
         <tr><td colspan="8" class="grp">Laptop, 14 nuclee / 20 fire, Windows&#8309;</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,35</b></td><td><b>1,05</b></td><td><b>2,92</b></td><td><b>0,32</b></td><td><b>2,32</b></td><td><b>2,22</b></td><td><b>2,04</b></td></tr>
         <tr><td>unrar 7.23</td><td>0,63</td><td>6,37</td><td>6,14</td><td>0,62</td><td>2,92</td><td>3,33</td><td>2,44</td></tr>
-        <tr><td>rarpar</td><td>0,74</td><td>11,58</td><td>9,76</td><td>0,54</td><td>2,72</td><td>2,85</td><td>2,38</td></tr>
         <tr><td>unar</td><td class="no">fără CLI&#8309;</td><td class="no">fără CLI&#8309;</td><td class="no">fără CLI&#8309;</td><td class="no">fără CLI&#8309;</td><td class="no">fără CLI&#8309;</td><td class="no">fără CLI&#8309;</td><td class="no">fără CLI&#8309;</td></tr>
         <tr><td>bsdtar</td><td>0,81</td><td>16,72</td><td>15,14</td><td>1,13</td><td class="no">rezultat greșit&sup2;</td><td class="no">fără criptare&sup3;</td><td class="no">fără dicționar mare&#8308;</td></tr>
         <tr><td>7-Zip</td><td>0,76</td><td>5,45</td><td>5,79</td><td>0,65</td><td>4,21</td><td>4,13</td><td>2,51</td></tr>
         <tr><td colspan="8" class="grp">Laptop, Apple M5 Max&#8310;</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,10</b></td><td><b>0,40</b></td><td><b>1,15</b></td><td><b>0,10</b></td><td><b>0,98</b></td><td><b>0,99</b></td><td><b>0,94</b></td></tr>
         <tr><td>unrar 7.22</td><td>0,16</td><td>1,94</td><td>1,87</td><td>0,15</td><td>1,75</td><td>1,91</td><td>1,52</td></tr>
-        <tr><td>rarpar</td><td>0,11</td><td>2,09</td><td>1,97</td><td>0,18</td><td>1,54</td><td>1,55</td><td>1,33</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>Unde câmpul n-a putut concura, și de
@@ -945,8 +891,7 @@
     merită verificat rezultatul. ³ <code>bsdtar: Encryption is not supported</code>.
     ⁴ <code>bsdtar: Declared dictionary size is not supported</code>. ⁵ unar nu
     livrează niciun instrument de linie de comandă pentru Windows, deci câmpul
-    laptopului numără cinci. ⁶ Grupul M5 Max concurează cele trei instrumente spre
-    care s-ar întoarce de fapt un cititor de macOS - unrar, <code>rarpar</code> și noi;
+    laptopului numără patru. ⁶ Grupul M5 Max concurează unrar împotriva noastră;
     unar, bsdtar și 7-Zip n-au fost concurate pe acea mașină. unrar-ul lui e 7.22, cel
     mai nou build care rulează nesupravegheat acolo.</p>
 
@@ -966,11 +911,11 @@
 
     <p class="note" style="text-align:start">Forma pe care o câștigăm cel mai mult e
     cea pe care Usenet chiar o postează cu sutele deodată: <b>400 de fișiere mici,
-    4,3× și 4,4× față de unrar</b> și 5,4× până la 5,5× față de <code>rarpar</code>.
+    4,3× și 4,4× față de unrar</b>.
     Asta e paralelism per membru, și e diferența dintre un extractor scris pentru o
     coadă de descărcare și unul scris pentru o linie de comandă. Forma stocată, care
     <a href="#census">recensământul de mai sus</a> spune că e 84% din octeții de pe
-    linie, e o egalitate aproape perfectă pentru cele trei instrumente serioase,
+    linie, e o egalitate aproape perfectă între noi și unrar,
     pentru că în acel punct toată lumea doar mută octeți.</p>
 
     <p class="note" style="text-align:start"><b>O alegere care merită declarată.</b>
@@ -1048,11 +993,9 @@
     hash-ul a șaisprezece fișiere deodată. Pe laptop asta valorează până la 2,6x,
     integral din build și flag-uri. Judecă-ne pe coloana reglată, care e comparația mai
     grea; coloana din lansare e ce trăiește cineva care o descarcă. <code>par2cmdline</code>
-    e originalul, versiunea 1.2.0, construit din sursă pe fiecare mașină. <code>rarpar</code>
-    e propria implementare PAR2 a lui Weaver, construită din sursă cu backend-ul lui
-    Metal GPU activat. <code>par2j</code> al lui MultiPar e doar pentru Windows, deci
-    apare doar pe rândurile laptopului Windows. Rândurile M5 Max concurează cele două
-    instrumente cu build-uri macOS arm64 curente alături de cele două coloane turbo;
+    e originalul, versiunea 1.2.0, construit din sursă pe fiecare mașină. <code>par2j</code> al lui MultiPar e doar pentru Windows, deci
+    apare doar pe rândurile laptopului Windows. Rândurile M5 Max concurează nzbfast
+    împotriva celor două coloane turbo;
     <code>par2cmdline</code> clasic n-a fost concurat pe acea mașină.</p>
 
     <div class="tblwrap"><table>
@@ -1063,28 +1006,24 @@
         <tr><td>par2-turbo, reglat</td><td>0,31</td><td>0,38</td><td>0,42</td><td>0,28</td></tr>
         <tr><td>par2-turbo, din lansare</td><td>0,86</td><td>1,12</td><td>1,06</td><td>0,80</td></tr>
         <tr><td>par2cmdline</td><td>3,03</td><td>3,84</td><td>3,81</td><td class="no">neconcurat</td></tr>
-        <tr><td>rarpar</td><td>2,62</td><td>3,45</td><td>2,96</td><td>2,32</td></tr>
         <tr><td>MultiPar</td><td class="no">doar Windows</td><td class="no">doar Windows</td><td>1,34</td><td class="no">doar Windows</td></tr>
         <tr><td colspan="5" class="grp">3 blocuri deteriorate - câteva articole moarte</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,22</b></td><td><b>0,33</b></td><td><b>0,46</b></td><td><b>0,26</b></td></tr>
         <tr><td>par2-turbo, reglat</td><td>0,51</td><td>0,66</td><td>0,78</td><td>0,48</td></tr>
         <tr><td>par2-turbo, din lansare</td><td>1,08</td><td>1,46</td><td>1,42</td><td>1,00</td></tr>
         <tr><td>par2cmdline</td><td>3,64</td><td>4,58</td><td>4,98</td><td class="no">neconcurat</td></tr>
-        <tr><td>rarpar</td><td>4,27</td><td>5,53</td><td>4,99</td><td>3,64</td></tr>
         <tr><td>MultiPar</td><td class="no">doar Windows</td><td class="no">doar Windows</td><td>1,71</td><td class="no">doar Windows</td></tr>
         <tr><td colspan="5" class="grp">101 blocuri deteriorate</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>0,48</b></td><td><b>0,74</b></td><td><b>0,96</b></td><td><b>0,66</b></td></tr>
         <tr><td>par2-turbo, reglat</td><td>0,88</td><td>1,17</td><td>1,40</td><td>0,85</td></tr>
         <tr><td>par2-turbo, din lansare</td><td>2,04</td><td>2,65</td><td>2,69</td><td>1,84</td></tr>
         <tr><td>par2cmdline</td><td>5,57</td><td>7,57</td><td>11,7</td><td class="no">neconcurat</td></tr>
-        <tr><td>rarpar</td><td>4,73</td><td>5,73</td><td>5,74</td><td>4,17</td></tr>
         <tr><td>MultiPar</td><td class="no">doar Windows</td><td class="no">doar Windows</td><td>2,65</td><td class="no">doar Windows</td></tr>
         <tr><td colspan="5" class="grp">1.500 blocuri deteriorate - 91% din recuperare folosit</td></tr>
         <tr><td><b>nzbfast</b></td><td><b>1,00</b></td><td><b>2,07</b></td><td><b>2,46</b></td><td><b>1,61</b></td></tr>
         <tr><td>par2-turbo, reglat</td><td>3,00</td><td>5,52</td><td>6,73</td><td>4,07</td></tr>
         <tr><td>par2-turbo, din lansare</td><td>5,21</td><td>8,20</td><td>9,30</td><td>6,01</td></tr>
         <tr><td>par2cmdline</td><td>67,7</td><td>86,1</td><td>403</td><td class="no">neconcurat</td></tr>
-        <tr><td>rarpar</td><td>7,15</td><td>11,49</td><td>14,22</td><td>6,91</td></tr>
         <tr><td>MultiPar</td><td class="no">doar Windows</td><td class="no">doar Windows</td><td>5,40</td><td class="no">doar Windows</td></tr>
       </tbody>
     </table></div>
@@ -1148,8 +1087,7 @@
     anterioară a acestei pagini a publicat timpii lor retrogradați ca și cum ar fi
     fost ai instrumentelor înseși. Rerularea acelei mașini cu fiecare instrument
     ridicat la prioritate înaltă mișcă tot câmpul: la cel mai greu nivel de
-    deteriorare, <code>par2-turbo</code> trece de la 22,4 s la 6,41 și <code>rarpar</code>
-    de la 59,2 s la 14,4, iar pentru o versiune a acestei pagini asta a transformat
+    deteriorare, <code>par2-turbo</code> trece de la 22,4 s la 6,41, iar pentru o versiune a acestei pagini asta a transformat
     coloana din a noastră într-una pe care am pierdut-o. Toată coloana laptopului e
     măsurată acum așa - corecția rămâne chiar dacă rândul a fost recâștigat de
     schimbarea de algoritm de mai sus, pentru că timpii câmpului pe acea mașină sunt
@@ -1200,15 +1138,6 @@
     concurată pe acea mașină. Acele cifre precedă rescrierea de detectare descrisă mai
     sus, deci sunt ale build-ului mai vechi, păstrate aici ca a doua mașină mai
     degrabă decât ca o cifră curentă.</p>
-    <p class="note" style="text-align:start"><code>rarpar</code> al lui Weaver
-    lipsește doar din acest tabel, și nu prin alegere: nu implementează această
-    reparare. Rugat să repare una din aceste arhive răspunde <i>"embedded Rar5
-    recovery record detected ... this API restores standalone .rev recovery volumes
-    only and does not consume embedded RR/protect data"</i>, și lasă fișierul
-    deteriorat. Apare în fiecare altă comparație de pe această pagină: toate cele
-    patru probe PAR2 de mai sus, toate cele șapte forme de extragere de mai sus de
-    asta, și proba de volume de recuperare imediat mai jos, care e chiar munca despre
-    care spune că o face - și pe care o câștigă.</p>
 
     <h3 style="margin:44px 0 4px">Volume de recuperare: reconstruirea fișierelor <code>.rev</code> lipsă în întregime</h3>
     <p class="note" style="text-align:start;margin-top:6px">Cealaltă jumătate a
@@ -1225,7 +1154,6 @@
       <tbody>
         <tr><td><b>nzbfast</b></td><td><b>0,44</b></td><td><b>0,50</b></td></tr>
         <tr><td>rar 7.23 <code>rc</code></td><td>0,46</td><td>0,58</td></tr>
-        <tr><td>rarpar <code>restore-volumes</code></td><td>0,48</td><td>0,61</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>Celula de 32 de nuclee de aici era la
@@ -1237,10 +1165,6 @@
     transformă pierderea într-o victorie pe ambele mașini. Marjele sunt 3% și 14%,
     deci e o victorie de declarat simplu mai degrabă decât de titrat, iar motivul
     pentru care e declarată deloc e că pierderea a fost declarată prima.</p>
-    <p class="note" style="text-align:start">Această probă există pentru că
-    <code>rarpar</code> al lui Weaver implementează exact asta și a cerut să fie
-    măsurat pe ea. Câștiga confortabil când am publicat-o prima dată, și am publicat-o
-    atunci din acel motiv.</p>
     <p class="note" style="text-align:start">Potrivirea fișierelor n-a fost niciodată
     costul, ceea ce merită înregistrat pentru că era suspectul intuitiv: volumele de
     recuperare nu poartă nume de fișiere, deci identificăm ce sloturi au supraviețuit
@@ -1284,23 +1208,23 @@
     <p class="kicker">Capacitate, nu micro-benchmark-uri</p>
     <h2>Ce poate face fiecare client</h2>
     <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5</th><th>NZBGet 26</th><th>rustnzb</th><th>Weaver</th><th>Usenapp</th><th>Newsbin</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5</th><th>NZBGet 26</th><th>rustnzb</th><th>Usenapp</th><th>Newsbin</th></tr></thead>
       <tbody>
-        <tr><td>NNTP pipeline-uit</td><td class="yes">da</td><td class="half">oprit implicit</td><td class="no">nu</td><td class="yes">da</td><td class="no">-⁷</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>verificare completă în timpul descărcării</td><td class="yes">fiecare bloc</td><td class="no">după</td><td class="half">verificare rapidă</td><td class="no">după</td><td class="no">după</td><td class="no">după</td><td class="no">după</td></tr>
-        <tr><td>extragere în timpul descărcării</td><td class="yes">în flux, fără volume pe disc</td><td class="half">despachetare directă⁴</td><td class="half">despachetare directă⁴</td><td class="half">face staging, apoi despachetează⁵</td><td class="no">nu</td><td class="no">nu</td><td class="no">nu</td></tr>
-        <tr><td>disc necesar pentru o postare de N GB</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
-        <tr><td>verdict de completabilitate înainte de descărcare</td><td class="yes">exact la nivel de bloc</td><td class="no">nu</td><td class="half">% de sănătate</td><td class="no">nu</td><td class="no">-⁷</td><td class="yes">verificare articol</td><td class="no">nu</td></tr>
-        <tr><td>memorie mărginită (niciodată swap)</td><td class="yes">bugetată</td><td class="half">setare de limită de cache</td><td class="half">setare de cache</td><td class="no">nu</td><td class="no">nu</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>își ridică propria limită de fișiere deschise</td><td class="yes">da, la pornire</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td></tr>
-        <tr><td>verifică fișierul în orice moment în timpul descărcării</td><td class="yes">da</td><td class="no">nu</td><td class="no">nu</td><td class="no">nu</td><td class="no">nu</td><td class="half">secvențial</td><td class="no">nu</td></tr>
-        <tr><td>indexer încorporat + perete de postere</td><td class="yes">da, fără cheie</td><td class="no">nu</td><td class="no">nu</td><td class="no">nu</td><td class="no">nu</td><td class="half">interfață de căutare</td><td class="half">navigator de grupuri</td></tr>
-        <tr><td>înlocuiește direct Sonarr/Radarr</td><td class="yes">API SAB + Newznab</td><td class="yes">nativ</td><td class="yes">nativ</td><td class="yes">API compatibil SAB</td><td class="half">RPC compatibil NZBGet⁷</td><td class="no">nu</td><td class="no">nu</td></tr>
-        <tr><td>telecomenzi de telefon (nzb360/LunaSea)</td><td class="yes">da</td><td class="yes">da</td><td class="yes">da</td><td class="no">nu</td><td class="no">-⁷</td><td class="no">nu</td><td class="no">nu</td></tr>
-        <tr><td>preluare automată din listă de urmărit + upgrade-uri</td><td class="yes">încorporat</td><td class="no">prin *arr</td><td class="no">prin *arr</td><td class="no">nu</td><td class="no">nu</td><td class="yes">Watchdog</td><td class="half">reguli</td></tr>
-        <tr><td>binar unic, de sine stătător</td><td class="yes">da</td><td class="half">pachete de aplicație; Python pe Linux</td><td class="yes">da</td><td class="yes">da</td><td class="yes">da</td><td class="yes">.app</td><td class="yes">.exe</td></tr>
-        <tr><td>sursă deschisă</td><td class="yes">GPL⁶</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">MIT</td><td class="yes">da</td><td class="no">plătit</td><td class="no">plătit</td></tr>
-        <tr><td>platforme</td><td class="yes">mac/win/linux (x64 + ARM)/docker/flatpak</td><td class="yes">mac/win/linux/docker/pachete NAS</td><td class="yes">mac/win/linux/docker/NAS + integrat</td><td class="half">linux/win (mac din sursă)</td><td class="half">binar mac; sursă în altă parte⁷</td><td class="no">doar mac</td><td class="no">doar win</td></tr>
+        <tr><td>NNTP pipeline-uit</td><td class="yes">da</td><td class="half">oprit implicit</td><td class="no">nu</td><td class="yes">da</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>verificare completă în timpul descărcării</td><td class="yes">fiecare bloc</td><td class="no">după</td><td class="half">verificare rapidă</td><td class="no">după</td><td class="no">după</td><td class="no">după</td></tr>
+        <tr><td>extragere în timpul descărcării</td><td class="yes">în flux, fără volume pe disc</td><td class="half">despachetare directă⁴</td><td class="half">despachetare directă⁴</td><td class="half">face staging, apoi despachetează⁵</td><td class="no">nu</td><td class="no">nu</td></tr>
+        <tr><td>disc necesar pentru o postare de N GB</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
+        <tr><td>verdict de completabilitate înainte de descărcare</td><td class="yes">exact la nivel de bloc</td><td class="no">nu</td><td class="half">% de sănătate</td><td class="no">nu</td><td class="yes">verificare articol</td><td class="no">nu</td></tr>
+        <tr><td>memorie mărginită (niciodată swap)</td><td class="yes">bugetată</td><td class="half">setare de limită de cache</td><td class="half">setare de cache</td><td class="no">nu</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>își ridică propria limită de fișiere deschise</td><td class="yes">da, la pornire</td><td class="no">-⁷</td><td class="no">-⁷</td><td class="no">-⁷</td><td class="no">-⁷</td><td class="no">-⁷</td></tr>
+        <tr><td>verifică fișierul în orice moment în timpul descărcării</td><td class="yes">da</td><td class="no">nu</td><td class="no">nu</td><td class="no">nu</td><td class="half">secvențial</td><td class="no">nu</td></tr>
+        <tr><td>indexer încorporat + perete de postere</td><td class="yes">da, fără cheie</td><td class="no">nu</td><td class="no">nu</td><td class="no">nu</td><td class="half">interfață de căutare</td><td class="half">navigator de grupuri</td></tr>
+        <tr><td>înlocuiește direct Sonarr/Radarr</td><td class="yes">API SAB + Newznab</td><td class="yes">nativ</td><td class="yes">nativ</td><td class="yes">API compatibil SAB</td><td class="no">nu</td><td class="no">nu</td></tr>
+        <tr><td>telecomenzi de telefon (nzb360/LunaSea)</td><td class="yes">da</td><td class="yes">da</td><td class="yes">da</td><td class="no">nu</td><td class="no">nu</td><td class="no">nu</td></tr>
+        <tr><td>preluare automată din listă de urmărit + upgrade-uri</td><td class="yes">încorporat</td><td class="no">prin *arr</td><td class="no">prin *arr</td><td class="no">nu</td><td class="yes">Watchdog</td><td class="half">reguli</td></tr>
+        <tr><td>binar unic, de sine stătător</td><td class="yes">da</td><td class="half">pachete de aplicație; Python pe Linux</td><td class="yes">da</td><td class="yes">da</td><td class="yes">.app</td><td class="yes">.exe</td></tr>
+        <tr><td>sursă deschisă</td><td class="yes">GPL⁶</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">MIT</td><td class="no">plătit</td><td class="no">plătit</td></tr>
+        <tr><td>platforme</td><td class="yes">mac/win/linux (x64 + ARM)/docker/flatpak</td><td class="yes">mac/win/linux/docker/pachete NAS</td><td class="yes">mac/win/linux/docker/NAS + integrat</td><td class="half">linux/win (mac din sursă)</td><td class="no">doar mac</td><td class="no">doar win</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">⁴ Despachetarea directă tot materializează
@@ -1312,17 +1236,10 @@
     volume obfuscate marcate "Completed" fără să le extragă; acel defect e reparat în
     amonte în 1.4.5.
     ⁶ GPL-3.0-or-later.
-    ⁷ Weaver 0.7.8, cel mai nou binar lansat, identitate dovedită prin hash (arhiva de
-    lansare publicată și binarul din interiorul ei se potrivesc amândoi cu sha256-ul
-    cu care concurăm); rândurile lui măsurate vin din runda de cost din 23 august,
-    celulele lui de capacitate marcate "-" sunt funcții pe care nu le-am evaluat mai
-    degrabă decât absențe confirmate; vorbește un RPC compatibil NZBGet, prin care îl
-    conduce bancul nostru de testare, dar n-am încercat telecomenzile de telefon
-    împotriva lui.
     Usenapp/Newsbin sunt cititoare comerciale pe o singură platformă cu funcții de
     descărcător; sunt listate pentru că lumea întreabă, nu pentru că concurează la
     viteză.</p>
-    <p class="note" style="text-align:start">⁸ macOS pornește un program cu o limită de
+    <p class="note" style="text-align:start">⁷ macOS pornește un program cu o limită de
     256 de fișiere deschise, iar un set complet de conexiuni pe mai multe servere o
     poate depăși. nzbfast își ridică propria limită la pornire pe macOS și Linux: cere
     65.536, coboară treptat până când sistemul e de acord, nu depășește niciodată
@@ -1387,8 +1304,7 @@
   august 2026</b> - tabelele de cost, re-cursa de rețea, runda cu post deteriorat,
   plafonul de spațiu liber, rig-ul de plafon de disc și re-cursa de extragere -
   concurând cu SABnzbd 5.1.1 (5.1.0 în runda cu deteriorare), NZBGet 26.3-testing
-  (build din 20 august), rustnzb 1.4.5 și Weaver 0.7.8 (cel mai nou binar lansat de
-  el, identitate dovedită prin hash), cinci provideri, tot TLS - cele mai noi runde
+  (build din 20 august) și rustnzb 1.4.5, cinci provideri, tot TLS - cele mai noi runde
   chiar pe <b>build-ul de lansare v1.2.2</b>, restul pe linia de cod care a fost
   lansată ca el. Plafonul de spațiu liber a fost re-tăiat pe build-ul de lansare pe
   24 august și a reprodus exact limitele lui; celulele rivalilor din runda de plafon

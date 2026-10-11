@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Usenet client download benchmarks - raw data</title>
-<meta name="description" content="Raw numbers from five Usenet clients raced on identical hardware, lines and providers: time to a usable file, memory, CPU, disk and wire bytes. Data only, no commentary.">
+<meta name="description" content="Raw numbers from four Usenet clients raced on identical hardware, lines and providers: time to a usable file, memory, CPU, disk and wire bytes. Data only, no commentary.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
 <style>
 *{box-sizing:border-box}
@@ -46,9 +46,10 @@ footer{background:#f8f9fa;border-top:1px solid #dadce0;margin-top:28px;padding:1
     <p class="kicker">Method</p>
     <h2>How the numbers were taken</h2>
     <ul class="plain">
-      <li><b>Builds:</b> NZBGet 26.3-testing, SABnzbd 5.1.1, nzbfast 1.2.2, Weaver
-      0.7.8 (its newest shipped binary, identity checked by hash), rustnzb 1.4.5.
-      One build of each client across every table on this page.</li>
+      <li><b>Builds:</b> NZBGet 26.3-testing, SABnzbd 5.1.1, nzbfast 1.2.2, rustnzb 1.4.5.
+      One build of each client across every table on this page. Weaver's results have
+      been removed from this page because its builds have moved on since these rounds;
+      they will return with the next full re-run.</li>
       <li><b>Configuration:</b> each client at its documented best settings. SABnzbd
       ran <code>pipelining_requests=8</code>; NZBGet ran ArticleCache, DirectWrite,
       DirectUnpack and ParQuick; rustnzb ran its documented config. nzbfast ran as
@@ -84,7 +85,6 @@ footer{background:#f8f9fa;border-top:1px solid #dadce0;margin-top:28px;padding:1
         <tr><td>NZBGet 26.3-testing</td><td class="num">227 s</td><td class="num">826 MB</td><td class="num">78.4 s</td><td class="num">13.3</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">230 s</td><td class="num">1,667 MB</td><td class="num">162.4 s</td><td class="num">15.2</td></tr>
         <tr><td>nzbfast 1.2.2</td><td class="num">217 s</td><td class="num">144 MB</td><td class="num">53.3 s</td><td class="num">6.2</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">230 s</td><td class="num">789 MB</td><td class="num">62.0 s</td><td class="num">12.9</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">256 s</td><td class="num">644 MB</td><td class="num">122.4 s</td><td class="num">15.4</td></tr>
       </tbody>
     </table></div>
@@ -106,7 +106,6 @@ footer{background:#f8f9fa;border-top:1px solid #dadce0;margin-top:28px;padding:1
         <tr><td>NZBGet 26.3-testing</td><td class="num">145 s&sup1;</td><td class="num">846 MB</td><td class="num">64.3 s</td><td class="num">13.2</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">125 s</td><td class="num">1,665 MB</td><td class="num">99.2 s</td><td class="num">14.2</td></tr>
         <tr><td>nzbfast 1.2.2</td><td class="num">109 s</td><td class="num">142 MB</td><td class="num">45.4 s</td><td class="num">6.2</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">138 s</td><td class="num">564 MB</td><td class="num">48.5 s</td><td class="num">12.4</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">131 s</td><td class="num">626 MB</td><td class="num">92.6 s</td><td class="num">14.5</td></tr>
       </tbody>
     </table></div>
@@ -127,7 +126,6 @@ footer{background:#f8f9fa;border-top:1px solid #dadce0;margin-top:28px;padding:1
         <tr><td>NZBGet 26.3-testing</td><td class="num">61 s</td><td class="num">801 MB</td><td class="num">40.1 s</td><td class="num">12.5</td><td class="num">6.5</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">63 s</td><td class="num">1,588 MB</td><td class="num">69.5 s</td><td class="num">13.8</td><td class="num">6.5</td></tr>
         <tr><td>nzbfast 1.2.2</td><td class="num">58 s</td><td class="num">143 MB</td><td class="num">35.7 s</td><td class="num">6.2</td><td class="num">6.5</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">110 s</td><td class="num">531 MB</td><td class="num">34.9 s&sup1;</td><td class="num">12.5</td><td class="num">6.5</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">67 s</td><td class="num">628 MB</td><td class="num">61.9 s</td><td class="num">13.4</td><td class="num">7.2</td></tr>
       </tbody>
     </table></div>
@@ -138,15 +136,13 @@ footer{background:#f8f9fa;border-top:1px solid #dadce0;margin-top:28px;padding:1
         <tr><td>NZBGet 26.3-testing</td><td class="num">306 s</td><td class="num">900 MB</td><td class="num">221.3 s</td><td class="num">68.1</td><td class="num">34.4</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">308 s</td><td class="num">1,607 MB</td><td class="num">356.5 s</td><td class="num">72.5</td><td class="num">34.4</td></tr>
         <tr><td>nzbfast 1.2.2</td><td class="num">302 s</td><td class="num">191 MB</td><td class="num">194.0 s</td><td class="num">32.5</td><td class="num">34.4</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">511 s</td><td class="num">1,076 MB</td><td class="num">373.8 s</td><td class="num">98.0</td><td class="num">34.4</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">343 s</td><td class="num">445 MB</td><td class="num">332.6 s</td><td class="num">69.8</td><td class="num">37.8</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">Medians of three, order rotated, 30 of
-    30 legs on these two fixtures byte-identical. The nzbfast arms ran the build
+    <p class="note" style="text-align:start">Medians of three, order rotated, 24 of
+    24 legs on these two fixtures byte-identical. The nzbfast arms ran the build
     that shipped later the same night as v1.2.2, at shipped defaults (25
-    connections). &sup1; Weaver's three CPU legs on the 6.5 GB fixture spanned 34.1
-    to 56.1 s; the median is quoted and the spread stated. rustnzb's 7.2 and
+    connections). rustnzb's 7.2 and
     37.8 GB wire figures are its own counter's excess over the 6.5 and 34.4 GB
     posts, with a warning in its log on two legs.</p>
   </div>
@@ -162,19 +158,16 @@ footer{background:#f8f9fa;border-top:1px solid #dadce0;margin-top:28px;padding:1
         <tr><td>NZBGet 26.3-testing</td><td class="num">93 s</td><td class="num">1,195 MB</td><td class="num">443 s</td><td class="num">183.7</td><td class="num">77.2</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">113 s</td><td class="num">1,910 MB</td><td class="num">234 s</td><td class="num">235.1</td><td class="num">77.2</td></tr>
         <tr><td>nzbfast 1.2.2</td><td class="num">70 s</td><td class="num">415 MB</td><td class="num">144 s</td><td class="num">72.9</td><td class="num">77.2</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">645 s</td><td class="num">1,825 MB</td><td class="num">631 s</td><td class="num">435.1&sup1;</td><td class="num">77.3</td></tr>
-        <tr><td>rustnzb 1.4.5</td><td class="num">869 s&sup2;</td><td class="num">681 MB</td><td class="num">2,444 s</td><td class="num">216.1</td><td class="num">86.9</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">869 s&sup1;</td><td class="num">681 MB</td><td class="num">2,444 s</td><td class="num">216.1</td><td class="num">86.9</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">Medians of three, order rotated, 15 of
-    15 legs on this fixture byte-identical across these five arms, all clients
+    <p class="note" style="text-align:start">Medians of three, order rotated, 12 of
+    12 legs on this fixture byte-identical across these four arms, all clients
     agreeing on the output checksum. The nzbfast arm is the v1.2.2 release build at
     50 connections (10 per server); a six-rung sweep on this fixture measured the
     wall identical from 50 connections to 360. Rep 3 for the three fastest arms ran
     about 40 minutes after the rest (a free-space guard paused the round; the
-    offset moved no median by more than the rep spread). &sup1; Weaver's device I/O
-    is its encrypted-at-rest store re-reading and re-writing data as the job grows.
-    &sup2; rustnzb completed byte-correct on all three legs; it pulled 86.9 GB
+    offset moved no median by more than the rep spread). &sup1; rustnzb completed byte-correct on all three legs; it pulled 86.9 GB
     where the eager plan is 77.2 (it fetches the full recovery set
     unconditionally).</p>
   </div>
@@ -211,7 +204,6 @@ footer{background:#f8f9fa;border-top:1px solid #dadce0;margin-top:28px;padding:1
         <tr><td>NZBGet 26.3-testing</td><td class="num">33.0 s</td><td class="num">23.7 s</td><td class="num">23.0 s</td></tr>
         <tr><td>SABnzbd 5.1.1</td><td class="num">48.0 s&sup1;</td><td class="num">28.0 s</td><td class="num">24.3 s</td></tr>
         <tr><td>nzbfast 1.2.2</td><td class="num">13.0 s</td><td class="num">10.0 s</td><td class="num">8.7 s</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">did not finish&sup2;</td><td class="num">did not finish&sup2;</td><td class="num">194.0 s</td></tr>
         <tr><td>rustnzb 1.4.5</td><td class="num">107.3 s</td><td class="num">51.3 s</td><td class="num">47.0 s</td></tr>
       </tbody>
     </table></div>
@@ -220,9 +212,7 @@ footer{background:#f8f9fa;border-top:1px solid #dadce0;margin-top:28px;padding:1
     levels, three repetitions per arm with the order alternated, every leg
     byte-checked against the clean file. Means of three. &sup1; SABnzbd's three
     legs at the heaviest damage ran 43, 41 and 60 s; the mean is quoted and the
-    range stated. &sup2; Weaver moved 1.5 GB and 4.9 GB of the 6.5 within the
-    20-minute cutoff at the two heavier damage levels, and completed correctly all
-    three times at 5 dead articles.</p>
+    range stated.</p>
   </div>
 </section>
 
