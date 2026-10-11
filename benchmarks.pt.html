@@ -124,7 +124,7 @@
       série M: "Europa" M1 Ultra em 10&nbsp;GbE, "costa leste" M3 Ultra
       linha de ~2,4-3,0 Gbps) e dizem isso; elas subestimam o build distribuído em vez de
       favorecê-lo. Os resultados do Weaver foram removidos desta página porque seus builds avançaram
-      desde estas rodadas; eles voltarão com a próxima repetição completa.</li>
+      desde estas rodadas.</li>
       <li><b>Justiça:</b> os mesmos provedores e TLS em todo lugar para cada cliente, legs corridos um atrás do outro intercalados. Cada concorrente ajustado ao seu melhor documentado: o SABnzbd recebeu <code>pipelining_requests=8</code> (<b>ele é distribuído com 1, ou seja, sem pipelining</b>, e o ajuste vale porcentagens de dois dígitos em trabalhos grandes), o NZBGet recebeu ArticleCache/DirectWrite/DirectUnpack/ParQuick, o rustnzb sua configuração documentada. Desde 20 de agosto de 2026 cada rodada corre com <b>cinco provedores</b> em vez de seis - o número de provedores não é uma alavanca de throughput nessas máquinas, onde um único provedor sozinho já alcança o teto da linha, e um conjunto fixo mantém as rodadas comparáveis - então um número de seis provedores nesta página não é diretamente comparável com um número mais novo de cinco provedores, e cada tabela diz qual dos dois rodou.</li>
       <li><b>Estado final:</b> um arquivo verificado, extraído, utilizável, não "download terminado". É isso que você realmente espera.</li>
       <li><b>Reprodutibilidade:</b> cada afirmação é datada e medida da mesma forma: tempo decorrido + contadores de bytes da interface + pico de RSS da árvore de processos, resolução de 1-2 s. Onde um leg roda sobre um NZB publicado publicamente, nós o nomeamos para que você possa rodá-lo você mesmo.</li>

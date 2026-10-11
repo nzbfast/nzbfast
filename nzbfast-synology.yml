@@ -46,17 +46,21 @@ services:
       - ./downloads:/downloads      # finished files
       - ./watch:/watch              # drop an .nzb here to auto-download
     # Hardening. Nothing to set and nothing to read: these three blocks take
-    # away powers the container has by default and does not use. The five
+    # away powers the container has by default and does not use. The six
     # capabilities are added back by name because the container needs exactly
     # those to hand your folders to your own DSM user - it starts as root for
-    # that one job and drops to your uid before the downloader itself runs.
-    # Drop them all with nothing added back and the container will not start.
+    # that one job and drops to your uid before the downloader itself runs -
+    # and, for KILL, to pass a stop on to the downloader so that stopping or
+    # restarting the container is immediate rather than a forced kill after
+    # a wait. Drop them all with nothing added back and the container will
+    # not start.
     cap_drop:
       - ALL
     cap_add:
       - CHOWN
       - DAC_OVERRIDE
       - FOWNER
+      - KILL
       - SETGID
       - SETUID
     security_opt:

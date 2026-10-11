@@ -125,7 +125,7 @@
       M-series boxes: "Europe" M1 Ultra on 10&nbsp;GbE, "East Coast" M3 Ultra
       ~2.4-3.0 Gbps line) and say so; they understate the shipping build rather than
       flatter it. Weaver's results have been removed from this page because its builds have
-      moved on since these rounds; they will return with the next full re-run.</li>
+      moved on since these rounds.</li>
       <li><b>Fairness:</b> same providers and TLS everywhere for every client, legs run back-to-back interleaved. Every competitor tuned to its documented best: SABnzbd got <code>pipelining_requests=8</code> (<b>it ships 1, i.e. unpipelined</b>, and the setting is worth double-digit percentages on large jobs), NZBGet got ArticleCache/DirectWrite/DirectUnpack/ParQuick, rustnzb its documented config. Since 20 August 2026 every round races <b>five providers</b> rather than six - provider count is not a throughput lever on these boxes, where one provider alone can reach the line ceiling, and a fixed set keeps rounds comparable - so a six-provider figure on this page is not directly comparable with a newer five-provider one, and each table says which it ran.</li>
       <li><b>End state:</b> a verified, extracted, usable file, not "download finished". That's what you actually wait for.</li>
       <li><b>Reproducibility:</b> every claim is dated and measured the same way: elapsed time + interface byte counters + process-tree peak RSS, 1-2 s resolution. Where a leg runs on a publicly posted NZB, we name it so you can run it yourself.</li>
