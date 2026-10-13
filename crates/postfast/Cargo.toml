@@ -73,7 +73,7 @@ sevenz-rust2 = { version = "0.22", default-features = false, features = ["compre
 # `crate::zip::write_archive` sets the timestamp EXPLICITLY and
 # `container.rs`'s `wrapping_twice_is_byte_identical` is the assertion
 # either way.
-zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 crc32fast = "1"
 serde = { version = "1", features = ["derive"] }
 # 1.x since 3 Sep 2026 (dependabot #58). No source change: this crate
