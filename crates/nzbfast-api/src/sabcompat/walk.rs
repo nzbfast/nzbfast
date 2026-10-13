@@ -21,6 +21,10 @@ pub(super) struct QueueView<'a> {
     pub(super) window: (usize, usize),
     /// Ours: keep live rows in the page whatever their rank.
     pub(super) pin_live: bool,
+    /// SAB's `search=`, already trimmed and lowercased (see
+    /// `search_needle`); matched by `Job::matches_search`, the same
+    /// test the history page applies.
+    pub(super) search: Option<&'a str>,
 }
 
 /// The page of rows, and the whole-queue totals the header states
@@ -186,16 +190,29 @@ pub(super) fn queue_walk(
         {
             continue;
         }
+        let pinned = view.pin_live
+            && matches!(
+                j.state,
+                JobState::Downloading | JobState::Finishing | JobState::Completed
+            );
+        // GitHub #97. A row the search misses is not a MATCH - it is
+        // not counted into `noofslots` and takes no rank in the window -
+        // but a live one still rides a `pin_live` page, for the reason
+        // `pin_live` exists: the dashboard's hero card, burn-down and
+        // status pill read "what is running" off the rows, and a search
+        // box must not blank them. It rides MARKED, so the client leaves
+        // it out of the queue table it is filtering.
+        if view.search.is_some_and(|needle| !j.matches_search(needle)) {
+            if pinned {
+                let mut row = slot_json(ctx, i, &j, phase, live.is_some(), pct, left);
+                row["search_miss"] = json!(true);
+                slots.push(row);
+            }
+            continue;
+        }
         let rank = n;
         n += 1;
-        if windowed
-            && !in_window(rank, view.window)
-            && !(view.pin_live
-                && matches!(
-                    j.state,
-                    JobState::Downloading | JobState::Finishing | JobState::Completed
-                ))
-        {
+        if windowed && !in_window(rank, view.window) && !pinned {
             continue;
         }
         slots.push(slot_json(ctx, i, &j, phase, live.is_some(), pct, left));

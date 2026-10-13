@@ -620,6 +620,37 @@ pub(super) async fn run_over(finished: &mut tokio::sync::watch::Receiver<bool>, 
     }
 }
 
+/// [`run_over`] for a PARKED worker (`admit::wait_for_slot`): also
+/// resolves once nothing is pending, polled on the same 250 ms slice.
+///
+/// `finished` is sent when a decrement lands `pending` on zero, so a run
+/// that STARTS at zero - a resumed job whose every article was already
+/// on disk ("N already on disk, 0 to fetch") - never sends it. Its
+/// admitted workers leave through `done_before_dial`, but a parked one
+/// left only when an admitted one retired and handed it the slot, and
+/// then only after sleeping its own ramp (ordinal x 150 ms). That chain
+/// cost ~11 s on a 50-slot spawn and ~37 s once the line cap spawned the
+/// second ceiling's 100 (12 Oct 2026,
+/// `postproc_lane::restart_mid_finishing_requeues_and_completes`, which
+/// waits 30 s). Parked workers ONLY: a parked worker holds no connection
+/// and has nothing to hand back, where an admitted one with nothing to
+/// do must still reach `done_before_dial` to return its warm claim
+/// (`warmpool::tests::a_worker_that_finds_no_work_returns_its_claim_to_the_pool`).
+pub(super) async fn parked_run_over(
+    finished: &mut tokio::sync::watch::Receiver<bool>,
+    shared: &Shared,
+) {
+    loop {
+        if shared.draining.load(Ordering::Acquire) || shared.pending.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        tokio::select! {
+            _ = finished.wait_for(|f| *f) => return,
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+        }
+    }
+}
+
 /// Wait out a connect backoff, but give up the moment the RUN is done.
 ///
 /// Returns false if the work finished while we slept, meaning this worker

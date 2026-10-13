@@ -759,6 +759,23 @@ pub(super) async fn settle_without_set(
             deferred_vols.extend(unfetched_recovery.iter().copied());
             deferred_vols.sort_unstable();
             deferred_vols.dedup();
+            if let Some((payload, parity)) = parity_cannot_cover_nothing(slots, nzb, &deferred_vols)
+            {
+                // Nothing to repair FROM, and not enough parity to
+                // rebuild it all from scratch, so this fetch cannot
+                // change the verdict. See the helper for the 12 Oct 2026
+                // dead-post legs that spent up to 30 minutes here.
+                info!(
+                    target: "repair",
+                    "not fetching {} deferred recovery volume(s): no payload article \
+                     landed, and {:.1} MB of recovery data cannot rebuild {:.1} MB of \
+                     payload from nothing",
+                    deferred_vols.len(),
+                    parity as f64 / 1e6,
+                    payload as f64 / 1e6
+                );
+                deferred_vols.clear();
+            }
             if !deferred_vols.is_empty() {
                 info!(
                     target: "repair",
@@ -1159,6 +1176,164 @@ fn feed_slot_from_disk(
             }
         }
         Err(e) => warn!(target: "par2", "{} not readable after fetch: {e}", path.display()),
+    }
+}
+
+/// Would fetching `deferred_vols` be wasted because there is nothing for
+/// their parity to repair FROM? `Some((payload, parity))` - the declared
+/// payload bytes and the declared bytes of those volumes - when it would.
+///
+/// Two facts, both read off the run rather than guessed. Not one payload
+/// article landed (every one is missing, unresolved, or failed to decode),
+/// so a repair would have to rebuild the WHOLE payload out of recovery
+/// blocks. And the volumes declare fewer bytes than the payload does, so
+/// they cannot hold that many blocks - their packet headers only make the
+/// real block capacity smaller than the figure compared here, which is
+/// the safe direction: a set big enough to rebuild everything is still
+/// fetched.
+///
+/// Measured live on 12 Oct 2026 against synthetic dead posts (every
+/// message-id rewritten to one that never existed), five real providers:
+/// after the stall watchdog cut the download, this fetch walked the dead
+/// recovery articles at the providers' slow-refusal rate for 244-315 s,
+/// and 1,805 s on an 87 GB post at 100 sockets, which was 90% of that
+/// leg's wall. The fetch could only ever have ended where it started.
+///
+/// `None` when any payload article landed (a partial repair is real
+/// work), when the payload declares no size (no arithmetic to make), or
+/// when there is nothing deferred to skip.
+fn parity_cannot_cover_nothing(
+    slots: &[Arc<FileSlot>],
+    nzb: &Nzb,
+    deferred_vols: &[usize],
+) -> Option<(u64, u64)> {
+    use std::sync::atomic::Ordering::Relaxed;
+    if deferred_vols.is_empty() {
+        return None;
+    }
+    let mut payload = 0u64;
+    for slot in slots.iter().filter(|s| !s.is_par2() && !s.sample_skipped) {
+        let gone = slot.remaining.load(Relaxed)
+            + slot.missing.load(Relaxed)
+            + slot.errors.load(Relaxed)
+            + slot.deferred.load(Relaxed)
+            + slot.abandoned.load(Relaxed);
+        if slot.total_segments > gone {
+            return None;
+        }
+        payload += slot.posted_bytes;
+    }
+    let parity: u64 = deferred_vols
+        .iter()
+        .filter_map(|&f| nzb.files.get(f))
+        .map(|f| f.bytes())
+        .sum();
+    (payload > 0 && parity < payload).then_some((payload, parity))
+}
+
+#[cfg(test)]
+mod cover_nothing_tests {
+    use super::*;
+
+    fn slot(
+        par2: bool,
+        total: usize,
+        missing: usize,
+        unresolved: usize,
+        bytes: u64,
+    ) -> Arc<FileSlot> {
+        Arc::new(FileSlot {
+            hint: "f".to_string(),
+            hint_is_posted_name: true,
+            yenc_votes: Default::default(),
+            name_choice: Default::default(),
+            is_par2_main: par2,
+            par2_name_demoted: Default::default(),
+            par2_sniffed: Default::default(),
+            total_segments: total,
+            posted_bytes: bytes,
+            remaining: unresolved.into(),
+            missing: missing.into(),
+            errors: Default::default(),
+            deferred: Default::default(),
+            abandoned: Default::default(),
+            sample_skipped: false,
+            capture: std::sync::Mutex::new(None),
+        })
+    }
+
+    /// A payload of two 1,000-byte files and two recovery volumes of the
+    /// given sizes, as an NZB.
+    fn nzb(vol_bytes: [u64; 2]) -> Nzb {
+        let seg =
+            |n: u32, b: u64| format!(r#"<segment bytes="{b}" number="{n}">id{n}.{b}@x</segment>"#);
+        let file = |subj: &str, b: u64| {
+            format!(
+                r#"<file poster="p" date="1700000000" subject="{subj}"><groups><group>a.b</group></groups><segments>{}</segments></file>"#,
+                seg(1, b)
+            )
+        };
+        let xml = format!(
+            r#"<?xml version="1.0"?><nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">{}{}{}{}</nzb>"#,
+            file("&quot;a.bin&quot; yEnc (1/1)", 1000),
+            file("&quot;b.bin&quot; yEnc (1/1)", 1000),
+            file("&quot;a.vol0+1.par2&quot; yEnc (1/1)", vol_bytes[0]),
+            file("&quot;a.vol1+2.par2&quot; yEnc (1/1)", vol_bytes[1]),
+        );
+        Nzb::parse(xml.as_bytes()).expect("fixture parses")
+    }
+
+    /// The dead post: nothing landed (some articles refused, the rest cut
+    /// off by the stall), and ten percent parity. The fetch is skipped.
+    #[test]
+    fn a_dead_payload_with_ordinary_parity_skips_the_fetch() {
+        let slots = [slot(false, 4, 1, 3, 1000), slot(false, 4, 4, 0, 1000)];
+        assert_eq!(
+            parity_cannot_cover_nothing(&slots, &nzb([100, 100]), &[2, 3]),
+            Some((2000, 200))
+        );
+    }
+
+    /// One payload article landed: a repair has something to work from,
+    /// so the fetch is real work and goes ahead whatever the sizes say.
+    #[test]
+    fn one_landed_article_keeps_the_fetch() {
+        let slots = [slot(false, 4, 1, 2, 1000), slot(false, 4, 4, 0, 1000)];
+        assert_eq!(
+            parity_cannot_cover_nothing(&slots, &nzb([100, 100]), &[2, 3]),
+            None
+        );
+    }
+
+    /// Parity at least as large as the payload could in principle rebuild
+    /// it from nothing, so it is fetched.
+    #[test]
+    fn parity_big_enough_to_rebuild_everything_is_still_fetched() {
+        let slots = [slot(false, 4, 4, 0, 1000), slot(false, 4, 4, 0, 1000)];
+        assert_eq!(
+            parity_cannot_cover_nothing(&slots, &nzb([1000, 1000]), &[2, 3]),
+            None
+        );
+    }
+
+    /// Recovery slots never count as payload, and a payload with no
+    /// declared size gives no arithmetic to make.
+    #[test]
+    fn recovery_slots_and_sizeless_payloads_decide_nothing() {
+        let landed_par2 = [slot(false, 4, 4, 0, 1000), slot(true, 4, 0, 0, 50)];
+        assert_eq!(
+            parity_cannot_cover_nothing(&landed_par2, &nzb([100, 100]), &[2, 3]),
+            Some((1000, 200))
+        );
+        let sizeless = [slot(false, 4, 4, 0, 0)];
+        assert_eq!(
+            parity_cannot_cover_nothing(&sizeless, &nzb([100, 100]), &[2, 3]),
+            None
+        );
+        assert_eq!(
+            parity_cannot_cover_nothing(&landed_par2, &nzb([100, 100]), &[]),
+            None
+        );
     }
 }
 

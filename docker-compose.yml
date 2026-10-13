@@ -55,24 +55,36 @@ services:
     # daemon ever runs, and dropping every capability takes away the two it
     # needs to do that. So the capabilities below are added back by name and
     # nothing else is: it is the smallest set that still lets the entrypoint
-    # hand your folders to your own user.
+    # hand your folders to your own user, and lets the container stop.
     #
     #   SETUID, SETGID   the privilege drop itself
     #   CHOWN            give a freshly created bind mount to PUID/PGID
     #   FOWNER           chmod the config file to 0600 once it is theirs
     #   DAC_OVERRIDE     read and fix up a /config a previous run left
     #                    owned by somebody else
+    #   KILL             let tini pass `docker stop`'s SIGTERM on to the
+    #                    daemon. tini is PID 1 and stays root; the daemon
+    #                    runs as PUID after the drop, and sending a signal
+    #                    to another user's process is exactly what
+    #                    CAP_KILL grants. Without it the forward is refused,
+    #                    the daemon never hears the stop, and every stop or
+    #                    restart sits out Docker's whole timeout before it
+    #                    is SIGKILLed (GitHub #105, found and fixed by
+    #                    CLHatch in #106). The earlier list left KILL out
+    #                    because the measured run above only ever STARTED
+    #                    the container and finished a download in it.
     #
     # What that removes, relative to the fourteen Docker grants by default:
-    # NET_RAW (raw sockets), MKNOD, SETPCAP, SETFCAP, SYS_CHROOT, KILL,
-    # FSETID, AUDIT_WRITE and NET_BIND_SERVICE. The daemon itself runs with
-    # no capabilities at all either way.
+    # NET_RAW (raw sockets), MKNOD, SETPCAP, SETFCAP, SYS_CHROOT, FSETID,
+    # AUDIT_WRITE and NET_BIND_SERVICE. The daemon itself runs with no
+    # capabilities at all either way.
     cap_drop:
       - ALL
     cap_add:
       - CHOWN
       - DAC_OVERRIDE
       - FOWNER
+      - KILL
       - SETGID
       - SETUID
     # Nothing in the container is setuid, so this costs nothing and closes

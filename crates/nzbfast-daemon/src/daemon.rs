@@ -329,10 +329,12 @@ pub struct Daemon {
     /// the split - and the next start files them again. An entry leaves
     /// when a history write for it lands (`history_upsert_if_present`,
     /// any successful rewrite), when the record leaves history, or when
-    /// it is back in the live queue (a retry). Taken with no other
-    /// daemon lock held except inside `queue_rows`, which takes
-    /// `history` UNDER it; never take it while holding `history`.
-    pub hist_owed: Mutex<std::collections::HashMap<String, Arc<Mutex<Job>>>>,
+    /// it is back in the live queue (a retry). A record MOVING between
+    /// the two lists is carried too, on `Owed::in_transit`. Lock order:
+    /// `hist_owed` FIRST, then `queue` or `history` - `queue_rows` takes
+    /// both under it, and `hist_carry_across` removes a mover's old
+    /// membership under it; never take it while holding either list.
+    pub hist_owed: Mutex<std::collections::HashMap<String, crate::histstore::Owed>>,
     /// The queue store EXISTS and this process could not read it at
     /// start (a permission or I/O error, never a missing file). Set by
     /// `load_queue`, never cleared: the remedy is to fix the file and

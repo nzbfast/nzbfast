@@ -581,6 +581,12 @@ fn decode_framed(
     let mut seen_begin = false;
     let mut seen_yend = false;
     let mut seen_ypart = false;
+    // `=ypart` as literally declared - see the oracle's twin.
+    let mut begin_decl: Option<u64> = None;
+    let mut end_decl: Option<u64> = None;
+    // An unrecognised `=y` line before the first `=ypart` - the oracle's
+    // twin says why it pins that junk in.
+    let mut pre_part_control = false;
     let mut encryption = None;
     let data = out;
 
@@ -637,11 +643,18 @@ fn decode_framed(
                 }
                 pos = next;
             } else if let Some(h) = crate::yenc::header_fields(line, b"part", false) {
+                // Header-zone junk before the first `=ypart` is discarded -
+                // the oracle's twin carries the rule.
+                if seen_begin && !seen_ypart && !pre_part_control {
+                    data.clear();
+                }
                 seen_ypart = true;
                 let h = h.as_ref();
                 // Clamp `begin` to its 1-based floor: a hostile `begin=0`
                 // would underflow Meta::offset() to u64::MAX (see yenc.rs).
-                begin = field_u64(h, b"begin").filter(|&b| b >= 1).unwrap_or(1);
+                begin_decl = field_u64(h, b"begin").filter(|&b| b >= 1);
+                end_decl = field_u64(h, b"end").filter(|&e| e >= 1);
+                begin = begin_decl.unwrap_or(1);
                 end = field_u64(h, b"end").unwrap_or(0);
                 pos = next;
             } else if let Some(h) = crate::yenc::header_fields(line, b"end", true) {
@@ -678,6 +691,9 @@ fn decode_framed(
             } else if seen_begin {
                 // First payload line: switch to SIMD block mode from the raw
                 // line start (dot-unstuffing needs the untouched bytes).
+                if !seen_ypart && line.starts_with(b"=y") {
+                    pre_part_control = true;
+                }
                 in_body = true;
             } else {
                 pos = next;
@@ -788,11 +804,20 @@ fn decode_framed(
                         // scalar oracle (and a latent panic for the
                         // differential fuzz target, which compares
                         // acceptance).
+                        // The arm a stray line between `=ybegin` and `=ypart`
+                        // actually reaches: that line put us in block mode and
+                        // rapidyenc decoded it before stopping here. Discard
+                        // it, exactly as the oracle does.
+                        if seen_begin && !seen_ypart && !pre_part_control {
+                            data.clear();
+                        }
                         seen_ypart = true;
                         let h = h.as_ref();
                         // Same 1-based clamp as the line-mode arm above and the
                         // oracle (yenc.rs): `begin=0` must not underflow offset().
-                        begin = field_u64(h, b"begin").filter(|&b| b >= 1).unwrap_or(1);
+                        begin_decl = field_u64(h, b"begin").filter(|&b| b >= 1);
+                        end_decl = field_u64(h, b"end").filter(|&e| e >= 1);
+                        begin = begin_decl.unwrap_or(1);
                         end = field_u64(h, b"end").unwrap_or(0);
                     } else if enc_ok
                         && let Some(h) = rest
@@ -821,6 +846,9 @@ fn decode_framed(
                         // reconstructed `=y` ++ rest (the `=y` is itself one
                         // escape pair and cannot be decoded separately).
                         // Cold path: reached only after rapidyenc has stopped.
+                        if !seen_ypart {
+                            pre_part_control = true;
+                        }
                         let mut line = Vec::with_capacity(rest.len() + 2);
                         line.extend_from_slice(b"=y");
                         line.extend_from_slice(rest);
@@ -902,7 +930,19 @@ fn decode_framed(
     // delivered, the preallocated file kept the range as sparse zeros, and a
     // PAR2-less job completed silently corrupt. Both decoders must agree here,
     // or the differential fuzz oracle is meaningless.
-    if !seen_yend {
+    let declared = crate::yenc::Declared {
+        part,
+        seen_ypart,
+        begin,
+        end,
+        begin_decl,
+        end_decl,
+        file_size,
+        len: data.len() as u64,
+    };
+    // The oracle's exception, through the oracle's function: a header whose
+    // own range proves the payload complete stands in for the trailer.
+    if !seen_yend && !crate::yenc::trailerless_complete(&declared) {
         return Err(YencError::Truncated);
     }
     // Same trailer-consistency check as the scalar oracle, in the same
@@ -917,17 +957,7 @@ fn decode_framed(
     // M4-87 / M4-93: which trailer fields may decide this article. ONE
     // function, shared with the oracle, for the reason `check_part_geometry`
     // is - see yenc::trailer_gates.
-    let gates = crate::yenc::trailer_gates(
-        &trailer,
-        &crate::yenc::Declared {
-            part,
-            seen_ypart,
-            begin,
-            end,
-            file_size,
-            len: data.len() as u64,
-        },
-    );
+    let gates = crate::yenc::trailer_gates(&trailer, &declared);
     if let Some(len) = gates.len
         && len != data.len() as u64
     {
@@ -937,7 +967,7 @@ fn decode_framed(
         });
     }
     // Same test, same shared implementation as the scalar oracle.
-    crate::yenc::check_part_geometry(seen_ypart, begin, end, data.len() as u64)?;
+    let placed = crate::yenc::place_part(&declared, gates.len_waived)?;
     let mut crc_checked = false;
     let mut verified_article_crc = None;
     // NZBFAST_SKIP_PCRC=1 is the loopback-rig MEASUREMENT switch -
@@ -981,14 +1011,16 @@ fn decode_framed(
             // are held equal by the differential fuzzer, so this cannot
             // be spelled twice or moved on one side alone.
             part: crate::yenc::declared_part(part),
-            begin,
-            end,
+            begin: placed.begin,
+            end: placed.end,
             len: data.len(),
             encryption,
         },
+        // A CRC proves the bytes, not where they go: an inferred range is
+        // left for PAR2 to vouch for - the oracle's twin carries the rule.
         DecodeIntegrity {
-            crc_checked,
-            verified_article_crc,
+            crc_checked: crc_checked && placed.vouched,
+            verified_article_crc: verified_article_crc.filter(|_| placed.vouched),
         },
     ))
 }
@@ -1284,9 +1316,15 @@ mod tests {
         // Differential-fuzz find: `begin=5part begin=50000` - the oracle's
         // HashMap used to keep the LAST `begin`, the SIMD scan the first, so
         // the two paths placed the payload at different file offsets.
+        //
+        // First-wins makes `begin` the unreadable `5part`, so this part 2
+        // declares no usable range at all. It used to be placed at offset 0
+        // regardless (on top of part 1); since the leniency fixture pass it is
+        // refused by both, which still tells first-wins from last-wins: the
+        // last `begin=50000` would have placed it.
         let body = b"=ybegin part=2 total=5 line=4 size=99 name=p.bin\r\n=ypart begin=5part begin=50000\r\nAAAA\r\n=yend size=4\r\n".as_slice();
         assert_matches_oracle(body);
-        assert_eq!(decode(body).unwrap().begin, 1);
+        assert!(matches!(decode(body), Err(YencError::PartGeometry { .. })));
     }
 
     #[test]

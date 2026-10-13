@@ -90,6 +90,9 @@ cat > "$WORK/bin/gh" <<'ENDOFGH'
 #!/bin/sh
 case "$*" in
     "api user --jq .login") echo nzbfast ;;
+    # The attested-asset check (one name, one set of bytes): a release
+    # with no assets yet, so every fixture reaches the upload line.
+    "release view "*" --json assets "*) ;;
     *) echo "STUB gh refused: $*" >&2; exit 1 ;;
 esac
 ENDOFGH

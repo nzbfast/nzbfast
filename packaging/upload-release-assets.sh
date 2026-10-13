@@ -355,6 +355,74 @@ if [ $fail -ne 0 ]; then
   exit 1
 fi
 
-echo "all $# asset(s) carry a current scan stamp - uploading to $TAG"
-gh release upload "$TAG" --repo "$REPO" --clobber "$@"
-echo "✓ uploaded $# asset(s) to $TAG"
+# ONE NAME, ONE SET OF BYTES. Since 11 Oct 2026 provenance-release.yml
+# builds the Linux tarballs, the Windows installer and zip and their
+# updater payloads on the public repo and attaches them to the DRAFT,
+# each with `<name>.intoto.jsonl` beside it (publish-release step 2a).
+# The release Mac downloads them to fold into SHA256SUMS and latest.json,
+# so they sit in <dist-dir> next to the local assets and the usual upload
+# globs match them. The `--clobber` below would then replace an attested
+# file - harmless when the bytes are the ones CI built, and the exact
+# defect this whole change exists to remove when they are not: a local
+# rebuild under the CI name, with an attestation beside it that no
+# longer describes the file on the page.
+#
+# So an asset the release already carries AS ATTESTED (its
+# `.intoto.jsonl` is on the release), or one of that asset's
+# `.intoto.jsonl` / `.spdx.json` siblings, is compared by sha256 with
+# what is there: identical bytes are skipped (nothing to upload), any
+# difference is a refusal. The digest is GitHub's own `digest` field,
+# which `gh release view` reports for drafts too.
+#
+# FAILS CLOSED: if the release cannot be read, nothing is uploaded. An
+# empty answer here would read as "nothing is attested" and wave every
+# file through to the --clobber, which is the one outcome this block
+# exists to prevent. The release must already exist anyway (header).
+if ! remote=$(gh release view "$TAG" --repo "$REPO" --json assets \
+       -q '.assets[] | "\(.name)\t\(.digest)"'); then
+  echo "REFUSING to upload: could not read release $TAG's assets to check" >&2
+  echo "    for attested files (create the draft first - step 2a)." >&2
+  exit 1
+fi
+attested_base() {   # $1 = asset name; prints the attested base name or nothing
+  local n=$1 b
+  for b in "$n" "${n%.intoto.jsonl}" "${n%.spdx.json}"; do
+    if printf '%s\n' "$remote" | cut -f1 | grep -qxF -- "$b.intoto.jsonl"; then
+      printf '%s' "$b"; return 0
+    fi
+  done
+  return 1
+}
+keep=()
+skipped=0
+for f in "$@"; do
+  n=$(basename "$f")
+  if ! attested_base "$n" >/dev/null; then
+    keep+=("$f"); continue
+  fi
+  have=$(printf '%s\n' "$remote" | awk -F'\t' -v n="$n" '$1 == n {print $2; exit}')
+  sum=$( { shasum -a 256 "$f" 2>/dev/null || sha256sum "$f"; } | awk '{print $1; exit}' )
+  if [ "$have" = "sha256:$sum" ]; then
+    echo "  = $n: already on $TAG as the attested CI build, same bytes - not re-uploaded"
+    skipped=$((skipped + 1))
+  else
+    echo "✗ $n: $TAG carries an ATTESTED file under this name (${have:-no digest})," >&2
+    echo "    and this one is different bytes (sha256:$sum). Uploading it would" >&2
+    echo "    replace the attested build with one the attestation does not describe." >&2
+    echo "    Use the CI build (gh release download), or delete the CI asset AND its" >&2
+    echo "    .intoto.jsonl/.spdx.json on purpose first." >&2
+    fail=1
+  fi
+done
+if [ $fail -ne 0 ]; then
+  echo "REFUSING to upload: one name, one set of bytes." >&2
+  exit 1
+fi
+if [ ${#keep[@]} -eq 0 ]; then
+  echo "✓ nothing to upload: all $skipped asset(s) are already on $TAG as attested"
+  exit 0
+fi
+
+echo "all $# asset(s) carry a current scan stamp - uploading to $TAG: ${#keep[@]} new, $skipped already there as attested"
+gh release upload "$TAG" --repo "$REPO" --clobber "${keep[@]}"
+echo "✓ uploaded ${#keep[@]} asset(s) to $TAG"

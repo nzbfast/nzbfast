@@ -196,33 +196,60 @@ pub(crate) fn encode_rar29_literals_with_options_and_progress(
 }
 
 pub fn encode_rar29_ppmd_literals(input: &[u8]) -> Result<Vec<u8>> {
-    encode_ppmd_member(input, false, &[])
+    encode_ppmd_member(input, false, &[], usize::MAX)
 }
 
+/// PPMd with LZ escapes reaching as far back as the planner likes. That is
+/// only readable where the archive's dictionary covers every such match; an
+/// ARCHIVE writer knows its dictionary and must use
+/// [`encode_rar29_ppmd_within`] instead.
 pub fn encode_rar29_ppmd(input: &[u8]) -> Result<Vec<u8>> {
-    encode_ppmd_member(input, true, &[])
+    encode_ppmd_member(input, true, &[], usize::MAX)
+}
+
+/// PPMd whose LZ escapes never reach further back than `max_offset`, which
+/// an archive writer sets to its dictionary size. The LZ planner has always
+/// capped its matches that way (`EncodeOptions::max_match_distance`); until
+/// 28 Sep 2026 the PPMd planner did not, and reference unrar, whose window
+/// is the archive's dictionary, rejected every such member with "checksum
+/// error" (level 5 RAR 4 text of about 282 KB and up, under the default
+/// 128 KiB RAR 4 dictionary), while this crate's own decoder, whose window
+/// is larger, read it back fine.
+pub fn encode_rar29_ppmd_within(input: &[u8], max_offset: usize) -> Result<Vec<u8>> {
+    encode_ppmd_member(input, true, &[], max_offset)
 }
 
 pub fn encode_rar29_ppmd_with_filter(input: &[u8], filter: Rar29FilterSpec) -> Result<Vec<u8>> {
-    encode_ppmd_filtered_member(input, filter, true)
+    encode_ppmd_filtered_member(input, filter, true, usize::MAX)
+}
+
+/// [`encode_rar29_ppmd_with_filter`] with the dictionary cap of
+/// [`encode_rar29_ppmd_within`].
+pub fn encode_rar29_ppmd_with_filter_within(
+    input: &[u8],
+    filter: Rar29FilterSpec,
+    max_offset: usize,
+) -> Result<Vec<u8>> {
+    encode_ppmd_filtered_member(input, filter, true, max_offset)
 }
 
 pub fn encode_rar29_ppmd_literals_with_filter(
     input: &[u8],
     filter: Rar29FilterSpec,
 ) -> Result<Vec<u8>> {
-    encode_ppmd_filtered_member(input, filter, false)
+    encode_ppmd_filtered_member(input, filter, false, usize::MAX)
 }
 
 fn encode_ppmd_filtered_member(
     input: &[u8],
     filter: Rar29FilterSpec,
     lz_escapes: bool,
+    max_offset: usize,
 ) -> Result<Vec<u8>> {
     let filters = split_large_filter(input.len(), filter)?;
     let filtered = filtered_members(input, &filters)?;
     let records = encoded_filter_records(&filtered.records)?;
-    encode_ppmd_member(&filtered.data, lz_escapes, &records)
+    encode_ppmd_member(&filtered.data, lz_escapes, &records, max_offset)
 }
 
 fn filtered_members(input: &[u8], filters: &[Rar29FilterSpec]) -> Result<FilteredMembers> {
@@ -357,14 +384,16 @@ fn encode_ppmd_member(
     input: &[u8],
     lz_escapes: bool,
     initial_filters: &[Vec<u8>],
+    max_offset: usize,
 ) -> Result<Vec<u8>> {
-    encode_ppmd_block(input, lz_escapes, initial_filters)
+    encode_ppmd_block(input, lz_escapes, initial_filters, max_offset)
 }
 
 fn encode_ppmd_block(
     input: &[u8],
     lz_escapes: bool,
     initial_filters: &[Vec<u8>],
+    max_offset: usize,
 ) -> Result<Vec<u8>> {
     const PPMD_ORDER: usize = 8;
     const PPMD_DICTIONARY_MB: u8 = 25;
@@ -377,7 +406,7 @@ fn encode_ppmd_block(
     for record in initial_filters {
         encoder.encode_vm_filter_record(record)?;
     }
-    for token in encode_ppmd_tokens(input, lz_escapes) {
+    for token in encode_ppmd_tokens(input, lz_escapes, max_offset) {
         match token.view() {
             PpmdEncodeToken::Literal(byte) => encoder.encode_literal(byte)?,
             PpmdEncodeToken::RepeatOffsetOne { length } => {
@@ -771,7 +800,7 @@ fn encode_member_with_options_impl(
             return encode_member_blocks(input, history, options, block_size, progress);
         }
     }
-    encode_member_inner(input, history, &[], options, progress)
+    encode_member_inner(input, history, &[], options, progress, true)
 }
 
 fn encode_member_blocks(
@@ -785,7 +814,8 @@ fn encode_member_blocks(
     let mut out = Vec::new();
     let mut local_history = history[history.len().saturating_sub(MAX_HISTORY)..].to_vec();
     let mut completed = 0usize;
-    for chunk in input.chunks(block_size) {
+    let blocks = input.len().div_ceil(block_size);
+    for (index, chunk) in input.chunks(block_size).enumerate() {
         let mut chunk_progress = |position: usize| {
             progress
                 .as_deref_mut()
@@ -797,6 +827,10 @@ fn encode_member_blocks(
             &[],
             options,
             Some(&mut chunk_progress),
+            // Only the member's LAST block ends the file; every earlier
+            // one announces the next block's table (see the end of
+            // `encode_member_inner`).
+            index + 1 == blocks,
         )?);
         completed = completed.saturating_add(chunk.len());
         local_history.extend_from_slice(chunk);
@@ -814,7 +848,7 @@ fn encode_member_with_initial_filters(
     filters: &[Vec<u8>],
     options: EncodeOptions,
 ) -> Result<Vec<u8>> {
-    encode_member_inner(input, history, filters, options, None)
+    encode_member_inner(input, history, filters, options, None, true)
 }
 
 fn encode_member_inner(
@@ -823,6 +857,7 @@ fn encode_member_inner(
     initial_filters: &[Vec<u8>],
     options: EncodeOptions,
     progress: Option<&mut dyn FnMut(usize) -> bool>,
+    ends_file: bool,
 ) -> Result<Vec<u8>> {
     let tokens = encode_tokens_with_progress(input, history, options, progress)?;
     let mut main_frequencies = vec![0usize; MAIN_COUNT];
@@ -992,7 +1027,24 @@ fn encode_member_inner(
         "RAR 2.9 encoder missing end-of-block Huffman code",
     ))?;
     bits.write_bits(end.code as u32, end.len);
-    bits.write_bit(true); // end member, no following table.
+    if ends_file {
+        // End of FILE, and the next member reads its own tables: `0` then
+        // `1`. A lone `1` here at a member's end, which this line wrote until
+        // 27 Sep 2026, says "same file, a new table follows", and a reader
+        // that believes it parses a table from past the member's end (see
+        // the test `lz_member_ends_the_file_rather_than_announcing_a_table`).
+        bits.write_bit(false);
+        bits.write_bit(true);
+    } else {
+        // A block of a multi-block member (`encode_member_blocks`) that is
+        // not its last: "same file, a new table follows", which is exactly
+        // what the next block opens with. Ending the FILE here instead -
+        // what every block did from 27 to 28 Sep 2026 - makes reference
+        // unrar stop after this block and fail the member's checksum (the
+        // test `reference_unrar_tests_a_multi_block_rar4_member_at_every_level`
+        // in `rar15_40::write`).
+        bits.write_bit(true);
+    }
     Ok(bits.finish())
 }
 
@@ -1466,7 +1518,7 @@ struct MatchCandidate {
     score: isize,
 }
 
-fn encode_ppmd_tokens(input: &[u8], lz_escapes: bool) -> Vec<PackedPpmdToken> {
+fn encode_ppmd_tokens(input: &[u8], lz_escapes: bool, max_offset: usize) -> Vec<PackedPpmdToken> {
     if !lz_escapes {
         return input
             .iter()
@@ -1488,7 +1540,7 @@ fn encode_ppmd_tokens(input: &[u8], lz_escapes: bool) -> Vec<PackedPpmdToken> {
             continue;
         }
 
-        if let Some((length, offset)) = best_ppmd_match(input, pos, &buckets) {
+        if let Some((length, offset)) = best_ppmd_match(input, pos, &buckets, max_offset) {
             tokens.push(PackedPpmdToken::match_at(offset, length));
             for history_pos in pos..pos + length {
                 insert_match_position(input, history_pos, &mut buckets);
@@ -1518,8 +1570,16 @@ fn ppmd_offset_one_repeat(input: &[u8], pos: usize) -> Option<usize> {
     (length >= 4).then_some(length)
 }
 
-fn best_ppmd_match(input: &[u8], pos: usize, buckets: &MatchIndex) -> Option<(usize, usize)> {
-    let max_offset = pos.min(0x1000001).min(MAX_ENCODER_MATCH_OFFSET);
+fn best_ppmd_match(
+    input: &[u8],
+    pos: usize,
+    buckets: &MatchIndex,
+    dictionary_cap: usize,
+) -> Option<(usize, usize)> {
+    let max_offset = pos
+        .min(0x1000001)
+        .min(MAX_ENCODER_MATCH_OFFSET)
+        .min(dictionary_cap);
     let max_length = (input.len() - pos).min(MAX_PPMD_MATCH_LENGTH);
     if max_offset < 2 || max_length < MIN_PPMD_MATCH_LENGTH || pos + 2 >= input.len() {
         return None;
@@ -5413,7 +5473,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
             .copied()
             .chain(std::iter::repeat_n(b'Z', 512))
             .collect::<Vec<_>>();
-        let tokens = encode_ppmd_tokens(&input, true);
+        let tokens = encode_ppmd_tokens(&input, true, usize::MAX);
         let packed = encode_rar29_ppmd(&input).unwrap();
 
         assert!(tokens.iter().any(
@@ -5431,7 +5491,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         input.extend_from_slice(phrase);
         input.extend_from_slice(phrase);
         input.extend_from_slice(b"tail");
-        let tokens = encode_ppmd_tokens(&input, true);
+        let tokens = encode_ppmd_tokens(&input, true, usize::MAX);
         let packed = encode_rar29_ppmd(&input).unwrap();
 
         assert!(tokens
@@ -5447,7 +5507,7 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
         for _ in 0..200 {
             input.extend_from_slice(phrase);
         }
-        let tokens = encode_ppmd_tokens(&input, true);
+        let tokens = encode_ppmd_tokens(&input, true, usize::MAX);
 
         assert!(tokens.iter().any(
             |token| matches!(token.view(), PpmdEncodeToken::Match { offset, length } if offset > 1 && length >= 32)
@@ -6612,5 +6672,55 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
 
     fn expected_text() -> Vec<u8> {
         "Hello, RAR 3.x fixture world.\n".repeat(80).into_bytes()
+    }
+
+    /// Every LZ member this encoder writes must END THE FILE after its
+    /// end-of-block symbol, not announce a table. `read_end_of_block` reads a
+    /// lone `1` bit after symbol 256 as "same file, a new table follows",
+    /// and until 27 Sep 2026 the encoder wrote exactly that at the end of
+    /// every member. This decoder forgives it (`finish_lz_member` accepts
+    /// a missing table when the trailing bits are zero), but a reader that
+    /// follows the format goes on to parse a table out of whatever its
+    /// input buffer holds past the member. unrar 4.20, 5.50 and 7.23 all do
+    /// that; when the stale bytes open a PPMd block header whose flags carry
+    /// 0x40, the phantom block replaces the PPMd escape char, and the next
+    /// PPMd member of a solid archive then decodes its escapes as literals
+    /// and fails its CRC. The rivals round's 9,681-member solid RAR 4
+    /// archive failed 5,090 members that way under the Auto filter policy,
+    /// whose members switch between LZ and PPMd; the reduction was three
+    /// members, PPMd then LZ then PPMd. Asserted on the bits rather than on
+    /// a decode, because this decoder decodes both endings to the same
+    /// bytes.
+    #[test]
+    fn lz_member_ends_the_file_rather_than_announcing_a_table() {
+        let text = b"the quick brown fox jumps over the lazy dog, ".repeat(40);
+        let mut binary = Vec::new();
+        for i in 0u32..4096 {
+            binary.extend_from_slice(&[0xe8, (i & 0xff) as u8, (i >> 8) as u8, 0, 0, 0x90]);
+        }
+        let cases: Vec<(&str, Vec<u8>, usize)> = vec![
+            ("plain", Rar29Encoder::new().encode_member(&text).unwrap(), text.len()),
+            (
+                "filtered",
+                Rar29Encoder::new()
+                    .encode_member_with_filter(&binary, Rar29FilterSpec::whole(Rar29FilterKind::E8))
+                    .unwrap(),
+                binary.len(),
+            ),
+            ("one byte", Rar29Encoder::new().encode_member(b"x").unwrap(), 1),
+        ];
+        for (name, packed, len) in cases {
+            let mut decoder = Rar29Decoder::new();
+            decoder.bits.append(&packed);
+            decoder.decode_until(len).unwrap();
+            assert_eq!(decoder.block_mode, BlockMode::Lz, "{name}");
+            assert_eq!(decoder.main.decode(&mut decoder.bits).unwrap(), 256, "{name}");
+            assert_eq!(
+                decoder.read_end_of_block().unwrap(),
+                super::LzBlockEnd::NewFileNewTables,
+                "{name}: the member must end the file and make the next one read its tables"
+            );
+            assert!(decoder.bits.remaining_bits_are_zero(), "{name}");
+        }
     }
 }

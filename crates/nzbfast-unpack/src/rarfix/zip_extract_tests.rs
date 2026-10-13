@@ -398,3 +398,39 @@ fn a_split_zip_set_unpacks_without_a_scratch_copy() {
     assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), data);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The duplicate-target guard's ASCII shortcut compares the archive's
+/// names with EACH OTHER, inside a fresh staging dir; a name that clashes
+/// with a file ALREADY in the job folder - differently cased, on a
+/// folding volume - is the publish step's to settle, and that step did
+/// not change. Pinned because the shortcut skips the per-target probe
+/// that used to touch those names, so a reader could fairly ask whether
+/// the pre-existing file is still safe: both payloads must survive,
+/// whatever this volume folds.
+#[test]
+fn an_ascii_zip_member_never_overwrites_a_differently_cased_file_already_there() {
+    let dir = tmp("ascii-preexisting");
+    let before = payload(50_000, 3);
+    std::fs::write(dir.join("README.TXT"), &before).unwrap();
+    let member = payload(40_000, 99);
+    let z = nzbkit::zip::fixtures::zip_of(&[
+        Spec::stored("Readme.txt", &member),
+        Spec::deflated("sub/other.bin", &payload(10_000, 7)),
+    ]);
+    std::fs::write(dir.join("payload.zip"), &z).unwrap();
+    let found = nzbkit::zip::scan(&dir);
+    assert_eq!(found.len(), 1);
+    assert!(super::extract_zip(&dir, &found, None), "zip should unpack");
+    let contents: Vec<Vec<u8>> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| std::fs::read(e.path()).unwrap())
+        .collect();
+    assert!(
+        contents.contains(&before),
+        "the file that was already there was overwritten"
+    );
+    assert!(contents.contains(&member), "the member did not land");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

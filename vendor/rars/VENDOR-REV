@@ -1,5 +1,5 @@
 fork: private perf fork of github.com/bitplane/rars, branch perf
-last-synced-rev: 11f2fc9 (fork perf; exact mirror of src/ and tests/fixtures/) plus THREE hand-applied hunks on top: (1) the IO_BUF census correction and damaged_shards right-sizing in src/recovery/stream.rs, which post-dates that rev and is in the fork as 8c9537b (merge b3d58ed), see 18 Sep below; (2) fork 7cb704f's crates/rars/ half (RAR 1.5 DOS directory: src/rar15_40.rs and tests/fixtures/rar15_40/rar155_dos/), see 18 Sep below; (3) fork cc9def3's crates/rars/src/ half, which is THREE COMMENTS in src/rar15_40.rs and no behaviour at all, see 18 Sep below
+last-synced-rev: 11f2fc9 (fork perf; exact mirror of src/ and tests/fixtures/) plus SIX hand-applied hunks on top: (1) the IO_BUF census correction and damaged_shards right-sizing in src/recovery/stream.rs, which post-dates that rev and is in the fork as 8c9537b (merge b3d58ed), see 18 Sep below; (2) fork 7cb704f's crates/rars/ half (RAR 1.5 DOS directory: src/rar15_40.rs and tests/fixtures/rar15_40/rar155_dos/), see 18 Sep below; (3) fork cc9def3's crates/rars/src/ half, which is THREE COMMENTS in src/rar15_40.rs and no behaviour at all, see 18 Sep below; (4) fork 6a81e4d's crates/rars/ half (a RAR 5 final match past its member's declared size: src/codec/rar50.rs and four tests/fixtures/rar50/ archives), see 27 Sep below; (5) fork 65cf0ff's crates/rars/src/ half (a RAR 2.9 LZ member ends the file rather than announcing a table: src/codec/rar29.rs), see 27 Sep below; (6) fork fdb7030's crates/rars/src/ half (only a multi-block RAR 2.9 member's last block ends the file; PPMd matches capped at the dictionary: src/codec/rar29.rs, src/rar15_40/write.rs), see 28 Sep below
 last-synced-date: 2026-09-18
 local-drift: none at the sync. On 22 Aug 2026 the whole vendored tree
   (104 local commits since the 24 Jul sync at 050758e, the NEON BLAKE2sp
@@ -394,3 +394,44 @@ local-drift: none at the sync. On 22 Aug 2026 the whole vendored tree
   touches crates/rars/tests/rar15_40_fixtures.rs (a wrong-password arm)
   and crates/rars-cli/tests/cli.rs, neither of which is vendored -
   tests/*.rs is out of the mirror's scope by design.
+  27 Sep 2026 (claim nzbfast-rars-solid-match-overruns-member-27sep):
+  fork 6a81e4d on perf (parent 4b96c43, pushed to `mine/perf`) accepts
+  a RAR 5 member whose FINAL match runs past its declared size, as
+  reference unrar 7.23 does: only the declared bytes are output, and
+  the whole match stays in the solid window for the next member. Its
+  crates/rars/ half was hand-applied here with `git diff --binary
+  --relative=crates/rars` and `git apply` (offsets only): the
+  src/codec/rar50.rs hunk and four new tests/fixtures/rar50/ archives.
+  The fixtures are byte-identical to the fork, and the fork-vs-vendor
+  difference in rar50.rs is the same set of lines after the port as
+  before it, so the next sync from 6a81e4d or later carries the change
+  and deletes nothing. sync-from-fork.sh was NOT run: mine/perf holds
+  other lanes' unported work (the rarfast redirection writer, the
+  oracle_hooks shims), and vendor holds post-11f2fc9 commits this file
+  does not yet name (GH #92's split-name change a939dae3a, TODO 118.2's
+  live stream length 702718687, the 21 Sep sweeps), so a whole-tree
+  sync is its own reconciliation item. The fork's
+  tests/rar50_fixtures.rs gains the integration tests; tests/*.rs is
+  out of the mirror's scope by design.
+  27 Sep 2026, VENDOR-FIRST, LOCAL DRIFT until ported (claim
+  nzbfast-rars-writer-filters-4g-and-unrar-hang-27sep): src/codec/rar29.rs
+  `encode_member_inner` ends a RAR 2.9 LZ member with 256 then `0`,`1`
+  (new file, next member reads its tables) instead of 256 then a lone
+  `1` (same file, a new table follows), plus the pinning test
+  `lz_member_ends_the_file_rather_than_announcing_a_table`. See
+  VENDORING.md's 27 Sep row and the host repo's
+  research/RARS-RAR29-END-OF-MEMBER-AND-AUTOSIZE-2026-09-27.md. PORTED
+  27 Sep to fork perf 65cf0ff (claim
+  rars-fork-rar29-end-of-member-port-and-oracle-pin-28sep) by `git apply`
+  of this commit's one-file diff (offset only; added and removed lines
+  identical), so a sync no longer deletes it.
+  28 Sep 2026 (claim rars-rar29-writer-broken-by-end-of-member-fix-28sep):
+  fork fdb7030 on perf (parent 65cf0ff, pushed to `mine/perf`) fixes two
+  RAR 4 writer defects unrar 7.23 rejects: every block of a multi-block
+  LZ member ended the FILE since 65cf0ff (this repo's 4c76b43b5), and
+  the PPMd planner's matches were never capped at the dictionary. Its
+  crates/rars/src/ half was hand-applied here with `git diff
+  --relative=crates/rars` and `git apply`: src/rar15_40/write.rs is
+  byte-identical to the fork, and src/codec/rar29.rs differs from it by
+  the same 66 fork-only lines it did before the port, so the next sync
+  from fdb7030 or later carries the change and deletes nothing.

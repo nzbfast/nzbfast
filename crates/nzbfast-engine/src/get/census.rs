@@ -136,6 +136,9 @@ pub(super) struct Census {
     /// (error-detection audit 20 Aug, A3).
     pub(super) left_servers: Vec<String>,
     pub(super) backbones: Vec<String>,
+    /// Id-proven refusals per server that ever connected, the figure the
+    /// session-end line prints. See `diag::LossCauses::server_refusals`.
+    pub(super) server_refusals: Vec<u64>,
     pub(super) post_age_days: u32,
     pub(super) sniff_bootstrap: Option<usize>,
     pub(super) incomplete: usize,
@@ -180,6 +183,7 @@ impl Census {
             dead_servers: Vec::new(),
             left_servers: Vec::new(),
             backbones: Vec::new(),
+            server_refusals: Vec::new(),
             post_age_days: 0,
             sniff_bootstrap: None,
             incomplete: 0,
@@ -237,8 +241,10 @@ pub(super) fn take_census(
     // to every guard downstream while `live_mask` quietly dropped them
     // from the quorum.
     let mut left_servers: Vec<String> = Vec::new();
+    let mut server_refusals: Vec<u64> = Vec::new();
     for ((s, _), st) in servers.iter().zip(stats) {
         if st.ever_connected {
+            server_refusals.push(st.miss_proven);
             // Session-end breakdown, printed only when something died:
             // "12 reconnects" alone never said WHO hung up, which is what
             // made the 6 Aug churn investigation eliminate six hypotheses
@@ -642,6 +648,7 @@ pub(super) fn take_census(
         dead_servers,
         left_servers,
         backbones,
+        server_refusals,
         post_age_days,
         sniff_bootstrap,
         incomplete,

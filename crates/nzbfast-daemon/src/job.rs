@@ -863,6 +863,22 @@ pub struct Job {
 }
 
 impl Job {
+    /// SAB's `search=`: a case-insensitive substring over the names a
+    /// user knows a download by - posted name, category, oracle
+    /// identity, filed-as. `needle` must already be trimmed and
+    /// lowercased (`search_needle` does both). ONE copy for the history
+    /// page and the queue walk (GitHub #97), so a search typed into
+    /// either card finds a row by the same names.
+    pub fn matches_search(&self, needle: &str) -> bool {
+        self.name.to_lowercase().contains(needle)
+            || self.category.to_lowercase().contains(needle)
+            || self.identity_name.to_lowercase().contains(needle)
+            || self
+                .filed_base
+                .as_ref()
+                .is_some_and(|b| b.to_lowercase().contains(needle))
+    }
+
     /// The one way a LIVE row's priority is written, so that every change
     /// leaves a line in daemon.log naming the row, both words and what
     /// asked for it.

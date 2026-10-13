@@ -1184,7 +1184,23 @@ impl Daemon {
         if gen0.is_some_and(|(r0, _)| job.lock_ok().retries != r0) {
             return;
         }
-        self.queue.lock_ok().retain(|j| j.lock_ok().nzo_id != id);
+        // A REFUSED prewrite leaves the queue row as the record's only
+        // durable copy, and the retain below takes it out of the list
+        // `queue_rows` publishes - so the record is carried in the queue
+        // store from the same `hist_owed` hold that removes it, until an
+        // arm of `park_file_terminal` files it somewhere (`Owed::in_transit`;
+        // 13 Oct 2026 sweep, F2). Before this, a racing save in the window
+        // tombstoned that row and a kill before the final filing lost the
+        // record from both stores. `Wrote` needs no carry - the history row
+        // is durable and `_inflight` keeps it there - and `Absent` is a
+        // tombstone bound for no store.
+        let carried = prewrite == HistWrite::Refused;
+        let leave = || self.queue.lock_ok().retain(|j| j.lock_ok().nzo_id != id);
+        if carried {
+            self.hist_carry_across(&job, &id, true, leave);
+        } else {
+            leave();
+        }
         // The harness's window: the row has just left the queue and every
         // store write park still owes is ahead of it.
         #[cfg(any(test, feature = "test-support"))]
@@ -1257,6 +1273,11 @@ impl Daemon {
             // behind it) never waits on a NAS copy.
             let owes_move = job.lock_ok().move_pending;
             self.history.lock_ok().push(job.clone());
+            // In history, so a carry park began for a refused prewrite
+            // can stand down to an ordinary owed entry: from here a delete
+            // finds the record in history and retires the carry the
+            // ordinary way (`Owed::in_transit`).
+            self.hist_carry_landed(job, id, true);
             // In history: `dir_claim` sees the record again, so the
             // directory deciders waiting on the lock may look now -
             // ahead of the durable upsert, which they need not wait for.
@@ -1353,7 +1374,8 @@ impl Daemon {
                 already
             };
             // Filed (or already present): the record is visible to
-            // `dir_claim` again.
+            // `dir_claim` again, and in a list the carry can hand over to.
+            self.hist_carry_landed(job, id, true);
             publish.take();
             if !already {
                 // The delete's OWN row - `deleted_cost` carries what a
@@ -1372,6 +1394,7 @@ impl Daemon {
             // was removed above, so the directory really is free and the
             // deciders need not wait for the burial below.
             publish.take();
+            self.hist_carry_landed(job, id, false);
             // §158.7: a delete landed INSIDE this park, after
             // `park_prewrite`. The job is dropped rather than filed, so
             // bury the row it already wrote or the next boot replays a
@@ -1393,6 +1416,11 @@ impl Daemon {
                      restart brings it back - its files were already removed"
                 );
             }
+        } else {
+            // A delete landed inside a park whose prewrite was REFUSED:
+            // the record is bound for no store, so its carry ends here
+            // rather than resurrecting what the user cancelled.
+            self.hist_carry_landed(job, id, false);
         }
         // The remaining arm (a tombstone with nothing prewritten) files
         // nothing either; make the release explicit before the promotion

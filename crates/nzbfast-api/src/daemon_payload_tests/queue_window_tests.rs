@@ -292,3 +292,64 @@ fn pin_live_keeps_the_running_row_in_the_page() {
         assert_eq!(ids_of(&qj(d, &[("pin_live", "1")])), ids_of(&qj(d, &[])));
     });
 }
+
+/// GitHub #97: SAB's `search=` on the queue read. A case-insensitive
+/// substring, applied at the walk like the category filter - so it
+/// reaches rows far past any window, `noofslots` counts the matches
+/// before the window, and the header stays a statement about the whole
+/// queue.
+#[test]
+fn search_narrows_the_queue_before_the_window() {
+    with_daemon("qwin-search", |d| {
+        seed(d);
+        let full = qj(d, &[]);
+        // Row 4 of 10, found from a page of one that starts at the top.
+        let hit = qj(d, &[("search", "  e04.1080P "), ("limit", "1")]);
+        assert_eq!(ids_of(&hit), ["SABnzbd_nzo_win04"]);
+        assert_eq!(hit["noofslots"], 1, "one match");
+        assert_eq!(hit["noofslots_total"], 10, "ten in the queue");
+        for k in ["mbleft", "mbleft_runnable", "space_need_bytes", "timeleft"] {
+            assert_eq!(hit[k], full[k], "{k} is a whole-queue total");
+        }
+        // The category is one of the names a row is known by, the same
+        // as on the history page (`Job::matches_search`), and a search
+        // pages like any filter.
+        let movies = qj(d, &[("search", "MOVIES"), ("start", "2"), ("limit", "2")]);
+        assert_eq!(movies["noofslots"], 5);
+        assert_eq!(ids_of(&movies), ["SABnzbd_nzo_win05", "SABnzbd_nzo_win07"]);
+        // It narrows the category filter rather than replacing it.
+        assert_eq!(
+            qj(d, &[("search", "e04"), ("category", "movies")])["noofslots"],
+            0
+        );
+        // A blank search is no search, and a miss is an empty page.
+        assert_eq!(ids_of(&qj(d, &[("search", "   ")])), ids_of(&full));
+        assert!(ids_of(&qj(d, &[("search", "no.such.release")])).is_empty());
+    });
+}
+
+/// ...and a live row the search MISSES still rides a `pin_live` page,
+/// because the dashboard reads "what is running" off the rows and a
+/// search box must not blank its hero card. It rides marked
+/// `search_miss`, so the queue table can leave it out, and it is not a
+/// match: `noofslots` does not count it.
+#[test]
+fn a_live_row_the_search_misses_rides_pin_live_marked() {
+    with_daemon("qwin-search-pin", |d| {
+        seed(d);
+        let running = "SABnzbd_nzo_win09";
+        let q = qj(d, &[("search", "e04"), ("limit", "250"), ("pin_live", "1")]);
+        assert_eq!(ids_of(&q), ["SABnzbd_nzo_win04", running]);
+        assert_eq!(q["noofslots"], 1, "the live row is not a match");
+        assert!(q["slots"][0].get("search_miss").is_none());
+        assert_eq!(q["slots"][1]["search_miss"], true);
+        assert_eq!(q["slots"][1]["status"], "Downloading");
+        // Without the flag a miss is simply absent, as for any SAB client.
+        assert_eq!(ids_of(&qj(d, &[("search", "e04")])), ["SABnzbd_nzo_win04"]);
+        // A live row the search FINDS is an ordinary match, unmarked.
+        let found = qj(d, &[("search", "e09"), ("pin_live", "1")]);
+        assert_eq!(ids_of(&found), [running]);
+        assert_eq!(found["noofslots"], 1);
+        assert!(found["slots"][0].get("search_miss").is_none());
+    });
+}

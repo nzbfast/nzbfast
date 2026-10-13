@@ -95,15 +95,40 @@ impl FinishAction {
 pub struct Pending {
     pub action: FinishAction,
     pub at: Instant,
+    /// The [`Control::epoch`] it was armed under. Firing requires it to
+    /// still be current, so a countdown can only ever run the choice it
+    /// was announced for.
+    pub epoch: u64,
+}
+
+/// The user's choice, the countdown serving it, and a generation (the
+/// `epoch` field) that every change of mind bumps - under ONE lock,
+/// because the watcher has to decide "is what I read still what the
+/// user wants" and act on the answer without a window between the two.
+///
+/// That window was real (Codex sweep 13 Oct 2026, F1): `tick` read the
+/// action, then waited on the mover, queue and job locks inside
+/// `drain_blocker`, then installed a countdown for what it had read. A
+/// user who switched Shutdown off in between got a shutdown anyway, and
+/// re-reading the action alone would not close it - Shutdown -> None ->
+/// Shutdown reads the same after as before, and a re-read is still a
+/// check-then-write. The generation is what makes the stale pass
+/// recognisable. Never held across `drain_blocker` or anything else that
+/// waits: it is taken for a compare and a store and released.
+#[derive(Clone, Copy, Default)]
+pub struct Control {
+    pub action: FinishAction,
+    pub pending: Option<Pending>,
+    pub epoch: u64,
 }
 
 /// Everything this feature keeps on the daemon, as ONE field: the
 /// `Daemon` struct is declared in `crates/nzbfast-daemon/src/daemon.rs`, which sat at its
 /// size-gate ceiling when this was written (the 31 Aug 2026
 /// recalibration moved it), and four loose fields would not fit.
-/// Grouping is also honest: these five only ever move together.
+/// Grouping is also honest: these only ever move together.
 pub struct FinishState {
-    pub action: Mutex<FinishAction>,
+    pub ctl: Mutex<Control>,
     pub script: Mutex<Option<PathBuf>>,
     pub delay_secs: AtomicU64,
     /// The drain edge, set by `note_queue_idle`'s latch CAS and TAKEN
@@ -114,18 +139,16 @@ pub struct FinishState {
     /// The refusal reason last logged, so a drain edge that is HELD
     /// across many ticks says why once rather than every two seconds.
     pub last_refusal: Mutex<Option<&'static str>>,
-    pub pending: Mutex<Option<Pending>>,
 }
 
 impl Default for FinishState {
     fn default() -> Self {
         FinishState {
-            action: Mutex::new(FinishAction::None),
+            ctl: Mutex::new(Control::default()),
             script: Mutex::new(None),
             delay_secs: AtomicU64::new(DEFAULT_DELAY_SECS),
             drained: AtomicBool::new(false),
             last_refusal: Mutex::new(None),
-            pending: Mutex::new(None),
         }
     }
 }
@@ -161,15 +184,85 @@ fn script_budget(d: &Daemon) -> u64 {
 
 impl FinishState {
     pub(crate) fn action(&self) -> FinishAction {
-        *self.action.lock_ok()
+        self.ctl.lock_ok().action
     }
 
     pub(crate) fn set_action(&self, a: FinishAction) {
-        *self.action.lock_ok() = a;
+        let mut c = self.ctl.lock_ok();
+        c.action = a;
         // Changing the choice abandons any countdown already running.
         // Switching from shutdown to none while the banner is up is the
         // clearest possible statement that the user does not want it.
-        *self.pending.lock_ok() = None;
+        c.pending = None;
+        // ...and so is any pass that read the old choice and has not
+        // acted on it yet. Bumped even when `a` equals the old value: a
+        // re-save is still the user restating the choice now, and a pass
+        // that read it before must not act on that earlier reading.
+        c.epoch = c.epoch.wrapping_add(1);
+    }
+
+    /// The choice and its generation, read together - what a pass
+    /// carries across `drain_blocker` instead of the bare action.
+    fn snapshot(&self) -> (FinishAction, u64) {
+        let c = self.ctl.lock_ok();
+        (c.action, c.epoch)
+    }
+
+    /// Install a countdown for `action`, but only if nothing changed the
+    /// choice since the pass read it at `epoch`. Compare and install are
+    /// one critical section; the false arm is a pass gone stale.
+    fn install_pending(&self, action: FinishAction, epoch: u64, secs: u64) -> bool {
+        let mut c = self.ctl.lock_ok();
+        if c.epoch != epoch || c.action != action || c.pending.is_some() {
+            return false;
+        }
+        c.pending = Some(Pending {
+            action,
+            at: Instant::now() + std::time::Duration::from_secs(secs),
+            epoch,
+        });
+        true
+    }
+
+    /// THE point past which a cancel is too late. A countdown is claimed
+    /// (taken - so a second pass cannot fire it twice) only while its
+    /// generation is current, and a one-shot action is disarmed in the
+    /// same critical section, so there is no instant in which the
+    /// countdown is gone and the arm still reads armed. A non-countdown
+    /// action (the script) is claimed by `epoch` alone. `None` = do not
+    /// fire.
+    fn claim(&self, action: FinishAction, epoch: u64) -> Option<FinishAction> {
+        let mut c = self.ctl.lock_ok();
+        if c.epoch != epoch || c.action != action {
+            return None;
+        }
+        if action.counts_down() {
+            match c.pending {
+                Some(p) if p.epoch == epoch && p.action == action => {}
+                _ => return None,
+            }
+            c.pending = None;
+        }
+        if action.one_shot() {
+            c.action = FinishAction::None;
+            c.epoch = c.epoch.wrapping_add(1);
+        }
+        Some(action)
+    }
+
+    /// The dashboard's stop button, in one critical section: take the
+    /// countdown, switch off a one-shot arm, and bump the generation so a
+    /// pass already past its first read cannot act on it. Returns the
+    /// countdown it stopped and the arm it found.
+    fn cancel_all(&self) -> (Option<Pending>, FinishAction) {
+        let mut c = self.ctl.lock_ok();
+        let had = c.pending.take();
+        let armed = c.action;
+        if armed.one_shot() {
+            c.action = FinishAction::None;
+        }
+        c.epoch = c.epoch.wrapping_add(1);
+        (had, armed)
     }
 
     pub(crate) fn set_script(&self, p: Option<PathBuf>) {
@@ -205,12 +298,65 @@ impl FinishState {
     }
 
     fn pending(&self) -> Option<Pending> {
-        *self.pending.lock_ok()
+        self.ctl.lock_ok().pending
     }
 
-    fn clear_pending(&self) -> Option<Pending> {
-        self.pending.lock_ok().take()
+    /// Drop the countdown armed at `epoch` (a blocker appeared). A
+    /// countdown armed since by a newer generation is not this pass's to
+    /// drop.
+    fn clear_pending_if(&self, epoch: u64) -> Option<Pending> {
+        let mut c = self.ctl.lock_ok();
+        match c.pending {
+            Some(p) if p.epoch == epoch => c.pending.take(),
+            _ => None,
+        }
     }
+}
+
+/// Test seam: `tick` trips it immediately before each `drain_blocker`
+/// call, i.e. after its first read of the choice and before it acts on
+/// it. `drain_blocker` waits on the mover, queue and job locks, so that
+/// is a real window on a busy daemon and a zero-width one in a test
+/// without this. Keyed by the daemon's address, and a list rather than
+/// one slot, because unit tests share the process and run in parallel;
+/// two-stage (open, release) like `PARK_PREWRITE_BARRIER`.
+#[cfg(test)]
+pub(crate) static TICK_DRAIN_BARRIER: Mutex<
+    Vec<(usize, Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
+> = Mutex::new(Vec::new());
+
+fn drain_seam(_d: &Arc<Daemon>) {
+    #[cfg(test)]
+    {
+        let key = Arc::as_ptr(_d) as usize;
+        let seam = TICK_DRAIN_BARRIER
+            .lock_ok()
+            .iter()
+            .find(|(k, _, _)| *k == key)
+            .cloned();
+        if let Some((_, open, release)) = seam {
+            open.wait();
+            release.wait();
+        }
+    }
+}
+
+/// Test sink: in a unit-test build `fire` records what it would have run
+/// here, keyed by the daemon's address, and runs nothing. Nothing in a
+/// unit test may sleep or power off the machine running it, and a race
+/// regression has to be able to see a firing that should not happen.
+#[cfg(test)]
+pub(crate) static FIRED: Mutex<Vec<(usize, FinishAction)>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn test_sink(d: &Arc<Daemon>, action: FinishAction) -> bool {
+    FIRED.lock_ok().push((Arc::as_ptr(d) as usize, action));
+    true
+}
+
+#[cfg(not(test))]
+fn test_sink(_: &Arc<Daemon>, _: FinishAction) -> bool {
+    false
 }
 
 /// Why this drain must NOT fire the action, or `None` if it may.
@@ -308,8 +454,9 @@ pub fn tick(d: &Arc<Daemon>) -> std::time::Duration {
     // edge, still being served, and a second one cannot arrive without
     // work having arrived first - which cancels this one below.
     if let Some(p) = d.finish.pending() {
+        drain_seam(d);
         if let Some(why) = drain_blocker(d) {
-            if d.finish.clear_pending().is_some() {
+            if d.finish.clear_pending_if(p.epoch).is_some() {
                 announce(d, p.action, "cancelled", why);
                 // Give the edge back, exactly as the refusal path
                 // below does. The latch still being set means this
@@ -327,21 +474,26 @@ pub fn tick(d: &Arc<Daemon>) -> std::time::Duration {
         if Instant::now() < p.at {
             return COUNTDOWN_TICK;
         }
-        // Take it before firing: a cancel landing in this instant loses
-        // the race, and the alternative (fire, then clear) would let a
-        // second pass fire the same countdown twice.
-        if d.finish.clear_pending().is_some() {
-            fire(d, p.action);
+        // Claim it before firing: a cancel landing after the claim loses
+        // the race, one landing before it wins, and the alternative
+        // (fire, then clear) would let a second pass fire the same
+        // countdown twice. The claim fails if the choice moved on since
+        // this countdown was armed, whatever the choice now reads.
+        if let Some(a) = d.finish.claim(p.action, p.epoch) {
+            fire(d, a);
         }
         return IDLE_TICK;
     }
     if !d.finish.take_drain_edge() {
         return IDLE_TICK;
     }
-    let action = d.finish.action();
+    // Read WITH its generation: everything below acts on this reading
+    // only if nothing changed the choice while `drain_blocker` waited.
+    let (action, epoch) = d.finish.snapshot();
     if action == FinishAction::None {
         return IDLE_TICK;
     }
+    drain_seam(d);
     if let Some(why) = drain_blocker(d) {
         // Hold the edge rather than spend it. `note_queue_idle`
         // short-circuits on the set latch, so it can never issue a
@@ -369,15 +521,19 @@ pub fn tick(d: &Arc<Daemon>) -> std::time::Duration {
         return IDLE_TICK;
     }
     *d.finish.last_refusal.lock_ok() = None;
+    // A stale pass spends the edge and does nothing, exactly as a disarm
+    // landing a moment later would have cancelled the countdown: the new
+    // choice is served by the next drain, never by this pass's reading.
     if !action.counts_down() {
-        fire(d, action);
+        if let Some(a) = d.finish.claim(action, epoch) {
+            fire(d, a);
+        }
         return IDLE_TICK;
     }
     let secs = d.finish.delay_secs();
-    *d.finish.pending.lock_ok() = Some(Pending {
-        action,
-        at: Instant::now() + std::time::Duration::from_secs(secs),
-    });
+    if !d.finish.install_pending(action, epoch, secs) {
+        return IDLE_TICK;
+    }
     announce(d, action, "armed", &format!("in {secs}s"));
     // The banner rides the revisioned queue payload, so the poll has to
     // be told there is something new to send.
@@ -386,13 +542,20 @@ pub fn tick(d: &Arc<Daemon>) -> std::time::Duration {
 }
 
 /// Do it.
+///
+/// Only ever called with what `FinishState::claim` handed back, so a
+/// one-shot action is already disarmed in memory by the time it gets
+/// here.
 fn fire(d: &Arc<Daemon>, action: FinishAction) {
-    // Disarm BEFORE running anything, and persist it. A shutdown that
+    // Persist the disarm BEFORE running anything. A shutdown that
     // reaches the OS never comes back here to tidy up, and a sleep comes
     // back to the same empty queue it slept on - either way the stored
     // value has to already say "none" or the next start re-arms itself.
     if action.one_shot() {
-        disarm(d);
+        persist_disarm(d);
+    }
+    if test_sink(d, action) {
+        return;
     }
     match action {
         FinishAction::None => {}
@@ -404,6 +567,12 @@ fn fire(d: &Arc<Daemon>, action: FinishAction) {
 /// Put the setting back to `none`, live and on disk.
 pub fn disarm(d: &Arc<Daemon>) {
     d.finish.set_action(FinishAction::None);
+    persist_disarm(d);
+}
+
+/// The on-disk half of [`disarm`], for callers that already switched the
+/// live value off inside their own critical section.
+fn persist_disarm(d: &Arc<Daemon>) {
     if !save_settings(
         &d.settings_path,
         &[("queue_finished_action", json!("none"))],
@@ -429,11 +598,13 @@ pub fn disarm(d: &Arc<Daemon>) {
 /// leaves a machine armed to power off by someone who just said no. Two
 /// clicks to arm it again is the right price.
 pub fn cancel(d: &Arc<Daemon>) -> Value {
-    let had = d.finish.clear_pending();
-    let armed = d.finish.action();
+    // One critical section for the countdown, the arm and the
+    // generation, so a watcher pass that read the arm before this click
+    // cannot install or fire anything after it.
+    let (had, armed) = d.finish.cancel_all();
     let disarmed = armed.one_shot();
     if disarmed {
-        disarm(d);
+        persist_disarm(d);
     }
     if let Some(p) = had {
         announce(d, p.action, "cancelled", "cancelled from the dashboard");

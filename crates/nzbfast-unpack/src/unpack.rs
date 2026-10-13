@@ -329,44 +329,12 @@ fn extract_nested_capped(
     } else {
         cap
     };
-    // Volume-set stems present before this pass: a volume REBUILT during
-    // extraction (.rev reconstruction, RR repair) lands in the diff as a
-    // "new" file but belongs to the outer set - never descend into it.
-    let pre_stems: std::collections::HashSet<String> = before
-        .iter()
-        .filter(|p| looks_like_named_rar(p))
-        .filter_map(|p| p.file_name().map(|n| release_stem(&n.to_string_lossy())))
-        .collect();
-    // Magic-only (obfuscated) outer volumes have no name grammar for the
-    // stem guard above, so remember whether the input set held any: a
-    // NEW extensionless Rar!-magic file appearing beside such a set is a
-    // rebuilt member of it (.rev/RR output), not a nested archive -
-    // archives a pass genuinely produces carry their packed names. A
-    // final payload (.cbr, .cb7) is RAR magic without RAR grammar too,
-    // but it is the download, not an outer volume - counting it here
-    // made an unrelated comic beside the set suppress recursion into a
-    // genuinely nested extensionless RAR (review sweep 13 Aug U3). Same
-    // exclusion its sibling censuses already apply.
-    let pre_obfuscated = before.iter().any(|p| {
-        !looks_like_named_rar(p) && nzbkit::extract::archive_sniff_eligible(p) && rar_magic(p)
-    });
-    let is_new_nested_archive = |p: &PathBuf| {
-        if !is_extractable_archive(p) {
-            return false;
-        }
-        if looks_like_named_rar(p) {
-            let stem = p
-                .file_name()
-                .map(|n| release_stem(&n.to_string_lossy()))
-                .unwrap_or_default();
-            if pre_stems.contains(&stem) {
-                return false; // rebuilt member of the outer set
-            }
-        } else if pre_obfuscated && rar_magic(p) {
-            return false; // rebuilt member of the obfuscated outer set
-        }
-        true
-    };
+    // The outer volume sets this pass started with - see
+    // [`OuterSetGuard`] for why a "new" archive beside one of them is a
+    // rebuilt member and not a nested layer.
+    let guard = OuterSetGuard::new(&before);
+    let is_new_nested_archive =
+        |p: &PathBuf| is_extractable_archive(p) && !guard.is_rebuilt_member(p);
     // Subdirectories that ALREADY hold an extractable archive when this
     // pass starts. The after/before diff below only finds archives a pass
     // PRODUCED - but an on-disk unpack writes its entry paths as real
@@ -660,10 +628,7 @@ fn extract_nested_capped(
                 // Move this pass's output only - and never a rebuilt member
                 // of the outer volume set (.rev/RR repairs land in the diff
                 // too, but they belong beside their siblings).
-                let rebuilt_outer = looks_like_named_rar(&p)
-                    && p.file_name()
-                        .map(|n| pre_stems.contains(&release_stem(&n.to_string_lossy())))
-                        .unwrap_or(false);
+                let rebuilt_outer = guard.is_rebuilt_named(&p);
                 if !before.contains(&p)
                     && !rebuilt_outer
                     && let Some(name) = p.file_name()
@@ -723,6 +688,80 @@ fn extract_nested_capped(
     // deeper level failed): sweep the spent input archives on full success.
     sweep_spent_entry(ok.produced());
     Ok(ok)
+}
+
+/// The outer volume sets one nested level started with, keyed by the
+/// DIRECTORY each lives in.
+///
+/// A volume REBUILT during extraction (.rev reconstruction, RR repair)
+/// lands in the after/before diff as a "new" file but belongs to the
+/// outer set - never descend into it. It lands BESIDE its set, so the
+/// guard is (parent dir, release stem) and never the bare stem: keyed by
+/// stem alone, a poster's `release.rar -> sub/release.rar -> payload`
+/// read as a rebuilt outer volume, nothing descended into `sub` (which
+/// did not exist before, so `pre_sub_dirs` offered no other route), and
+/// the level reported `Produced` with the payload still packed (Codex
+/// sweep 13 Oct 2026 F4).
+///
+/// Magic-only (obfuscated) outer volumes have no name grammar for the
+/// stem guard, so the guard remembers which directories held one: a NEW
+/// extensionless Rar!-magic file appearing beside such a set is a rebuilt
+/// member of it (.rev/RR output), not a nested archive - archives a pass
+/// genuinely produces carry their packed names. That census was one
+/// boolean for the whole tree until F4, so an obfuscated outer set
+/// suppressed descent into a magic-only archive anywhere below it. A
+/// final payload (.cbr, .cb7) is RAR magic without RAR grammar too, but
+/// it is the download, not an outer volume - counting it here made an
+/// unrelated comic beside the set suppress recursion into a genuinely
+/// nested extensionless RAR (review sweep 13 Aug U3). Same exclusion its
+/// sibling censuses already apply.
+struct OuterSetGuard {
+    named: std::collections::HashSet<(PathBuf, String)>,
+    obfuscated_dirs: std::collections::HashSet<PathBuf>,
+}
+
+impl OuterSetGuard {
+    fn new(before: &std::collections::HashSet<PathBuf>) -> Self {
+        let named = before
+            .iter()
+            .filter(|p| looks_like_named_rar(p))
+            .filter_map(Self::key)
+            .collect();
+        let obfuscated_dirs = before
+            .iter()
+            .filter(|p| {
+                !looks_like_named_rar(p)
+                    && nzbkit::extract::archive_sniff_eligible(p)
+                    && rar_magic(p)
+            })
+            .filter_map(|p| p.parent().map(|d| d.to_path_buf()))
+            .collect();
+        Self {
+            named,
+            obfuscated_dirs,
+        }
+    }
+
+    fn key(p: &PathBuf) -> Option<(PathBuf, String)> {
+        let dir = p.parent()?.to_path_buf();
+        let stem = nzbkit::extract::release_stem(&p.file_name()?.to_string_lossy());
+        Some((dir, stem))
+    }
+
+    /// A named RAR volume that shares a directory AND a release stem with
+    /// a set this level started with.
+    fn is_rebuilt_named(&self, p: &PathBuf) -> bool {
+        looks_like_named_rar(p) && Self::key(p).is_some_and(|k| self.named.contains(&k))
+    }
+
+    /// [`Self::is_rebuilt_named`], or a magic-only RAR beside a
+    /// magic-only set this level started with.
+    fn is_rebuilt_member(&self, p: &PathBuf) -> bool {
+        if looks_like_named_rar(p) {
+            return self.is_rebuilt_named(p);
+        }
+        p.parent().is_some_and(|d| self.obfuscated_dirs.contains(d)) && rar_magic(p)
+    }
 }
 
 /// Does every archive this level is about to unpack PROVE that it stores
@@ -2635,6 +2674,11 @@ mod nested_depth_tests;
 #[cfg(test)]
 #[path = "unpack/nested_repair_cancel_tests.rs"]
 mod nested_repair_cancel_tests;
+
+/// Codex 13 Oct F4: a nested archive sharing the outer set's stem.
+#[cfg(test)]
+#[path = "unpack/nested_same_stem_tests.rs"]
+mod nested_same_stem_tests;
 
 /// The one-dominant-member PAR2 shape, which had no corpus anywhere in
 /// the tree until 16 Sep 2026 - and whose absence is why the lane

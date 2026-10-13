@@ -160,11 +160,14 @@ digest of the tag. The same attestation is attached to the release as
 downloaded files alone (`--bundle <that file>`) and archived alongside
 them.
 
-Scope, stated plainly: this covers the `nzbfast-<target>.tar.gz`
-binaries. The convenience packages - the macOS disk image and the
-Windows installer, which is what most people download - are built and
-signed through separate channels and carry no build-provenance
-attestation.
+Scope, stated plainly: a file is covered exactly when the release
+carries `<file>.intoto.jsonl` beside it. The workflow builds the
+`nzbfast-<target>.tar.gz` binaries, the Linux tarballs, the Windows
+installer and portable zip, the macOS disk image and zip, and every
+update payload this manifest points at, so the payload a client is told
+to fetch is the attested build. Releases cut before the workflow gained
+those jobs (1.7.1 and earlier) cover the `nzbfast-<target>.tar.gz`
+binaries only.
 
 Work to make builds bit-for-bit repeatable is in progress and documented
 separately; we do not claim it until a released tag has been

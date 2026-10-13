@@ -101,8 +101,8 @@ fn a_pax_spelled_sparse_member_is_refused_too() {
     let dir = tmp("paxsparse");
     let mut sparse = Spec::file("holey.img", b"1234");
     sparse.pax = vec![
-        ("GNU.sparse.major".to_string(), "1".to_string()),
-        ("GNU.sparse.size".to_string(), "1048576".to_string()),
+        ("GNU.sparse.major".to_string(), b"1".to_vec()),
+        ("GNU.sparse.size".to_string(), b"1048576".to_vec()),
     ];
     let container = put(&dir, "release.tar", &tar_of(&[sparse]));
     let jobs = collect_tar_containers(&dir).unwrap();
@@ -226,6 +226,41 @@ fn a_gnu_tar_with_a_long_name_unpacks() {
     let jobs = collect_tar_containers(&dir).unwrap();
     assert!(extract_tar(&dir, &jobs).is_empty());
     assert_eq!(std::fs::read(dir.join(&deep)).unwrap(), body);
+}
+
+/// A GNU tar written with populated access/change times (incremental
+/// dumps do) lands its members at their own names: the times sit where
+/// POSIX keeps `prefix`, and reading them as one put every file under a
+/// directory named after an octal timestamp. Codex 13 Oct sweep F5.
+#[test]
+fn a_gnu_tar_with_access_times_unpacks_at_its_own_names() {
+    let dir = tmp("gnutimes");
+    let a = vec![6u8; 2_500];
+    let b = b"notes\n".repeat(40);
+    let times = Some((0o15000000000, 0o15000000007));
+    let arch = tar_of(&[
+        Spec {
+            gnu: true,
+            gnu_times: times,
+            ..Spec::file("movie.mkv", &a)
+        },
+        Spec {
+            gnu: true,
+            gnu_times: times,
+            ..Spec::dir("sub/")
+        },
+        Spec {
+            gnu: true,
+            gnu_times: times,
+            ..Spec::file("sub/notes.txt", &b)
+        },
+    ]);
+    put(&dir, "release.tar", &arch);
+    let jobs = collect_tar_containers(&dir).unwrap();
+    assert!(extract_tar(&dir, &jobs).is_empty());
+    assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), a);
+    assert_eq!(std::fs::read(dir.join("sub/notes.txt")).unwrap(), b);
+    assert!(!dir.join("15000000000").exists(), "no timestamp directory");
 }
 
 /// The nested-layer predicate answers for a tar the same way it answers

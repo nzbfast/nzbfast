@@ -86,6 +86,29 @@ pub enum HistWrite {
     Refused,
 }
 
+/// One entry of [`Daemon::hist_owed`]: a terminal record the queue store
+/// carries because history.jsonl has no current row for it.
+pub struct Owed {
+    pub job: Arc<Mutex<Job>>,
+    /// The record is MOVING between the live lists - out of the queue
+    /// and not yet into history (a park whose prewrite was refused), or
+    /// out of history and not yet back in the queue (a retry or library
+    /// play of a record already owed) - so it is in neither, and
+    /// `queue_rows` carries it on this flag alone.
+    ///
+    /// Without it the ordinary rule ("carried while it is in history")
+    /// read the move as a delete: a queue save inside the window
+    /// published a tombstone over the record's only durable row and,
+    /// for the retry, dropped the entry for good, so a kill before the
+    /// mover's own save lost the record from both stores (13 Oct 2026
+    /// codex read-only sweep, F2). Set by `Daemon::hist_carry_across`
+    /// under the same hold that removes the old membership, cleared by
+    /// `Daemon::hist_carry_landed` once the new one is in place - so a
+    /// delete, which can only find the record in a live list, still
+    /// stops the carry the ordinary way.
+    pub in_transit: bool,
+}
+
 /// Read a store's bytes, telling a MISSING store (`Ok(None)`, a fresh
 /// install or a pre-split spool) from one that is there and cannot be
 /// read (`Err`). Both stores' replays and `load_queue`'s probe use it;
@@ -275,7 +298,78 @@ impl Daemon {
     /// replaces the entry. Must not be called with `history` held.
     pub(crate) fn hist_owe(&self, job: &Arc<Mutex<Job>>) {
         let id = job.lock_ok().nzo_id.clone();
-        self.hist_owed.lock_ok().insert(id, job.clone());
+        self.hist_owed.lock_ok().insert(
+            id,
+            Owed {
+                job: job.clone(),
+                in_transit: false,
+            },
+        );
+    }
+
+    /// Carry `job` in the queue store across a move between the two live
+    /// lists, and take it out of the list it is leaving (`leave`) under
+    /// the SAME hold of `hist_owed` - see [`Owed::in_transit`] for the
+    /// window this closes. `queue_rows` takes `hist_owed` before it
+    /// snapshots either list, so it sees the record in exactly one of
+    /// the old list or the carry, never neither.
+    ///
+    /// `fresh` says whether to register a record that is not owed yet:
+    /// park passes `true` when its prewrite was refused (the queue row
+    /// it is about to retain out is the record's only durable copy),
+    /// while retry and library play pass `false` - a record that is NOT
+    /// owed has its history.jsonl row on disk, which `hist_inflight`
+    /// already keeps alive across the move, so only an entry history
+    /// refused needs marking. Lock order: `hist_owed`, then whatever
+    /// `leave` takes (`queue` for park, `history` for the other two) -
+    /// the order `queue_rows` takes them in.
+    pub(crate) fn hist_carry_across<R>(
+        &self,
+        job: &Arc<Mutex<Job>>,
+        id: &str,
+        fresh: bool,
+        leave: impl FnOnce() -> R,
+    ) -> R {
+        let mut owed = self.hist_owed.lock_ok();
+        match owed.get_mut(id) {
+            Some(o) if Arc::ptr_eq(&o.job, job) => o.in_transit = true,
+            _ if fresh => {
+                owed.insert(
+                    id.to_owned(),
+                    Owed {
+                        job: job.clone(),
+                        in_transit: true,
+                    },
+                );
+            }
+            _ => {}
+        }
+        leave()
+    }
+
+    /// The carry [`Self::hist_carry_across`] began has reached its
+    /// destination list. `still_owed` is whether the record now sits in
+    /// HISTORY with history.jsonl still owing it a row (park: the entry
+    /// stays, as an ordinary owed record that a landed write or a delete
+    /// retires); `false` drops the entry outright - the record is back
+    /// in the live queue (retry, library play), whose own row is the
+    /// one to publish, or park filed it into no store at all.
+    ///
+    /// Must be called AFTER the destination membership is in place: a
+    /// queue save between the two then still finds it in one or the
+    /// other.
+    pub(crate) fn hist_carry_landed(&self, job: &Arc<Mutex<Job>>, id: &str, still_owed: bool) {
+        let mut owed = self.hist_owed.lock_ok();
+        if !owed.get(id).is_some_and(|o| Arc::ptr_eq(&o.job, job)) {
+            return;
+        }
+        if still_owed {
+            if let Some(o) = owed.get_mut(id) {
+                o.in_transit = false;
+            }
+        } else {
+            owed.remove(id);
+        }
     }
 
     /// Persist a history record the caller has just mutated, and say
@@ -958,8 +1052,11 @@ impl Daemon {
                 // Every live record is in its own store now, so none of
                 // them needs carrying in the queue store any longer - and
                 // a record in `drop_ids` is being removed, which is the
-                // other way an entry stops being owed.
-                self.hist_owed.lock_ok().clear();
+                // other way an entry stops being owed. Except a record IN
+                // TRANSIT: it is in neither live list, so this snapshot
+                // did not carry it, and the queue store's row is still
+                // its only durable copy (`Owed::in_transit`).
+                self.hist_owed.lock_ok().retain(|_, o| o.in_transit);
                 true
             }
             Err(e) => {

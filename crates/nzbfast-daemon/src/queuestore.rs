@@ -250,7 +250,42 @@ impl Daemon {
     /// the queue lock held it across every job lock and JSON build, and
     /// every API request queues behind it.
     pub(crate) fn queue_rows(&self) -> Vec<Row> {
+        // `hist_owed` is taken BEFORE the queue snapshot and held until
+        // the carried set is decided, so membership and carry are read
+        // as ONE state: a record moving between the lists has its carry
+        // registered under this same lock in the same hold that removes
+        // it from the list it leaves (`Daemon::hist_carry_across`), so
+        // this sees it in one or the other. Snapshotted separately, a
+        // save between the two reads saw it in neither and published a
+        // tombstone over its only durable row (13 Oct 2026 sweep, F2).
+        let mut owed_guard = self.hist_owed.lock_ok();
         let snapshot: Vec<Arc<Mutex<Job>>> = self.queue.lock_ok().iter().cloned().collect();
+        // ...plus the terminal records the history store has refused,
+        // which this store carries until history takes them (see
+        // `Daemon::hist_owed`). AFTER the live rows, so the order an
+        // append implies still matches. An entry stops being carried
+        // when the record is back in the live queue (a retry, whose row
+        // must not be overridden by a stale terminal line) or has left
+        // history (a delete - carrying it on would resurrect it at the
+        // next start) - unless it is in transit between the two, when
+        // being in neither is the move and not a delete. Matched by
+        // Arc, which is what travels with every move, so no job lock is
+        // taken here under `hist_owed`. `queue` and `history` are taken
+        // UNDER `hist_owed` here and nowhere is the reverse order taken.
+        let owed: Vec<Arc<Mutex<Job>>> = if owed_guard.is_empty() {
+            drop(owed_guard);
+            Vec::new()
+        } else {
+            let hist = self.history.lock_ok();
+            owed_guard.retain(|_, o| {
+                !snapshot.iter().any(|q| Arc::ptr_eq(q, &o.job))
+                    && (o.in_transit || hist.iter().any(|h| Arc::ptr_eq(h, &o.job)))
+            });
+            drop(hist);
+            let carried = owed_guard.values().map(|o| o.job.clone()).collect();
+            drop(owed_guard);
+            carried
+        };
         let mut rows: Vec<Row> = snapshot
             .iter()
             .map(|j| {
@@ -258,28 +293,6 @@ impl Daemon {
                 (g.nzo_id.clone(), job_json(&g).to_string())
             })
             .collect();
-        // ...plus the terminal records the history store has refused,
-        // which this store carries until history takes them (see
-        // `Daemon::hist_owed`). AFTER the live rows, so the order an
-        // append implies still matches. An entry stops being carried
-        // when the record is back in the live queue (a retry, whose row
-        // above must not be overridden by a stale terminal line) or has
-        // left history (a delete - carrying it on would resurrect it at
-        // the next start). `history` is taken UNDER `hist_owed` here and
-        // nowhere is the reverse order taken.
-        let owed: Vec<Arc<Mutex<Job>>> = {
-            let mut owed = self.hist_owed.lock_ok();
-            if owed.is_empty() {
-                Vec::new()
-            } else {
-                let live: HashSet<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
-                let hist = self.history.lock_ok();
-                owed.retain(|id, j| {
-                    !live.contains(id.as_str()) && hist.iter().any(|h| Arc::ptr_eq(h, j))
-                });
-                owed.values().cloned().collect()
-            }
-        };
         for j in &owed {
             let g = j.lock_ok();
             rows.push((g.nzo_id.clone(), job_json(&g).to_string()));

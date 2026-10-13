@@ -429,3 +429,253 @@ fn a_store_that_will_not_open_latches_before_anything_is_swept() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+// ---------------------------------------------------------------------
+// 13 Oct 2026 codex read-only sweep, F2: the fallback above covers a
+// record sitting in history, and a record MOVING between the lists sat
+// in neither - so a queue save inside the move published a tombstone
+// over its only durable row. Each red test runs that save inside the
+// real window (the storecut seam), kills every later write, and
+// restarts over the spool. `Owed::in_transit` is the remedy.
+// ---------------------------------------------------------------------
+
+/// A record with something worth losing beyond its id: the identity and
+/// the settings a restart must bring back.
+fn marked(d: &Arc<Daemon>, id: &str, state: &str) -> Arc<Mutex<Job>> {
+    let j = job(d, id, state);
+    {
+        let mut g = j.lock_ok();
+        g.category = "tv".into();
+        g.priority = 1;
+    }
+    j
+}
+
+/// The restarted record, by id, from whichever list it came back in.
+fn restored(dir: &Path, id: &str) -> Option<(String, String, String, i32)> {
+    let d = test_daemon(dir);
+    d.load_queue();
+    let q = d.queue.lock_ok().iter().cloned().collect::<Vec<_>>();
+    let h = d.history.lock_ok().iter().cloned().collect::<Vec<_>>();
+    let all: Vec<_> = q
+        .iter()
+        .chain(h.iter())
+        .filter(|j| j.lock_ok().nzo_id == id)
+        .collect();
+    assert!(all.len() <= 1, "{id} came back in both lists");
+    all.first().map(|j| {
+        let g = j.lock_ok();
+        (
+            g.name.clone(),
+            g.category.clone(),
+            format!("{:?}", g.state),
+            g.priority,
+        )
+    })
+}
+
+/// A Failed record in history that history.jsonl never took, carried in
+/// the queue store - the state P2-3's park leaves.
+fn owed_in_history(d: &Arc<Daemon>, id: &str) -> Arc<Mutex<Job>> {
+    let j = marked(d, id, "Failed");
+    d.history.lock_ok().push(j.clone());
+    d.hist_owe(&j);
+    assert!(d.save_queue());
+    assert_eq!(
+        stored_state(d, id).as_deref(),
+        Some("Failed"),
+        "the fixture's premise"
+    );
+    assert!(replayed_history_ids(d).is_empty(), "the fixture's premise");
+    j
+}
+
+/// F2, park: the PREWRITE is refused, so from the retain on the queue
+/// row is the record's only durable copy - and a queue save landing
+/// there used to tombstone it.
+#[test]
+fn a_park_whose_prewrite_is_refused_survives_a_queue_save_in_its_window() {
+    use crate::storecut::{arm_cut, on_park_gap};
+    let dir = tmp("f2-park");
+    let d = test_daemon(&dir);
+    let j = marked(&d, "nzo_f2p", "Finishing");
+    d.queue.lock_ok().push_back(j.clone());
+    assert!(d.save_queue());
+    j.lock_ok().state = JobState::Completed;
+
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = fired.clone();
+    arm_store_cut(&[Store::HistoryAppend, Store::HistoryRewrite]);
+    on_park_gap(move |d| {
+        assert!(d.save_queue(), "the racing save must land");
+        // The kill: nothing park writes after this reaches disk.
+        arm_cut(0);
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    d.park_gen(j, None);
+    disarm();
+    assert!(
+        fired.load(std::sync::atomic::Ordering::Relaxed),
+        "the gap seam never fired"
+    );
+    assert!(
+        replayed_history_ids(&d).is_empty(),
+        "the fault under test: history took nothing"
+    );
+
+    assert_eq!(
+        restored(&dir, "nzo_f2p"),
+        Some(("Release.nzo_f2p".into(), "tv".into(), "Completed".into(), 1)),
+        "the save inside park's window tombstoned the record's only durable row"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// F2, retry: a record history refused is moved back to the queue, and a
+/// queue save between its history removal and its queue push used to
+/// see it in neither list - tombstoning its row AND dropping it from
+/// `hist_owed` for good.
+#[test]
+fn a_retry_of_an_owed_record_survives_a_queue_save_in_its_window() {
+    use crate::storecut::{arm_cut, on_retry_gap};
+    let dir = tmp("f2-retry");
+    let d = test_daemon(&dir);
+    owed_in_history(&d, "nzo_f2r");
+
+    arm_store_cut(&[Store::HistoryAppend, Store::HistoryRewrite]);
+    on_retry_gap(|d| {
+        assert!(d.save_queue(), "the racing save must land");
+        arm_cut(0);
+    });
+    assert!(d.retry("nzo_f2r"));
+    disarm();
+
+    let back = restored(&dir, "nzo_f2r")
+        .expect("the save inside retry's window tombstoned the record's only durable row");
+    assert_eq!(
+        (back.0.as_str(), back.1.as_str(), back.3),
+        ("Release.nzo_f2r", "tv", 1)
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// F2's third door: library play moves a record out of history exactly
+/// as retry does, and an owed one had the same window.
+#[test]
+fn a_play_of_an_owed_record_survives_a_queue_save_in_its_window() {
+    use crate::storecut::{arm_cut, on_activate_gap};
+    let dir = tmp("f2-play");
+    let d = test_daemon(&dir);
+    let j = owed_in_history(&d, "nzo_f2a");
+
+    arm_store_cut(&[Store::HistoryAppend, Store::HistoryRewrite]);
+    on_activate_gap(|d| {
+        assert!(d.save_queue(), "the racing save must land");
+        arm_cut(0);
+    });
+    d.activate_parked(&j);
+    disarm();
+
+    let back = restored(&dir, "nzo_f2a")
+        .expect("the save inside the play's window tombstoned the record's only durable row");
+    assert_eq!(
+        (back.0.as_str(), back.1.as_str(), back.3),
+        ("Release.nzo_f2a", "tv", 1)
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Control: a carry must not outlive a DELETE. A park that history
+/// refused end to end leaves the record owed; the user deletes it from
+/// history, and the next start must not bring it back.
+#[test]
+fn a_refused_park_then_deleted_is_not_resurrected() {
+    let dir = tmp("f2-delete");
+    let d = test_daemon(&dir);
+    let j = marked(&d, "nzo_f2d", "Finishing");
+    d.queue.lock_ok().push_back(j.clone());
+    assert!(d.save_queue());
+    j.lock_ok().state = JobState::Completed;
+
+    arm_store_cut(&[Store::HistoryAppend, Store::HistoryRewrite]);
+    d.park_gen(j, None);
+    assert_eq!(stored_state(&d, "nzo_f2d").as_deref(), Some("Completed"));
+    // The delete, as the history verbs do it at this layer.
+    d.history
+        .lock_ok()
+        .retain(|x| x.lock_ok().nzo_id != "nzo_f2d");
+    assert!(d.save_queue());
+    disarm();
+
+    assert_eq!(stored_state(&d, "nzo_f2d"), None);
+    assert!(d.hist_owed.lock_ok().is_empty());
+    assert_eq!(
+        restored(&dir, "nzo_f2d"),
+        None,
+        "a deleted record came back"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Control: the prewrite is refused but the FINAL filing lands. The carry
+/// stands down, the queue store drops its copy, and the record is in
+/// history exactly once.
+#[test]
+fn a_refused_prewrite_whose_final_filing_lands_is_carried_no_further() {
+    use crate::storecut::on_park_gap;
+    let dir = tmp("f2-lands");
+    let d = test_daemon(&dir);
+    let j = marked(&d, "nzo_f2l", "Finishing");
+    d.queue.lock_ok().push_back(j.clone());
+    assert!(d.save_queue());
+    j.lock_ok().state = JobState::Completed;
+
+    arm_store_cut(&[Store::HistoryAppend, Store::HistoryRewrite]);
+    on_park_gap(|d| {
+        assert!(d.save_queue());
+        let raw = std::fs::read(d.queue_store_path()).unwrap_or_default();
+        assert!(
+            crate::queuestore::replay_bytes(&raw)
+                .rows
+                .iter()
+                .any(|(_, v, _)| v["nzo_id"] == "nzo_f2l" && v["state"] == "Completed"),
+            "carried while in transit"
+        );
+        // History recovers before the final filing.
+        disarm();
+    });
+    d.park_gen(j, None);
+    disarm();
+
+    assert!(
+        d.hist_owed.lock_ok().is_empty(),
+        "a landed filing owes nothing"
+    );
+    assert_eq!(stored_state(&d, "nzo_f2l"), None);
+    assert_eq!(replayed_history_ids(&d), ["nzo_f2l"]);
+    assert_eq!(
+        restored(&dir, "nzo_f2l"),
+        Some(("Release.nzo_f2l".into(), "tv".into(), "Completed".into(), 1))
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Control: an ordinary retry of an owed record with healthy stores. The
+/// retry's generation wins - the queue row is Queued, the carry is gone,
+/// and the next start runs it rather than showing the old failure.
+#[test]
+fn a_retry_of_an_owed_record_publishes_the_retry_and_carries_nothing() {
+    let dir = tmp("f2-retry-ok");
+    let d = test_daemon(&dir);
+    owed_in_history(&d, "nzo_f2k");
+
+    assert!(d.retry("nzo_f2k"));
+
+    assert!(d.hist_owed.lock_ok().is_empty());
+    assert_eq!(stored_state(&d, "nzo_f2k").as_deref(), Some("Queued"));
+    assert_eq!(
+        restored(&dir, "nzo_f2k"),
+        Some(("Release.nzo_f2k".into(), "tv".into(), "Queued".into(), 1))
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

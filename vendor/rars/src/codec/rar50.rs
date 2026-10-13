@@ -6266,7 +6266,13 @@ impl Rar50Decoder {
             }
         }
 
-        if output.len() == output_size {
+        if output.len() >= output_size {
+            // Anything past `output_size` is the tail of a final match that
+            // ran past the member's declared size (see `copy_match`): it is
+            // window, not output. Filters run over the declared bytes only,
+            // so a filter reaching into the tail is still "range exceeds
+            // output".
+            let overrun = output.split_off(output_size);
             let history_output =
                 if self.retain_history && mode.applies_filters() && !filters.is_empty() {
                     Some(output.clone())
@@ -6279,6 +6285,7 @@ impl Rar50Decoder {
             if self.retain_history {
                 self.history
                     .extend_from_slice(history_output.as_deref().unwrap_or(&output));
+                self.history.extend_from_slice(&overrun);
                 self.trim_history_to(dictionary_size);
             }
             Ok(output)
@@ -6681,11 +6688,14 @@ impl Rar50Decoder {
         if distance == 0 || distance > logical_window {
             return Err(Error::InvalidData("RAR 5 match distance exceeds window"));
         }
-        if output
-            .len()
-            .checked_add(length)
-            .is_none_or(|end| end > output_limit)
-        {
+        // A match may run PAST the member's declared size. Reference unrar
+        // decodes it whole into the solid window and writes only the declared
+        // bytes, so the caller truncates the output and keeps the overrun in
+        // `history`, where the next solid member's distances count it. Only a
+        // match that STARTS inside the member is decoded at all (the caller's
+        // loop stops at `output_limit`), so the overrun is bounded by one
+        // match length.
+        if output.len() >= output_limit || output.len().checked_add(length).is_none() {
             return Err(Error::InvalidData("RAR 5 match exceeds output limit"));
         }
         let mut remaining = length;
@@ -6791,6 +6801,11 @@ struct StreamingOutput {
     /// vendor/rars/VENDORING.md.)
     delta_scratch: Vec<u8>,
     next_flush_check: usize,
+    /// Ring position past which nothing is ever flushed, or `usize::MAX`.
+    /// Set only by `copy_match_across_limit`: the bytes of a final match
+    /// that run past the member's declared size stay in the ring as window
+    /// for the next solid member and never reach the sink.
+    emit_cap: usize,
 }
 
 impl StreamingOutput {
@@ -6848,6 +6863,7 @@ impl StreamingOutput {
             member_ends: Vec::new(),
             filter_scratch: Vec::new(),
             delta_scratch: Vec::new(),
+            emit_cap: usize::MAX,
         }
     }
 
@@ -6859,6 +6875,24 @@ impl StreamingOutput {
     fn with_member_ends(mut self, member_ends: Vec<usize>) -> Self {
         self.member_ends = member_ends;
         self
+    }
+
+    /// A chained member's block stream ended: the group's output must sit
+    /// exactly on that member's declared end. A member that decoded past it
+    /// (a final match overrunning it, or symbols after it) or fell short
+    /// would shift every later member's bytes, so the chain fails here and
+    /// the extractor's serial retry decodes the group member by member,
+    /// with the per-member semantics. The group's LAST member is the
+    /// ordinary output limit and is not checked here; neither is a lone
+    /// member, which has no `member_ends`.
+    #[cfg(feature = "parallel")]
+    fn check_member_end(&self, index: usize) -> Result<()> {
+        match self.member_ends.get(index) {
+            Some(&end) if index + 1 < self.member_ends.len() && self.written() != end => Err(
+                Error::InvalidData("RAR 5 solid member does not end at its declared size"),
+            ),
+            _ => Ok(()),
+        }
     }
 
     fn queue_filter<E>(
@@ -7241,18 +7275,21 @@ impl StreamingOutput {
         // with a multi-MiB zero run, or one following an all-zero solid
         // member, was rejected here with "match distance exceeds window").
         let logical_window = self.window_len().saturating_add(self.zero_prefix);
+        let crosses_limit = self
+            .written
+            .checked_add(length)
+            .is_none_or(|end| end > self.output_limit);
         if self.all_zero && distance <= logical_window {
+            if crosses_limit {
+                return self.copy_match_across_limit(distance, length, sink);
+            }
             return self.push_zeroes(length, sink);
         }
         if distance == 0 || distance > logical_window {
             return Err(Error::InvalidData("RAR 5 match distance exceeds window").into());
         }
-        if self
-            .written
-            .checked_add(length)
-            .is_none_or(|end| end > self.output_limit)
-        {
-            return Err(Error::InvalidData("RAR 5 match exceeds output limit").into());
+        if crosses_limit {
+            return self.copy_match_across_limit(distance, length, sink);
         }
         let mut length = length;
         let window = self.window_len();
@@ -7374,6 +7411,46 @@ impl StreamingOutput {
         Ok(())
     }
 
+    /// A final match that runs past the member's declared size, which the
+    /// buffered decoder's `copy_match` describes: the declared share is
+    /// copied and emitted as usual, and the rest is materialized into the
+    /// window only - `emit_cap` stops every later flush at the member's last
+    /// byte - so the next solid member reaches the window the whole match
+    /// left, as it does under reference unrar. `written` ends AT the limit,
+    /// which is what stops the caller's decode loop. Distance errors were
+    /// already raised by `copy_match` for the whole match.
+    #[cold]
+    #[inline(never)]
+    fn copy_match_across_limit<E>(
+        &mut self,
+        distance: usize,
+        length: usize,
+        sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), StreamDecodeError<E>> {
+        let room = self.output_limit.saturating_sub(self.written);
+        if room == 0 {
+            return Err(Error::InvalidData("RAR 5 match exceeds output limit").into());
+        }
+        let limit = self.output_limit;
+        self.copy_match(distance, room, sink)?;
+        self.emit_cap = self.head;
+        let over = length - room;
+        let logical_window = self.window_len().saturating_add(self.zero_prefix);
+        if self.all_zero && distance <= logical_window && self.pending_filters.is_empty() {
+            // The sparse arm: the overrun is zeroes, carried logically the
+            // way `push_zeroes` carries a run, and never emitted.
+            self.zero_prefix = self.zero_prefix.saturating_add(over);
+            return Ok(());
+        }
+        self.output_limit = limit
+            .checked_add(over)
+            .ok_or(Error::InvalidData("RAR 5 match exceeds output limit"))?;
+        let copied = self.copy_match(distance, over, sink);
+        self.output_limit = limit;
+        self.written = limit;
+        copied
+    }
+
     fn flush<E>(
         &mut self,
         sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
@@ -7385,7 +7462,8 @@ impl StreamingOutput {
                 .front()
                 .map(|held| held.ring_start)
                 .unwrap_or(usize::MAX)
-                .min(self.head);
+                .min(self.head)
+                .min(self.emit_cap);
             while self.flushed < plain_limit {
                 let offset = self.flushed & self.mask;
                 let len = (plain_limit - self.flushed).min(self.ring.len() - offset);
@@ -7400,6 +7478,12 @@ impl StreamingOutput {
                 .ring_start
                 .checked_add(front.filter.length)
                 .ok_or(Error::InvalidData("RAR 5 filter range overflows"))?;
+            if end > self.emit_cap {
+                // The range reaches past the member's declared end, into
+                // window-only bytes: the buffered decoder refuses the same
+                // filter (it filters the declared bytes only).
+                return Err(Error::InvalidData("RAR 5 filter range exceeds output").into());
+            }
             if self.head < end {
                 // Range not fully decoded yet; held back until it is.
                 return Ok(());
@@ -7456,6 +7540,11 @@ impl StreamingOutput {
         self.flush(sink)?;
         if !self.pending_filters.is_empty() {
             return Err(Error::InvalidData("RAR 5 filter range exceeds output").into());
+        }
+        // Past a match that overran the member, the bytes above `emit_cap`
+        // were withheld on purpose; they are window like any flushed byte.
+        if self.emit_cap != usize::MAX {
+            self.flushed = self.head;
         }
         Ok(())
     }
@@ -7869,6 +7958,9 @@ struct TapeJob {
     buffers: TapeBuffers,
     start_bit: usize,
     payload_bits: usize,
+    /// The block carried its member's `is_last`, so a chain's apply stage
+    /// checks the member ended where it declared (see `check_member_end`).
+    ends_member: bool,
 }
 
 #[cfg(feature = "parallel")]
@@ -7877,6 +7969,8 @@ struct BlockTape {
     tables: std::sync::Arc<LazyDecodeTables>,
     payload: Vec<u8>,
     payload_bits: usize,
+    /// Carried from `TapeJob::ends_member`, through any continuation.
+    ends_member: bool,
     lits: Vec<u8>,
     ops: Vec<TapeOp>,
     /// Filter payloads, one per `tape_kind::FILTER` op, in tape order (the
@@ -7914,6 +8008,7 @@ fn decode_block_tape(job: TapeJob) -> BlockTape {
         buffers,
         start_bit,
         payload_bits,
+        ends_member,
     } = job;
     let TapeBuffers {
         payload,
@@ -7939,6 +8034,7 @@ fn decode_block_tape(job: TapeJob) -> BlockTape {
                 tables: lazy_tables,
                 payload,
                 payload_bits,
+                ends_member,
                 lits,
                 ops,
                 filters,
@@ -8037,6 +8133,7 @@ fn decode_block_tape(job: TapeJob) -> BlockTape {
         tables: lazy_tables,
         payload,
         payload_bits,
+        ends_member,
         lits,
         ops,
         filters,
@@ -8413,6 +8510,7 @@ impl Rar50Decoder {
                         buffers,
                         start_bit,
                         payload_bits: header.payload_bits,
+                        ends_member: header.is_last,
                     });
                     dispatched += 1;
                     // Hand the job to any worker with queue space; when every
@@ -8448,6 +8546,7 @@ impl Rar50Decoder {
             // apply in archive order.
             let mut reorder: BTreeMap<usize, BlockTape> = BTreeMap::new();
             let mut applied = 0usize;
+            let mut members_ended = 0usize;
             let mut output_done = false;
             let apply_result: std::result::Result<(), StreamDecodeError<E>> = 'apply: loop {
                 let Ok(tape) = result_rx.recv() else {
@@ -8464,6 +8563,12 @@ impl Rar50Decoder {
                     let result = self.apply_tape(&mut tape, output, output_size, sink);
                     tape.take_buffers().recycle(&recycle_tx);
                     match result {
+                        Ok(TapeApplied::BlockDone) if tape.ends_member => {
+                            if let Err(error) = output.check_member_end(members_ended) {
+                                break 'apply Err(error.into());
+                            }
+                            members_ended += 1;
+                        }
                         Ok(TapeApplied::BlockDone) => {}
                         Ok(TapeApplied::OutputDone) => output_done = true,
                         Err(error) => break 'apply Err(error),
@@ -8840,6 +8945,7 @@ impl Rar50Decoder {
                     buffers: tape.take_buffers(),
                     start_bit: resume_bit,
                     payload_bits,
+                    ends_member: tape.ends_member,
                 };
                 *tape = decode_block_tape(job);
                 continue;
@@ -8984,6 +9090,7 @@ impl Rar50Decoder {
                         buffers,
                         start_bit,
                         payload_bits: header.payload_bits,
+                        ends_member: header.is_last,
                     });
                     dispatched += 1;
                     for probe in 0..job_txs.len() {
@@ -9015,6 +9122,7 @@ impl Rar50Decoder {
             // apply in archive order.
             let mut reorder: BTreeMap<usize, BlockTape> = BTreeMap::new();
             let mut applied = 0usize;
+            let mut members_ended = 0usize;
             let mut output_done = false;
             let apply_result: std::result::Result<(), StreamDecodeError<E>> = 'apply: loop {
                 let Ok(tape) = result_rx.recv() else {
@@ -9031,6 +9139,12 @@ impl Rar50Decoder {
                     let result = self.apply_tape_flat(&mut tape, output, output_size, sink);
                     tape.take_buffers().recycle(&recycle_tx);
                     match result {
+                        Ok(TapeApplied::BlockDone) if tape.ends_member => {
+                            if let Err(error) = output.check_member_end(members_ended) {
+                                break 'apply Err(error.into());
+                            }
+                            members_ended += 1;
+                        }
                         Ok(TapeApplied::BlockDone) => {}
                         Ok(TapeApplied::OutputDone) => output_done = true,
                         Err(error) => break 'apply Err(error),
@@ -9403,12 +9517,33 @@ impl FlatOutput {
         self
     }
 
+    /// A chained member's block stream ended: the group's output must sit
+    /// exactly on that member's declared end. A member that decoded past it
+    /// (a final match overrunning it, or symbols after it) or fell short
+    /// would shift every later member's bytes, so the chain fails here and
+    /// the extractor's serial retry decodes the group member by member,
+    /// with the per-member semantics. The group's LAST member is the
+    /// ordinary output limit and is not checked here; neither is a lone
+    /// member, which has no `member_ends`.
+    #[cfg(feature = "parallel")]
+    fn check_member_end(&self, index: usize) -> Result<()> {
+        match self.member_ends.get(index) {
+            Some(&end) if index + 1 < self.member_ends.len() && self.written() != end => Err(
+                Error::InvalidData("RAR 5 solid member does not end at its declared size"),
+            ),
+            _ => Ok(()),
+        }
+    }
+
     /// Logical bytes of THIS GROUP's output (the seeded prefix is not
     /// output). Every output-limit and member-boundary computation runs on
     /// this; `pos` stays physical.
     #[inline]
     fn written(&self) -> usize {
-        self.origin + self.pos - self.base
+        // Past a final match that overran the output (`copy_match_across_
+        // limit`), `pos` sits beyond the declared end; the output count
+        // stops at it, exactly as the ring's `written` does.
+        (self.origin + self.pos).min(self.output_end) - self.base
     }
 
     /// Whether this group's declared output is complete - `written() >=
@@ -9560,7 +9695,7 @@ impl FlatOutput {
             .checked_add(length)
             .is_none_or(|end| end + self.base > self.output_end)
         {
-            return Err(Error::InvalidData("RAR 5 match exceeds output limit").into());
+            return self.copy_match_across_limit(distance, length, sink);
         }
         if self.pos + length > self.buf.len() {
             self.make_room(length, sink)?;
@@ -9636,6 +9771,38 @@ impl FlatOutput {
         self.maybe_emit(sink)
     }
 
+    /// The flat twin of `StreamingOutput::copy_match_across_limit`: a final
+    /// match that runs past the declared output lands whole in `buf`, which
+    /// is the window `into_history` hands the next solid member, while
+    /// `emit_ready` never releases a byte at or past `limit_pos`. A buffer
+    /// sized to the output has no room for the overrun, so it grows once
+    /// here - a cold path no encoder takes, bounded by one match length.
+    /// `pos` ending past `limit_pos` is what `output_complete` reads as done.
+    #[cold]
+    #[inline(never)]
+    fn copy_match_across_limit<E>(
+        &mut self,
+        distance: usize,
+        length: usize,
+        sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), StreamDecodeError<E>> {
+        let room = self.limit_pos.saturating_sub(self.pos);
+        let needed = self
+            .pos
+            .checked_add(length)
+            .and_then(|end| end.checked_add(16))
+            .filter(|_| room > 0)
+            .ok_or(Error::InvalidData("RAR 5 match exceeds output limit"))?;
+        if needed > self.buf.len() {
+            self.buf.resize(needed, 0);
+        }
+        let output_end = self.output_end;
+        self.output_end = output_end.saturating_add(length - room);
+        let copied = self.copy_match_slow(distance, length, sink);
+        self.output_end = output_end;
+        copied
+    }
+
     /// Declare a filter over member-output range `[start, start+length)`.
     /// `buf` is 1:1 with output position (no sparse zeros in flat mode), so
     /// `start` indexes `buf` directly. Identical-range chains are kept and
@@ -9704,7 +9871,8 @@ impl FlatOutput {
                 .front()
                 .map(|held| held.start)
                 .unwrap_or(usize::MAX)
-                .min(self.pos);
+                .min(self.pos)
+                .min(self.limit_pos);
             if self.emitted < plain_limit {
                 sink(DecodedChunk::Bytes(&self.buf[self.emitted..plain_limit]))
                     .map_err(StreamDecodeError::Sink)?;
@@ -9717,6 +9885,12 @@ impl FlatOutput {
                 .start
                 .checked_add(front.length)
                 .ok_or(Error::InvalidData("RAR 5 filter range overflows"))?;
+            if self.pos > self.limit_pos && end > self.limit_pos {
+                // Only reachable past a match that overran the output: the
+                // range needs window-only bytes, which the buffered decoder
+                // refuses the same way (it filters the declared bytes only).
+                return Err(Error::InvalidData("RAR 5 filter range exceeds output").into());
+            }
             if self.pos < end {
                 // Range not fully decoded yet; held back until it is.
                 return Ok(());
@@ -11422,6 +11596,7 @@ mod tests {
                             tables: tables.clone(),
                             payload: Vec::new(),
                             payload_bits: 0,
+                            ends_member: false,
                             lits: vec![0xa5; literal_len + 64],
                             ops: vec![
                                 TapeOp::lits(literal_len as u32),
@@ -12190,6 +12365,7 @@ mod tests {
             tables,
             payload,
             payload_bits: 16,
+            ends_member: false,
             lits,
             ops,
             filters,
@@ -15176,9 +15352,25 @@ mod tests {
             decoder.copy_match(&mut output, 3, 1, 3, DEFAULT_DICTIONARY_SIZE),
             Err(Error::InvalidData("RAR 5 match distance exceeds window"))
         );
+        // A match that STARTS inside the member may run past its declared
+        // size: the whole match lands (the caller keeps the overrun as
+        // window and truncates the output). One that starts AT the limit is
+        // a symbol after the member ended, and is refused.
         assert_eq!(
             decoder.copy_match(&mut output, 1, 2, 3, DEFAULT_DICTIONARY_SIZE),
+            Ok(())
+        );
+        assert_eq!(output, b"ABBB");
+        assert_eq!(
+            decoder.copy_match(&mut output, 1, 2, 4, DEFAULT_DICTIONARY_SIZE),
             Err(Error::InvalidData("RAR 5 match exceeds output limit"))
+        );
+        // Crossing the limit excuses nothing else: a bad distance on the
+        // crossing match is still the window error.
+        let mut output = b"AB".to_vec();
+        assert_eq!(
+            decoder.copy_match(&mut output, 3, 4, 3, DEFAULT_DICTIONARY_SIZE),
+            Err(Error::InvalidData("RAR 5 match distance exceeds window"))
         );
     }
 
@@ -15712,6 +15904,157 @@ mod tests {
             );
             assert_eq!(chained.reps, serial.reps, "rep state diverged");
             assert_eq!(chained.previous_match_length, serial.previous_match_length);
+        }
+    }
+
+    /// Three solid members, the first ending in a long match (a 1000-byte
+    /// repeat of the 1000 bytes before it) and the next two reaching back
+    /// into that tail. Declaring the first member `k` bytes short makes its
+    /// FINAL match run `k` bytes past the declared size - the shape
+    /// rarkit's fuzz lane found on 27 Sep 2026. Reference unrar 7.23,
+    /// driven as a black box over the same shape built by `rar -s`,
+    /// extracts the first member cut at its declared size AND the next two
+    /// byte-exact, so the whole match is window for them. Returns the
+    /// packed streams, the declared sizes and each member's expected output.
+    fn overrun_chain(k: usize) -> (Vec<Vec<u8>>, Vec<usize>, Vec<Vec<u8>>) {
+        let noise = |len: usize, seed: u32| -> Vec<u8> {
+            (0..len as u32)
+                .map(|i| (i.wrapping_add(seed).wrapping_mul(2654435761) >> 13) as u8)
+                .collect()
+        };
+        let lead = noise(3000, 1);
+        let tail = noise(1000, 7);
+        let other = noise(700, 13);
+        let first = [lead.as_slice(), &tail, &tail].concat();
+        let second = [tail.as_slice(), &other].concat();
+        let third = [other.as_slice(), &tail].concat();
+        let members = [first, second, third];
+        let mut encoder = Rar50Encoder::with_options(EncodeOptions::new(4));
+        let encoded: Vec<Vec<u8>> = members
+            .iter()
+            .map(|data| encoder.encode_member(data, 0).unwrap())
+            .collect();
+        let declared = vec![members[0].len() - k, members[1].len(), members[2].len()];
+        let expected = vec![
+            members[0][..declared[0]].to_vec(),
+            members[1].clone(),
+            members[2].clone(),
+        ];
+        (encoded, declared, expected)
+    }
+
+    #[test]
+    fn member_whose_final_match_overruns_its_size_keeps_the_overrun_as_window() {
+        for k in [1, 300] {
+            let (encoded, declared, expected) = overrun_chain(k);
+            let mut decoder = Rar50Decoder::new();
+            for (index, packed) in encoded.iter().enumerate() {
+                let out = decoder
+                    .decode_member(packed, 0, declared[index], index != 0, DecodeMode::Lz)
+                    .unwrap_or_else(|error| panic!("k {k} member {index}: {error:?}"));
+                assert_eq!(out, expected[index], "k {k} member {index}");
+            }
+        }
+    }
+
+    /// The same chain through the to-sink entry point, which is what the
+    /// extractor streams through: the flat buffer (the first member is
+    /// non-solid, so a large `flat_limit` takes it flat), the ring, and the
+    /// ring under the MT pipeline and without it. Every leg must emit only
+    /// the declared bytes and hand the next member the overrun as window.
+    #[test]
+    fn overrunning_final_match_matches_the_buffered_decoder_on_every_sink_path() {
+        for k in [1, 300] {
+            let (encoded, declared, expected) = overrun_chain(k);
+            for flat_limit in [u64::MAX, 0] {
+                for workers in [1, usize::MAX] {
+                    let mut decoder = Rar50Decoder::new();
+                    decoder.set_mt_workers_cap(workers);
+                    for (index, packed) in encoded.iter().enumerate() {
+                        let mut out = Vec::new();
+                        decoder
+                            .decode_member_from_reader_with_dictionary_to_sink(
+                                &mut std::io::Cursor::new(packed.as_slice()),
+                                0,
+                                declared[index],
+                                DEFAULT_DICTIONARY_SIZE,
+                                index != 0,
+                                flat_limit,
+                                |chunk| -> std::result::Result<(), std::convert::Infallible> {
+                                    match chunk {
+                                        DecodedChunk::Bytes(bytes) => out.extend_from_slice(bytes),
+                                        DecodedChunk::Repeated { byte, len } => {
+                                            out.extend(std::iter::repeat_n(byte, len))
+                                        }
+                                    }
+                                    Ok(())
+                                },
+                            )
+                            .unwrap_or_else(|error| {
+                                panic!(
+                                    "k {k} flat {flat_limit} workers {workers} member {index}: \
+                                     {error:?}"
+                                )
+                            });
+                        assert_eq!(
+                            out, expected[index],
+                            "k {k} flat {flat_limit} workers {workers} member {index}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A solid CHAIN decodes a group as one stream and cuts it at the
+    /// declared member ends, so a member that decodes past its end would
+    /// shift every later member's bytes. The chain must refuse it (the
+    /// extractor then restores the snapshot and retries the group member by
+    /// member, which the test above pins), never emit a shifted stream. An
+    /// overrun by the group's LAST member is the ordinary output limit and
+    /// the chain takes it itself.
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn chain_refuses_an_interior_overrun_and_takes_a_final_one() {
+        let chain = |encoded: &[Vec<u8>], sizes: &[usize], flat_limit: u64| {
+            let mut next = 0usize;
+            let mut next_input = || -> Option<Box<dyn std::io::Read + Send>> {
+                let reader = encoded.get(next)?;
+                next += 1;
+                Some(Box::new(std::io::Cursor::new(reader.clone())))
+            };
+            let mut out = Vec::new();
+            let result = Rar50Decoder::new().decode_solid_chain_to_sink(
+                &mut next_input,
+                0,
+                sizes,
+                DEFAULT_DICTIONARY_SIZE,
+                true,
+                flat_limit,
+                |chunk| -> std::result::Result<(), std::convert::Infallible> {
+                    match chunk {
+                        DecodedChunk::Bytes(bytes) => out.extend_from_slice(bytes),
+                        DecodedChunk::Repeated { byte, len } => {
+                            out.extend(std::iter::repeat_n(byte, len))
+                        }
+                    }
+                    Ok(())
+                },
+            );
+            result.map(|()| out)
+        };
+        for k in [1, 300] {
+            let (encoded, declared, expected) = overrun_chain(k);
+            for flat_limit in [u64::MAX, 0] {
+                assert!(
+                    chain(&encoded, &declared, flat_limit).is_err(),
+                    "k {k} flat {flat_limit}: an interior overrun must fail the chain"
+                );
+                // The first member alone, as a one-member group: its overrun
+                // is the group's end, taken like the per-member paths.
+                let alone = chain(&encoded[..1], &declared[..1], flat_limit).unwrap();
+                assert_eq!(alone, expected[0], "k {k} flat {flat_limit}");
+            }
         }
     }
 

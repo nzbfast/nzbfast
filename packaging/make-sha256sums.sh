@@ -45,10 +45,13 @@ cd "$DIST"
 # Everything that is an asset, minus the machine-only ones. A leading
 # `nzbfast` covers the dmg, the zips, the tarballs, the apk, the rpms and
 # the debs (`nzbfast_1.5.0-0beta1_amd64.deb` included - the separator is
-# `_`, so the glob is deliberately not `nzbfast-`).
+# `_`, so the glob is deliberately not `nzbfast-`). The `.spdx.json` SBOMs
+# provenance-release.yml attaches beside each CI-built file are metadata
+# about an asset, like the `.intoto.jsonl` bundles, and stay out too.
 list=$(ls -1 2>/dev/null | grep '^nzbfast' \
     | grep -v '^nzbfast-updater-' \
-    | grep -v '\.sha256$' | grep -v '\.intoto\.jsonl$' | sort || true)
+    | grep -v '\.sha256$' | grep -v '\.intoto\.jsonl$' | grep -v '\.spdx\.json$' \
+    | sort || true)
 
 [ -n "$list" ] || {
     echo "x no human downloads found in $DIST - refusing to write an empty" \

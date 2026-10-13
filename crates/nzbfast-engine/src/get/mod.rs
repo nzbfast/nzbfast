@@ -128,12 +128,33 @@ fn shard_count(total_conns: usize) -> usize {
             // cpu-workers-gate: I/O runtime shards, not a CPU pool, and
             // NZBFAST_SHARDS above is this site's own override.
             let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-            if cores >= 12 && total_conns >= 24 {
-                (total_conns / 16).clamp(2, 4)
-            } else {
-                1
-            }
+            default_shard_count(total_conns, cores)
         })
+}
+
+/// The shard count with no override: TWO on a big box with a real
+/// fleet, one otherwise.
+///
+/// This was `(total_conns / 16).clamp(2, 4)` until 13 Oct 2026, so 50
+/// spawned slots got 3 shards and 100 got 4. Two runtimes carry a
+/// 10 GbE line on their own (9.1 Gbps on a 20-thread Apple Silicon
+/// box), and the third and fourth only add per-wakeup kernel cost.
+/// Measured on apollo13 and mummy, five providers, paired A/B: 2 shards
+/// was equal on wall within the rep spread in every cell, and cost 6-10%
+/// less cpu_s at the shipped cap (3 -> 2) and 15-16% less at 100
+/// sockets (4 -> 2) (`research/IO-SHARDS-2-VS-4-2026-10-13.md`,
+/// `research/CPU-PER-SOCKET-PROFILE-2026-10-12.md` lever A). The count
+/// is therefore NOT sized from the fleet any more: socket count was
+/// never what the shards are for, line RATE is, and nothing here
+/// measured a line two runtimes cannot carry. A line faster than 10 GbE
+/// is the case that would want a third, and NZBFAST_SHARDS is the
+/// override for it until someone measures one.
+fn default_shard_count(total_conns: usize, cores: usize) -> usize {
+    if cores >= 12 && total_conns >= 24 {
+        2
+    } else {
+        1
+    }
 }
 
 /// The one-line launch banner: file count, eager/total megabytes, and
@@ -175,7 +196,10 @@ async fn run_fetch(
     // leg as a fleet that came up short.
     let spawned: usize = servers.iter().map(|(_, c)| c.connections).sum();
     let dialled: usize = servers.iter().map(|(_, c)| c.dialled()).sum();
-    let shards = shard_count(spawned);
+    // `shard_basis` is `spawned` except on an automatic cap with no
+    // measured anchor, which spawns the probe's headroom but keeps the
+    // shard layout of the first ceiling (`linecap::shard_basis`).
+    let shards = shard_count(nzbkit::pool::linecap::shard_basis(servers));
     if shards > 1 {
         let parked = match spawned.saturating_sub(dialled) {
             0 => String::new(),
@@ -755,4 +779,26 @@ pub async fn get_with_progress(job: JobSpec<'_>) -> Result<()> {
         &mem_sampler,
     )
     .await
+}
+
+#[cfg(test)]
+mod shard_count_tests {
+    use super::default_shard_count;
+
+    #[test]
+    fn a_big_box_gets_two_shards_at_every_fleet_size() {
+        // 25 = the seed fleet, 50 = the shipped cap's shard basis,
+        // 100 = the supply ceiling and NZBFAST_LINE_CAP=0, 500 = five
+        // servers at `--connections 100` with no cap at all.
+        for conns in [24, 25, 50, 64, 100, 500] {
+            assert_eq!(default_shard_count(conns, 20), 2, "conns={conns}");
+        }
+    }
+
+    #[test]
+    fn a_small_box_or_a_small_fleet_stays_single_runtime() {
+        assert_eq!(default_shard_count(100, 11), 1);
+        assert_eq!(default_shard_count(23, 20), 1);
+        assert_eq!(default_shard_count(0, 20), 1);
+    }
 }

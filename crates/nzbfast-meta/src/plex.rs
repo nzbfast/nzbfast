@@ -36,7 +36,8 @@
 //! reading that could unwatch everything.
 
 use crate::listsrc::ListEntry;
-use crate::rss::{attr, elem_tags, find_elem, tag_text, unescape, wrong_document};
+use crate::rss::wrong_document;
+use crate::xmlscan::{attr, elem_tags, elements, tag_text, unescape};
 
 /// Where a linked account's watchlist is read. The older
 /// `metadata.provider.plex.tv` path is deprecated and answered 404 for
@@ -133,38 +134,15 @@ pub fn parse_pin(body: &str) -> Result<Pin, String> {
 }
 
 /// The tag text and inner XML of every element in `xml` whose local name
-/// is `local`; a self-closing element yields an empty body.
+/// is `local`; a self-closing or unclosed element yields an empty body.
 ///
-/// Built on `rss.rs`'s scanner rather than beside it - this crate has one
-/// XML reader and it stays that way.
-fn blocks<'a>(xml: &'a str, local: &str) -> Vec<(&'a str, &'a str)> {
-    let mut out = Vec::new();
-    let mut at = 0;
-    while let Some((open, name)) = find_elem(&xml[at..], local) {
-        let open = at + open;
-        let Some(gt) = xml[open..].find('>').map(|g| open + g) else {
-            break;
-        };
-        let tag = &xml[open..gt];
-        if tag.ends_with('/') {
-            out.push((tag, ""));
-            at = gt + 1;
-            continue;
-        }
-        let close = format!("</{name}>");
-        match xml[gt + 1..].find(&close) {
-            Some(e) => {
-                out.push((tag, &xml[gt + 1..gt + 1 + e]));
-                at = gt + 1 + e + close.len();
-            }
-            None => {
-                // An unclosed element: take the tag, keep scanning.
-                out.push((tag, ""));
-                at = gt + 1;
-            }
-        }
-    }
-    out
+/// A thin view over `xmlscan::elements` - this crate has one XML reader
+/// and it stays that way.
+fn blocks<'a>(xml: &'a str, local: &'a str) -> Vec<(&'a str, &'a str)> {
+    elements(xml, local)
+        .into_iter()
+        .map(|(tag, body)| (tag, body.unwrap_or("")))
+        .collect()
 }
 
 /// Plex's word for what a title is, in ours. `None` for anything else,

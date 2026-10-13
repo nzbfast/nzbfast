@@ -387,6 +387,17 @@ pub struct LossCauses<'a> {
     /// Age of the youngest article in the post, days. 0 when the NZB
     /// carries no usable date - see `GONE_MIN_AGE_DAYS`.
     pub post_age_days: u32,
+    /// Id-proven 430/423 answers, one entry per server that ever held a
+    /// connection - the figure the leg log prints as `430s: N id-proven`.
+    ///
+    /// The per-SERVER view the counts above do not have: `missing_430`
+    /// is charged only once EVERY live server has refused an article, so
+    /// a run cut off while the slow servers were still answering carries
+    /// zero there however many refusals are on record. Read only by the
+    /// stall arm of [`incomplete_verdict`], through
+    /// [`LossCauses::fleet_refused_the_post`]. Empty when the caller has
+    /// no per-server accounting, which claims nothing.
+    pub server_refusals: &'a [u64],
 }
 
 impl LossCauses<'_> {
@@ -432,7 +443,48 @@ impl LossCauses<'_> {
     fn asked_430(&self) -> u64 {
         self.missing_430.saturating_sub(self.unasked_430)
     }
+
+    /// Did every server refuse this post, even though no single article
+    /// had collected every refusal yet when the run stopped?
+    ///
+    /// Measured live on 12 Oct 2026 (a synthetic dead post, five real
+    /// providers): one server refused every article in seconds, the other
+    /// four refused at a few a second each, and the stall watchdog fired
+    /// at 180 s before any article had all five refusals. `asked_430` was
+    /// therefore zero with 9,300 to 118,000 id-proven refusals on record
+    /// per leg, and the stall arm told the user nobody had said anything
+    /// was missing.
+    ///
+    /// All of it has to hold, and each term is the conservative side:
+    /// * every server that ever connected refused at least
+    ///   [`FLEET_REFUSAL_FLOOR`] articles by id, so one stray 430 per
+    ///   server is never enough;
+    /// * the server that refused the FEWEST still refused more than the
+    ///   whole fleet delivered, which is what separates a dead post from
+    ///   a healthy one that stalled with a few gaps in it;
+    /// * no server was dead or left mid-run - a server that never voted
+    ///   may be the one that carries the post, and then the refusals of
+    ///   the others say nothing about it.
+    pub fn fleet_refused_the_post(&self) -> bool {
+        let Some(&fewest) = self.server_refusals.iter().min() else {
+            return false;
+        };
+        let delivered = self.total_segments.saturating_sub(self.missing_segments);
+        self.total_segments > 0
+            && fewest >= FLEET_REFUSAL_FLOOR
+            && fewest > delivered
+            && self.dead_servers.is_empty()
+            && self.left_servers.is_empty()
+    }
 }
+
+/// The fewest id-proven refusals each server must have given before a
+/// stalled run may be read as a post every server refused. See
+/// [`LossCauses::fleet_refused_the_post`]: this is a floor against a
+/// handful of stray answers, not a tuned threshold - the measured dead
+/// posts sat at 400 and up for the slowest server at the moment the stall
+/// fired.
+pub const FLEET_REFUSAL_FLOOR: u64 = 64;
 
 /// How old a post must be before "every article 430" may be called DEAD
 /// rather than "not here yet".
@@ -960,6 +1012,32 @@ pub fn incomplete_verdict(
         // errors clause deliberately: `fail_kind` maps that to
         // `Transport`, which is exactly right here - retry freely, and
         // never report the release to an indexer as dead.
+        // A stall over a post every server has been refusing is NOT our
+        // failure, and must not read or classify as one: `Transport`
+        // tells an *arr client to retry the same dead grab rather than
+        // fail over to another release. It opens "download incomplete"
+        // (`MissingArticles`: reportable, one automatic retry) and not
+        // "post is gone", because no single article reached unanimity
+        // and `Gone` is reserved for that proof.
+        if causes.stalled && causes.fleet_refused_the_post() {
+            let fewest = causes.server_refusals.iter().min().copied().unwrap_or(0);
+            let most = causes.server_refusals.iter().max().copied().unwrap_or(0);
+            let delivered = causes
+                .total_segments
+                .saturating_sub(causes.missing_segments);
+            let msg = format!(
+                "download incomplete: every server refused this post - between \
+                 {fewest} and {most} articles each, by message-id, from {} server(s), \
+                 while the whole fleet delivered {delivered} of {} segment(s). The run \
+                 stalled with {incomplete} file(s) still incomplete and {derrs} \
+                 decode/write errors before any one article had been refused by all \
+                 of them, because some servers answer a refusal slowly; this release \
+                 is dead or nearly so, not a fault on this machine",
+                causes.server_refusals.len(),
+                causes.total_segments,
+            );
+            return (FailKind::MissingArticles, msg);
+        }
         if causes.stalled {
             let mut msg = format!(
                 "download failed on connection errors: the connection pool stalled \
@@ -971,7 +1049,23 @@ pub fn incomplete_verdict(
             // the first version of this message told the user "not
             // evidence that anything is missing" about a release where
             // four providers had said exactly that, thousands of times.
+            // And the per-server record has to be read as well as the
+            // unanimous one. `asked_430` counts only articles EVERY server
+            // refused, so it is zero on a run cut off while the slower
+            // servers were still answering - and the 12 Oct 2026 dead-post
+            // legs said "no server said any article was missing" over
+            // thousands of refusals per server, which is this same mistake
+            // made a second time. A refusal record too thin for
+            // `fleet_refused_the_post` above still has to be reported.
+            let refused: u64 = causes.server_refusals.iter().sum();
             match causes.asked_430() {
+                0 if refused > 0 => msg.push_str(&format!(
+                    " No article had been refused by every server yet, though the \
+                     servers refused {refused} request(s) by message-id between them, \
+                     so this is more likely a fault on THIS machine or its link than \
+                     evidence about the post - most of the outstanding articles were \
+                     never requested.",
+                )),
                 0 => msg.push_str(
                     " No server said any article was missing, so this is a fault on \
                      THIS machine or its link rather than evidence about the post - \

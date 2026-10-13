@@ -2695,12 +2695,81 @@ pub fn sync_dir(dir: &Path) {
     #[cfg(unix)]
     {
         if let Ok(f) = File::open(dir) {
-            let _ = f.sync_all();
+            let _ = sync_handle(&f);
         }
     }
     #[cfg(not(unix))]
     {
         let _ = dir;
+    }
+}
+
+/// `f.sync_all()`, except that on Apple targets a REFUSED full flush falls
+/// back to plain `fsync(2)` on the same descriptor.
+///
+/// On Apple targets std's `sync_all` is `fcntl(F_FULLFSYNC)`, not `fsync`,
+/// and the macOS SMB client refuses `F_FULLFSYNC` on a READ-ONLY descriptor
+/// with EACCES and on a DIRECTORY descriptor with ENOTSUP, where `fsync`
+/// succeeds on both (GitHub #99, the reporter's probe against a QNAP share;
+/// a writable descriptor takes either call). Every "Move completed to" an
+/// SMB share failed on its first file over that, because the mover flushes
+/// what it copied through a read-only handle.
+///
+/// The full flush stays first because it is the one that pushes the
+/// drive's own write cache on local APFS, and that durability is the
+/// point of flushing at all. `fsync` on smbfs hands the flush to the
+/// server, which is the most a client can ask of a network share anyway.
+/// Only those two errnos fall back: anything else (EIO, ENOSPC) is a real
+/// failure and is returned as it came.
+pub fn sync_handle(f: &File) -> io::Result<()> {
+    // `unix` is redundant beside `apple` on every real target, and it is
+    // what lets win-portability-gate PROVE this arm never reaches Windows
+    // (its cfg evaluator does not know `target_vendor`).
+    #[cfg(all(unix, target_vendor = "apple"))]
+    {
+        use std::os::fd::AsRawFd;
+        full_sync_or_plain(
+            || f.sync_all(),
+            || {
+                // SAFETY: `fsync` reads nothing but the descriptor, which
+                // `f` keeps open for the whole call.
+                if unsafe { libc::fsync(f.as_raw_fd()) } == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error())
+                }
+            },
+        )
+    }
+    #[cfg(not(all(unix, target_vendor = "apple")))]
+    {
+        // Everywhere else `sync_all` already IS `fsync` (or
+        // FlushFileBuffers), so there is nothing weaker to fall back to.
+        f.sync_all()
+    }
+}
+
+/// The decision half of [`sync_handle`], with both flushes injected so a
+/// test can hand it the errno an SMB share answers without needing one.
+#[cfg(all(unix, any(test, target_vendor = "apple")))]
+pub(crate) fn full_sync_or_plain(
+    full: impl FnOnce() -> io::Result<()>,
+    plain: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    match full() {
+        // EOPNOTSUPP is its own number on macOS (102 against ENOTSUP's
+        // 45); the reporter saw ENOTSUP, and either means the same refusal.
+        // On Linux the two are ONE number (95), so a pattern naming both
+        // has an unreachable arm and reds `check`'s clippy (aa1e0cd0) on
+        // the only target this test-gated fn compiles there: compare
+        // values, which is right on both.
+        Err(e)
+            if e.raw_os_error()
+                .is_some_and(|c| [libc::EACCES, libc::ENOTSUP, libc::EOPNOTSUPP].contains(&c)) =>
+        {
+            plain()
+        }
+        r => r,
     }
 }
 
@@ -2716,7 +2785,7 @@ pub use sanitize::{sanitize_filename, sanitize_filename_for};
 // The one fold every identity-key site in the tree shares (M4-44). Gate
 // it on `case_insensitive_dir`, never on the build target.
 mod casefold;
-pub use casefold::case_fold_key;
+pub use casefold::{ascii_fold_is_exact, case_fold_key};
 
 // Whether two paths reach ONE file object: the volume's own case
 // behaviour (`case_insensitive_dir`) and the inode identity behind a

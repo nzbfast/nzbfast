@@ -1406,6 +1406,7 @@ pub(super) fn finish_job(
             bytes_arrived: census.total,
             backbones: &census.backbones,
             post_age_days: census.post_age_days,
+            server_refusals: &census.server_refusals,
         };
         // TODO 307 item 1: the census states which of the six kinds this
         // is, in the same statement that writes the sentence. Every

@@ -269,6 +269,99 @@ impl std::io::Seek for SplitParts {
     }
 }
 
+/// A read buffer in front of a seekable source that KEEPS its bytes
+/// across a seek landing inside them.
+///
+/// `std::io::BufReader::seek` discards its buffer on every seek, and
+/// sevenz-rust2 seeks to each block's pack offset before decoding it. In
+/// a non-solid archive every member is its own block and the next one
+/// starts where the last one ended, so the reader threw away the bytes
+/// it was about to need and read a fresh 1 MiB for a member a few KiB
+/// long: 4 GiB of kernel copy for a 28 MB archive, and 22.7% of the CPU
+/// of a 4,096-member extraction on 26 Sep 2026
+/// (research/MANYSMALL-ZIP-7Z-PER-MEMBER-2026-09-26.md). Here a seek to
+/// an offset inside the window only moves the cursor.
+///
+/// Invariant: the source's own cursor sits at `base + filled`.
+pub struct SeekBuf<R> {
+    inner: R,
+    buf: Box<[u8]>,
+    /// Logical offset of `buf[0]`.
+    base: u64,
+    pos: usize,
+    filled: usize,
+}
+
+impl<R: std::io::Read + std::io::Seek> SeekBuf<R> {
+    /// `inner`'s cursor must be at 0, which is where `SplitParts::open`
+    /// leaves it and where every caller here seeks it first.
+    pub fn with_capacity(cap: usize, inner: R) -> Self {
+        Self {
+            inner,
+            buf: vec![0u8; cap.max(1)].into_boxed_slice(),
+            base: 0,
+            pos: 0,
+            filled: 0,
+        }
+    }
+}
+
+impl<R: std::io::Read + std::io::Seek> std::io::Read for SeekBuf<R> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos == self.filled {
+            self.base += self.filled as u64;
+            self.pos = 0;
+            self.filled = 0;
+            // A read at least as wide as the window gains nothing from
+            // it: straight through, exactly as `BufReader` does.
+            if out.len() >= self.buf.len() {
+                let n = self.inner.read(out)?;
+                self.base += n as u64;
+                return Ok(n);
+            }
+            self.filled = self.inner.read(&mut self.buf)?;
+        }
+        let n = (self.filled - self.pos).min(out.len());
+        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+impl<R: std::io::Read + std::io::Seek> std::io::Seek for SeekBuf<R> {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        use std::io::SeekFrom::*;
+        let target = match to {
+            Start(n) => Some(n),
+            Current(d) => (self.base + self.pos as u64).checked_add_signed(d),
+            // The end is the source's to answer; nothing buffered helps.
+            End(_) => None,
+        };
+        if let Some(n) = target
+            && n >= self.base
+            && n - self.base <= self.filled as u64
+        {
+            self.pos = (n - self.base) as usize;
+            return Ok(n);
+        }
+        let to = match (to, target) {
+            (End(d), _) => End(d),
+            (_, Some(n)) => Start(n),
+            (_, None) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "seek before the start of the 7z set",
+                ));
+            }
+        };
+        let n = self.inner.seek(to)?;
+        self.base = n;
+        self.pos = 0;
+        self.filled = 0;
+        Ok(n)
+    }
+}
+
 /// Open one 7-Zip container - the ordered parts of a split set, or a
 /// single file - behind the shared declared-size gate, ready to read
 /// entries. The gate runs through the same reader the library is about
@@ -290,25 +383,26 @@ impl std::io::Seek for SplitParts {
 pub fn open_sevenz(
     parts: &[PathBuf],
     password: Option<&str>,
-) -> Result<sevenz_rust2::ArchiveReader<std::io::BufReader<SplitParts>>> {
+) -> Result<sevenz_rust2::ArchiveReader<SeekBuf<SplitParts>>> {
     use sevenz_rust2::{ArchiveReader, Password};
     let pw = match password {
         Some(p) if !p.is_empty() => Password::from(p),
         _ => Password::empty(),
     };
-    let mut src = SplitParts::open(parts)?;
-    if let Some(reason) = nzbkit::nameprobe::sevenz_disk_declared_bomb(&mut src) {
-        anyhow::bail!("{reason}");
-    }
-    std::io::Seek::seek(&mut src, std::io::SeekFrom::Start(0))?;
     // A wide read buffer in front of the raw part files: sevenz-rust2's
     // AES decoder pulls its input 512 bytes at a time and the Copy path
     // reads in the writer's chunk, so an unbuffered source cost an
     // encrypted 1 GiB member two million read syscalls (1.46 s of system
     // time on an M1 Ultra against 7-Zip's 0.23 for the whole job;
-    // research/RAR-PERF-AUDIT-2026-09-02.md, round 7). The header walk
-    // seeks through it, which just drops the buffer.
-    let src = std::io::BufReader::with_capacity(1 << 20, src);
+    // research/RAR-PERF-AUDIT-2026-09-02.md, round 7). `SeekBuf` rather
+    // than `BufReader` so a seek into bytes already read keeps them (see
+    // its doc), and in front of the gate too, whose packed-header decode
+    // otherwise read the parts a few bytes at a time.
+    let mut src = SeekBuf::with_capacity(1 << 20, SplitParts::open(parts)?);
+    if let Some(reason) = nzbkit::nameprobe::sevenz_disk_declared_bomb(&mut src) {
+        anyhow::bail!("{reason}");
+    }
+    std::io::Seek::seek(&mut src, std::io::SeekFrom::Start(0))?;
     let mut reader = ArchiveReader::new(src, pw).map_err(|e| anyhow::anyhow!("opening 7z: {e}"))?;
     // LZMA2 streams 7-Zip wrote with its default multithreading are a
     // sequence of independently decodable blocks (a dictionary reset every
@@ -341,9 +435,12 @@ pub fn open_sevenz(
 /// nzbkit half does: true covers "encrypted" and "not provably
 /// otherwise", so only a false is worth acting on.
 pub fn sevenz_set_is_encrypted(parts: &[PathBuf]) -> bool {
-    let Ok(mut src) = SplitParts::open(parts) else {
+    let Ok(src) = SplitParts::open(parts) else {
         return true;
     };
+    // Buffered for the packed end header's decode, which reads its input
+    // a few bytes at a time (see `open_sevenz`).
+    let mut src = SeekBuf::with_capacity(64 << 10, src);
     nzbkit::nameprobe::sevenz_is_encrypted(&mut src)
 }
 
@@ -492,12 +589,34 @@ fn sevenz_pass(
                 // was 131,072 reads and writes (0.79 s of system time on
                 // an M1 Ultra against 7-Zip's 0.20); at 1 MiB it is 1,024
                 // (research/RAR-PERF-AUDIT-2026-09-02.md, round 7).
-                inner: std::io::BufWriter::with_capacity(1 << 20, file),
+                // Sized to the member when it is smaller: a 12 KiB member
+                // needs no 1 MiB buffer, and one per member is what a
+                // non-solid many-file archive pays 4,096 times.
+                inner: std::io::BufWriter::with_capacity(
+                    usize::try_from(entry.size)
+                        .unwrap_or(PIPED_COPY_BUF)
+                        .clamp(8 << 10, PIPED_COPY_BUF),
+                    file,
+                ),
                 written: written.clone(),
                 budget: budget.clone(),
             },
         );
-        let copied = piped_copy(rd, &mut w)?;
+        // A member that fits one of `piped_copy`'s buffers is copied
+        // here, on this thread: that loop fills a WHOLE buffer before its
+        // writer sees a byte, so such a member never overlapped decode and
+        // write, and paid a thread spawn plus four zeroed 1 MiB buffers
+        // for nothing - 2.0B instructions of a 4,096-member non-solid 7z,
+        // 2.1B of a solid one (26 Sep 2026,
+        // research/MANYSMALL-ZIP-7Z-PER-MEMBER-2026-09-26.md). `entry.size`
+        // is a declaration, and a lie is bounded exactly as before: the
+        // library's reader stops at it, and the length check below
+        // refuses a short one.
+        let copied = if entry.size <= PIPED_COPY_BUF as u64 {
+            std::io::copy(rd, &mut w)?
+        } else {
+            piped_copy(rd, &mut w)?
+        };
         use std::io::Write as _;
         w.flush()?;
         // A SHORT member is not a successful extract.
@@ -539,6 +658,10 @@ fn sevenz_pass(
     Ok(resumed.len())
 }
 
+/// The buffer [`piped_copy`] fills before each hand-off, and so the
+/// member size at or under which `sevenz_pass` copies inline instead.
+const PIPED_COPY_BUF: usize = 1 << 20;
+
 /// `std::io::copy` with the writes on their own thread: the reader here
 /// is the archive's decoder chain (Copy, AES, LZMA2 - whatever the folder
 /// declares), and running it in series with the disk write left a 1 GiB
@@ -551,7 +674,7 @@ fn piped_copy<W: std::io::Write + Send>(
     rd: &mut dyn std::io::Read,
     w: &mut W,
 ) -> std::io::Result<u64> {
-    const BUF: usize = 1 << 20;
+    const BUF: usize = PIPED_COPY_BUF;
     const POOL: usize = 4;
     let (full_tx, full_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, usize)>(POOL);
     let (empty_tx, empty_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(POOL);
@@ -819,6 +942,104 @@ mod sevenz_extract_tests {
             Err(e) => e.to_string(),
         };
         assert!(err.starts_with("opening 7z:"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `SeekBuf` against a `Cursor` over the same bytes, through a
+    /// deterministic walk of reads of every width and seeks of every
+    /// kind - inside the window, just past it, backwards out of it, from
+    /// the end - so a cursor that drifts from the source's is caught on
+    /// the first read after it.
+    #[test]
+    fn seekbuf_reads_what_a_cursor_reads_through_any_seek() {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i * 31 + i / 7) as u8).collect();
+        let mut want = std::io::Cursor::new(data.clone());
+        let mut got = super::SeekBuf::with_capacity(4096, std::io::Cursor::new(data.clone()));
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for step in 0..20_000 {
+            let r = next();
+            match r % 5 {
+                0 => {
+                    let to = SeekFrom::Start(next() % 310_000);
+                    assert_eq!(got.seek(to).unwrap(), want.seek(to).unwrap(), "{step}");
+                }
+                1 => {
+                    let d = (next() % 9000) as i64 - 4500;
+                    let to = SeekFrom::Current(d);
+                    match (want.seek(to), got.seek(to)) {
+                        (Ok(a), Ok(b)) => assert_eq!(a, b, "{step}"),
+                        (Err(_), Err(_)) => {}
+                        (a, b) => panic!("step {step}: cursor {a:?}, seekbuf {b:?}"),
+                    }
+                }
+                2 => {
+                    let to = SeekFrom::End(-((next() % 5000) as i64));
+                    assert_eq!(got.seek(to).unwrap(), want.seek(to).unwrap(), "{step}");
+                }
+                _ => {
+                    let n = [1usize, 7, 512, 4095, 4096, 4097, 20_000][(next() % 7) as usize];
+                    let (mut a, mut b) = (vec![0u8; n], vec![0u8; n]);
+                    let ka = want.read(&mut a).unwrap();
+                    let mut kb = 0;
+                    while kb < ka {
+                        let k = got.read(&mut b[kb..ka]).unwrap();
+                        assert!(k > 0, "step {step}: short read before the end");
+                        kb += k;
+                    }
+                    assert_eq!(a[..ka], b[..ka], "step {step}");
+                }
+            }
+        }
+    }
+
+    /// Many members, each its own block - the non-solid shape the
+    /// 26 Sep 2026 per-member work changed three things under: the
+    /// inline copy for a member that fits one buffer, the single-thread
+    /// decoder for a small LZMA2 block, and the buffer kept across the
+    /// seek to each block. Sizes straddle the 1 MiB line both of the
+    /// first two turn on, and include empty members, so every arm runs
+    /// in one archive and every byte is compared.
+    #[test]
+    fn a_many_member_non_solid_7z_lands_every_byte() {
+        use sevenz_rust2::{ArchiveEntry, ArchiveWriter};
+        let dir = tmp("many-nonsolid");
+        let members: Vec<(String, Vec<u8>)> = (0..300u32)
+            .map(|i| {
+                let n = match i {
+                    0 | 150 => 0,
+                    7 => (1 << 20) + 1,
+                    8 => 1 << 20,
+                    9 => 3 << 20,
+                    _ => (i as usize * 997) % 40_000 + 1,
+                };
+                let body = (0..n as u32)
+                    .map(|j| (j * 7 + i * 131 + j / 251) as u8)
+                    .collect();
+                (format!("d{:02}/f{i:04}.bin", i % 17), body)
+            })
+            .collect();
+        let bytes = {
+            let mut w = ArchiveWriter::new(std::io::Cursor::new(Vec::new())).unwrap();
+            for (name, body) in &members {
+                w.push_archive_entry(ArchiveEntry::new_file(name), Some(&body[..]))
+                    .unwrap();
+            }
+            w.finish().unwrap().into_inner()
+        };
+        std::fs::write(dir.join("many.7z"), &bytes).unwrap();
+        let jobs = super::collect_sevenz_archives(&dir).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert!(super::extract_sevenz(&dir, &jobs, None));
+        for (name, body) in &members {
+            assert_eq!(&std::fs::read(dir.join(name)).unwrap(), body, "{name}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

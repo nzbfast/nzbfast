@@ -963,15 +963,25 @@ pub fn line_cap_auto_resolve(env: Option<&str>, setting: Option<usize>) -> bool 
 /// A leg that TYPED a fleet size gets none: it pinned the governor too,
 /// so there is no raise to make room for, and spawning past its rung
 /// would move the shard layout of every A/B arm on every §208 ladder.
-pub fn line_cap_headroom_fleet(line_cap: usize, auto: bool, anchor_measured: bool) -> usize {
-    match (auto, anchor_measured) {
-        (false, _) => line_cap,
-        (true, false) => nzbkit::pool::linecap::LINE_CAP_MAX_FLEET,
+///
+/// **12 Oct 2026: an automatic cap gets the second ceiling's headroom
+/// whatever its anchor**, which is why `anchor_measured` no longer
+/// changes the answer. The cold-start probe (`linecap::probe_step`)
+/// walks an anchorless or typed-anchor fleet past
+/// `LINE_CAP_MAX_FLEET` once one of its own rungs has PAID, and a
+/// daemon's first 87 GB job measured +21% over uncapped while it had
+/// nowhere above 50 to go (`research/LINECAP-COLD-START-2026-10-12.md`).
+/// The I/O shard layout does NOT follow this: `linecap::shard_basis`
+/// holds such a run's shard count to the first ceiling's, so the only
+/// cost of the wider spawn is the parked tasks above.
+pub fn line_cap_headroom_fleet(line_cap: usize, auto: bool, _anchor_measured: bool) -> usize {
+    match auto {
+        false => line_cap,
         // Not `supply_ceiling`'s grant `min` here, on purpose: that
         // bound is per SERVER and is applied per server, one function
         // down. Handing this a fleet-wide sum would take the headroom
         // off servers that are not the ones with the small account.
-        (true, true) => nzbkit::pool::linecap::LINE_CAP_SUPPLY_MAX_FLEET,
+        true => nzbkit::pool::linecap::LINE_CAP_SUPPLY_MAX_FLEET,
     }
 }
 
@@ -1001,10 +1011,16 @@ pub fn line_cap_spawn_slots(
     applied_connections(headroom_share.min(uncapped), pinned, tuned, now).max(applied)
 }
 
-/// The per-server share of the fleet cap for a fleet of `n_servers`.
-/// `None` = nothing to cap with, i.e. the rule is off. Callers `min`
-/// this into the server's own ceiling; a pinned server is theirs to
-/// skip.
+/// The fleet cap and the levels it divides over, `None` = nothing to
+/// cap with, i.e. the rule is off. Callers take a server's share with
+/// [`nzbkit::pool::linecap::FleetSplit::share`] and `min` it into the
+/// server's own ceiling; a pinned server is theirs to skip.
+///
+/// `levels` is every server the fleet counts (one entry each, pinned
+/// ones included). GH #103: a server above the fleet's lowest level is
+/// a fill server and gets a small fixed share rather than an equal one
+/// - see `nzbkit::pool::linecap::level_share`; a fleet all at one level
+/// splits exactly as it did.
 ///
 /// `anchor_bps` is the line reading the curve sizes from, in bytes/s;
 /// 0 = none, which is the floor. The seed binds on every install
@@ -1017,12 +1033,12 @@ pub fn line_cap_spawn_slots(
 /// is only one spelling of it both live.
 pub fn line_cap_share(
     config: &Path,
-    n_servers: usize,
+    levels: Vec<u32>,
     anchor_bps: u64,
     carry_bps: u64,
-) -> Option<usize> {
+) -> Option<nzbkit::pool::linecap::FleetSplit> {
     nzbkit::pool::linecap::fleet_cap(line_cap_fleet(config, anchor_bps, carry_bps))
-        .map(|f| nzbkit::pool::linecap::server_share(f, n_servers))
+        .map(|f| nzbkit::pool::linecap::FleetSplit::new(f, levels))
 }
 
 /// TODO 112: the live epoch controller's dev override. The real gate

@@ -341,9 +341,32 @@ fn seeded_fleet_holds(
     measured: bool,
     holds_cap: u64,
 ) -> (Arc<Shared>, Vec<Arc<ConnTarget>>) {
-    let n = spawns.len();
-    let targets: Vec<_> = (0..n)
-        .map(|_| ConnTarget::new(server_share(cap, n)))
+    seeded_fleet_tiered(
+        spawns,
+        &vec![0; spawns.len()],
+        cap,
+        anchor_bps,
+        measured,
+        holds_cap,
+    )
+}
+
+/// [`seeded_fleet_holds`] with each server's `level` set (GH #103), and
+/// every target seeded at [`level_share`] of the cap - what the fleet
+/// build hands it. All-zero `levels` is exactly the fixture every test
+/// above was written against.
+fn seeded_fleet_tiered(
+    spawns: &[usize],
+    levels: &[u32],
+    cap: usize,
+    anchor_bps: u64,
+    measured: bool,
+    holds_cap: u64,
+) -> (Arc<Shared>, Vec<Arc<ConnTarget>>) {
+    assert_eq!(levels.len(), spawns.len(), "one level per server");
+    let targets: Vec<_> = levels
+        .iter()
+        .map(|&l| ConnTarget::new(level_share(cap, levels, l)))
         .collect();
     let servers: Vec<(ServerConfig, PoolConfig)> = targets
         .iter()
@@ -360,7 +383,7 @@ fn seeded_fleet_holds(
                     connections: spawn as u32,
                     pin_connections: false,
                     rcvbuf: None,
-                    level: 0,
+                    level: levels[i],
                     group: None,
                     retention_days: 0,
                     block_bytes: None,
@@ -1917,4 +1940,377 @@ fn anchor_cfgs(measured: &[bool], anchor_bps: u64) -> Vec<(ServerConfig, PoolCon
             )
         })
         .collect()
+}
+
+/// GH #103, the half that must NOT move: a fleet whose servers all sit
+/// at one level - every fleet any §208/§277 round measured - splits to
+/// the socket as the equal split did, at every fleet size and server
+/// count, and whatever that one level is.
+#[test]
+fn a_fleet_at_one_level_splits_exactly_as_it_always_did() {
+    for fleet in [1, 2, 7, 25, 35, 50, 100, 101] {
+        for n in 1..=8 {
+            for level in [0, 1, 3] {
+                assert_eq!(
+                    level_share(fleet, &vec![level; n], level),
+                    server_share(fleet, n),
+                    "fleet {fleet} over {n} servers at level {level}"
+                );
+                assert_eq!(
+                    fill_tail_share(fleet, &vec![level; n], level),
+                    server_share(fleet, n),
+                    "and the queue-dry share is the same number"
+                );
+            }
+        }
+    }
+    // No servers at all is the equal split's own answer, not a panic.
+    assert_eq!(level_share(50, &[], 0), server_share(50, 0));
+}
+
+/// GH #103, the reporter's own fleet: two level-0 servers, a level-1
+/// and a level-2 block account under a fleet of 100. The equal split
+/// gave each 25 and the two fill servers carried 0.0 MB; the fill tier
+/// now holds its floor and the primaries split the rest - 45, 45, 5, 5,
+/// the budget conserved. Measured on the loopback rig (research note in
+/// `fill_tail_share`'s doc): 35.9 s -> 22.6 s, same bytes.
+#[test]
+fn the_fill_tier_holds_a_floor_and_the_primaries_split_the_rest() {
+    let levels = [0, 0, 1, 2];
+    let shares: Vec<usize> = levels
+        .iter()
+        .map(|&l| level_share(100, &levels, l))
+        .collect();
+    assert_eq!(
+        shares,
+        vec![45, 45, LINE_CAP_FILL_SHARE, LINE_CAP_FILL_SHARE]
+    );
+    assert_eq!(shares.iter().sum::<usize>(), 100, "the fleet is conserved");
+    // The default fleet with no line reading, which is a CLI run's and
+    // a daemon's first job's: 7 each before, now 8, 8, 5, 5.
+    let floor: Vec<usize> = levels
+        .iter()
+        .map(|&l| level_share(LINE_CAP_DEFAULT_FLEET, &levels, l))
+        .collect();
+    assert_eq!(floor, vec![8, 8, 5, 5]);
+    // "Lowest level", not "level 0": the pool's tiering is relative, so
+    // a fleet with no level-0 server has its level-1 servers as the
+    // primaries.
+    let shifted = [1, 1, 2, 3];
+    assert_eq!(
+        shifted
+            .iter()
+            .map(|&l| level_share(100, &shifted, l))
+            .collect::<Vec<_>>(),
+        shares
+    );
+}
+
+/// A fill server is never handed MORE than the equal share, so a fleet
+/// too small to give every server five cannot grow its fill tier, and a
+/// primary is never handed less than the equal share either.
+#[test]
+fn a_small_fleet_never_grows_its_fill_tier_or_shrinks_a_primary() {
+    for fleet in 1..=60 {
+        for levels in [&[0, 1][..], &[0, 0, 1, 2], &[0, 1, 1, 1, 1, 1]] {
+            let equal = server_share(fleet, levels.len());
+            for &l in levels {
+                let got = level_share(fleet, levels, l);
+                match l {
+                    0 => assert!(got >= equal, "primary {got} < {equal} at {fleet}"),
+                    _ => assert!(got <= equal, "fill {got} > {equal} at {fleet}"),
+                }
+                assert!(got >= 1, "never below one connection");
+            }
+        }
+    }
+}
+
+/// Past queue-dry a fill server's share is the equal one again: the
+/// primaries have nothing new to fetch and the fill tier's backlog IS
+/// the tail. Measured on the #103 rig with 5% of articles missing from
+/// both primaries: a fill tier held at its floor throughout spent 20 s
+/// of a 37 s run on 57 holes; raised at queue-dry the run took 27 s.
+#[test]
+fn past_queue_dry_a_fill_server_gets_its_equal_share_back() {
+    let levels = [0, 0, 1, 2];
+    let tail: Vec<usize> = levels
+        .iter()
+        .map(|&l| fill_tail_share(100, &levels, l))
+        .collect();
+    assert_eq!(tail, vec![45, 45, 25, 25]);
+}
+
+/// The governor end to end on the reporter's fleet: the seed's 45/45/5/5
+/// holds for as long as the queue does, and the queue-dry edge raises
+/// the two fill targets to the equal share - on an ANCHORLESS run too,
+/// which may never shed and whose tick otherwise returns before it
+/// touches a target. The primaries are left exactly where they were.
+#[test]
+fn the_queue_dry_edge_raises_the_fill_tier_and_nothing_else() {
+    for anchor in [0, mbit(1_000)] {
+        let levels = [0, 0, 1, 2];
+        let (sh, targets) =
+            seeded_fleet_tiered(&[100, 50, 100, 50], &levels, 100, anchor, false, 0);
+        let got = || targets.iter().map(|t| t.get()).collect::<Vec<_>>();
+        assert_eq!(got(), vec![45, 45, 5, 5], "the seed, anchor {anchor}");
+        sh.line_cap_tick(LINE_CAP_TICK_MS, false);
+        sh.line_cap_tick(2 * LINE_CAP_TICK_MS, false);
+        assert_eq!(
+            got(),
+            vec![45, 45, 5, 5],
+            "no tail, no raise, anchor {anchor}"
+        );
+        sh.line_cap_tick(3 * LINE_CAP_TICK_MS, true);
+        assert_eq!(got(), vec![45, 45, 25, 25], "queue dry, anchor {anchor}");
+        sh.line_cap_tick(4 * LINE_CAP_TICK_MS, true);
+        assert_eq!(got(), vec![45, 45, 25, 25], "and it stays, anchor {anchor}");
+    }
+}
+
+/// An all-primary fleet's tail moves nothing: the queue-dry raise is a
+/// fill-tier rule and a fleet without one must keep the exact §208
+/// behaviour through its tail as well as before it.
+#[test]
+fn an_all_primary_fleet_is_untouched_by_the_queue_dry_edge() {
+    let (sh, targets) = seeded_fleet_tiered(&[100; 4], &[0; 4], 100, 0, false, 0);
+    sh.line_cap_tick(LINE_CAP_TICK_MS, true);
+    sh.line_cap_tick(2 * LINE_CAP_TICK_MS, true);
+    assert!(
+        targets.iter().all(|t| t.get() == 25),
+        "{:?}",
+        targets.iter().map(|t| t.get()).collect::<Vec<_>>()
+    );
+}
+
+/// Drive [`probe_step`] once a second for `secs` seconds over a fleet
+/// whose rate is `rate(dialling)`, with every slot the probe asks for
+/// dialling at once. Returns the fleet after each tick.
+fn probe_run(seed: usize, secs: u64, ceiling: usize, rate: impl Fn(usize) -> u64) -> Vec<usize> {
+    probe_run_to(seed, secs, ceiling, ceiling, rate)
+}
+
+/// [`probe_run`] with a separate `proven` ceiling for the steps after
+/// a rung has paid.
+fn probe_run_to(
+    seed: usize,
+    secs: u64,
+    ceiling: usize,
+    proven: usize,
+    rate: impl Fn(usize) -> u64,
+) -> Vec<usize> {
+    let mut p = Probe::default();
+    let mut fleet = seed;
+    let mut seen = Vec::new();
+    for t in 0..secs {
+        let (f, next) = probe_step(p, fleet, t * 1_000, rate(fleet), fleet, ceiling, proven);
+        assert!(f >= fleet, "the probe never shrinks a fleet");
+        let bound = ceiling.max(proven).max(fleet);
+        assert!(f <= bound, "{f} past ceiling {bound}");
+        p = next;
+        fleet = f;
+        seen.push(fleet);
+    }
+    seen
+}
+
+/// 12 Oct 2026, the regime the probe exists for: a 10 GbE line whose
+/// sockets each carry ~170 Mbit, so the SOCKETS are the limit. The
+/// curve stalls here (it plans 150 Mbit a socket and reads the fleet's
+/// own rate as the line); the probe reaches the first ceiling within
+/// two dwells and stops there.
+#[test]
+fn the_probe_climbs_a_fast_line_whose_sockets_are_the_limit() {
+    let seen = probe_run(LINE_CAP_DEFAULT_FLEET, 12, LINE_CAP_MAX_FLEET, |d| {
+        mbit(170) * d as u64
+    });
+    assert_eq!(seen[2], 35, "{seen:?}");
+    assert_eq!(seen[4], LINE_CAP_MAX_FLEET, "{seen:?}");
+    assert_eq!(*seen.last().unwrap(), LINE_CAP_MAX_FLEET, "{seen:?}");
+}
+
+/// A fast line the seed fleet already FILLS: the first rung buys
+/// nothing, so probing ends there for the run. One rung of
+/// over-provisioning is the whole cost.
+#[test]
+fn the_probe_stops_at_the_first_rung_that_does_not_pay() {
+    let seen = probe_run(LINE_CAP_DEFAULT_FLEET, 30, LINE_CAP_MAX_FLEET, |_| {
+        mbit(3_000)
+    });
+    assert_eq!(*seen.last().unwrap(), 35, "{seen:?}");
+}
+
+/// Sockets that each add a little but well under half the average
+/// carry: a line that is nearly full. That is not paying.
+#[test]
+fn a_rung_that_buys_under_half_its_share_does_not_pay() {
+    // 25 -> 35 sockets is +40%; +15% of rate is under half of that.
+    let seen = probe_run(
+        LINE_CAP_DEFAULT_FLEET,
+        30,
+        LINE_CAP_MAX_FLEET,
+        |d| match d {
+            25 => mbit(4_000),
+            _ => mbit(4_600),
+        },
+    );
+    assert_eq!(*seen.last().unwrap(), 35, "{seen:?}");
+}
+
+/// §208's protected regime: a 99 Mbit line (and a 1 GbE one) can never
+/// show the probe's 2 Gbit gate, however its sockets behave, so the
+/// fleet stays exactly on its seed.
+#[test]
+fn the_probe_never_fires_on_a_slow_line() {
+    for line in [mbit(99), mbit(940), mbit(1_990)] {
+        let seen = probe_run(LINE_CAP_DEFAULT_FLEET, 60, LINE_CAP_MAX_FLEET, |_| line);
+        assert!(
+            seen.iter().all(|&f| f == LINE_CAP_DEFAULT_FLEET),
+            "{seen:?}"
+        );
+    }
+}
+
+/// No evidence is no move, and that includes the queue-dry tail, where
+/// the governor hands the arms `now_bps == 0`.
+#[test]
+fn the_probe_waits_for_a_dwell_and_ignores_no_reading() {
+    let p = Probe::default();
+    let (f, p) = probe_step(
+        p,
+        25,
+        0,
+        mbit(5_000),
+        25,
+        LINE_CAP_MAX_FLEET,
+        LINE_CAP_MAX_FLEET,
+    );
+    assert_eq!(f, 25);
+    let (f, p) = probe_step(p, 25, LINE_CAP_PROBE_SETTLE_MS - 1, mbit(5_000), 25, 50, 50);
+    assert_eq!(f, 25, "inside the dwell");
+    let (f, q) = probe_step(p, 25, 10_000, 0, 25, LINE_CAP_MAX_FLEET, LINE_CAP_MAX_FLEET);
+    assert_eq!((f, q), (25, p), "a zero reading changes nothing");
+    let (f, _) = probe_step(p, 25, LINE_CAP_PROBE_SETTLE_MS, mbit(5_000), 25, 50, 50);
+    assert_eq!(f, 35);
+}
+
+/// A fleet the curve raised under the probe gets a fresh dwell rather
+/// than being judged on time it never had.
+#[test]
+fn a_curve_raise_restarts_the_probes_dwell() {
+    let (_, p) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 50, 50);
+    let (f, p) = probe_step(p, 30, 1_900, mbit(5_000), 30, 50, 50);
+    assert_eq!(f, 30);
+    let (f, _) = probe_step(p, 30, 2_100, mbit(5_000), 30, 50, 50);
+    assert_eq!(f, 30, "30's dwell began at 1.9 s");
+    let (f, _) = probe_step(p, 30, 3_900, mbit(5_000), 30, 50, 50);
+    assert_eq!(f, 45);
+}
+
+/// Slots that never came up add no dialling sockets, and a rung that
+/// did not add any cannot pay, whatever the rate did.
+#[test]
+fn a_rung_whose_slots_never_dialled_does_not_pay() {
+    let mut p = Probe::default();
+    let mut fleet = 25;
+    for t in 0..20u64 {
+        // The account grants 25 and no more.
+        let (f, n) = probe_step(p, fleet, t * 1_000, mbit(4_500 + t * 10), 25, 50, 50);
+        p = n;
+        fleet = f;
+    }
+    assert_eq!(fleet, 35);
+    assert!(p.done);
+}
+
+/// The probe is clamped by the same per-tick ceiling as the supply arm.
+/// Above the first ceiling only a measured anchor can take it there.
+#[test]
+fn the_probe_respects_the_ceiling_it_is_handed() {
+    let seen = probe_run(LINE_CAP_DEFAULT_FLEET, 20, 40, |d| mbit(170) * d as u64);
+    assert_eq!(*seen.last().unwrap(), 40, "{seen:?}");
+    let seen = probe_run(LINE_CAP_DEFAULT_FLEET, 20, LINE_CAP_SUPPLY_MAX_FLEET, |d| {
+        mbit(170) * d as u64
+    });
+    assert_eq!(*seen.last().unwrap(), LINE_CAP_SUPPLY_MAX_FLEET, "{seen:?}");
+}
+
+/// 12 Oct 2026, Option B: once a rung has PAID, the probe may walk to
+/// `proven` (the second ceiling) - the first, unproven step may not.
+/// A fast line whose sockets are the limit goes 25 -> 35 -> 50 -> 70
+/// -> 100, the account's grant, and no further.
+#[test]
+fn a_probe_that_paid_walks_past_the_first_ceiling() {
+    let seen = probe_run_to(
+        LINE_CAP_DEFAULT_FLEET,
+        20,
+        LINE_CAP_MAX_FLEET,
+        LINE_CAP_SUPPLY_MAX_FLEET,
+        |d| mbit(120) * d as u64,
+    );
+    assert_eq!(*seen.last().unwrap(), LINE_CAP_SUPPLY_MAX_FLEET, "{seen:?}");
+    assert!(
+        seen.iter().all(|&f| f <= LINE_CAP_SUPPLY_MAX_FLEET),
+        "{seen:?}"
+    );
+    assert!(seen.contains(&70), "{seen:?}");
+}
+
+/// The first step has no rung behind it, so it is bounded by `ceiling`
+/// however generous `proven` is.
+#[test]
+fn the_first_probe_step_never_uses_the_proven_ceiling() {
+    let (f, _) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 30, 100);
+    assert_eq!(f, 25);
+    let (_, p) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 30, 100);
+    let (f, p) = probe_step(p, 25, 2_000, mbit(5_000), 25, 30, 100);
+    assert_eq!(f, 30, "the unproven step stops at `ceiling`");
+    assert!(!p.paid);
+}
+
+/// A line 50 sockets nearly fill (8 Gbit at 150 Mbit a socket): the
+/// rung to 70 buys a sixth of its share, so the probe stops THERE - one
+/// rung past the knee, never at the grant.
+#[test]
+fn a_proven_probe_still_stops_where_the_line_is_full() {
+    let line = mbit(8_000);
+    let seen = probe_run_to(
+        LINE_CAP_DEFAULT_FLEET,
+        30,
+        LINE_CAP_MAX_FLEET,
+        LINE_CAP_SUPPLY_MAX_FLEET,
+        |d| (mbit(150) * d as u64).min(line),
+    );
+    assert_eq!(*seen.last().unwrap(), 70, "{seen:?}");
+}
+
+/// Option B's spawn change must not move the I/O shard layout: an
+/// automatic cap with no MEASURED anchor now spawns the second
+/// ceiling's headroom, and `shard_basis` holds its shard input to the
+/// first ceiling, which is what such a run spawned before. A measured
+/// anchor, a typed fleet and a cap that is off keep the spawn count.
+#[test]
+fn the_shard_basis_holds_an_unproven_auto_cap_to_the_first_ceiling() {
+    let fleet = |cap: usize, auto: bool, measured: bool| -> Vec<(ServerConfig, PoolConfig)> {
+        (0..5)
+            .map(|i| {
+                let s: ServerConfig = serde_json::from_value(serde_json::json!({
+                    "host": format!("s{i}.example"), "port": 119, "connections": 20
+                }))
+                .unwrap();
+                let c = PoolConfig {
+                    connections: 20,
+                    line_cap_fleet: cap,
+                    line_cap_auto: auto,
+                    line_anchor_measured: measured,
+                    ..PoolConfig::default()
+                };
+                (s, c)
+            })
+            .collect()
+    };
+    assert_eq!(shard_basis(&fleet(25, true, false)), LINE_CAP_MAX_FLEET);
+    assert_eq!(shard_basis(&fleet(25, true, true)), 100);
+    assert_eq!(shard_basis(&fleet(25, false, false)), 100, "typed fleet");
+    assert_eq!(shard_basis(&fleet(0, true, false)), 100, "cap off");
 }

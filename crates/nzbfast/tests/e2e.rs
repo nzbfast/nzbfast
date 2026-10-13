@@ -49,6 +49,9 @@ mod e2e_chip6;
 // (sibling dir, size gate).
 mod e2e_containers;
 mod e2e_drop;
+// A dead post that stalls before any article is unanimously refused
+// (sibling dir, size gate).
+mod e2e_deadstall;
 // The one-pass writer's write-coalescing window, ARMED - the coverage
 // that went with `COALESCE_CAP_DEFAULT` going back to 0 on 17 Sep 2026
 // (sibling dir, size gate; its header carries the two round-44 defects

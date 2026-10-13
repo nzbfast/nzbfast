@@ -1208,7 +1208,21 @@ impl Archive {
         // arm made the same move for the same reason
         // (research/RAR-PERF-AUDIT-2026-09-02.md, round 7 - and round 13
         // for this one).
-        let mut buf = vec![0u8; 1 << 20];
+        //
+        // CAPPED AT THE DECLARED SIZE (plus one, so the read that finds
+        // the end, or the byte past a lie, still has room): a zeroed 1 MiB
+        // buffer per member was 0.83B of the 11.32B instructions a
+        // 4,096-member zip cost on 26 Sep 2026
+        // (research/MANYSMALL-ZIP-7Z-PER-MEMBER-2026-09-26.md). The floor
+        // keeps a zero-length declaration reading a real chunk, so an
+        // entry that lies about being empty still meets the "longer than
+        // its declared size" refusal below rather than a read of nothing.
+        let mut buf = vec![
+            0u8;
+            usize::try_from(e.uncompressed_size.saturating_add(1))
+                .unwrap_or(1 << 20)
+                .clamp(4 << 10, 1 << 20)
+        ];
         // One code path for both methods: `store` is just the identity
         // decoder, so the CRC/size accounting below cannot drift between
         // them.

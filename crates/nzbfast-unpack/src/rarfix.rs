@@ -2122,9 +2122,40 @@ fn zip_pass(
         /// What the path SPELLS, for a target whose id would not read.
         Spelling(PathBuf),
     }
+    //
+    // THE PROBE IS SKIPPED, whole archive or not at all, when every
+    // target is spelled inside `nzbkit::disk::ascii_fold_is_exact`'s
+    // subset - plain ASCII, no `~`, no `:`, no trailing dot or space -
+    // where the ASCII lowercase spelling IS the volume's answer (that
+    // function's doc carries the argument, alias class by alias class).
+    // Measured 26 Sep 2026 on a 4,096-member zip: create + stat + unlink
+    // per target was 3.79B of the run's 11.32B instructions, the largest
+    // single per-member cost (research/MANYSMALL-ZIP-7Z-PER-MEMBER-2026-09-26.md).
+    // All or nothing, because a non-ASCII name can alias an ASCII one
+    // (the Kelvin sign onto `k`), so one name outside the subset sends
+    // EVERY target back to the volume. Not on Windows, whose own volume
+    // is where the probe's reach past any spelling rule was measured;
+    // this is a shortcut for the hosts where the gap is, not a verdict
+    // on NTFS.
+    let spelled_exactly = fold
+        && !cfg!(windows)
+        && files.iter().all(|(_, target)| {
+            target
+                .strip_prefix(out)
+                .ok()
+                .and_then(|rel| rel.to_str())
+                .is_some_and(nzbkit::disk::ascii_fold_is_exact)
+        });
     let mut probed: Vec<&std::path::Path> = Vec::new();
     let mut keys: Vec<TargetKey> = Vec::with_capacity(files.len());
     for (_, target) in &files {
+        if spelled_exactly {
+            let rel = target.strip_prefix(out).unwrap_or(target);
+            keys.push(TargetKey::Spelling(PathBuf::from(
+                rel.to_string_lossy().to_ascii_lowercase(),
+            )));
+            continue;
+        }
         if fold {
             if !target.exists() && std::fs::File::create(target).is_ok() {
                 probed.push(target.as_path());
@@ -2229,6 +2260,36 @@ fn zip_pass(
                     (f, 0, 0)
                 }
             };
+            // A member that fits ONE hand-off buffer is written here, on
+            // the decode thread. `with_write_thread` hands a buffer over
+            // only when it is full or at the final flush, so such a member
+            // is decoded whole before its writer sees a byte: the thread
+            // bought no overlap for it, and cost a spawn plus four zeroed
+            // 1 MiB buffers every time. Measured 26 Sep 2026 on a
+            // 4,096-member zip: 2.30B of 11.32B instructions
+            // (research/MANYSMALL-ZIP-7Z-PER-MEMBER-2026-09-26.md). The
+            // buffer is sized to the member, so a whole small member is one
+            // `write` at the flush. A LIE in the declared size is bounded
+            // exactly as before: the entry reader refuses past it.
+            if e.size() <= WRITE_THREAD_BUF as u64 {
+                let cap = usize::try_from(e.size()).unwrap_or(WRITE_THREAD_BUF);
+                let mut w = crate::resumeout::ResumeWriter::verified(
+                    skip,
+                    crc,
+                    mismatch.clone(),
+                    BombGuardWriter {
+                        inner: std::io::BufWriter::with_capacity(cap.max(8 << 10), file),
+                        written: written.clone(),
+                        budget: budget.clone(),
+                    },
+                );
+                archive
+                    .read_entry_to_with(e, &mut w, password)
+                    .map_err(|err| anyhow::anyhow!("{err}"))?;
+                use std::io::Write as _;
+                w.flush()?;
+                return Ok(());
+            }
             // The disk write runs on its own thread; the bomb guard and the
             // resume accounting stay here, on the decode side, where they
             // cost nothing. `with_write_thread` owns the buffering, so there
@@ -2429,6 +2490,11 @@ impl std::io::Write for ChannelWriter {
     }
 }
 
+/// The hand-off buffer [`with_write_thread`] cycles, and so the member
+/// size at or under which `zip_pass` writes inline instead: a member
+/// that fits one buffer gets no overlap from the thread.
+const WRITE_THREAD_BUF: usize = 1 << 20;
+
 /// Run `f` with a writer whose `write` calls land on a second thread.
 ///
 /// The thread's error wins over the closure's: see [`ChannelWriter`].
@@ -2439,7 +2505,7 @@ fn with_write_thread<T>(
     use std::io::Write as _;
     // Four buffers in flight, the same width and depth round 8 measured
     // for the 7z arm.
-    const BUF: usize = 1 << 20;
+    const BUF: usize = WRITE_THREAD_BUF;
     const POOL: usize = 4;
     let (full_tx, full_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, usize)>(POOL);
     let (empty_tx, empty_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(POOL);
@@ -2629,6 +2695,10 @@ mod rarfix_rev_recovery_tests;
 #[cfg(test)]
 #[path = "rarfix_numeric_volume_tests.rs"]
 mod rarfix_numeric_volume_tests;
+
+#[cfg(test)]
+#[path = "rarfix_solid_overrun_tests.rs"]
+mod rarfix_solid_overrun_tests;
 
 #[cfg(test)]
 mod native_unrar_tests;

@@ -266,7 +266,7 @@ mod tests {
         // reporter's own five-connections-a-server.
         assert_eq!(crate::conntune::line_cap_fleet(&cfg, anchor, 0), floor);
         assert_eq!(
-            crate::conntune::line_cap_share(&cfg, 5, anchor, 0),
+            crate::conntune::line_cap_share(&cfg, vec![0; 5], anchor, 0).map(|s| s.share(0)),
             Some(5),
             "which is what GH #62 reported seeing"
         );
@@ -294,7 +294,7 @@ mod tests {
             "job two must not re-walk job one's climb: {seeded}"
         );
         assert_eq!(
-            crate::conntune::line_cap_share(&cfg, 5, anchor, carry),
+            crate::conntune::line_cap_share(&cfg, vec![0; 5], anchor, carry).map(|s| s.share(0)),
             Some(10),
             "10 connections a server at job build, not 5 walked to 10"
         );

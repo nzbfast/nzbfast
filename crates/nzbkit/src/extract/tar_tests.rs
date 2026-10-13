@@ -154,7 +154,7 @@ fn tar_long_names_reach_disk() {
         ..Spec::file(&long[..100], &data)
     }]);
     let pax = tar_of(&[Spec {
-        pax: vec![("path".to_string(), long.clone())],
+        pax: vec![("path".to_string(), long.clone().into_bytes())],
         ..Spec::file(&long[..100], &data)
     }]);
     // The path is provably safe, so the long name keeps its tree.

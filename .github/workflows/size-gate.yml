@@ -3685,6 +3685,16 @@ jobs:
       # step it is visible to the selftest roster and to a reader.
       - name: PE import reader selftest
         run: python3 packaging/pe-imports.py --selftest
+      # The three helpers provenance-release.yml's installer jobs call on
+      # the public repo, where the only other place they run is a release.
+      # A broken one would otherwise surface as a red release run with the
+      # draft already cut. Hermetic: canned input, no cargo, no network.
+      - name: SBOM generator selftest
+        run: python3 packaging/make-sbom.py --selftest
+      - name: attestation stager selftest
+        run: python3 packaging/stage-attestation.py --selftest
+      - name: Windows portable zip selftest
+        run: python3 packaging/windows/make-portable-zip.py --selftest
       - name: script modes gate
         run: packaging/tests/script-modes.sh
       - name: publish destination guard

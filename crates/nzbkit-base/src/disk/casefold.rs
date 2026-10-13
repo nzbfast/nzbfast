@@ -121,9 +121,83 @@ pub fn case_fold_key(s: &str) -> String {
     up.to_lowercase()
 }
 
+/// Is `rel` - an output path RELATIVE to the directory being written,
+/// separators already `/` - spelled in a subset where its ASCII
+/// lowercasing is an EXACT identity key, so a caller comparing many
+/// targets may compare spellings instead of asking the volume per file?
+///
+/// For the zip extractor's duplicate-target guard, which otherwise
+/// creates, stats and unlinks a probe per member on a case-insensitive
+/// volume (`nzbfast_unpack::rarfix::zip_pass`). That probe is about
+/// 0.93M instructions a member on APFS, the largest single per-member
+/// cost measured on a 4,096-file zip (26 Sep 2026 profile,
+/// `research/MANYSMALL-ZIP-7Z-PER-MEMBER-2026-09-26.md`), and the answer
+/// it buys is only ever needed for spellings a fold can get wrong.
+///
+/// # Why this subset is exact
+///
+/// Every alias a volume makes between two names is one of: a case
+/// mapping, a normalization, a short-name alias, or a name the OS
+/// rewrites before the filesystem sees it. Over the subset below:
+///
+/// * **case** - only the 26 ASCII letter pairs fold into each other
+///   among ASCII characters, on APFS, HFS+, NTFS's `$UpCase`, exFAT's
+///   upcase table and ext4 casefold alike. The non-ASCII characters that
+///   fold ONTO ASCII (the Kelvin sign onto `k`, the long s onto `s`) are
+///   excluded by requiring the whole path to be ASCII - which is why the
+///   caller must take this path for EVERY target or for none.
+/// * **normalization** - no ASCII character has a decomposition.
+/// * **8.3 short names** (FAT, and NTFS with 8dot3 on, including over
+///   SMB) - a short name always carries `~`, so a name without one
+///   cannot be another file's alias.
+/// * **Win32 rewrites** - trailing dots and spaces are stripped and `:`
+///   opens an alternate data stream, so `a.` and `a`, or `a` and `a:x`,
+///   reach one object. All three are excluded.
+///
+/// Anything outside the subset answers false, and the caller keeps
+/// asking the volume. This never over-folds either: two ASCII names
+/// that differ other than in letter case keep different keys.
+pub fn ascii_fold_is_exact(rel: &str) -> bool {
+    rel.is_ascii()
+        && !rel.is_empty()
+        && rel
+            .split('/')
+            .all(|c| !c.is_empty() && !c.contains(['~', ':']) && !c.ends_with(['.', ' ']))
+}
+
 #[cfg(test)]
 mod tests {
     use super::case_fold_key;
+
+    /// The subset `ascii_fold_is_exact` admits, and the shapes it must
+    /// refuse because a volume can alias them outside letter case.
+    #[test]
+    fn ascii_fold_is_exact_admits_plain_ascii_and_refuses_every_alias_shape() {
+        use super::ascii_fold_is_exact;
+        for ok in [
+            "a",
+            "d00/f01728",
+            "Movie.Name.2026.mkv",
+            "sub dir/x-y_z.txt",
+        ] {
+            assert!(ascii_fold_is_exact(ok), "{ok:?} should be admitted");
+        }
+        for no in [
+            "",
+            "PROGRA~1",       // 8.3 short-name alias
+            "d/LONGFI~1.TXT", // ... in any component
+            "file.",          // Win32 strips the trailing dot
+            "file ",          // ... and a trailing space
+            "d./x",
+            "a:stream",          // NTFS alternate data stream
+            "\u{212A}elvin",     // folds onto ASCII `k`
+            "stra\u{00DF}e.txt", // expands to `ss`
+            "caf\u{00E9}",       // normalization-sensitive
+            "a//b",              // empty component
+        ] {
+            assert!(!ascii_fold_is_exact(no), "{no:?} should be refused");
+        }
+    }
 
     /// Pairs MEASURED as one file object on the dev box's APFS volume on
     /// 31 Aug 2026 (one file created per name, classes read off the

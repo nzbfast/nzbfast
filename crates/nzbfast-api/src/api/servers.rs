@@ -1339,6 +1339,21 @@ fn enabled_server_count(servers: &[Value]) -> usize {
         .count()
 }
 
+/// Every ENABLED row's level, in config order - what the fleet cap's
+/// share divides by (`nzbkit::pool::linecap::level_share`). Same row
+/// filter as [`enabled_server_count`], for the same reason.
+fn enabled_levels(servers: &[Value]) -> Vec<u32> {
+    servers
+        .iter()
+        .filter(|s| s.get("enabled").and_then(Value::as_bool).unwrap_or(true))
+        .map(|s| {
+            s.get("level")
+                .and_then(Value::as_u64)
+                .map_or(0, |l| u32::try_from(l).unwrap_or(u32::MAX))
+        })
+        .collect()
+}
+
 /// Is a download in flight - the one signal both connection probes in
 /// this file gate on?
 ///
@@ -1568,7 +1583,10 @@ fn m_server_carry(
             // The rule is off, so there is no share to speak of and the
             // server's own number is what a job would dial.
             None => ceiling,
-            Some(f) => nzbkit::pool::linecap::server_share(f, n_servers),
+            // GH #103: by level, as the job's own seed divides it, so a
+            // fill server's panel shows the fill share it would really
+            // open and a primary's the larger one.
+            Some(f) => nzbkit::pool::linecap::level_share(f, &enabled_levels(&servers), srv.level),
         };
         let (rung_now, rung_more) = carry_rungs_for(share, ceiling);
         // Both refusals stand BEFORE the permit is taken: a handler

@@ -9,8 +9,8 @@ use crate::codec::rar20::{
 };
 use crate::codec::rar29::{
     encode_rar29_literals, encode_rar29_literals_with_options,
-    encode_rar29_literals_with_options_and_progress, encode_rar29_ppmd,
-    encode_rar29_ppmd_with_filter, EncodeOptions as Rar29EncodeOptions, Rar29Decoder, Rar29Encoder,
+    encode_rar29_literals_with_options_and_progress, encode_rar29_ppmd_with_filter_within,
+    encode_rar29_ppmd_within, EncodeOptions as Rar29EncodeOptions, Rar29Decoder, Rar29Encoder,
 };
 pub use crate::codec::rar29::{Rar29FilterKind as FilterKind, Rar29FilterSpec as FilterSpec};
 use crate::io_util::align16 as checked_align16;
@@ -251,11 +251,17 @@ fn encode_rar29_policy_filtered_payload(
             method: lz_method,
         }),
         FilterPolicy::Ppmd => Ok(EncodedPayload {
-            data: encode_rar29_ppmd(data).map_err(Error::from)?,
+            data: encode_rar29_ppmd_within(data, options.max_match_distance)
+                .map_err(Error::from)?,
             method: 0x35,
         }),
         FilterPolicy::PpmdFiltered(filter) => Ok(EncodedPayload {
-            data: encode_rar29_ppmd_with_filter(data, filter.clone()).map_err(Error::from)?,
+            data: encode_rar29_ppmd_with_filter_within(
+                data,
+                filter.clone(),
+                options.max_match_distance,
+            )
+            .map_err(Error::from)?,
             method: 0x35,
         }),
     }
@@ -359,7 +365,8 @@ fn encode_rar29_auto_filtered_member(
     }
     if include_ppmd && is_large_text_ppmd_candidate(data) {
         return Ok(EncodedPayload {
-            data: encode_rar29_ppmd(data).map_err(Error::from)?,
+            data: encode_rar29_ppmd_within(data, options.max_match_distance)
+                .map_err(Error::from)?,
             method: 0x35,
         });
     }
@@ -369,7 +376,8 @@ fn encode_rar29_auto_filtered_member(
     };
     if include_ppmd && data.len() <= 1024 * 1024 && is_text_ppmd_candidate(data) {
         let ppmd = EncodedPayload {
-            data: encode_rar29_ppmd(data).map_err(Error::from)?,
+            data: encode_rar29_ppmd_within(data, options.max_match_distance)
+                .map_err(Error::from)?,
             method: 0x35,
         };
         if ppmd.data.len() < best.data.len() {
@@ -395,7 +403,8 @@ fn encode_rar29_auto_filtered_member(
         keep_shorter(
             &mut best,
             EncodedPayload {
-                data: encode_rar29_ppmd(data).map_err(Error::from)?,
+                data: encode_rar29_ppmd_within(data, options.max_match_distance)
+                    .map_err(Error::from)?,
                 method: 0x35,
             },
         );
@@ -3195,6 +3204,131 @@ mod tests {
 
         assert!(ranged.len() < plain.len());
         assert!(auto.data.len() <= ranged.len());
+    }
+
+    /// A RAR 4 member bigger than one LZ block (`RAR29_LZ_BLOCK_SIZE`) is
+    /// encoded as several blocks back to back, and only the LAST may end
+    /// the file: every earlier block must say "same file, a new table
+    /// follows". `4c76b43b5` (27 Sep 2026) made every block end the file,
+    /// and reference unrar then stopped after the first megabyte and
+    /// reported "checksum error" on the member - while this crate's own
+    /// decoder, which forgives either ending, still round-tripped it. So
+    /// only an external unrar can pin this: every level, text and binary,
+    /// over two blocks, through `unrar t`. Skips (loudly) where no unrar
+    /// is installed.
+    ///
+    /// The third payload is the PPMd twin, found beside it: level 5 sends
+    /// text of a megabyte or less through PPMd, whose LZ escapes were not
+    /// capped at the archive's dictionary (128 KiB for RAR 4) until 28 Sep
+    /// 2026, so a far match past it made unrar fail the member while this
+    /// crate's decoder, with its larger window, still read it back. The
+    /// payload is 300 KB of random words and then a repeat of the first
+    /// 60 KB, so its best match lies 300 KB back. It has to be that far:
+    /// measured against unrar 7.23 as a black box, a match ~200 KB back
+    /// still tested clean although the header declares 128 KiB, so unrar's
+    /// window for this format is evidently at least 256 KiB whatever the
+    /// header says - which is why the defect first showed at ~282 KB of
+    /// text - and the cap follows the header, as the LZ planner's does.
+    /// Level 5 is the only level that tries PPMd, so it runs there alone.
+    ///
+    /// `parallel` only: the serial match finder makes this matrix cost about
+    /// 200 s in a debug build, against about 20 s with the feature, which is
+    /// what nzbfast's lib line and every workspace build resolve.
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn reference_unrar_tests_a_multi_block_rar4_member_at_every_level() {
+        use crate::rar15_40::FileEntry;
+        let text: Vec<u8> = (0u32..)
+            .flat_map(|i| {
+                format!(
+                    "line {i}: the quick brown fox {} jumps over the lazy dog\n",
+                    i % 977
+                )
+                .into_bytes()
+            })
+            .take(super::RAR29_LZ_BLOCK_SIZE + 12_345)
+            .collect();
+        const WORDS: [&str; 14] = [
+            "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog", "rar", "archive",
+            "member", "block", "table", "symbol",
+        ];
+        let mut prose = Vec::new();
+        let mut word = 0x9e37_79b9u32;
+        while prose.len() < 300_000 {
+            word ^= word << 13;
+            word ^= word >> 17;
+            word ^= word << 5;
+            prose.extend_from_slice(WORDS[word as usize % WORDS.len()].as_bytes());
+            prose.push(if word.is_multiple_of(11) { b'\n' } else { b' ' });
+        }
+        let head = prose[..60_000].to_vec();
+        prose.extend_from_slice(&head);
+        let mut state = 0x2545_f491u32;
+        let binary: Vec<u8> = (0..super::RAR29_LZ_BLOCK_SIZE + 777)
+            .map(|i| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                // Compressible but not text: a quarter-period noise mix.
+                if i % 4 == 0 {
+                    state as u8
+                } else {
+                    (i / 7) as u8
+                }
+            })
+            .collect();
+        let dir = std::env::temp_dir().join(format!("rars-rar4-multiblock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for level in 1..=5u8 {
+            for (name, data) in [
+                ("text.txt", &text),
+                ("binary.bin", &binary),
+                ("prose.txt", &prose),
+            ] {
+                if name == "prose.txt" && level != 5 {
+                    continue;
+                }
+                let entry = FileEntry {
+                    name: name.as_bytes(),
+                    data,
+                    file_time: 0,
+                    file_attr: 0x20,
+                    host_os: 2,
+                    password: None,
+                    file_comment: None,
+                };
+                let archive = super::write_compressed_archive(
+                    &[entry],
+                    super::WriterOptions::new(ArchiveVersion::Rar40, FeatureSet::store_only())
+                        .with_compression_level(level),
+                )
+                .unwrap();
+                let path = dir.join(format!("level{level}-{name}.rar"));
+                std::fs::write(&path, &archive).unwrap();
+                let output = match std::process::Command::new("unrar")
+                    .arg("t")
+                    .arg("-idq")
+                    .arg(&path)
+                    .output()
+                {
+                    Ok(output) => output,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        eprintln!("skipping reference test: local `unrar` is not installed");
+                        let _ = std::fs::remove_dir_all(&dir);
+                        return;
+                    }
+                    Err(error) => panic!("failed to run unrar: {error}"),
+                };
+                assert!(
+                    output.status.success(),
+                    "unrar t rejected level {level} {name} ({} bytes)\nstdout:\n{}\nstderr:\n{}",
+                    archive.len(),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

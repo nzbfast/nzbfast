@@ -294,7 +294,10 @@ fn tool_cmd(
                 c.arg(password);
             }
         }
-        "unrar" => {
+        // Any name starting `unrar` takes unrar's argv, so a second tool that
+        // speaks the unrar dialect (`--tools unrar,unrar-other` with a
+        // `--tool-bin` for it) races in the same round as the reference.
+        t if t.starts_with("unrar") => {
             c.arg("x").arg("-y").arg("-idq");
             c.arg(if encrypted {
                 format!("-p{password}")
@@ -303,7 +306,12 @@ fn tool_cmd(
             });
             c.arg(entry).arg(format!("{}/", out.display()));
         }
-        "rarpar" => {
+        // Any name starting `rarpar` takes rarpar's argv, for the same reason
+        // the `ours` arm above is a prefix: one interleaved round can race
+        // two rarpar releases (`--tools rarpar060,rarpar025` with a
+        // `--tool-bin` for each) instead of two separate races under
+        // different load.
+        t if t.starts_with("rarpar") => {
             c.arg("rar").arg("extract").arg("--overwrite");
             if encrypted {
                 c.arg("--password-env").arg("RARPAR_PW");

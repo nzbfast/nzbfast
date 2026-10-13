@@ -13,12 +13,16 @@
 //! instead of waiting for a map to parse.
 //!
 //! What is read:
-//! - **ustar** (POSIX.1-1988) and **GNU tar**, which differ only in the
-//!   six magic bytes at 257 and how they spell long names.
+//! - **ustar** (POSIX.1-1988) and **GNU tar**, told apart by the eight
+//!   magic-and-version bytes at 257. They differ in how they spell long
+//!   names AND in what the 155 bytes at offset 345 hold: POSIX's
+//!   `prefix`, but GNU's atime, ctime and incremental-dump fields, so
+//!   only a POSIX header has a prefix to join.
 //! - Long paths both ways: GNU's `L` typeflag entry, whose data IS the
 //!   next entry's name, and POSIX pax `x` extended headers, whose
 //!   `path=` and `size=` records override the ustar fields behind them.
-//! - `prefix` (ustar's own long-path field) joined back onto `name`.
+//! - `prefix` (ustar's own long-path field) joined back onto `name`, in
+//!   a POSIX header only.
 //! - Numeric fields in octal, and in GNU base-256 for sizes past 8 GB.
 //!
 //! What is deliberately refused, each one demoting the whole container
@@ -356,8 +360,9 @@ impl<R: io::Read> Reader<R> {
                 // GNU long name / long link name: the DATA is the name,
                 // and the real header follows.
                 b'L' | b'K' => {
-                    let text = self.read_meta(size)?;
+                    let raw = self.read_meta(size)?;
                     if flag == b'L' {
+                        let text = String::from_utf8_lossy(&raw);
                         long_name = Some(text.trim_end_matches('\0').to_string());
                     }
                     continue;
@@ -367,9 +372,9 @@ impl<R: io::Read> Reader<R> {
                 // we read neither name nor size out of it, because the
                 // only keywords acted on here are per-entry by nature.
                 b'x' | b'g' => {
-                    let text = self.read_meta(size)?;
+                    let raw = self.read_meta(size)?;
                     if flag == b'x' {
-                        let (n, s) = parse_pax(&text)?;
+                        let (n, s) = parse_pax(&raw)?;
                         pax_name = n.or(pax_name);
                         pax_size = s.or(pax_size);
                     }
@@ -382,9 +387,17 @@ impl<R: io::Read> Reader<R> {
                 }
                 _ => {}
             }
-            let mut name = pax_name
-                .or(long_name)
-                .unwrap_or_else(|| join_prefix(&block));
+            let mut name = pax_name.or(long_name).unwrap_or_else(|| {
+                if magic == MAGIC_USTAR {
+                    join_prefix(&block)
+                } else {
+                    // GNU keeps atime/ctime at 345, not a prefix: a
+                    // populated pair read as one put every member
+                    // under `15000000000/`. Its long paths come by
+                    // the `L` entry above instead.
+                    read_str(&block[OFF_NAME..OFF_NAME + 100])
+                }
+            });
             let size = pax_size.unwrap_or(size);
             let kind = match flag {
                 b'0' | 0 | b'7' => {
@@ -507,8 +520,12 @@ impl<R: io::Read> Reader<R> {
     }
 
     /// Read a metadata member's whole data (a GNU long name or a pax
-    /// record set) plus its padding, as text.
-    fn read_meta(&mut self, size: u64) -> Result<String, TarError> {
+    /// record set) plus its padding, as RAW BYTES. Not text: a pax set
+    /// is byte-counted records whose values may be binary (bsdtar
+    /// writes `SCHILY.xattr.*` raw), so a lossy decode here turns each
+    /// invalid byte into a 3-byte U+FFFD and every length after it
+    /// points at the wrong place. The caller decodes what it acts on.
+    fn read_meta(&mut self, size: u64) -> Result<Vec<u8>, TarError> {
         if size > MAX_NAME_BYTES {
             return Err(TarError::Unsupported(format!(
                 "the tar declares a {size}-byte name record, over the {MAX_NAME_BYTES}-byte ceiling"
@@ -527,13 +544,14 @@ impl<R: io::Read> Reader<R> {
         }
         out.truncate(done);
         self.skip_rest()?;
-        Ok(String::from_utf8_lossy(&out).into_owned())
+        Ok(out)
     }
 }
 
 /// ustar's own long-path field: `prefix` holds the leading directories,
 /// `name` the tail, joined with `/`. Empty prefix (the common case) is
-/// the plain name.
+/// the plain name. POSIX ustar only - the same bytes are timestamps in a
+/// GNU header.
 fn join_prefix(block: &[u8]) -> String {
     let name = read_str(&block[OFF_NAME..OFF_NAME + 100]);
     let prefix = read_str(&block[OFF_PREFIX..OFF_PREFIX + 155]);
@@ -547,46 +565,58 @@ fn join_prefix(block: &[u8]) -> String {
 /// pax extended header records: `<len> <key>=<value>\n`, where `<len>`
 /// counts the whole record including itself and the newline. Only
 /// `path` and `size` are acted on; every other keyword is ordinary
-/// metadata this extractor has no output for.
+/// metadata this extractor has no output for, and is stepped over by
+/// its length without being decoded - which is what lets a binary value
+/// through. macOS bsdtar writes a file's `com.apple.provenance` xattr
+/// raw into a `SCHILY.xattr.com.apple.provenance` record; walking the
+/// set as lossily-decoded TEXT refused every such tar as "pax record
+/// length is out of range".
 ///
 /// A `GNU.sparse.*` keyword is refused outright rather than ignored: a
 /// pax-spelled sparse member looks like an ordinary file in its ustar
 /// header, so ignoring the keyword would write the FILE IMAGE's holes as
 /// literal bytes and call the result good.
-fn parse_pax(text: &str) -> Result<(Option<String>, Option<u64>), TarError> {
+fn parse_pax(raw: &[u8]) -> Result<(Option<String>, Option<u64>), TarError> {
     let mut name = None;
     let mut size = None;
-    let mut rest = text;
+    let mut rest = raw;
     while !rest.is_empty() {
-        let Some(sp) = rest.find(' ') else { break };
-        let Ok(len) = rest[..sp].parse::<usize>() else {
+        let Some(sp) = rest.iter().position(|&b| b == b' ') else {
+            break;
+        };
+        let Some(len) = std::str::from_utf8(&rest[..sp])
+            .ok()
+            .and_then(|d| d.parse::<usize>().ok())
+        else {
             return Err(TarError::Malformed("pax record has no length"));
         };
-        // A pax length is a BYTE count, and the values are arbitrary
-        // UTF-8 (`path=` above all), so a hostile or merely truncated
-        // record can point it into the middle of a character. `get`
-        // rather than a slice: the panic that would be is reachable
-        // from container bytes.
+        // A pax length is a BYTE count, and nothing bounds it but the
+        // container, so a hostile or merely truncated record can point
+        // it short of its own key or past the set's end. `get` rather
+        // than a slice: the panic that would be is reachable from
+        // container bytes.
         let (Some(body), Some(tail)) = (rest.get(sp + 1..len), rest.get(len..)) else {
             return Err(TarError::Malformed("pax record length is out of range"));
         };
-        let body = body.trim_end_matches('\n');
+        let body = body.strip_suffix(b"\n").unwrap_or(body);
         rest = tail;
-        let Some((key, value)) = body.split_once('=') else {
+        let Some(eq) = body.iter().position(|&b| b == b'=') else {
             continue;
         };
-        if key.starts_with("GNU.sparse.") {
+        let (key, value) = (&body[..eq], &body[eq + 1..]);
+        if key.starts_with(b"GNU.sparse.") {
             return Err(TarError::Unsupported(
                 "the tar holds a sparse member, which is not extracted".to_string(),
             ));
         }
         match key {
-            "path" => name = Some(value.to_string()),
-            "size" => {
+            b"path" => name = Some(String::from_utf8_lossy(value).into_owned()),
+            b"size" => {
                 size = Some(
-                    value
-                        .parse::<u64>()
-                        .map_err(|_| TarError::Malformed("pax size is not a number"))?,
+                    std::str::from_utf8(value)
+                        .ok()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .ok_or(TarError::Malformed("pax size is not a number"))?,
                 )
             }
             _ => {}
@@ -601,7 +631,7 @@ fn parse_pax(text: &str) -> Result<(Option<String>, Option<u64>), TarError> {
 /// checksum, a sparse member, a size that runs past the container), and
 /// no new dependency belongs in the tree for that.
 pub mod fixtures {
-    use super::{BLOCK, OFF_CHKSUM};
+    use super::{BLOCK, OFF_CHKSUM, OFF_PREFIX};
 
     /// One member to write.
     #[derive(Clone)]
@@ -615,10 +645,20 @@ pub mod fixtures {
         /// this name, and truncate the ustar `name` field to 100 bytes.
         pub long_name: Option<&'a str>,
         /// Precede the member with a pax `x` header carrying these
-        /// records, each written as `<len> <key>=<value>\n`.
-        pub pax: Vec<(String, String)>,
+        /// records, each written as `<len> <key>=<value>\n`. The value
+        /// is bytes because a real writer puts binary in it (bsdtar's
+        /// `SCHILY.xattr.*`).
+        pub pax: Vec<(String, Vec<u8>)>,
         /// Corrupt the stored header checksum.
         pub bad_checksum: bool,
+        /// Write this into the 155-byte field at offset 345 - POSIX
+        /// ustar's `prefix`, the leading directories of the name.
+        pub prefix: Option<&'a str>,
+        /// Write these as octal access and change times at offsets 345
+        /// and 357, where a GNU/oldgnu header keeps them - the SAME
+        /// bytes POSIX reads as `prefix`. Incremental-mode GNU tar
+        /// (`--incremental`, `--atime-preserve` dumps) populates them.
+        pub gnu_times: Option<(u64, u64)>,
     }
 
     impl<'a> Spec<'a> {
@@ -631,6 +671,8 @@ pub mod fixtures {
                 long_name: None,
                 pax: Vec::new(),
                 bad_checksum: false,
+                prefix: None,
+                gnu_times: None,
             }
         }
 
@@ -656,8 +698,23 @@ pub mod fixtures {
         out[..s.len()].copy_from_slice(s.as_bytes());
     }
 
+    /// What a header carries at offset 345 beside its name: nothing, a
+    /// POSIX `prefix`, or GNU's atime/ctime pair.
+    #[derive(Clone, Copy, Default)]
+    struct At345<'a> {
+        prefix: Option<&'a str>,
+        gnu_times: Option<(u64, u64)>,
+    }
+
     /// One 512-byte header, checksummed.
-    fn header(name: &str, size: u64, typeflag: u8, gnu: bool, bad: bool) -> Vec<u8> {
+    fn header(
+        name: &str,
+        size: u64,
+        typeflag: u8,
+        gnu: bool,
+        bad: bool,
+        at345: At345<'_>,
+    ) -> Vec<u8> {
         let mut h = vec![0u8; BLOCK];
         let n = name.as_bytes();
         let take = n.len().min(100);
@@ -674,6 +731,13 @@ pub mod fixtures {
         } else {
             h[257..265].copy_from_slice(b"ustar\x0000");
         }
+        if let Some(p) = at345.prefix {
+            h[OFF_PREFIX..OFF_PREFIX + p.len()].copy_from_slice(p.as_bytes());
+        }
+        if let Some((atime, ctime)) = at345.gnu_times {
+            octal(atime, 12, &mut h[OFF_PREFIX..OFF_PREFIX + 12]);
+            octal(ctime, 12, &mut h[OFF_PREFIX + 12..OFF_PREFIX + 24]);
+        }
         let sum: u64 = h.iter().map(|&b| b as u64).sum();
         let sum = if bad { sum ^ 0o777 } else { sum };
         let s = format!("{sum:06o}\0 ");
@@ -681,8 +745,16 @@ pub mod fixtures {
         h
     }
 
-    fn push_member(out: &mut Vec<u8>, name: &str, data: &[u8], flag: u8, gnu: bool, bad: bool) {
-        out.extend_from_slice(&header(name, data.len() as u64, flag, gnu, bad));
+    fn push_member(
+        out: &mut Vec<u8>,
+        name: &str,
+        data: &[u8],
+        flag: u8,
+        gnu: bool,
+        bad: bool,
+        at345: At345<'_>,
+    ) {
+        out.extend_from_slice(&header(name, data.len() as u64, flag, gnu, bad, at345));
         out.extend_from_slice(data);
         let pad = (BLOCK - data.len() % BLOCK) % BLOCK;
         out.extend(std::iter::repeat_n(0u8, pad));
@@ -693,26 +765,57 @@ pub mod fixtures {
         let mut out = Vec::new();
         for s in specs {
             if !s.pax.is_empty() {
-                let mut rec = String::new();
+                let mut rec = Vec::new();
                 for (k, v) in &s.pax {
                     // The length counts itself, so it is solved for:
                     // start from the record without it and grow until
                     // the printed width stops changing.
-                    let body = format!(" {k}={v}\n");
+                    let mut body = format!(" {k}=").into_bytes();
+                    body.extend_from_slice(v);
+                    body.push(b'\n');
                     let mut len = body.len() + 1;
                     while format!("{len}").len() + body.len() != len {
                         len = format!("{len}").len() + body.len();
                     }
-                    rec.push_str(&format!("{len}{body}"));
+                    rec.extend_from_slice(format!("{len}").as_bytes());
+                    rec.extend_from_slice(&body);
                 }
-                push_member(&mut out, "PaxHeader", rec.as_bytes(), b'x', s.gnu, false);
+                push_member(
+                    &mut out,
+                    "PaxHeader",
+                    &rec,
+                    b'x',
+                    s.gnu,
+                    false,
+                    At345::default(),
+                );
             }
             if let Some(long) = s.long_name {
                 let mut n = long.as_bytes().to_vec();
                 n.push(0);
-                push_member(&mut out, "././@LongLink", &n, b'L', s.gnu, false);
+                push_member(
+                    &mut out,
+                    "././@LongLink",
+                    &n,
+                    b'L',
+                    s.gnu,
+                    false,
+                    At345::default(),
+                );
             }
-            push_member(&mut out, s.name, s.data, s.typeflag, s.gnu, s.bad_checksum);
+            let at345 = At345 {
+                prefix: s.prefix,
+                gnu_times: s.gnu_times,
+            };
+            push_member(
+                &mut out,
+                s.name,
+                s.data,
+                s.typeflag,
+                s.gnu,
+                s.bad_checksum,
+                at345,
+            );
         }
         out.extend(std::iter::repeat_n(0u8, BLOCK * 2));
         out
@@ -783,7 +886,7 @@ mod tests {
             ..Spec::file(&long[..100], &data)
         }]);
         let pax = tar_of(&[Spec {
-            pax: vec![("path".to_string(), long.clone())],
+            pax: vec![("path".to_string(), long.clone().into_bytes())],
             ..Spec::file(&long[..100], &data)
         }]);
         for (tag, arch) in [("gnu", gnu), ("pax", pax)] {
@@ -792,6 +895,34 @@ mod tests {
             assert_eq!(got[0].0, long, "{tag}");
             assert_eq!(got[0].2, data, "{tag}");
         }
+    }
+
+    /// A binary pax value is stepped over by its byte length, not
+    /// decoded. This is the shape macOS bsdtar writes for a file that
+    /// carries `com.apple.provenance`; the value bytes are ones that
+    /// field really holds. It was refused as "pax record length is out
+    /// of range" while the set was walked as lossily-decoded text, each
+    /// invalid byte becoming a 3-byte U+FFFD. The `path` record after it
+    /// is the proof the walk stayed in step, and the payload is checked
+    /// byte for byte.
+    #[test]
+    fn steps_over_a_binary_pax_value() {
+        let data: Vec<u8> = (0..1500u32).map(|i| (i * 7 + 3) as u8).collect();
+        let arch = tar_of(&[Spec {
+            pax: vec![
+                (
+                    "SCHILY.xattr.com.apple.provenance".to_string(),
+                    vec![
+                        0x01, 0x02, 0x00, 0xb4, 0xa6, 0x4a, 0xbd, 0xe1, 0xde, 0xbe, 0x62,
+                    ],
+                ),
+                ("path".to_string(), b"dir/renamed.bin".to_vec()),
+            ],
+            ..Spec::file("payload.bin", &data)
+        }]);
+        let got = read_all(&arch).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], ("dir/renamed.bin".into(), Kind::File, data));
     }
 
     /// Re-stamp the checksum of the header block a test has edited in
@@ -811,6 +942,53 @@ mod tests {
         rechecksum(&mut arch);
         let got = read_all(&arch).unwrap();
         assert_eq!(got[0].0, "Release/payload.mkv");
+    }
+
+    /// A GNU header keeps atime and ctime where POSIX keeps `prefix`, so
+    /// a populated pair must not be read as leading directories: GNU tar
+    /// itself lists this member as `hello.txt`. Codex 13 Oct sweep F5.
+    #[test]
+    fn gnu_access_times_are_not_a_path_prefix() {
+        let data = b"hello world\n".to_vec();
+        let arch = tar_of(&[Spec {
+            gnu: true,
+            gnu_times: Some((0o15000000000, 0o15000000001)),
+            ..Spec::file("hello.txt", &data)
+        }]);
+        assert_eq!(&arch[OFF_PREFIX..OFF_PREFIX + 11], b"15000000000");
+        let got = read_all(&arch).unwrap();
+        assert_eq!(got, vec![("hello.txt".into(), Kind::File, data)]);
+    }
+
+    /// A POSIX member with a real prefix still joins it, through the
+    /// fixture's own field rather than a byte patch.
+    #[test]
+    fn a_posix_prefix_still_joins() {
+        let data = vec![5u8; 700];
+        let arch = tar_of(&[Spec {
+            prefix: Some("Show.S01/Season 1"),
+            ..Spec::file("episode.mkv", &data)
+        }]);
+        let got = read_all(&arch).unwrap();
+        assert_eq!(got[0].0, "Show.S01/Season 1/episode.mkv");
+        assert_eq!(got[0].2, data);
+    }
+
+    /// GNU's `L` long name still wins over the ustar `name` field when
+    /// the real header behind it carries populated times.
+    #[test]
+    fn a_gnu_long_name_wins_over_populated_times() {
+        let long = format!("deep/{}/payload.mkv", "y".repeat(150));
+        let data = vec![8u8; 900];
+        let arch = tar_of(&[Spec {
+            gnu: true,
+            long_name: Some(&long),
+            gnu_times: Some((0o15000000000, 0o15000000000)),
+            ..Spec::file(&long[..100], &data)
+        }]);
+        let got = read_all(&arch).unwrap();
+        assert_eq!(got[0].0, long);
+        assert_eq!(got[0].2, data);
     }
 
     /// A reference member is reported as one - the extractor turns that
@@ -840,8 +1018,8 @@ mod tests {
 
         let paxed = tar_of(&[Spec {
             pax: vec![
-                ("GNU.sparse.major".to_string(), "1".to_string()),
-                ("GNU.sparse.size".to_string(), "1099511627776".to_string()),
+                ("GNU.sparse.major".to_string(), b"1".to_vec()),
+                ("GNU.sparse.size".to_string(), b"1099511627776".to_vec()),
             ],
             ..Spec::file("sparse.img", b"\0\0\0\0")
         }]);

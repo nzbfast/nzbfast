@@ -1,8 +1,11 @@
 # nzbfast
 
 **The fast Usenet downloader.** One self-contained executable: download engine,
-web dashboard, poster-wall media browser, built-in indexer, realtime preview,
-and the repair/extraction tools, nothing else to install.
+web dashboard, poster-wall media browser, an optional built-in indexer (off by
+default), realtime preview, and the repair/extraction tools, nothing else to
+install.
+
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/nzbfast/nzbfast/badge)](https://scorecard.dev/viewer/?uri=github.com/nzbfast/nzbfast)
 
 [**Website**](https://nzbfast.github.io/nzbfast/) ·
 [Features](https://nzbfast.github.io/nzbfast/features.html) ·
@@ -76,7 +79,10 @@ Manager step by step, no SSH. Both run the same image as the compose file.
   (TVmaze / iTunes / IMDb datasets / Wikidata / AniList), preview or download
   from the tile
 - Preview with real seeking while the download runs
-- Built-in indexer, with a newznab endpoint, so nzbfast can be your indexer
+- Optional built-in indexer, off by default: switch it on and it scans your
+  newsgroups into a local index with a newznab endpoint. It finds what is
+  posted under real filenames, a limited slice of Usenet, so keep using your
+  commercial indexers too
 - Watchlist auto-grab with quality upgrades, RSS automation, Smart Folders,
   weekly scheduler, SABnzbd-compatible post-processing scripts
 - SABnzbd-compatible API and NZBGet JSON-RPC: Sonarr/Radarr, LunaSea, and
@@ -230,10 +236,29 @@ gh attestation verify nzbfast-x86_64-unknown-linux-gnu.tar.gz \
   --repo nzbfast/nzbfast
 ```
 
-The attested files are the `nzbfast-<target-triple>.tar.gz` assets. The
-convenience packages (DMG, Windows installer, platform zips) are built
-and signed through separate channels; grab a target-triple tarball when
-you want a binary you can verify against source.
+**Which files are attested.** Every file on a release page that has a
+`<file>.intoto.jsonl` beside it was built on a GitHub-hosted runner by
+[`provenance-release.yml`](.github/workflows/provenance-release.yml),
+from the tagged source, and that is the whole rule. The workflow builds
+the target-triple tarballs, the Linux tarballs
+(`nzbfast-X.Y.Z-linux-x64.tar.gz`, `-linux-arm64.tar.gz`), the Windows
+installer and portable zip, the macOS disk image and universal zip, and
+every update payload;
+releases cut before it gained the installer jobs (1.7.1 and earlier)
+attest the target-triple tarballs only. Files without an `.intoto.jsonl`
+(the Android APK, the Linux packages, the NAS packages and the beta
+builds) are built outside that workflow; when you
+want a binary you can verify against source on those platforms, take the
+matching target-triple tarball.
+
+Each attested file also carries `<file>.spdx.json`, an SPDX software
+bill of materials listing the crates compiled into it, at the versions
+and licences of that build. The SBOM is attested to the same digest:
+
+```sh
+gh attestation verify nzbfast-X.Y.Z-windows-x64-setup.exe --repo nzbfast/nzbfast \
+  --predicate-type https://spdx.dev/Document/v2.3
+```
 
 Container images are attested the same way once they are pushed by the
 public workflow rather than by hand - the workflow assembles the image

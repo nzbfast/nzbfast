@@ -11,32 +11,74 @@ name: provenance-release
 #
 #     gh attestation verify <file> --repo nzbfast/nzbfast
 #
-# SCOPE: the per-target tar.gz binaries this workflow uploads
-# (nzbfast-<target-triple>.tar.gz), plus - when the `image` input is set -
-# the container image, which this workflow assembles and pushes itself so
-# the attested digest is one a runner actually produced. The platform
-# installers (.dmg, setup.exe) are packaged and signed through separate
-# channels and are NOT covered here - which matters, because they are what
-# most people download. No copy anywhere may say nzbfast's downloads are
-# attested; the true claim is the narrower one, that the target-triple
-# tarballs are.
+# SCOPE, as of the `linux` and `windows-x64` jobs below (11 Oct 2026):
+#   - the per-target tarballs, nzbfast-<target-triple>.tar.gz (`binaries`);
+#   - the Linux human downloads, nzbfast-X.Y.Z-linux-{x64,arm64}.tar.gz,
+#     and the linux updater payloads (`linux`);
+#   - the Windows x64 installer, portable zip and updater payload
+#     (`windows-x64`), UNSIGNED until SignPath's release certificate
+#     issues - see sign-windows.yml and SIGNPATH.md;
+#   - the macOS DMG, universal zip and the three mac updater payloads
+#     (`macos`), ad-hoc signed exactly as the release Mac signed them;
+#   - the container image, which this workflow assembles and pushes
+#     itself so the attested digest is one a runner actually produced
+#     (`image`).
+# Every file this workflow attaches carries `<file>.intoto.jsonl` (its
+# provenance bundle) and `<file>.spdx.json` (an SPDX SBOM of the crates
+# compiled into it, from packaging/make-sbom.py, also attested). What it
+# does NOT build: the Android .apk, the
+# .deb/.rpm and the NAS packages, the armv7/FreeBSD/Windows-ARM64 betas -
+# those are still built by the release Mac or the private repo's
+# release.yml. So the true public claim is "every file that has an
+# .intoto.jsonl beside it was built here from the tagged source", never
+# "nzbfast's downloads are attested".
+#
+# ONE NAME, ONE SET OF BYTES. The Linux tarballs and the Windows zip and
+# installer used to be built on the release Mac under these same names,
+# so a release carried a CI build and a local build of the same program
+# side by side, and nobody could match SHA256SUMS.txt to a CI run. The
+# release Mac no longer builds them: the publish-release skill step 4
+# creates the release as a DRAFT, dispatches this workflow against it,
+# downloads what it attached, scans it, and folds it into SHA256SUMS.txt
+# and latest.json before publishing. Uploads here never --clobber, so a
+# release that already carries a locally built file under one of these
+# names makes this workflow fail loudly rather than publish a second
+# build of it.
 #
 # TWO WAYS IN, and they are not interchangeable:
 #
-# 1. AUTOMATIC, on `release: published` - the normal path. Provenance that
-#    exists only when somebody remembers to trigger it is provenance the
-#    README promises and some release quietly lacks, so the release itself
-#    is the trigger. Publishing a release creates (or already has) its tag
-#    and the event's GITHUB_SHA is that tag's commit, so the source guard
-#    below passes with nobody passing a ref. The `image` job stays opt-in
-#    and so never runs on this path - it moves :latest.
+# 1. MANUAL, workflow_dispatch, against a DRAFT release - the normal path
+#    since 11 Oct 2026. The release Mac pushes the tag, creates the draft,
+#    and dispatches with all build inputs on; every build job attaches to
+#    the draft, which is invisible to the public until it is published.
+#    That ordering is the point: the Mac has to fold these files into
+#    SHA256SUMS.txt and the signed latest.json BEFORE the release goes
+#    out, and a draft is the only state in which both exist at once.
+#    (A draft does not create its tag - the skill pushes the tag first,
+#    and the checkout below refuses without one.)
 #
-# 2. MANUAL, workflow_dispatch - the escape hatch, for the two cases the
-#    release event cannot cover: re-attesting a tag whose attestations
-#    died with a deleted release, and pushing the container image after an
-#    automatic run has already attached the tarballs
-#    (-f image=true -f binaries=false). Dispatch with the workflow ref set
-#    to the SAME tag:
+# 2. AUTOMATIC, on `release: published`. Publishing the draft from path 1
+#    fires this too, and finds the release already carrying .intoto.jsonl
+#    assets, so every BUILD job skips (`not_yet_attested` below) and only
+#    `image` runs. A release published WITHOUT path 1 - the old flow, or
+#    one somebody cut by hand - has no attestations yet, so the build jobs
+#    run here instead; provenance that exists only when somebody remembers
+#    to trigger it is provenance the README promises and some release
+#    quietly lacks. Publishing creates (or already has) the tag and the
+#    event's GITHUB_SHA is that tag's commit, so the source guard below
+#    passes with nobody passing a ref.
+#
+#    The `image` job runs on this path for a non-prerelease nzbfast tag
+#    that is the repository's LATEST release (it moves :latest, so it
+#    checks), because "dispatch the image by hand after publishing" was
+#    a step v1.3.0 forgot and both registries served the previous
+#    version for 15 hours.
+#
+# The dispatch is also the escape hatch, for re-attesting a tag whose
+# attestations died with a deleted release (-f installers=false), and for
+# re-pushing the image (-f image=true -f binaries=false
+# -f installers=false). Dispatch with the workflow ref set to the SAME
+# tag:
 #
 #     gh workflow run provenance-release.yml --ref "$TAG" -f tag="$TAG" ...
 #
@@ -88,6 +130,10 @@ on:
         description: "Build, attest and attach the per-target tarballs (uncheck to only push and attest the image for a tag whose tarballs are already attached - re-uploading them fails, there is no --clobber)"
         type: boolean
         default: true
+      installers:
+        description: "Build, attest and attach the Linux tarballs, the Windows x64 installer + zip, and their updater payloads (uncheck when they are already attached)"
+        type: boolean
+        default: true
       image:
         description: "Also build, push and attest the container image (moves :latest - only at release time, never for an old tag)"
         type: boolean
@@ -129,9 +175,20 @@ jobs:
     # A dispatch is left alone - it names its own tag deliberately, and
     # attesting a parfast tag on purpose is a thing somebody may one day
     # want.
+    #
+    # AND ONLY WHEN THE RELEASE IS NOT ALREADY ATTESTED. The normal path
+    # dispatches this workflow against a draft and then publishes it,
+    # which fires the release event a second time over assets that are
+    # already attached; uploading them again fails (no --clobber), so
+    # every build job asks the event's own asset list first. The same
+    # clause is on `linux` and `windows-x64`. Any `.intoto.jsonl` at all
+    # counts, which is deliberate: a release half-attested by a dispatch
+    # is a thing to repair by dispatch, not by a second automatic run
+    # failing over the half that landed.
     if: >-
       ${{ (github.event_name == 'release' && github.repository == 'nzbfast/nzbfast'
-           && startsWith(github.event.release.tag_name, 'v'))
+           && startsWith(github.event.release.tag_name, 'v')
+           && !contains(toJSON(github.event.release.assets.*.name), '.intoto.jsonl'))
           || (github.event_name == 'workflow_dispatch' && inputs.binaries) }}
     permissions:
       id-token: write       # Sigstore keyless signing (OIDC identity token)
@@ -266,6 +323,13 @@ jobs:
           test "$(wc -c < "$ART")" -gt 1000000
           shasum -a 256 "$ART" > "$ART.sha256"
 
+      # The SBOM: an SPDX 2.3 document of the crates compiled into THIS
+      # tarball for THIS triple (packaging/make-sbom.py says how, and what
+      # it leaves out). Written before the provenance step so the signed
+      # statement and the SBOM both describe the file as it will ship.
+      - name: SBOM
+        run: python3 packaging/make-sbom.py --asset nzbfast-${{ matrix.target }}.tar.gz --target ${{ matrix.target }} -p nzbfast
+
       # THE provenance step: signs a SLSA statement over the artifact,
       # publishes it to the repo's Attestations tab + the Rekor log.
       - name: Attest build provenance
@@ -274,52 +338,26 @@ jobs:
         with:
           subject-path: nzbfast-${{ matrix.target }}.tar.gz
 
-      # Make the attestation a thing you can DOWNLOAD. Copied verbatim -
-      # the signature covers the base64 statement inside the bundle, but
-      # re-serialising signed material to prettify it is a habit worth not
-      # having. `<artifact>.intoto.jsonl` is load-bearing twice: it pairs
-      # the bundle with the file it describes, and it is the exact
-      # case-sensitive suffix Scorecard's Signed-Releases check looks for.
-      #
-      # Then prove the pairing before it ships, because a bundle for the
-      # wrong subject is worse than no bundle: it verifies, against
-      # something else. The subject digest inside the signed statement
-      # must be this tarball's sha256.
+      # Make the attestation a thing you can DOWNLOAD, beside the file it
+      # describes, after proving the bundle's signed subject IS this file.
+      # Staged straight after the provenance step and before the SBOM
+      # attestation below, so the bundle file holds the provenance bundle
+      # and nothing appended after it. The check, and why the copy is
+      # verbatim: packaging/stage-attestation.py's header.
       - name: Stage the attestation bundle as a release asset
         env:
           BUNDLE: ${{ steps.attest.outputs.bundle-path }}
-        run: |
-          set -euo pipefail
-          ART=nzbfast-${{ matrix.target }}.tar.gz
-          cp "$BUNDLE" "$ART.intoto.jsonl"
-          python3 - "$ART.intoto.jsonl" "$ART" <<'PY'
-          import base64, hashlib, json, sys
+        run: python3 packaging/stage-attestation.py "$BUNDLE" nzbfast-${{ matrix.target }}.tar.gz
 
-          bundle_path, artifact = sys.argv[1], sys.argv[2]
-          want = hashlib.sha256(open(artifact, "rb").read()).hexdigest()
-          text = open(bundle_path, encoding="utf-8").read()
-
-          # The action writes each bundle as compact JSON plus a newline,
-          # appending, so this is genuinely JSON Lines - one line here,
-          # one subject. Accept a whole-file bundle too rather than let a
-          # formatting change on their side fail a release.
-          try:
-              bundles = [json.loads(text)]
-          except json.JSONDecodeError:
-              bundles = [json.loads(ln) for ln in text.splitlines() if ln.strip()]
-          if not bundles:
-              sys.exit(f"{bundle_path}: empty attestation bundle")
-
-          subjects = []
-          for b in bundles:
-              payload = b["dsseEnvelope"]["payload"]
-              stmt = json.loads(base64.b64decode(payload))
-              for subj in stmt.get("subject", []):
-                  subjects.append((subj.get("name"), subj.get("digest", {}).get("sha256")))
-          if want not in [d for _, d in subjects]:
-              sys.exit(f"{bundle_path} attests {subjects}, not {want} ({artifact})")
-          print(f"{bundle_path}: {len(bundles)} bundle(s), subject sha256 {want} confirmed")
-          PY
+      # The SBOM, attested to the same digest, so `gh attestation verify
+      # --predicate-type https://spdx.dev/Document/v2.3` finds it without
+      # the .spdx.json asset. actions/attest, not the deprecated
+      # actions/attest-sbom wrapper around it.
+      - name: Attest SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: nzbfast-${{ matrix.target }}.tar.gz
+          sbom-path: nzbfast-${{ matrix.target }}.tar.gz.spdx.json
 
       # Attach to the existing release. Never touches the release notes.
       # Target-triple filenames can't collide with the human-download
@@ -341,7 +379,623 @@ jobs:
             "nzbfast-$TARGET.tar.gz" \
             "nzbfast-$TARGET.tar.gz.sha256" \
             "nzbfast-$TARGET.tar.gz.intoto.jsonl" \
+            "nzbfast-$TARGET.tar.gz.spdx.json" \
             --repo "$REPO"
+
+  # The Linux HUMAN downloads: nzbfast-X.Y.Z-linux-{x64,arm64}.tar.gz,
+  # static musl, with LICENSE, COPYRIGHT.md and the offline manual under
+  # nzbfast-X.Y.Z-linux-<arch>/ - the inner path push-image.sh extracts
+  # the container's binary from. Plus the updater payloads
+  # nzbfast-updater-X.Y.Z-linux-<arch>.gz, which are the SAME binary
+  # gzipped, so the tarball and the payload latest.json points at can
+  # never be two builds again.
+  #
+  # Built by packaging/build-linux-tarballs.sh, the exact script the
+  # release Mac ran, so the layout has one definition. armv7 is NOT built
+  # here: it is a beta, and the private repo's release.yml and the release
+  # Mac still own it.
+  #
+  # Matrix keys are `arch` and `triple`, NOT `target`, on purpose:
+  # tools/release-asset-parity.py derives the versionless
+  # nzbfast-<target>.tar.gz trios from `target:` entries in this file, and
+  # these assets are versioned human downloads, not that family.
+  linux:
+    if: >-
+      ${{ (github.event_name == 'release' && github.repository == 'nzbfast/nzbfast'
+           && startsWith(github.event.release.tag_name, 'v')
+           && !contains(toJSON(github.event.release.assets.*.name), '.intoto.jsonl'))
+          || (github.event_name == 'workflow_dispatch' && inputs.installers) }}
+    permissions:
+      id-token: write       # Sigstore keyless signing (OIDC identity token)
+      attestations: write   # write the attestation to the GH attestations API
+      contents: write       # attach artifacts to the release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64,   triple: x86_64-unknown-linux-musl }
+          - { arch: arm64, triple: aarch64-unknown-linux-musl }
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Require a tag
+        run: |
+          if [ -z "${TAG:-}" ]; then
+            echo "no tag to attest: inputs.tag and release.tag_name are both empty" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      # The same two-sided guard as the `binaries` job, for the same reason
+      # (the header): the checkout must be the tag, and so must the ref the
+      # attestation will name as the source.
+      - name: Verify the checkout and the attested source are both the tag
+        run: |
+          set -euo pipefail
+          want=$(git rev-parse "refs/tags/$TAG^{commit}")
+          have=$(git rev-parse HEAD)
+          if [ "$want" != "$have" ]; then
+            echo "checkout is $have but tag $TAG is $want" >&2
+            exit 1
+          fi
+          if [ "$want" != "$GITHUB_SHA" ]; then
+            echo "this run's ref is $GITHUB_SHA but tag $TAG is $want." >&2
+            echo "Re-dispatch at the tag:" >&2
+            echo "  gh workflow run provenance-release.yml --ref $TAG -f tag=$TAG" >&2
+            exit 1
+          fi
+          echo "VER=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/nzbfast/Cargo.toml | head -1)" >> "$GITHUB_ENV"
+
+      - name: Pin SOURCE_DATE_EPOCH to the tag's commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      # release.yml's `packages` recipe, pins included: one zig
+      # cross-compiler for both musl targets (and the C in rapidyenc and
+      # aws-lc), zig pinned by PyPI version and cargo-zigbuild by release
+      # sha256, because a version tag alone is mutable and this binary
+      # compiles what gets published.
+      #
+      # ONE DELIBERATE DIFFERENCE: the archive is unpacked in a scratch
+      # directory, not the workspace. It carries cargo-zigbuild's own
+      # LICENSE and README.md beside the binary, and the release.yml
+      # spelling (`tar xf --strip-components=1` in the checkout) writes
+      # them over OURS - harmless there, because no file that job ships
+      # reads the root LICENSE, and fatal here, because
+      # build-linux-tarballs.sh copies it into every tarball. The first
+      # test run of this job shipped messense's MIT licence as nzbfast's.
+      - name: Install zig + cargo-zigbuild
+        run: |
+          python3 -m venv /tmp/zigvenv
+          /tmp/zigvenv/bin/pip install --quiet ziglang==0.16.0
+          printf '#!/bin/sh\nexec /tmp/zigvenv/bin/python -m ziglang "$@"\n' \
+            | sudo tee /usr/local/bin/zig >/dev/null
+          sudo chmod +x /usr/local/bin/zig
+          zig version
+          ver=0.23.0
+          sha=f0aa9cc8220a84788c6e4a9b6d80422f041659227b680fdef982d5a8ddffddb4
+          url="https://github.com/rust-cross/cargo-zigbuild/releases/download/v${ver}/cargo-zigbuild-x86_64-unknown-linux-musl.tar.xz"
+          zb=$(mktemp -d)
+          curl -fsSL -o "$zb/cargo-zigbuild.tar.xz" "$url"
+          (cd "$zb" && echo "$sha  cargo-zigbuild.tar.xz" | sha256sum -c -)
+          tar xf "$zb/cargo-zigbuild.tar.xz" -C "$zb" --strip-components=1
+          sudo mv "$zb/cargo-zigbuild" /usr/local/bin/
+          rm -rf "$zb"
+          git diff --exit-code --stat   # the checkout is untouched
+
+      # rust-toolchain.toml pins rustc; only the target is added.
+      - name: Add target
+        run: rustup target add ${{ matrix.triple }}
+
+      # The remap keeps the runner's home (cargo registry paths in panic
+      # metadata) out of the binary, the same flag the `binaries` job
+      # passes. On Linux the env var replacing build.rustflags loses
+      # nothing: .cargo/config.toml's [build] remap names a Mac home that
+      # does not exist here, and no linux-musl target has a section.
+      - name: Build + package (packaging/build-linux-tarballs.sh)
+        env:
+          CARGO_INCREMENTAL: "0"
+          RUSTFLAGS: "--remap-path-prefix=/home/runner=/build"
+        run: packaging/build-linux-tarballs.sh dist ${{ matrix.arch }}
+
+      # The updater payload is the tarball's binary, gzipped the way
+      # make-latest-json.sh gzips (-9 -n: no name, no timestamp). Only
+      # the .gz is a release asset; latest.json is signed on the release
+      # Mac over these bytes.
+      - name: Updater payload
+        run: |
+          set -euo pipefail
+          raw="dist/nzbfast-updater-$VER-linux-${{ matrix.arch }}"
+          cp target/${{ matrix.triple }}/release/nzbfast "$raw"
+          gzip -9 -n -c "$raw" > "$raw.gz"
+          rm -f "$raw"
+
+      - name: No builder identity in the archive
+        run: python3 packaging/check-archive-identity.py "dist/nzbfast-$VER-linux-${{ matrix.arch }}.tar.gz"
+
+      - name: SBOMs
+        run: |
+          set -euo pipefail
+          for f in "dist/nzbfast-$VER-linux-${{ matrix.arch }}.tar.gz" \
+                   "dist/nzbfast-updater-$VER-linux-${{ matrix.arch }}.gz"; do
+            python3 packaging/make-sbom.py --asset "$f" --target ${{ matrix.triple }} -p nzbfast
+          done
+
+      # Before anything is signed: the run's own copy, so a failure in a
+      # later step still leaves the build inspectable.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nzbfast-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/nzbfast-${{ env.VER }}-linux-${{ matrix.arch }}.tar.gz
+            dist/nzbfast-updater-${{ env.VER }}-linux-${{ matrix.arch }}.gz
+
+      - name: Stage the attestation bundle beside each asset
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          python3 packaging/stage-attestation.py "$BUNDLE" \
+            "dist/nzbfast-$VER-linux-${{ matrix.arch }}.tar.gz" \
+            "dist/nzbfast-updater-$VER-linux-${{ matrix.arch }}.gz"
+
+      - name: Attest SBOM (tarball)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/nzbfast-${{ env.VER }}-linux-${{ matrix.arch }}.tar.gz
+          sbom-path: dist/nzbfast-${{ env.VER }}-linux-${{ matrix.arch }}.tar.gz.spdx.json
+
+      - name: Attest SBOM (updater payload)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/nzbfast-updater-${{ env.VER }}-linux-${{ matrix.arch }}.gz
+          sbom-path: dist/nzbfast-updater-${{ env.VER }}-linux-${{ matrix.arch }}.gz.spdx.json
+
+      # No --clobber, as in `binaries`: a release that already has a
+      # locally built file under one of these names fails here, loudly,
+      # instead of carrying two builds of one program.
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          t=dist/nzbfast-$VER-linux-$ARCH.tar.gz
+          u=dist/nzbfast-updater-$VER-linux-$ARCH.gz
+          gh release upload "$TAG" \
+            "$t" "$t.intoto.jsonl" "$t.spdx.json" \
+            "$u" "$u.intoto.jsonl" "$u.spdx.json" \
+            --repo "$REPO"
+
+  # Windows x64: the Inno Setup installer (the headline Windows download),
+  # the portable zip, and the updater payload, all from ONE build of
+  # nzbfast.exe + nzbtray.exe.
+  #
+  # x86_64-pc-windows-gnu, the target the release Mac cross-built: the
+  # -static link-arg (and so a binary needing no mingw DLLs) comes from
+  # .cargo/config.toml's section for that target, which is why this job
+  # sets NO RUSTFLAGS - the env var would replace that section outright.
+  # packaging/pe-imports.py asserts the result rather than trusting it.
+  # The build recipe and the Inno invocation are sign-windows.yml's, which
+  # has built this installer on a runner since Phase B.
+  #
+  # UNSIGNED. SignPath's release certificate is still pending
+  # (SIGNPATH.md); when it issues, the signing step belongs here, between
+  # the build and the attestation, so what is attested is what ships.
+  windows-x64:
+    if: >-
+      ${{ (github.event_name == 'release' && github.repository == 'nzbfast/nzbfast'
+           && startsWith(github.event.release.tag_name, 'v')
+           && !contains(toJSON(github.event.release.assets.*.name), '.intoto.jsonl'))
+          || (github.event_name == 'workflow_dispatch' && inputs.installers) }}
+    permissions:
+      id-token: write       # Sigstore keyless signing (OIDC identity token)
+      attestations: write   # write the attestation to the GH attestations API
+      contents: write       # attach artifacts to the release
+    runs-on: windows-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Require a tag
+        run: |
+          if [ -z "${TAG:-}" ]; then
+            echo "no tag to attest: inputs.tag and release.tag_name are both empty" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      - name: Verify the checkout and the attested source are both the tag
+        run: |
+          set -euo pipefail
+          want=$(git rev-parse "refs/tags/$TAG^{commit}")
+          have=$(git rev-parse HEAD)
+          if [ "$want" != "$have" ]; then
+            echo "checkout is $have but tag $TAG is $want" >&2
+            exit 1
+          fi
+          if [ "$want" != "$GITHUB_SHA" ]; then
+            echo "this run's ref is $GITHUB_SHA but tag $TAG is $want." >&2
+            echo "Re-dispatch at the tag:" >&2
+            echo "  gh workflow run provenance-release.yml --ref $TAG -f tag=$TAG" >&2
+            exit 1
+          fi
+          echo "VER=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/nzbfast/Cargo.toml | head -1)" >> "$GITHUB_ENV"
+          # The runner image ships python under one name or the other
+          # depending on the release; take whichever is there.
+          echo "PY=$(command -v python3 || command -v python)" >> "$GITHUB_ENV"
+
+      - name: Pin SOURCE_DATE_EPOCH to the tag's commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      # Only the target - never `rustup update stable`, which would build
+      # shipped bits with an unpinned compiler.
+      - name: Add target
+        run: rustup target add x86_64-pc-windows-gnu
+
+      # Both packages in ONE invocation: `-p nzbtray` alone resolves a
+      # graph without the engine's feature unification and yields a
+      # smaller, wrong tray (the release-bundle skill has the numbers).
+      - name: Build nzbfast.exe + nzbtray.exe
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo build --release --locked --target x86_64-pc-windows-gnu -p nzbfast -p nzbtray
+
+      - name: Static link (no mingw runtime DLLs)
+        run: |
+          "$PY" packaging/pe-imports.py --check \
+            target/x86_64-pc-windows-gnu/release/nzbfast.exe \
+            target/x86_64-pc-windows-gnu/release/nzbtray.exe
+
+      # The manual is GENERATED, never copied: docs/MANUAL.html carries a
+      # placeholder the daemon substitutes at serve time.
+      - name: Stage payload
+        run: |
+          set -euo pipefail
+          STAGE=packaging/windows/stage
+          rm -rf "$STAGE" && mkdir -p "$STAGE" packaging/windows/out dist
+          cp target/x86_64-pc-windows-gnu/release/nzbfast.exe \
+             target/x86_64-pc-windows-gnu/release/nzbtray.exe "$STAGE/"
+          packaging/make-offline-manual.sh docs/MANUAL.html "$STAGE/MANUAL.html"
+          cp LICENSE COPYRIGHT.md "$STAGE/"
+
+      # Inno Setup is not preinstalled on windows-latest; choco is. Same
+      # invocation as make-installer.sh and sign-windows.yml. The version
+      # reaches ISCC through %APPVER%, never ${{ }} in the cmd line.
+      - name: Compile Inno Setup installer
+        shell: cmd
+        env:
+          APPVER: ${{ env.VER }}
+        run: |
+          choco install innosetup -y --no-progress
+          cd packaging\windows
+          ISCC /DAppVersion=%APPVER% /DStageDir=stage /Oout installer.iss
+
+      # Inner directory nzbfast-windows/, holding exactly what v1.7.1's
+      # zip held: both exes, the offline manual and the launcher.
+      - name: Portable zip + updater payload
+        run: |
+          set -euo pipefail
+          mv "packaging/windows/out/nzbfast-$VER-windows-x64-setup.exe" dist/
+          "$PY" packaging/windows/make-portable-zip.py \
+            "dist/nzbfast-$VER-windows-x64.zip" nzbfast-windows \
+            packaging/windows/stage/nzbfast.exe \
+            packaging/windows/stage/nzbtray.exe \
+            packaging/windows/stage/MANUAL.html \
+            "packaging/windows/Start nzbfast.bat"
+          raw=dist/nzbfast-updater-$VER-windows-x64.exe
+          cp packaging/windows/stage/nzbfast.exe "$raw"
+          gzip -9 -n -c "$raw" > "$raw.gz"
+          rm -f "$raw"
+          ls -l dist
+
+      - name: No builder identity in the archive
+        run: '"$PY" packaging/check-archive-identity.py "dist/nzbfast-$VER-windows-x64.zip"'
+
+      - name: SBOMs
+        run: |
+          set -euo pipefail
+          for f in "dist/nzbfast-$VER-windows-x64-setup.exe" "dist/nzbfast-$VER-windows-x64.zip"; do
+            "$PY" packaging/make-sbom.py --asset "$f" --target x86_64-pc-windows-gnu -p nzbfast -p nzbtray
+          done
+          "$PY" packaging/make-sbom.py --asset "dist/nzbfast-updater-$VER-windows-x64.exe.gz" \
+            --target x86_64-pc-windows-gnu -p nzbfast
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nzbfast-windows-x64
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/nzbfast-${{ env.VER }}-windows-x64-setup.exe
+            dist/nzbfast-${{ env.VER }}-windows-x64.zip
+            dist/nzbfast-updater-${{ env.VER }}-windows-x64.exe.gz
+
+      - name: Stage the attestation bundle beside each asset
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          "$PY" packaging/stage-attestation.py "$BUNDLE" \
+            "dist/nzbfast-$VER-windows-x64-setup.exe" \
+            "dist/nzbfast-$VER-windows-x64.zip" \
+            "dist/nzbfast-updater-$VER-windows-x64.exe.gz"
+
+      - name: Attest SBOM (installer)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/nzbfast-${{ env.VER }}-windows-x64-setup.exe
+          sbom-path: dist/nzbfast-${{ env.VER }}-windows-x64-setup.exe.spdx.json
+
+      - name: Attest SBOM (zip)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/nzbfast-${{ env.VER }}-windows-x64.zip
+          sbom-path: dist/nzbfast-${{ env.VER }}-windows-x64.zip.spdx.json
+
+      - name: Attest SBOM (updater payload)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/nzbfast-updater-${{ env.VER }}-windows-x64.exe.gz
+          sbom-path: dist/nzbfast-updater-${{ env.VER }}-windows-x64.exe.gz.spdx.json
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          files=()
+          for f in "dist/nzbfast-$VER-windows-x64-setup.exe" \
+                   "dist/nzbfast-$VER-windows-x64.zip" \
+                   "dist/nzbfast-updater-$VER-windows-x64.exe.gz"; do
+            files+=("$f" "$f.intoto.jsonl" "$f.spdx.json")
+          done
+          gh release upload "$TAG" "${files[@]}" --repo "$REPO"
+
+  # macOS: the DMG (NzbFast.app in the styled image, the headline mac
+  # download), the universal portable zip, and the three mac updater
+  # payloads, all from ONE universal engine build.
+  #
+  # AD-HOC SIGNED, exactly as the release Mac has always shipped it:
+  # macapp/make-app.sh signs with `codesign -s -`, and nothing here holds
+  # or needs an Apple certificate. Notarisation is not on the table - it
+  # needs Apple Developer Program enrollment, which was declined because
+  # every tier publishes the enrolling entity. So this job adds no secret
+  # and changes nothing a user sees at install time; it moves WHERE the
+  # bytes are built, from the release Mac to a runner, and attests them.
+  macos:
+    if: >-
+      ${{ (github.event_name == 'release' && github.repository == 'nzbfast/nzbfast'
+           && startsWith(github.event.release.tag_name, 'v')
+           && !contains(toJSON(github.event.release.assets.*.name), '.intoto.jsonl'))
+          || (github.event_name == 'workflow_dispatch' && inputs.installers) }}
+    permissions:
+      id-token: write       # Sigstore keyless signing (OIDC identity token)
+      attestations: write   # write the attestation to the GH attestations API
+      contents: write       # attach artifacts to the release
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Require a tag
+        run: |
+          if [ -z "${TAG:-}" ]; then
+            echo "no tag to attest: inputs.tag and release.tag_name are both empty" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      - name: Verify the checkout and the attested source are both the tag
+        run: |
+          set -euo pipefail
+          want=$(git rev-parse "refs/tags/$TAG^{commit}")
+          have=$(git rev-parse HEAD)
+          if [ "$want" != "$have" ]; then
+            echo "checkout is $have but tag $TAG is $want" >&2
+            exit 1
+          fi
+          if [ "$want" != "$GITHUB_SHA" ]; then
+            echo "this run's ref is $GITHUB_SHA but tag $TAG is $want." >&2
+            echo "Re-dispatch at the tag:" >&2
+            echo "  gh workflow run provenance-release.yml --ref $TAG -f tag=$TAG" >&2
+            exit 1
+          fi
+          echo "VER=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/nzbfast/Cargo.toml | head -1)" >> "$GITHUB_ENV"
+
+      - name: Pin SOURCE_DATE_EPOCH to the tag's commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Add targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      # The release-bundle recipe: both darwin targets in one invocation
+      # and lipo, at the 11.0 floor every mac CLI asset carries
+      # (MACOSX_DEPLOYMENT_TARGET, read by cc-rs as well as rustc). The
+      # remap is the `binaries` job's; the env var replaces
+      # .cargo/config.toml's [build] remap, which names a home that does
+      # not exist here, and no apple target has a section of its own.
+      - name: Universal engine
+        env:
+          CARGO_INCREMENTAL: "0"
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          RUSTFLAGS: "--remap-path-prefix=/Users/runner=/build"
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p nzbfast \
+            --target aarch64-apple-darwin --target x86_64-apple-darwin
+          lipo -create -output target/nzbfast-universal \
+            target/aarch64-apple-darwin/release/nzbfast \
+            target/x86_64-apple-darwin/release/nzbfast
+          lipo -info target/nzbfast-universal
+
+      # The wrapper and its bundle, by the same script the release Mac
+      # runs: it strips the Swift debug map, proves no private string
+      # survived, and ad-hoc signs inside-out. ENGINE= hands it the build
+      # above so the app bundles the same engine the zip and the updater
+      # payload carry.
+      - name: NzbFast.app
+        run: ENGINE="$PWD/target/nzbfast-universal" macapp/make-app.sh
+
+      - name: Check the bundle
+        run: macapp/check-app.sh macapp/build/NzbFast.app
+
+      # make-dmg.sh writes the Finder layout headlessly with ds-store and
+      # mac-alias. Pinned by version AND wheel hash, in a venv (the
+      # runner's Homebrew python is externally managed).
+      - name: DMG layout tools
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/dmgvenv"
+          printf '%s\n' \
+            'ds-store==1.3.3 --hash=sha256:b92a371efbf1b4ccce2a04d1ed13fceacc4736c81ba09cf5aefb74c088160a35' \
+            'mac-alias==2.2.3 --hash=sha256:7362b521d2132ef92f606a37abfed5fcd849ceb2f28b6f9743e014b02af92f0d' \
+            > "$RUNNER_TEMP/dmg-reqs.txt"
+          "$RUNNER_TEMP/dmgvenv/bin/pip" install --quiet --require-hashes --only-binary :all: \
+            -r "$RUNNER_TEMP/dmg-reqs.txt"
+          echo "$RUNNER_TEMP/dmgvenv/bin" >> "$GITHUB_PATH"
+
+      - name: DMG
+        run: |
+          set -euo pipefail
+          APP="$PWD/macapp/build/NzbFast.app" packaging/mac/make-dmg.sh
+          mkdir -p dist
+          mv "packaging/mac/build/nzbfast-$VER-macos.dmg" dist/
+          hdiutil verify "dist/nzbfast-$VER-macos.dmg"
+
+      # Inner directory nzbfast-macos/, holding what v1.7.1's zip held:
+      # the universal binary, the launcher and the offline manual.
+      - name: Universal zip + updater payloads
+        run: |
+          set -euo pipefail
+          Z="$RUNNER_TEMP/zip"; mkdir -p "$Z"
+          cp target/nzbfast-universal "$Z/nzbfast"
+          packaging/make-offline-manual.sh docs/MANUAL.html "$Z/MANUAL.html"
+          python3 packaging/windows/make-portable-zip.py \
+            "dist/nzbfast-$VER-macos-universal.zip" nzbfast-macos \
+            "$Z/nzbfast" "$Z/MANUAL.html" "packaging/mac/Start nzbfast.command"
+          # The payloads make-latest-json.sh signs over: the universal
+          # binary and the two thin slices lipo cuts from it, gzipped -9 -n.
+          u="dist/nzbfast-updater-$VER-macos-universal"
+          cp target/nzbfast-universal "$u"
+          lipo "$u" -thin arm64  -output "dist/nzbfast-updater-$VER-macos-arm64"
+          lipo "$u" -thin x86_64 -output "dist/nzbfast-updater-$VER-macos-x64"
+          for p in macos-universal macos-arm64 macos-x64; do
+            raw="dist/nzbfast-updater-$VER-$p"
+            gzip -9 -n -c "$raw" > "$raw.gz"
+            rm -f "$raw"
+          done
+          ls -l dist
+
+      - name: No builder identity in the archive
+        run: python3 packaging/check-archive-identity.py "dist/nzbfast-$VER-macos-universal.zip"
+
+      # The DMG's SBOM is the engine's crate graph; the Swift wrapper has
+      # no crate dependencies and is not a package in it.
+      - name: SBOMs
+        run: |
+          set -euo pipefail
+          both=(--target aarch64-apple-darwin --target x86_64-apple-darwin)
+          for f in "dist/nzbfast-$VER-macos.dmg" "dist/nzbfast-$VER-macos-universal.zip" \
+                   "dist/nzbfast-updater-$VER-macos-universal.gz"; do
+            python3 packaging/make-sbom.py --asset "$f" "${both[@]}" -p nzbfast
+          done
+          python3 packaging/make-sbom.py --asset "dist/nzbfast-updater-$VER-macos-arm64.gz" \
+            --target aarch64-apple-darwin -p nzbfast
+          python3 packaging/make-sbom.py --asset "dist/nzbfast-updater-$VER-macos-x64.gz" \
+            --target x86_64-apple-darwin -p nzbfast
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nzbfast-macos
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/nzbfast-${{ env.VER }}-macos.dmg
+            dist/nzbfast-${{ env.VER }}-macos-universal.zip
+            dist/nzbfast-updater-${{ env.VER }}-macos-universal.gz
+            dist/nzbfast-updater-${{ env.VER }}-macos-arm64.gz
+            dist/nzbfast-updater-${{ env.VER }}-macos-x64.gz
+
+      - name: Stage the attestation bundle beside each asset
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          python3 packaging/stage-attestation.py "$BUNDLE" \
+            "dist/nzbfast-$VER-macos.dmg" \
+            "dist/nzbfast-$VER-macos-universal.zip" \
+            "dist/nzbfast-updater-$VER-macos-universal.gz" \
+            "dist/nzbfast-updater-$VER-macos-arm64.gz" \
+            "dist/nzbfast-updater-$VER-macos-x64.gz"
+
+      - name: Attest SBOM (dmg)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/nzbfast-${{ env.VER }}-macos.dmg
+          sbom-path: dist/nzbfast-${{ env.VER }}-macos.dmg.spdx.json
+
+      - name: Attest SBOM (zip)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/nzbfast-${{ env.VER }}-macos-universal.zip
+          sbom-path: dist/nzbfast-${{ env.VER }}-macos-universal.zip.spdx.json
+
+      - name: Attest SBOM (universal payload)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/nzbfast-updater-${{ env.VER }}-macos-universal.gz
+          sbom-path: dist/nzbfast-updater-${{ env.VER }}-macos-universal.gz.spdx.json
+
+      - name: Attest SBOM (arm64 payload)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/nzbfast-updater-${{ env.VER }}-macos-arm64.gz
+          sbom-path: dist/nzbfast-updater-${{ env.VER }}-macos-arm64.gz.spdx.json
+
+      - name: Attest SBOM (x64 payload)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/nzbfast-updater-${{ env.VER }}-macos-x64.gz
+          sbom-path: dist/nzbfast-updater-${{ env.VER }}-macos-x64.gz.spdx.json
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          files=()
+          for f in "dist/nzbfast-$VER-macos.dmg" "dist/nzbfast-$VER-macos-universal.zip" \
+                   "dist/nzbfast-updater-$VER-macos-universal.gz" \
+                   "dist/nzbfast-updater-$VER-macos-arm64.gz" \
+                   "dist/nzbfast-updater-$VER-macos-x64.gz"; do
+            files+=("$f" "$f.intoto.jsonl" "$f.spdx.json")
+          done
+          gh release upload "$TAG" "${files[@]}" --repo "$REPO"
 
   # Container image: assemble, push and attest IN THIS RUN, so the attested
   # digest is one this workflow actually produced. What the provenance claim
@@ -351,11 +1005,22 @@ jobs:
   # SHA256SUMS.txt. It repackages release assets; it does not compile them.
   # The workflow source is public, so the claim is auditable.
   #
-  # OPT-IN (`image` input, default false) because the push moves the
-  # :<version> AND :latest tags on ghcr + Docker Hub. Enable it when
-  # dispatching for a freshly cut release; leave it off when re-dispatching
-  # an OLD tag (e.g. re-attesting after a release deletion), or :latest
-  # would regress to that old version.
+  # The push moves the :<version> AND :latest tags on ghcr + Docker Hub,
+  # so it runs in exactly two cases:
+  #   - AUTOMATICALLY when a non-prerelease nzbfast release is published
+  #     AND that tag is the repository's latest release, checked against
+  #     the API before anything is built. Re-publishing an old release
+  #     (after a deletion, say) then skips with a notice instead of
+  #     regressing :latest. This was dispatch-only until 11 Oct 2026, and
+  #     v1.3.0 shipped without an image because nobody dispatched it.
+  #   - On a dispatch with `image` set, which is the re-push escape hatch.
+  #     Leave it off when re-dispatching an OLD tag.
+  #
+  # It waits for `linux` when that job runs in the same run, because those
+  # are the tarballs it repackages; it does not care whether `linux`
+  # PASSED, because on the draft path the tarballs were attached by the
+  # earlier dispatch and `linux` is skipped here. push-image.sh verifies
+  # whatever it downloads against SHA256SUMS.txt either way.
   #
   # Auth: GHCR_TOKEN falls back to the workflow's own GITHUB_TOKEN, which
   # can push only if the ghcr package grants this repo's Actions write
@@ -364,7 +1029,13 @@ jobs:
   # is optional; without the secret the job pushes ghcr only, exactly like
   # a local push-image.sh run.
   image:
-    if: ${{ inputs.image && github.repository == 'nzbfast/nzbfast' }}
+    needs: [linux]
+    if: >-
+      ${{ !cancelled() && github.repository == 'nzbfast/nzbfast'
+          && ((github.event_name == 'release'
+               && startsWith(github.event.release.tag_name, 'v')
+               && !github.event.release.prerelease)
+              || (github.event_name == 'workflow_dispatch' && inputs.image)) }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write       # Sigstore keyless signing (OIDC identity token)
@@ -372,7 +1043,33 @@ jobs:
       contents: read
       packages: write       # push the image + its attestation to ghcr
     steps:
+      # The release-event path only: moving :latest from anything but the
+      # latest release would regress it. A dispatch is an explicit choice
+      # and is not second-guessed. `--latest` is passed explicitly when
+      # the release Mac publishes (publish-release step 4), in the same
+      # API call that publishes, so by the time this event arrives the
+      # answer is settled.
+      - name: Is this tag the latest release?
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != release ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          latest=$(gh api "repos/$REPO/releases/latest" -q .tag_name)
+          if [ "$latest" = "$TAG" ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$TAG is not the latest release ($latest is); not moving :latest. Dispatch with -f image=true if this push is wanted."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.latest.outputs.go == 'true'
         with:
           ref: refs/tags/${{ env.TAG }}
 
@@ -381,6 +1078,7 @@ jobs:
       # ref this run was dispatched at is what the image attestation will
       # name as its source.
       - name: Verify the checkout and the attested source are both the tag
+        if: steps.latest.outputs.go == 'true'
         run: |
           set -euo pipefail
           want=$(git rev-parse "refs/tags/$TAG^{commit}")
@@ -399,6 +1097,7 @@ jobs:
 
       # arm64 layers run under emulation (the Dockerfile apt-gets packages).
       - name: Set up QEMU (arm64)
+        if: steps.latest.outputs.go == 'true'
         uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
         with:
           platforms: arm64
@@ -408,6 +1107,7 @@ jobs:
       # and buildx-pushes one multi-arch manifest to ghcr (+ Docker Hub
       # when a token is present).
       - name: Build + push image from release binaries
+        if: steps.latest.outputs.go == 'true'
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN || github.token }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -417,6 +1117,7 @@ jobs:
       # manifest to every tag/registry in one build, so this single digest
       # identifies the image on ghcr AND Docker Hub.
       - name: Resolve pushed digest
+        if: steps.latest.outputs.go == 'true'
         id: digest
         run: |
           set -euo pipefail
@@ -427,6 +1128,7 @@ jobs:
           echo "pushed manifest digest: $d"
 
       - name: Attest image provenance
+        if: steps.latest.outputs.go == 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/nzbfast/nzbfast

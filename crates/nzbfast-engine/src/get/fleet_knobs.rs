@@ -43,8 +43,16 @@ pub(super) struct FleetKnobs {
 pub(super) struct LineCapPlan {
     pub(super) line_cap: usize,
     pub(super) line_cap_auto: bool,
-    pub(super) line_share: Option<usize>,
-    pub(super) headroom_share: usize,
+    /// The fleet the cap holds the run to, `None` = the rule is off.
+    /// Not a per-server number any more (GH #103): a server's slice of
+    /// it is [`LineCapPlan::line_share`], which reads its level.
+    pub(super) line_fleet: Option<usize>,
+    /// The fleet TODO 277 spawns slots for, divided the same way by
+    /// [`LineCapPlan::headroom_share`].
+    pub(super) headroom_fleet: usize,
+    /// Every server's level, in fleet order - what both shares divide
+    /// by. See `nzbkit::pool::linecap::level_share`.
+    pub(super) levels: Vec<u32>,
     /// TODO 275 item 9: what the LINE alone asks for
     /// (`linecap::fleet_for_line`), so the seed's log line can attribute
     /// the fleet it announces. 0 when the fleet size was TYPED, where
@@ -107,7 +115,7 @@ pub(super) fn line_cap_plan(
     anchor_bps: u64,
     anchor_measured: bool,
     carry_bps: u64,
-    n_servers: usize,
+    levels: Vec<u32>,
 ) -> LineCapPlan {
     let setting = crate::conntune::line_cap_setting(config);
     let env = std::env::var("NZBFAST_LINE_CAP").ok();
@@ -125,12 +133,37 @@ pub(super) fn line_cap_plan(
             false => 0,
             true => nzbkit::pool::linecap::fleet_for_line(anchor_bps),
         },
-        line_share: nzbkit::pool::linecap::fleet_cap(line_cap)
-            .map(|f| nzbkit::pool::linecap::server_share(f, n_servers)),
-        headroom_share: nzbkit::pool::linecap::server_share(
-            crate::conntune::line_cap_headroom_fleet(line_cap, line_cap_auto, anchor_measured),
-            n_servers,
+        line_fleet: nzbkit::pool::linecap::fleet_cap(line_cap),
+        headroom_fleet: crate::conntune::line_cap_headroom_fleet(
+            line_cap,
+            line_cap_auto,
+            anchor_measured,
         ),
+        levels,
+    }
+}
+
+impl LineCapPlan {
+    /// A server at `level`'s share of the fleet cap, `None` = the rule
+    /// is off. GH #103: by level, so a fill tier is not handed a
+    /// primary's slice - `nzbkit::pool::linecap::level_share`, the same
+    /// function the in-run governor divides by, so the seed and the
+    /// governor cannot disagree about whose share is whose.
+    pub(super) fn line_share(&self, level: u32) -> Option<usize> {
+        self.line_fleet
+            .map(|f| nzbkit::pool::linecap::level_share(f, &self.levels, level))
+    }
+
+    /// The spawn headroom's share for a server at `level`:
+    /// `nzbkit::pool::linecap::fill_tail_share`, the larger of the two
+    /// shares the in-run governor can ever hand this server. A primary
+    /// whose running share grew needs the parked slots to grow with it,
+    /// and a fill server needs them for the queue-dry raise back to the
+    /// equal share; either way a raise onto a `ConnTarget` above the
+    /// spawned fleet wakes nothing. Parked slots hold no connection, so
+    /// a fill server idles at its small share, not at this one.
+    pub(super) fn headroom_share(&self, level: u32) -> usize {
+        nzbkit::pool::linecap::fill_tail_share(self.headroom_fleet, &self.levels, level)
     }
 }
 

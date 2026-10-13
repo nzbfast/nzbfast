@@ -1268,6 +1268,10 @@ pub fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, String>
         .or_else(|| params.get("category"))
         .filter(|c| !c.is_empty() && *c != "*");
     let ids = nzo_ids_param(params);
+    // SAB's `search=` on the queue read (GitHub #97): the dashboard's
+    // queue search box, and any SAB client that sends it. Applied at
+    // the walk like `cat`, so it reaches rows far past the window.
+    let search = search_needle(params);
     // Whole-queue bytes still to fetch, for the top-level sizeleft /
     // timeleft SAB carries. Accumulated INSIDE the slot walk below, from
     // the very number each row reports, so the header and its rows are
@@ -1346,6 +1350,7 @@ pub fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, String>
             ids: ids.as_ref(),
             window,
             pin_live,
+            search: search.as_deref(),
         },
     );
     let QueueWalk {

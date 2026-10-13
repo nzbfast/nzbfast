@@ -720,160 +720,20 @@ pub fn rules_judge_at(rules: &[String], item: &FeedItem, now: i64) -> Judgement 
     }
 }
 
-/// Position and as-written name of the next element in `xml` whose
-/// LOCAL name (the part after any `prefix:`) is `local`. A closing tag
-/// never matches: its "name" starts with `/`. Matching the local name
-/// is load-bearing - `<atom:entry>` is as good an entry as `<entry>`,
-/// and literal-substring scans made every fully-prefixed Atom feed
-/// parse to healthy-and-empty (review sweep 5 Aug M9).
-pub(crate) fn find_elem<'a>(xml: &'a str, local: &str) -> Option<(usize, &'a str)> {
-    xml.match_indices('<').find_map(|(at, _)| {
-        let name = xml[at + 1..]
-            .split(|c: char| c.is_whitespace() || c == '>' || c == '/')
-            .next()
-            .unwrap_or_default();
-        (name.rsplit(':').next().unwrap_or(name) == local).then_some((at, name))
-    })
-}
+// The element / attribute / character-data helpers every wire reader in
+// this crate shares live in `xmlscan`, which knows comments, CDATA and
+// quoted attribute values (13 Oct 2026 sweep F7).
+use crate::xmlscan::{attr, elem_tags, elements, tag_text, unescape};
 
-/// Raw tag text (`<` up to but excluding `>`) of every element in `xml`
-/// whose local name is `local`, self-closing included.
-pub(crate) fn elem_tags<'a>(xml: &'a str, local: &str) -> Vec<&'a str> {
-    let mut out = Vec::new();
-    let mut at = 0;
-    while let Some((open, _)) = find_elem(&xml[at..], local) {
-        let open = at + open;
-        let end = xml[open..].find('>').map(|e| open + e).unwrap_or(xml.len());
-        out.push(&xml[open..end]);
-        at = end.max(open + 1);
-    }
-    out
-}
-
-pub(crate) fn tag_text<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
-    // Keep scanning past a matching element with no closing tag: an RSS
-    // item can carry a self-closing `<atom:link rel="self"/>` ahead of
-    // the `<link>` whose text is wanted, and stopping at the first
-    // local-name hit would lose the real one.
-    let mut at = 0;
-    while let Some((open, name)) = find_elem(&xml[at..], tag) {
-        let open = at + open;
-        let gt = xml[open..].find('>')?;
-        let start = open + gt + 1;
-        if let Some(end) = xml[start..].find(&format!("</{name}>")) {
-            return Some(xml[start..start + end].trim());
-        }
-        at = start;
-    }
-    None
-}
-
-pub(crate) fn unescape(s: &str) -> String {
-    // ONE LEFT-TO-RIGHT PASS, which is what makes `&amp;` safe rather
-    // than an ordering rule to remember. The chain of `replace` calls
-    // this used to be had to decode `&amp;` LAST - doing it first turns
-    // `&amp;lt;` (an escaped literal "&lt;") into `&lt;`, which the next
-    // pass then wrongly decodes to "<". A single scan never revisits
-    // what it has already emitted, so the hazard cannot arise.
-    //
-    // NUMERIC CHARACTER REFERENCES are decoded too, decimal and hex.
-    // They are ordinary, valid XML that this parser used to leave
-    // literal - and in a feed's `<link>` that is not cosmetic: `&#35;`
-    // stayed as the four characters `&#35;`, so an indexer URL carrying
-    // an escaped `#` was passed on with a fragment marker the server
-    // never sees, silently truncating the query.
-    let stripped = s.replace("<![CDATA[", "").replace("]]>", "");
-    let mut out = String::with_capacity(stripped.len());
-    let mut rest = stripped.as_str();
-    while let Some(amp) = rest.find('&') {
-        out.push_str(&rest[..amp]);
-        rest = &rest[amp..];
-        // Bounded: an unterminated `&` must not scan to the end of a
-        // megabyte of feed, and anything that reaches whitespace or a
-        // second `&` was never an entity to begin with.
-        let semi = rest
-            .char_indices()
-            .skip(1)
-            .take(12)
-            .find(|(_, c)| *c == ';' || *c == '&' || c.is_whitespace())
-            .filter(|(_, c)| *c == ';')
-            .map(|(i, _)| i);
-        let decoded = semi.and_then(|semi| match &rest[1..semi] {
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            "amp" => Some('&'),
-            n => n.strip_prefix('#').and_then(|n| {
-                match n.strip_prefix(['x', 'X']) {
-                    Some(h) => u32::from_str_radix(h, 16).ok(),
-                    None => n.parse::<u32>().ok(),
-                }
-                .and_then(char::from_u32)
-            }),
-        });
-        match (decoded, semi) {
-            (Some(c), Some(semi)) => {
-                out.push(c);
-                rest = &rest[semi + 1..];
-            }
-            // Not an entity: the `&` is a literal, exactly as before.
-            _ => {
-                out.push('&');
-                rest = &rest[1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// The value of attribute `name` in a start tag, to the XML attribute
-/// grammar rather than to one spelling of it.
-///
-/// `format!("{name}=\"")` matched exactly one shape and got two things
-/// wrong, both of which appear in valid feeds every day. SINGLE QUOTES
-/// are as legal as double (`<enclosure url='...'/>`), and so is
-/// whitespace either side of the `=`; a feed written that way lost the
-/// attribute entirely, which for `url` means the row is dropped and for
-/// a Newznab `<error code=.. description=..>` means a real quota
-/// refusal reads as an empty result set, so the backoff never engages.
-/// And the match was UNANCHORED, so asking for `url` found the tail of
-/// `xmlUrl=` or `thumbnailUrl=` and returned that value instead - the
-/// wrong link, silently.
-pub(crate) fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
-    let b = tag.as_bytes();
-    let mut from = 0usize;
-    while let Some(hit) = tag[from..].find(name) {
-        let at = from + hit;
-        from = at + name.len();
-        // A whole attribute name: what precedes it is the tag opener or
-        // separating whitespace, never the tail of a longer name.
-        if at > 0 && !b[at - 1].is_ascii_whitespace() && b[at - 1] != b'<' {
-            continue;
-        }
-        let mut j = from;
-        while b.get(j).is_some_and(u8::is_ascii_whitespace) {
-            j += 1;
-        }
-        if b.get(j) != Some(&b'=') {
-            continue;
-        }
-        j += 1;
-        while b.get(j).is_some_and(u8::is_ascii_whitespace) {
-            j += 1;
-        }
-        let Some(&q) = b.get(j) else { continue };
-        if q != b'"' && q != b'\'' {
-            continue;
-        }
-        j += 1;
-        let Some(end) = tag[j..].find(q as char) else {
-            continue;
-        };
-        return Some(&tag[j..j + end]);
-    }
-    None
+/// One named `<newznab:attr name=".." value=".."/>` value inside an item
+/// block, read through the shared lexer, so a commented-out or
+/// CDATA-quoted attr is not one. Any prefix counts - Torznab spells the
+/// same element `torznab:attr`.
+pub(crate) fn newznab_attr<'a>(item: &'a str, name: &str) -> Option<&'a str> {
+    elem_tags(item, "attr")
+        .into_iter()
+        .filter(|t| attr(t, "name") == Some(name))
+        .find_map(|t| attr(t, "value"))
 }
 
 /// A body that came back HTTP 200 and is not a feed at all.
@@ -933,11 +793,9 @@ pub(crate) fn wrong_document(xml: &str, roots: &[&str], want: &str) -> Option<St
     // Byte-limited scan: only the document's opening needs looking at,
     // and a multi-megabyte body of HTML must not be lowercased whole.
     let head: String = xml.chars().take(4096).collect::<String>().to_lowercase();
-    let looks_right = head.match_indices('<').any(|(at, _)| {
-        let name = head[at + 1..]
-            .split(|c: char| c.is_whitespace() || c == '>' || c == '/')
-            .next()
-            .unwrap_or_default();
+    // Read with the shared lexer, so a root spelled inside a comment or
+    // a CDATA section (an HTML login page quoting a feed) is not one.
+    let looks_right = crate::xmlscan::start_tag_names(&head).any(|name| {
         // `head` is lowercased, so the roots are compared case-blind -
         // XML element names are case-SENSITIVE and Plex's root is
         // `MediaContainer`, which a literal `contains` would never see.
@@ -994,13 +852,12 @@ pub fn parse_feed(xml: &str) -> Vec<FeedItem> {
 
 fn parse_rss_items(xml: &str) -> Vec<FeedItem> {
     let mut out = Vec::new();
-    let mut rest = xml;
-    while let Some((open, name)) = find_elem(rest, "item") {
-        let close_pat = format!("</{name}>");
-        let Some(close) = rest[open..].find(&close_pat) else {
-            break;
-        };
-        let item = &rest[open..open + close];
+    // An unclosed `<item>` has no body and yields nothing, exactly as the
+    // loop that stopped at the first one did.
+    for item in elements(xml, "item")
+        .into_iter()
+        .filter_map(|(_, body)| body)
+    {
         let title = tag_text(item, "title").map(unescape).unwrap_or_default();
         let enclosure = elem_tags(item, "enclosure").into_iter().next();
         let link = enclosure
@@ -1012,15 +869,8 @@ fn parse_rss_items(xml: &str) -> Vec<FeedItem> {
         let size = enclosure
             .and_then(|e| attr(e, "length"))
             .and_then(|v| v.parse().ok())
-            .or_else(|| {
-                // newznab: <newznab:attr name="size" value="123"/>
-                item.split("<newznab:attr").skip(1).find_map(|a| {
-                    let a = &a[..a.find('>').unwrap_or(a.len())];
-                    (attr(a, "name") == Some("size"))
-                        .then(|| attr(a, "value")?.parse().ok())
-                        .flatten()
-                })
-            })
+            // newznab: <newznab:attr name="size" value="123"/>
+            .or_else(|| newznab_attr(item, "size")?.parse().ok())
             .unwrap_or(0);
         let guid = tag_text(item, "guid")
             .map(unescape)
@@ -1043,7 +893,6 @@ fn parse_rss_items(xml: &str) -> Vec<FeedItem> {
                 pub_date,
             });
         }
-        rest = &rest[open + close + close_pat.len()..];
     }
     out
 }
@@ -1060,13 +909,10 @@ fn parse_rss_items(xml: &str) -> Vec<FeedItem> {
 /// `<link>` too. `<id>` stands in for `<guid>`.
 fn parse_atom_entries(xml: &str) -> Vec<FeedItem> {
     let mut out = Vec::new();
-    let mut rest = xml;
-    while let Some((open, name)) = find_elem(rest, "entry") {
-        let close_pat = format!("</{name}>");
-        let Some(close) = rest[open..].find(&close_pat) else {
-            break;
-        };
-        let entry = &rest[open..open + close];
+    for entry in elements(xml, "entry")
+        .into_iter()
+        .filter_map(|(_, body)| body)
+    {
         let title = tag_text(entry, "title").map(unescape).unwrap_or_default();
         // Every <link .../> in the entry, as its raw tag text.
         let links: Vec<&str> = elem_tags(entry, "link");
@@ -1098,14 +944,7 @@ fn parse_atom_entries(xml: &str) -> Vec<FeedItem> {
         let size = download
             .and_then(|l| attr(l, "length"))
             .and_then(|v| v.parse().ok())
-            .or_else(|| {
-                entry.split("<newznab:attr").skip(1).find_map(|a| {
-                    let a = &a[..a.find('>').unwrap_or(a.len())];
-                    (attr(a, "name") == Some("size"))
-                        .then(|| attr(a, "value")?.parse().ok())
-                        .flatten()
-                })
-            })
+            .or_else(|| newznab_attr(entry, "size")?.parse().ok())
             .unwrap_or(0);
         let guid = tag_text(entry, "id")
             .map(unescape)
@@ -1129,7 +968,6 @@ fn parse_atom_entries(xml: &str) -> Vec<FeedItem> {
                 pub_date,
             });
         }
-        rest = &rest[open + close + close_pat.len()..];
     }
     out
 }
@@ -1446,8 +1284,11 @@ mod tests {
         // eat the tail.
         assert_eq!(unescape("tail &"), "tail &");
         assert_eq!(unescape("&#3"), "&#3");
-        // CDATA wrappers still come off.
-        assert_eq!(unescape("<![CDATA[a &amp; b]]>"), "a & b");
+        // CDATA wrappers still come off, but their content is LITERAL:
+        // this line asserted "a & b" until 13 Oct 2026, which was the
+        // F7 defect pinned as an expectation (XML 1.0 section 2.7 - no
+        // markup, entity references included, is recognised in CDATA).
+        assert_eq!(unescape("<![CDATA[a &amp; b]]>"), "a &amp; b");
     }
 
     #[test]
@@ -1929,5 +1770,100 @@ mod tests {
         assert!(assign_feed_ids(&mut list), "a duplicate is work");
         assert_ne!(list[0].id, list[1].id);
         assert_eq!(list[0].id, ids[0], "the FIRST one keeps its id");
+    }
+
+    /// 13 Oct 2026 read-only sweep F7: markup-shaped TEXT inside a feed
+    /// must never be read as markup. Each fixture below picked the wrong
+    /// download URL (or none) when the helpers were substring scans; the
+    /// URL is what gets grabbed, so these are not cosmetic.
+    #[test]
+    fn an_enclosure_written_inside_cdata_is_text_not_the_download() {
+        // The sweep's own fixture, verbatim in shape.
+        let xml = r#"<rss><channel><item>
+  <title>Real.Release</title>
+  <description><![CDATA[Example:
+    <enclosure url="https://example.invalid/example.nzb"/>
+  ]]></description>
+  <enclosure url="https://example.invalid/real.nzb" length="42"/>
+</item></channel></rss>"#;
+        let items = parse_feed_checked(xml).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].link, "https://example.invalid/real.nzb");
+        assert_eq!(items[0].size, 42);
+    }
+
+    #[test]
+    fn a_url_inside_another_attributes_value_is_not_the_url() {
+        let xml = r#"<rss><channel><item><title>Real.Release</title>
+<enclosure title="Example url='https://example.invalid/decoy.nzb'" url="https://example.invalid/real.nzb"/>
+</item></channel></rss>"#;
+        assert_eq!(parse_feed(xml)[0].link, "https://example.invalid/real.nzb");
+    }
+
+    #[test]
+    fn cdata_text_stays_literal() {
+        let xml = r#"<rss><channel><item><title><![CDATA[Show &amp; Tell]]></title>
+<link>https://x/a.nzb</link></item></channel></rss>"#;
+        assert_eq!(parse_feed(xml)[0].title, "Show &amp; Tell");
+        // CDATA wrappers still come off; only their content is literal.
+        assert_eq!(unescape("<![CDATA[a &amp; b]]>"), "a &amp; b");
+    }
+
+    #[test]
+    fn a_commented_out_enclosure_is_ignored() {
+        let xml = r#"<rss><channel><item><title>T</title>
+<!-- <enclosure url="https://x/old.nzb" length="1"/> -->
+<enclosure url="https://x/real.nzb" length="2"/>
+</item></channel></rss>"#;
+        let items = parse_feed(xml);
+        assert_eq!(items[0].link, "https://x/real.nzb");
+        assert_eq!(items[0].size, 2);
+    }
+
+    #[test]
+    fn a_quoted_gt_inside_an_attribute_does_not_end_the_tag() {
+        let xml = r#"<rss><channel><item><title>T</title>
+<enclosure title="a > b" url="https://x/real.nzb" length="7"/>
+</item></channel></rss>"#;
+        let items = parse_feed(xml);
+        assert_eq!(items.len(), 1, "the row must not be dropped");
+        assert_eq!(items[0].link, "https://x/real.nzb");
+        assert_eq!(items[0].size, 7);
+    }
+
+    #[test]
+    fn a_close_tag_inside_cdata_does_not_end_the_item() {
+        // A `</item>` in description text used to cut the item short,
+        // losing the enclosure after it.
+        let xml = r#"<rss><channel><item><title>T</title>
+<description><![CDATA[see </item> here]]></description>
+<newznab:attr name="size" value="9"/>
+<enclosure url="https://x/real.nzb"/>
+</item></channel></rss>"#;
+        let items = parse_feed(xml);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].link, "https://x/real.nzb");
+        assert_eq!(items[0].size, 9);
+    }
+
+    #[test]
+    fn namespaced_rss_and_atom_ignore_markup_in_text_too() {
+        let rss = r#"<r:rss xmlns:r="x"><r:channel><r:item><r:title>T</r:title>
+<r:description><![CDATA[<r:enclosure url="https://x/decoy.nzb"/>]]></r:description>
+<r:enclosure url="https://x/real.nzb"/></r:item></r:channel></r:rss>"#;
+        assert_eq!(
+            parse_feed_checked(rss).unwrap()[0].link,
+            "https://x/real.nzb"
+        );
+        let atom = r#"<atom:feed xmlns:atom="http://www.w3.org/2005/Atom"><atom:entry>
+<atom:title>T</atom:title>
+<atom:content type="html"><![CDATA[<atom:link rel="enclosure" href="https://x/decoy.nzb"/>]]></atom:content>
+<!-- <atom:link rel="enclosure" href="https://x/old.nzb"/> -->
+<atom:link rel="enclosure" title="rel='x' href='https://x/decoy2.nzb'" href="https://x/real.nzb" length="5"/>
+</atom:entry></atom:feed>"#;
+        let items = parse_feed_checked(atom).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].link, "https://x/real.nzb");
+        assert_eq!(items[0].size, 5);
     }
 }

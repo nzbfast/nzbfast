@@ -2093,6 +2093,97 @@ async fn a_part_zero_header_does_not_steer_the_article() {
     );
 }
 
+/// yEnc leniency shape 7: a file whose articles' `=ybegin part=` numbers
+/// disagree with the NZB's segment numbering, while `=ypart` carries the
+/// real offsets and every pcrc32 passes - REVERSED (n..1) and OFFSET (+5).
+/// Placement never reads the part number (`Decoded::offset` is `=ypart
+/// begin=`), so what is left to pin is that the split-brain gate neither
+/// loses an article nor spins: on one server a mismatch has no peer and is
+/// delivered as is (`a_part_mismatch_is_never_re_asked_from_the_same_server`
+/// is the serial pin); on two servers carrying the same numbering - every
+/// server posting a file spells it the same way - the refetch comes back
+/// with the same "wrong" part and the F-09 latch stands the gate down. The
+/// cost there is bounded steers, never a lost article. Placement of the
+/// bytes is pinned at the decoder (`yenc::leniency_tests`). Research note:
+/// research/YENC-LENIENCY-FIXTURES-2026-10-11.md.
+#[tokio::test(flavor = "multi_thread")]
+async fn yenc_part_numbers_that_disagree_with_the_nzb_still_deliver() {
+    let data: Vec<u8> = (0..48_000u32).map(|i| ((i * 7) >> 3) as u8).collect();
+    let art = 8_000usize;
+    let n = data.len().div_ceil(art) as u32;
+    let mk = |tag: &str, yenc_part: &dyn Fn(u32) -> u32| {
+        let mut arts = std::collections::HashMap::new();
+        let mut ids = Vec::new();
+        for (i, chunk) in data.chunks(art).enumerate() {
+            let a = crate::yenc::encode(
+                "p.bin",
+                data.len() as u64,
+                Some((yenc_part(i as u32 + 1), n + 5)),
+                (i * art) as u64 + 1,
+                chunk,
+            );
+            let id = format!("<{tag}-{i}@mock>");
+            arts.insert(id.clone(), a);
+            ids.push(ArticleReq {
+                id: id.into(),
+                age_days: 0,
+                part: i as u32 + 1,
+                file: 0,
+            });
+        }
+        (arts, ids)
+    };
+    let reversed = move |p: u32| n + 1 - p;
+    let offset = |p: u32| p + 5;
+    for (label, numbering) in [
+        ("reversed", &reversed as &dyn Fn(u32) -> u32),
+        ("offset +5", &offset),
+    ] {
+        let cfg = PoolConfig {
+            crc_steer: true,
+            window: 2,
+            ..Default::default()
+        };
+        // One server: nowhere to steer.
+        let (arts, ids) = mk("one", numbering);
+        let a = crate::mock::MockServer::start(arts, Default::default()).await;
+        let (_, done, bad, _, _) =
+            payout_leg_steered(vec![payout_server(&a, 3, cfg.clone())], ids).await;
+        assert_eq!(
+            done, n as usize,
+            "{label}, one server: every article delivered"
+        );
+        assert_eq!(bad, 0, "{label}, one server: every body passes its pcrc32");
+
+        // Two servers, same numbering on both.
+        let (arts_a, ids) = mk("two", numbering);
+        let (arts_b, _) = mk("two", numbering);
+        let a = crate::mock::MockServer::start(arts_a, Default::default()).await;
+        let b = crate::mock::MockServer::start(arts_b, Default::default()).await;
+        let servers = vec![payout_server(&a, 3, cfg.clone()), payout_server(&b, 1, cfg)];
+        let (_, done, bad, _, notes) = payout_leg_steered(servers, ids).await;
+        assert_eq!(
+            done, n as usize,
+            "{label}, two servers: every article delivered"
+        );
+        assert_eq!(bad, 0, "{label}, two servers: every body passes its pcrc32");
+        // Structural, as `a_zero_based_files_steer_cost_is_the_pipeline_depth_not_the_file`
+        // pins it: the gate fired and the latch stood it down exactly once.
+        // The steer COUNT is that test's pipeline depth (measured here,
+        // 11 Oct 2026, 30-article file: 5 to 20 steers) and is not pinned.
+        let steers = notes.iter().filter(|n| n.contains("wrong article")).count();
+        let standdown = notes.iter().filter(|n| n.contains("synthesized")).count();
+        assert!(
+            steers > 0,
+            "{label}: no steer fired - the rig measures nothing"
+        );
+        assert_eq!(
+            standdown, 1,
+            "{label}: the latch must stand the gate down: {notes:?}"
+        );
+    }
+}
+
 /// TODO 114 anti-wedge: `crc_steer` on a SINGLE-server config, where
 /// `other_can_take` can never say yes. The run must TERMINATE with
 /// every id owned: the deferred `complete_one` settles at the

@@ -80,6 +80,10 @@ thread_local! {
     static ACTIVATE_GAP: RefCell<Option<Box<dyn FnOnce(&Daemon)>>> = const {
         RefCell::new(None)
     };
+    /// One-shot callback for the retry window; see [`on_retry_gap`].
+    static RETRY_GAP: RefCell<Option<Box<dyn FnOnce(&Daemon)>>> = const {
+        RefCell::new(None)
+    };
     /// One-shot callback for the promotion window; see
     /// [`on_promote_gap`].
     static PROMOTE_GAP: RefCell<Option<Box<dyn FnOnce(&Daemon)>>> = const {
@@ -115,6 +119,7 @@ pub fn disarm() {
     STORES.with(|s| s.set(0));
     PARK_GAP.with(|g| *g.borrow_mut() = None);
     ACTIVATE_GAP.with(|g| *g.borrow_mut() = None);
+    RETRY_GAP.with(|g| *g.borrow_mut() = None);
     PROMOTE_GAP.with(|g| *g.borrow_mut() = None);
     EARLY_RENAME_GAP.with(|g| *g.borrow_mut() = None);
 }
@@ -171,6 +176,22 @@ pub fn on_activate_gap(f: impl FnOnce(&Daemon) + 'static) {
 /// The `activate_parked` side of [`on_activate_gap`].
 pub fn activate_gap(d: &Daemon) {
     let f = ACTIVATE_GAP.with(|g| g.borrow_mut().take());
+    if let Some(f) = f {
+        f(d);
+    }
+}
+
+/// Run `f` the next time `Daemon::retry` has dropped a record from
+/// history and not yet pushed it onto the queue on this thread - the
+/// retry twin of [`on_activate_gap`], and a race for the same reason.
+/// One shot, like [`on_park_gap`].
+pub fn on_retry_gap(f: impl FnOnce(&Daemon) + 'static) {
+    RETRY_GAP.with(|g| *g.borrow_mut() = Some(Box::new(f)));
+}
+
+/// The `retry` side of [`on_retry_gap`].
+pub fn retry_gap(d: &Daemon) {
+    let f = RETRY_GAP.with(|g| g.borrow_mut().take());
     if let Some(f) = f {
         f(d);
     }

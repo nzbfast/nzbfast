@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::netfetch::urlenc;
-use crate::rss::{attr, parse_rfc2822, tag_text, unescape};
+use crate::rss::{newznab_attr, parse_rfc2822};
+use crate::xmlscan::{attr, elem_tags, elements, root_tag, tag_text, unescape};
 
 /// Which PROTOCOL a configured search source speaks.
 ///
@@ -381,16 +382,16 @@ pub fn parse_error(xml: &str) -> Option<NewznabError> {
     // raises NewznabError::Limit, so without it the daily-quota answer reads
     // as an empty result set, the backoff never engages, and we keep hammering
     // an account that is already over quota.
-    let mut t = xml.trim_start_matches('\u{feff}').trim_start();
-    if let Some(rest) = t.strip_prefix("<?xml") {
-        t = rest
-            .split_once("?>")
-            .map(|(_, r)| r)
-            .unwrap_or(rest)
-            .trim_start();
+    //
+    // The ROOT element, found by the shared lexer: the BOM, an `<?xml?>`
+    // declaration, a DOCTYPE and any comment ahead of it are stepped over,
+    // and a `>` inside the description does not end the tag (13 Oct 2026
+    // sweep F7). Only the root counts - an `<error>` anywhere else in a
+    // result feed is not the indexer refusing.
+    let (name, tag) = root_tag(xml.trim_start_matches('\u{feff}'))?;
+    if name != "error" {
+        return None;
     }
-    let rest = t.strip_prefix("<error")?;
-    let tag = &rest[..rest.find('>').unwrap_or(rest.len())];
     let code: u16 = attr(tag, "code")?.parse().ok()?;
     let desc = unescape(attr(tag, "description").unwrap_or(""));
     Some(match code {
@@ -479,31 +480,24 @@ pub fn caps_url(cfg: &IndexerConfig) -> String {
 
 /// One named `<newznab:attr>` value inside an item block.
 fn nn_attr(item: &str, name: &str) -> Option<String> {
-    item.split("<newznab:attr").skip(1).find_map(|a| {
-        let a = &a[..a.find('>').unwrap_or(a.len())];
-        (attr(a, "name") == Some(name))
-            .then(|| attr(a, "value").map(str::to_string))
-            .flatten()
-    })
+    newznab_attr(item, name).map(str::to_string)
 }
 
 /// Parse a `t=caps` document. Tolerant like the RSS parser - a missing
 /// section just leaves its field at the default.
 pub fn parse_caps(xml: &str) -> Caps {
     let mut caps = Caps::default();
-    let one_tag = |open: &str| -> Option<String> {
-        let p = xml.find(open)?;
-        let end = xml[p..].find('>').map(|e| p + e)?;
-        Some(xml[p..end].to_string())
+    let one_tag = |local: &'static str| -> Option<String> {
+        elem_tags(xml, local).first().map(|t| t.to_string())
     };
-    if let Some(t) = one_tag("<server") {
+    if let Some(t) = one_tag("server") {
         caps.server = unescape(
             attr(&t, "title")
                 .or_else(|| attr(&t, "appversion"))
                 .unwrap_or(""),
         );
     }
-    if let Some(t) = one_tag("<limits") {
+    if let Some(t) = one_tag("limits") {
         caps.limit_max = attr(&t, "max").and_then(|v| v.parse().ok()).unwrap_or(0);
         caps.limit_default = attr(&t, "default")
             .and_then(|v| v.parse().ok())
@@ -517,33 +511,28 @@ pub fn parse_caps(xml: &str) -> Caps {
             .map(str::to_string)
             .collect()
     };
-    if let Some(t) = one_tag("<search ") {
+    if let Some(t) = one_tag("search") {
         caps.search = attr(&t, "available") == Some("yes");
     }
-    if let Some(t) = one_tag("<tv-search")
+    if let Some(t) = one_tag("tv-search")
         && attr(&t, "available") == Some("yes")
     {
         caps.tvsearch = params(&t);
     }
-    if let Some(t) = one_tag("<movie-search")
+    if let Some(t) = one_tag("movie-search")
         && attr(&t, "available") == Some("yes")
     {
         caps.movie = params(&t);
     }
     // Top-level categories only: `<category id name>`; `<subcat>` rides
     // its parent's thousand and is noise at this level.
-    let mut rest = xml;
-    while let Some(p) = rest.find("<category") {
-        let tail = &rest[p..];
-        let end = tail.find('>').unwrap_or(tail.len());
-        let tag = &tail[..end];
+    for tag in elem_tags(xml, "category") {
         if let (Some(id), Some(name)) = (
             attr(tag, "id").and_then(|v| v.parse().ok()),
             attr(tag, "name"),
         ) {
             caps.categories.push((id, unescape(name)));
         }
-        rest = &tail[end..];
     }
     caps
 }
@@ -552,17 +541,15 @@ pub fn parse_caps(xml: &str) -> Caps {
 /// first; a feed with zero items is a valid "nothing found".
 pub fn parse_results(xml: &str) -> Vec<SearchResult> {
     let mut out = Vec::new();
-    let mut rest = xml;
-    while let Some(open) = rest.find("<item") {
-        let Some(close) = rest[open..].find("</item>") else {
-            break;
-        };
-        let item = &rest[open..open + close];
+    // The shared lexer, never a `find("<item")` of this reader's own: that
+    // copy read an `<enclosure>` written inside a CDATA description as
+    // the download link (13 Oct 2026 sweep F7).
+    for item in elements(xml, "item")
+        .into_iter()
+        .filter_map(|(_, body)| body)
+    {
         let title = tag_text(item, "title").map(unescape).unwrap_or_default();
-        let enclosure = item.find("<enclosure").map(|p| {
-            let end = item[p..].find('>').map(|e| p + e).unwrap_or(item.len());
-            &item[p..end]
-        });
+        let enclosure = elem_tags(item, "enclosure").into_iter().next();
         let link = enclosure
             .and_then(|e| attr(e, "url"))
             .map(str::to_string)
@@ -600,7 +587,6 @@ pub fn parse_results(xml: &str) -> Vec<SearchResult> {
                 grabs,
             });
         }
-        rest = &rest[open + close + 7..];
     }
     out
 }
@@ -1295,5 +1281,44 @@ mod tests {
             u.count_hit("geek");
         }
         assert!(u.hit_allowed(&c));
+    }
+
+    /// 13 Oct 2026 sweep F7, the Newznab copy: `parse_results` ran its
+    /// own `find("<item")` / `find("<enclosure")` scans beside rss's, so
+    /// markup-shaped text picked the download URL here too.
+    #[test]
+    fn results_read_no_markup_out_of_text_or_attribute_values() {
+        let xml = r#"<rss><channel><item><title>A</title>
+<description><![CDATA[<enclosure url="https://x/example.nzb"/> and </item>]]></description>
+<!-- <newznab:attr name="size" value="1"/> -->
+<enclosure url="https://x/real-a.nzb" length="42"/>
+</item>
+<item><title><![CDATA[Show &amp; Tell]]></title>
+<enclosure title="see url='https://x/decoy.nzb' > here" url="https://x/real-b.nzb"/>
+<newznab:attr name="size" value="7"/>
+</item></channel></rss>"#;
+        let items = parse_results(xml);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].link, "https://x/real-a.nzb");
+        assert_eq!(items[0].size, 42);
+        assert_eq!(items[1].title, "Show &amp; Tell");
+        assert_eq!(items[1].link, "https://x/real-b.nzb");
+        assert_eq!(items[1].size, 7);
+    }
+
+    #[test]
+    fn an_error_document_reads_through_a_comment_and_a_quoted_gt() {
+        let e = parse_error(
+            r#"<?xml version="1.0"?><!-- quota --><error code="500" description="limit > reached"/>"#,
+        );
+        assert!(
+            matches!(&e, Some(NewznabError::Limit(500, d)) if d == "limit > reached"),
+            "{e:?}"
+        );
+        // Still only the ROOT: an <error> in a result feed's text is not one.
+        assert!(
+            parse_error("<rss><channel><item><title>error</title></item></channel></rss>")
+                .is_none()
+        );
     }
 }

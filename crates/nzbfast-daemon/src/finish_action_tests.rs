@@ -15,7 +15,16 @@ pub fn with_daemon(name: &str, f: impl FnOnce(&Arc<Daemon>)) {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let d = crate::testutil::test_daemon(&dir);
+    // `FIRED` is keyed by the daemon's ADDRESS, and the allocator reuses
+    // a freed daemon's address for a later one in the same process. Any
+    // entry already under this key belongs to a daemon that is gone, so
+    // it is dropped here, and this daemon's own are dropped on the way
+    // out. Without it the race tests read an earlier test's Shutdown as
+    // their own: red on CI's unit-one-process (glibc reuses the address
+    // readily) and green on macOS, run 38433942820 on 66d3bc6d.
+    forget_fired(&d);
     f(&d);
+    forget_fired(&d);
     drop(d);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -124,7 +133,7 @@ fn an_owed_relocation_blocks_the_drain_though_it_left_the_queue() {
 fn a_refused_drain_keeps_its_edge_for_the_next_tick() {
     with_daemon("edge", |d| {
         d.queue_idle_latch.store(true, Ordering::Relaxed);
-        *d.finish.action.lock_ok() = FinishAction::Sleep;
+        d.finish.set_action(FinishAction::Sleep);
         d.queue.lock_ok().push_back(queued("paused", true, 0));
 
         d.finish.note_drained();
@@ -503,4 +512,179 @@ fn every_platform_has_a_command_for_both_actions() {
             assert!(!prog.is_empty());
         }
     }
+}
+
+/// What `fire` was asked to run for THIS daemon (the unit-test build
+/// records instead of running anything).
+fn forget_fired(d: &Arc<Daemon>) {
+    let key = Arc::as_ptr(d) as usize;
+    FIRED.lock_ok().retain(|(k, _)| *k != key);
+}
+
+fn fired(d: &Arc<Daemon>) -> Vec<FinishAction> {
+    let key = Arc::as_ptr(d) as usize;
+    FIRED
+        .lock_ok()
+        .iter()
+        .filter(|(k, _)| *k == key)
+        .map(|(_, a)| *a)
+        .collect()
+}
+
+/// Run one `tick` on another thread, hold it at the drain check (after
+/// it has read the choice, before it acts on it), run `meanwhile` on
+/// this thread, then let the tick finish.
+fn tick_paused_at_drain_check(d: &Arc<Daemon>, meanwhile: impl FnOnce()) {
+    let key = Arc::as_ptr(d) as usize;
+    let open = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    TICK_DRAIN_BARRIER
+        .lock_ok()
+        .push((key, open.clone(), release.clone()));
+    let d2 = d.clone();
+    let t = std::thread::spawn(move || tick(&d2));
+    open.wait();
+    meanwhile();
+    release.wait();
+    t.join().expect("tick thread");
+    TICK_DRAIN_BARRIER.lock_ok().retain(|(k, _, _)| *k != key);
+}
+
+/// A drained, idle daemon with `a` armed and a zero-second countdown, so
+/// any countdown a pass installs is due on the very next tick.
+fn armed_and_drained(d: &Arc<Daemon>, a: FinishAction) {
+    d.queue_idle_latch.store(true, Ordering::Relaxed);
+    d.finish.set_delay_secs(0);
+    d.finish.set_action(a);
+    d.finish.note_drained();
+}
+
+/// The control the race tests below lean on: with nothing interfering,
+/// the paused pass arms the countdown and the next tick fires it once
+/// through the sink. Without this, "the sink saw nothing" could just
+/// mean the sink sees nothing.
+#[test]
+fn an_undisturbed_pass_arms_and_the_next_tick_fires_once() {
+    with_daemon("race-control", |d| {
+        armed_and_drained(d, FinishAction::Shutdown);
+        tick_paused_at_drain_check(d, || {});
+        assert!(d.finish.pending().is_some(), "the pass armed a countdown");
+        tick(d);
+        assert_eq!(fired(d), vec![FinishAction::Shutdown]);
+        assert_eq!(d.finish.action(), FinishAction::None, "one-shot disarms");
+        tick(d);
+        assert_eq!(fired(d), vec![FinishAction::Shutdown], "and only once");
+    });
+}
+
+/// Codex sweep 13 Oct 2026, F1: the user switches Shutdown off while the
+/// watcher is inside `drain_blocker`. The pass read Shutdown before the
+/// click and used to install the countdown after it, so the machine shut
+/// down on a setting that already read "none".
+#[test]
+fn disarming_while_a_pass_is_in_the_drain_check_cancels_it() {
+    with_daemon("race-off", |d| {
+        armed_and_drained(d, FinishAction::Shutdown);
+        tick_paused_at_drain_check(d, || d.finish.set_action(FinishAction::None));
+        assert!(
+            d.finish.pending().is_none(),
+            "no countdown for a disarmed choice"
+        );
+        tick(d);
+        assert!(fired(d).is_empty(), "nothing fired: {:?}", fired(d));
+        assert_eq!(d.finish.action(), FinishAction::None);
+    });
+}
+
+/// Changing Shutdown to Sleep mid-pass: the OLD choice must not run, and
+/// the stale pass does not get to decide for the new one either.
+#[test]
+fn switching_shutdown_to_sleep_mid_pass_never_runs_the_shutdown() {
+    with_daemon("race-sleep", |d| {
+        armed_and_drained(d, FinishAction::Shutdown);
+        tick_paused_at_drain_check(d, || d.finish.set_action(FinishAction::Sleep));
+        assert!(
+            d.finish.pending().is_none(),
+            "no countdown from the stale reading"
+        );
+        tick(d);
+        assert!(
+            !fired(d).contains(&FinishAction::Shutdown),
+            "the withdrawn shutdown ran: {:?}",
+            fired(d)
+        );
+        assert!(fired(d).is_empty(), "nothing fired: {:?}", fired(d));
+        assert_eq!(d.finish.action(), FinishAction::Sleep, "the new arm stands");
+    });
+}
+
+/// Shutdown -> None -> Shutdown inside one pass reads the same before and
+/// after, which is exactly why a re-read of the action is not a fix. The
+/// user's "no" still has to cancel the pass that read the earlier "yes".
+#[test]
+fn off_and_on_again_mid_pass_still_cancels_the_stale_pass() {
+    with_daemon("race-offon", |d| {
+        armed_and_drained(d, FinishAction::Shutdown);
+        tick_paused_at_drain_check(d, || {
+            d.finish.set_action(FinishAction::None);
+            d.finish.set_action(FinishAction::Shutdown);
+        });
+        assert!(d.finish.pending().is_none(), "the stale pass armed nothing");
+        tick(d);
+        assert!(fired(d).is_empty(), "nothing fired: {:?}", fired(d));
+    });
+}
+
+/// The header chip's cancel landing after the pass read the arm but
+/// before it installed the countdown.
+#[test]
+fn cancel_before_the_countdown_is_installed_wins() {
+    with_daemon("race-cancel-pre", |d| {
+        armed_and_drained(d, FinishAction::Shutdown);
+        let mut out = Value::Null;
+        tick_paused_at_drain_check(d, || out = cancel(d));
+        assert_eq!(
+            out["cancelled"],
+            json!(false),
+            "nothing was counting down yet"
+        );
+        assert_eq!(out["disarmed"], json!(true));
+        assert!(d.finish.pending().is_none(), "no countdown after a cancel");
+        tick(d);
+        assert!(fired(d).is_empty(), "nothing fired: {:?}", fired(d));
+        assert_eq!(d.finish.action(), FinishAction::None);
+    });
+}
+
+/// The banner's cancel landing while the countdown's last pass is in the
+/// drain check, i.e. before the claim. Before the claim, cancel wins.
+///
+/// A GUARD, not a regression: this one was already green before F1's
+/// fix (measured 13 Oct 2026 with the seam and sink grafted onto the old
+/// code), because the old take-before-fire refused a countdown the
+/// cancel had already taken. It pins that the claim kept the property.
+#[test]
+fn cancel_during_a_countdown_before_the_claim_wins() {
+    with_daemon("race-cancel-mid", |d| {
+        armed_and_drained(d, FinishAction::Shutdown);
+        tick(d);
+        assert!(d.finish.pending().is_some(), "countdown is up and due");
+        let mut out = Value::Null;
+        tick_paused_at_drain_check(d, || out = cancel(d));
+        assert_eq!(out["cancelled"], json!(true));
+        assert!(fired(d).is_empty(), "nothing fired: {:?}", fired(d));
+        assert!(d.finish.pending().is_none());
+        assert_eq!(d.finish.action(), FinishAction::None);
+    });
+}
+
+/// The non-countdown arm had the same stale read: a script switched off
+/// mid-pass still ran.
+#[test]
+fn a_script_disarmed_mid_pass_does_not_run() {
+    with_daemon("race-script", |d| {
+        armed_and_drained(d, FinishAction::Script);
+        tick_paused_at_drain_check(d, || d.finish.set_action(FinishAction::None));
+        assert!(fired(d).is_empty(), "the script ran: {:?}", fired(d));
+    });
 }

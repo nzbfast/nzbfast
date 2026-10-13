@@ -90,6 +90,8 @@ pub mod nzbindex;
 pub mod plex;
 pub mod rss;
 pub mod watchlist;
+// The one XML lexer `rss`, `newznab` and `plex` read wire documents with.
+mod xmlscan;
 
 // THE INDEXER-GATED HALF. These six were `#[cfg(feature = "indexer")]
 // mod ...;` in main.rs and the gate came down here with them. The bin

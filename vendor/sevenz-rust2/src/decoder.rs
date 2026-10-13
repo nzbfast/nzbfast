@@ -72,6 +72,13 @@ impl<R: Read> Read for Decoder<R> {
     }
 }
 
+/// nzbfast: the smallest block for which the multithreaded LZMA2 reader
+/// can ever run more than one worker. 7-Zip's MT encoder cuts
+/// independent blocks at four dictionaries and never below 1 MiB, so a
+/// block this small is one independent run and the MT reader spawns a
+/// thread per block to decode it on one worker anyway.
+const MT_MIN_UNPACK: usize = 1 << 20;
+
 pub fn add_decoder<I: Read>(
     input: I,
     uncompressed_len: usize,
@@ -114,7 +121,10 @@ pub fn add_decoder<I: Read>(
                 });
             }
 
-            let lz = if threads < 2 {
+            // nzbfast: one thread for a block too small to hold two of
+            // the independent blocks the MT reader parallelizes over -
+            // see README-nzbfast.md item 3.
+            let lz = if threads < 2 || uncompressed_len <= MT_MIN_UNPACK {
                 Decoder::Lzma2(Box::new(Lzma2Reader::new(input, dic_size, None)))
             } else {
                 Decoder::Lzma2Mt(Box::new(Lzma2ReaderMt::new(input, dic_size, None, threads)))

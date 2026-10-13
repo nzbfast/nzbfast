@@ -245,6 +245,9 @@ impl Daemon {
         // so it must not interleave with an add (or another retry)
         // making the same decision about the same folder.
         let publish = self.add_lock.lock_ok();
+        // `hist_owed` BEFORE `history`, the order `queue_rows` takes them
+        // in, and held to the removal below - see the carry there.
+        let mut owed = self.hist_owed.lock_ok();
         let mut h = self.history.lock_ok();
         // A recategorize is moving this job's payload right now. Taking
         // it out of history and re-queueing it would start writers at
@@ -291,8 +294,26 @@ impl Daemon {
         // compaction carries the disk row, exactly as park does around its
         // prewrite window. Guard drops on every exit below.
         let _inflight = self.hist_inflight_begin(nzo_id);
+        // ...and a record history REFUSED has no disk row for that guard
+        // to carry: its only durable copy is the queue store's terminal
+        // row, which `queue_rows` stopped publishing - and dropped from
+        // `hist_owed` for good - the moment the record was in neither
+        // list. So an owed entry is marked in transit under the same
+        // `hist_owed` hold as the removal (`Owed::in_transit`; 13 Oct
+        // 2026 sweep, F2), and `hist_carry_landed` ends it once the
+        // queue holds the record. What `hist_carry_across` does for park
+        // and library play, spelled out because this hold has to span
+        // the checks above.
+        if let Some(o) = owed.get_mut(nzo_id)
+            && Arc::ptr_eq(&o.job, &h[pos])
+        {
+            o.in_transit = true;
+        }
         let job = h.remove(pos);
         drop(h);
+        drop(owed);
+        #[cfg(any(test, feature = "test-support"))]
+        super::storecut::retry_gap(self);
         // A TV-filed job's out_dir is the SHARED `Show/Season NN` library
         // folder. Re-queueing it as-is would point the whole re-download
         // (journal, volume writers, and every later "delete this job's
@@ -494,7 +515,10 @@ impl Daemon {
         // button the user pressed had done nothing.
         moveseq::stamp_move(&job);
         let seq = job.lock_ok().move_seq;
-        self.queue.lock_ok().push_back(job);
+        self.queue.lock_ok().push_back(job.clone());
+        // In the live queue: its own row is the one to publish now, so
+        // the carry (if this record was owed) ends here.
+        self.hist_carry_landed(&job, nzo_id, false);
         drop(publish);
         // Queue first, tombstone second, and never the tombstone on its
         // own - `commit_to_queue` holds the ordering and the reasons for

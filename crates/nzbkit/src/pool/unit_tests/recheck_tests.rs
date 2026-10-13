@@ -497,3 +497,249 @@ async fn a_cancelled_hold_gives_its_budget_back_and_a_requeue_takes_it_again() {
         "the requeued Work still carries the hold it was cancelled with"
     );
 }
+
+/// Codex 13 Oct sweep F6: the slot is a unit of HELD ARTICLES, not of
+/// holds. Feed one in-flight copy of `id` to `handle_missing` as an
+/// echoed refusal from the server `si`.
+async fn refuse_on(
+    sh: &Arc<Shared>,
+    servers: &[(ServerConfig, PoolConfig)],
+    cfg: &PoolConfig,
+    si: usize,
+    w: Work,
+    tx: &mpsc::Sender<FetchOutcome>,
+) {
+    let mut sess = SessionState::from_inflight([w].into_iter().collect());
+    sh.charge_wire();
+    handle_missing(
+        cfg,
+        ctx_for(servers, si),
+        sh,
+        tx,
+        PooledBuf::unpooled(Vec::new()),
+        true,
+        false,
+        &mut sess,
+    )
+    .await;
+}
+
+async fn pop(sh: &Arc<Shared>) -> Work {
+    sh.queue
+        .lock()
+        .await
+        .pop_front()
+        .expect("the article is queued")
+}
+
+/// The order Codex traced, driven through the verdict site itself: A is
+/// out of the live set, B's refusal is live-unanimous and takes a hold;
+/// A comes back, B's re-ask refuses but A has not been tried, so the
+/// article requeues with no release; A refuses, the set is unanimous
+/// again and A takes a hold of its own; A's re-ask ends it. ONE article
+/// held throughout, so the counter must come back to zero - it used to
+/// stop at one, charged twice and refunded once, and 4,096 of those
+/// retire the late re-ask for the rest of the run in silence.
+#[tokio::test]
+async fn a_second_backbones_hold_reuses_the_articles_slot() {
+    let servers = vec![
+        (server("a"), PoolConfig::default()),
+        (server("b"), PoolConfig::default()),
+    ];
+    let cfg = PoolConfig {
+        recheck_430: true,
+        recheck_430_max: 1,
+        ..Default::default()
+    };
+    let (sh, _) = Shared::new(fresh(&["<x@x>", "<y@x>"]), &servers);
+    let held = || sh.recheck_held.load(Ordering::Acquire);
+    let (tx, mut rx) = mpsc::channel(8);
+    // A dark; B the only live backbone.
+    sh.alive[1].fetch_add(1, Ordering::AcqRel);
+    let x = pop(&sh).await;
+    refuse_on(&sh, &servers, &cfg, 1, x, &tx).await;
+    assert_eq!(held(), 1, "B's refusal was the last evidence: a hold");
+    // A reconnects.
+    sh.alive[0].fetch_add(1, Ordering::AcqRel);
+    let x = sh.queue.lock().await.iter().position(|w| &*w.id == "<x@x>");
+    let x = sh.queue.lock().await.remove(x.unwrap()).unwrap();
+    refuse_on(&sh, &servers, &cfg, 1, x, &tx).await;
+    assert!(rx.try_recv().is_err(), "A has not been asked yet");
+    assert_eq!(held(), 1, "a requeue keeps the slot");
+    let x = sh.queue.lock().await.iter().position(|w| &*w.id == "<x@x>");
+    let x = sh.queue.lock().await.remove(x.unwrap()).unwrap();
+    refuse_on(&sh, &servers, &cfg, 0, x, &tx).await;
+    assert!(
+        rx.try_recv().is_err(),
+        "A's refusal is the last evidence now, and A has its own hold to \
+         spend - even with the budget full, because the article already \
+         holds the one slot it will ever need"
+    );
+    assert_eq!(held(), 1, "the same article, the same slot");
+    let x = sh.queue.lock().await.iter().position(|w| &*w.id == "<x@x>");
+    let x = sh.queue.lock().await.remove(x.unwrap()).unwrap();
+    refuse_on(&sh, &servers, &cfg, 0, x, &tx).await;
+    assert!(
+        matches!(rx.try_recv(), Ok(FetchOutcome::Missing { id, .. }) if &*id == "<x@x>"),
+        "A's re-ask refused too, so the article is terminal"
+    );
+    assert_eq!(held(), 0, "and its one slot is back");
+    // The proof the slot is usable rather than merely counted: the next
+    // article's last refusal holds under a budget of one.
+    let y = pop(&sh).await;
+    let mut y2 = y;
+    y2.tried_430 = server_bit(1);
+    refuse_on(&sh, &servers, &cfg, 0, y2, &tx).await;
+    assert!(rx.try_recv().is_err(), "the next article may hold");
+    assert_eq!(held(), 1);
+}
+
+/// A full budget refuses a NEW article, and still lets an article that
+/// already holds a slot take a second backbone's hold in it.
+#[test]
+fn a_full_budget_still_admits_an_already_held_articles_second_group() {
+    let servers = vec![
+        (server("a"), PoolConfig::default()),
+        (server("b"), PoolConfig::default()),
+    ];
+    let cfg = PoolConfig {
+        recheck_430: true,
+        recheck_430_max: 1,
+        ..Default::default()
+    };
+    let (sh, _) = Shared::new(Vec::new(), &servers);
+    let mut x = work("<x@x>");
+    let mut y = work("<y@x>");
+    assert!(sh.take_recheck(&mut x, &cfg, server_bit(1)));
+    assert!(
+        !sh.take_recheck(&mut y, &cfg, server_bit(1)),
+        "a new article past the budget goes terminal"
+    );
+    assert!(sh.take_recheck(&mut x, &cfg, server_bit(0)));
+    assert_eq!(
+        x.recheck_430,
+        server_bit(0) | server_bit(1),
+        "both groups recorded"
+    );
+    assert!(
+        !sh.take_recheck(&mut x, &cfg, server_bit(0)),
+        "and each group still gets exactly one re-ask"
+    );
+    assert_eq!(sh.recheck_held.load(Ordering::Acquire), 1);
+    sh.release_recheck(&x);
+    assert_eq!(sh.recheck_held.load(Ordering::Acquire), 0);
+}
+
+/// A mirror group sets several bits on ONE charge, and the one release
+/// refunds exactly that - the bit-count refund, tried and reverted on
+/// 21 Sep 2026, is the wrong fix this pins against: it took the counter
+/// below a second article's live hold.
+#[test]
+fn a_mirror_groups_hold_is_one_slot_and_one_refund() {
+    let servers = vec![
+        (server("a"), PoolConfig::default()),
+        (server("b"), PoolConfig::default()),
+        (server("c"), PoolConfig::default()),
+    ];
+    let cfg = PoolConfig {
+        recheck_430: true,
+        ..Default::default()
+    };
+    let (sh, _) = Shared::new(Vec::new(), &servers);
+    let mirror = server_bit(0) | server_bit(1);
+    let mut x = work("<x@x>");
+    let mut y = work("<y@x>");
+    assert!(sh.take_recheck(&mut x, &cfg, mirror));
+    assert!(sh.take_recheck(&mut y, &cfg, server_bit(2)));
+    assert!(sh.take_recheck(&mut x, &cfg, server_bit(2)));
+    assert_eq!(sh.recheck_held.load(Ordering::Acquire), 2);
+    sh.release_recheck(&x);
+    assert_eq!(
+        sh.recheck_held.load(Ordering::Acquire),
+        1,
+        "x's three bits were one slot; y still holds its own"
+    );
+    sh.release_recheck(&y);
+    assert_eq!(sh.recheck_held.load(Ordering::Acquire), 0);
+}
+
+/// Cancel and requeue of an article held by TWO backbones: one slot
+/// out, one slot back, one slot refunded at its terminal verdict.
+#[tokio::test]
+async fn a_two_group_hold_round_trips_cancel_and_requeue_as_one_slot() {
+    let servers = vec![
+        (server("a"), PoolConfig::default()),
+        (server("b"), PoolConfig::default()),
+    ];
+    let (sh, _) = Shared::new(fresh(&["<held@x>", "<other@x>"]), &servers);
+    let cfg = PoolConfig {
+        recheck_430: true,
+        ..Default::default()
+    };
+    sh.alive[0].fetch_add(1, Ordering::AcqRel);
+    sh.alive[1].fetch_add(1, Ordering::AcqRel);
+    let ctl = QueueControl::default();
+    ctl.attach(&sh);
+    {
+        let mut q = sh.queue.lock().await;
+        let w = q.front_mut().unwrap();
+        assert!(sh.take_recheck(w, &cfg, server_bit(1)));
+        w.tried_430 = server_bit(1);
+        assert!(sh.take_recheck(w, &cfg, server_bit(0)));
+    }
+    let held = || sh.recheck_held.load(Ordering::Acquire);
+    assert_eq!(held(), 1);
+    let ids: HashSet<Arc<str>> = ["<held@x>"].iter().map(|s| Arc::from(*s)).collect();
+    assert_eq!(ctl.cancel(&ids).len(), 1);
+    assert_eq!(held(), 0);
+    let back: Vec<Arc<str>> = ids.iter().cloned().collect();
+    assert_eq!(ctl.requeue(&back), 1);
+    assert_eq!(
+        held(),
+        1,
+        "resurrected as the one slot it was cancelled with"
+    );
+    let w = {
+        let mut q = sh.queue.lock().await;
+        let at = q.iter().position(|w| &*w.id == "<held@x>").unwrap();
+        q.remove(at).unwrap()
+    };
+    sh.release_recheck(&w);
+    assert_eq!(held(), 0);
+}
+
+/// An article held by two backbones whose window runs out is retired by
+/// the queue scan and gives back its ONE slot - not one per hold.
+#[tokio::test]
+async fn an_expired_two_group_hold_returns_its_one_slot() {
+    let short = PoolConfig {
+        recheck_430: true,
+        recheck_430_hold: Duration::from_millis(10),
+        ..Default::default()
+    };
+    let servers = vec![(server("a"), short.clone()), (server("b"), short.clone())];
+    let (sh, _) = Shared::new(fresh(&["<held@x>"]), &servers);
+    sh.alive[0].fetch_add(1, Ordering::AcqRel);
+    sh.alive[1].fetch_add(1, Ordering::AcqRel);
+    {
+        let mut q = sh.queue.lock().await;
+        let w = q.front_mut().unwrap();
+        // B's hold answered (bit back up), A's hold pending (bit down).
+        assert!(sh.take_recheck(w, &short, server_bit(1)));
+        w.tried_430 = server_bit(1);
+        assert!(sh.take_recheck(w, &short, server_bit(0)));
+    }
+    assert_eq!(sh.recheck_held.load(Ordering::Acquire), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let (tx, mut rx) = mpsc::channel(4);
+    assert!(
+        next_work(&sh, ctx_for(&servers, 1), &tx, Pipeline::payload(0))
+            .await
+            .is_none()
+    );
+    assert!(
+        matches!(rx.try_recv(), Ok(FetchOutcome::Missing { id, .. }) if &*id == "<held@x>"),
+        "an expired hold owes the verdict"
+    );
+    assert_eq!(sh.recheck_held.load(Ordering::Acquire), 0);
+}

@@ -1361,14 +1361,15 @@ fn reopen_leaves_settled_knees_alone() {
 /// curve's ceiling whatever the cap in force is, which is what the
 /// governor may grow to.
 ///
-/// TODO 275 item 7: and which ceiling that is now depends on the line
-/// anchor's PROVENANCE, because the governor may walk a measured-anchor
-/// fleet to the second one. A typed anchor keeps the first ceiling
-/// exactly, which is every install any §208 round measured.
+/// TODO 275 item 7 made that ceiling depend on the anchor's
+/// PROVENANCE. Since 12 Oct 2026 it does not: the cold-start probe
+/// walks ANY automatic fleet past the first ceiling once one of its own
+/// rungs has paid, so every auto cap spawns the second ceiling's room.
+/// The shard layout is held separately (`linecap::shard_basis`).
 #[test]
 fn only_an_auto_cap_gets_room_to_grow_into() {
-    let max = nzbkit::pool::linecap::LINE_CAP_MAX_FLEET;
     let supply_max = nzbkit::pool::linecap::LINE_CAP_SUPPLY_MAX_FLEET;
+    let max = nzbkit::pool::linecap::LINE_CAP_MAX_FLEET;
     for cap in [
         nzbkit::pool::linecap::LINE_CAP_DEFAULT_FLEET,
         30,
@@ -1378,7 +1379,7 @@ fn only_an_auto_cap_gets_room_to_grow_into() {
     ] {
         assert_eq!(
             line_cap_headroom_fleet(cap, true, false),
-            max,
+            supply_max,
             "auto cap {cap} on a typed anchor"
         );
         assert_eq!(

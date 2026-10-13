@@ -40,6 +40,8 @@ run_one() {
             leg_timed "$tool" "$label" "$RAR" rc "$(ls ./*.part01.rar 2>/dev/null || ls ./*.rar | head -1)"
             cd "$back" ;;
     rarpar) leg_timed "$tool" "$label" "$RARPAR" rar restore-volumes "$WORK"/*.rev ;;
+    # A second rarpar build raced in the same rounds (REV_TOOLS="... rarpar_old").
+    rarpar_old) leg_timed "$tool" "$label" "${RARPAR_OLD:?set RARPAR_OLD}" rar restore-volumes "$WORK"/*.rev ;;
     *) echo "unknown tool $tool" >&2; return 0 ;;
   esac
   # The OUTPUT gate stays, and stays separate from the exit code.
@@ -58,6 +60,6 @@ echo "=== .rev restore ($ROUNDS rounds, warm protocol) ==="
 echo "    per-leg stderr: $LEG_ERRDIR"
 for _ in $(seq "$ROUNDS"); do
   obsn=$((obsn + 1))
-  for t in ours rar rarpar; do run_one "$t"; done
+  for t in ${REV_TOOLS:-ours rar rarpar}; do run_one "$t"; done
 done
 rm -rf "$WORK"

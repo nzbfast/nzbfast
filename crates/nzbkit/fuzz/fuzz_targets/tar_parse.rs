@@ -12,8 +12,8 @@
 //! both the signed and unsigned form, octal and GNU base-256 sizes, the
 //! typeflag table, the `prefix` join, GNU `L`/`K` long-name members and
 //! pax `x`/`g` extended headers (including the sparse refusal hidden
-//! behind an ordinary file header, `parse_pax`'s byte-vs-char slicing
-//! trap noted in its own doc comment).
+//! behind an ordinary file header, and `parse_pax`'s byte-counted
+//! record walk over values that need not be UTF-8).
 //!
 //! No capped sink is needed the way zip's target needs one: a tar member
 //! is stored uncompressed, so its declared size can never exceed the

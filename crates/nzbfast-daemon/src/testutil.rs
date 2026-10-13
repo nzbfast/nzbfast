@@ -577,6 +577,7 @@ pub fn no_causes() -> crate::LossCauses<'static> {
         bytes_arrived: 0,
         backbones: &[],
         post_age_days: 0,
+        server_refusals: &[],
     }
 }
 

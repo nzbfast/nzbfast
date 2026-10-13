@@ -101,10 +101,11 @@ below are the same thing done by hand.
        # folders you made above. No TZ either - times are stored as UTC
        # and shown in your browser's timezone.
        # Takes away powers the container has by default and does not use.
-       # The five it does need are added back by name: without them it
-       # cannot hand your folders to your DSM user and will not start.
+       # The six it does need are added back by name: without them it
+       # cannot hand your folders to your DSM user and will not start,
+       # and (KILL) cannot stop or restart without a forced kill.
        cap_drop: [ALL]
-       cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+       cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, KILL, SETGID, SETUID]
        security_opt: [no-new-privileges:true]
 
      # Optional: checks nightly for a newer nzbfast image and recreates

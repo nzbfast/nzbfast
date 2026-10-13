@@ -912,3 +912,252 @@ async fn passwords_file_try_order_promotes_the_winner_for_the_next_job() {
         "password value leaked into the log"
     );
 }
+
+/// A HEADER-encrypted RAR5 store set whose password exists ONLY in the
+/// NZB's `<meta type="password">`, on the one-pass path, with the daemon
+/// SIGKILLed mid-download. The failure shape this guards against: a
+/// restored set that comes back without the NZB's password, so it can
+/// neither map its volumes nor restore its plaintext, and refetches
+/// volumes it already had. Ours holds the password twice over -
+/// `Job.password` rides the queue row, and the engine re-reads the meta
+/// from the spooled NZB at plan time - so this pins three things, each
+/// by its own evidence:
+///
+/// 1. the durable row the restarted daemon reads still carries the
+///    meta password (read off `.spool/queue.jsonl` with run 1 dead);
+/// 2. the resumed job extracts byte-identical, one-pass, with unrar
+///    forbidden - no `.rar` volume reaches the completed folder;
+/// 3. no article run 1 journaled as decrypted plaintext (`D`) is asked
+///    of the server again. The kill waits on the journal holding `D`
+///    records rather than on a clock, so the "nothing refetched" claim
+///    always has a population behind it. Header-only articles (each
+///    volume's first, carrying the encrypted headers, and the end-of-set
+///    tail) belong to no output file and legitimately refetch - the same
+///    boundary `enospc_after_decrypt_publish_retries_without_refetching`
+///    names - so the assertion is by identity, not a count.
+#[tokio::test(flavor = "multi_thread")]
+async fn header_encrypted_meta_password_survives_a_kill9_mid_download() {
+    use nzbkit::mock::Throttle;
+    use nzbkit::rar::fixtures;
+    let dir = std::env::temp_dir().join(format!("nzbfast-hpmeta-k9-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    const PW: &str = "hp-m3ta-only";
+    let inner = payload(1_200_001, 41);
+    let f = fixtures::encrypt_file(PW, &inner, 21);
+    let n = f.cipher.len();
+    let (a, b) = (n / 3, 2 * n / 3);
+    let vols = [
+        fixtures::rar5_volume_enc_headers(&[("movie.mkv", &f, 0..a, false, true)], Some(0), PW, 31),
+        fixtures::rar5_volume_enc_headers(&[("movie.mkv", &f, a..b, true, true)], Some(1), PW, 32),
+        fixtures::rar5_volume_enc_headers(&[("movie.mkv", &f, b..n, true, false)], Some(2), PW, 33),
+    ];
+    let names = [
+        "Hp.Meta.Restart.2026.part1.rar",
+        "Hp.Meta.Restart.2026.part2.rar",
+        "Hp.Meta.Restart.2026.part3.rar",
+    ];
+    let mut articles = HashMap::new();
+    let mut files = Vec::new();
+    for (i, (name, vol)) in names.iter().zip(&vols).enumerate() {
+        let segs = make_file_articles(name, vol, 40_000, &format!("hk{i}"), &mut articles);
+        files.push((*name, segs));
+    }
+    let total: usize = files.iter().map(|(_, s)| s.len()).sum();
+    // Paced so run 1 is reliably mid-set when the journal condition
+    // below is met; the pacing is not what the kill waits on.
+    let srv = MockServer::start(
+        articles,
+        Chaos {
+            throttle: Throttle {
+                per_conn_bps: 150_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    let body_log = srv.body_log.clone();
+
+    let mut xml = String::from(
+        "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head><meta type=\"password\">hp-m3ta-only</meta></head>\n",
+    );
+    for (name, segs) in &files {
+        xml.push_str(&format!(
+            "  <file poster=\"x\" date=\"0\" subject=\"&quot;{name}&quot; yEnc (1/{})\">\n    <groups><group>g</group></groups>\n    <segments>\n",
+            segs.len()
+        ));
+        for (id, bytes, num) in segs {
+            xml.push_str(&format!(
+                "      <segment bytes=\"{bytes}\" number=\"{num}\">{id}</segment>\n"
+            ));
+        }
+        xml.push_str("    </segments>\n  </file>\n");
+    }
+    xml.push_str("</nzb>\n");
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let build = {
+        let (cfg, dir) = (cfg.clone(), dir.clone());
+        move |port: u16| {
+            let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+            c.env("NZBFAST_OPEN", "1")
+                .env("NZBFAST_NO_ENRICH", "1")
+                .env("NZBFAST_TEST_FORBID_UNRAR", "1")
+                .arg("--config")
+                .arg(&cfg)
+                .arg("serve")
+                .arg("--bind")
+                .arg("127.0.0.1")
+                .arg("--port")
+                .arg(port.to_string())
+                .arg("--apikey")
+                .arg("sekrit")
+                .arg("--out")
+                .arg(dir.join("complete"))
+                .arg("--connections")
+                .arg("2");
+            c
+        }
+    };
+
+    // --- run 1: submit, wait for decrypted plaintext on disk, SIGKILL.
+    let d1 = serve(&dir, build.clone()).await;
+    let port1 = d1.port;
+    let dir1 = dir.clone();
+    let xml1 = xml.clone();
+    let (nzo, journal) = tokio::task::spawn_blocking(move || {
+        let boundary = "----hpmetak9";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"name\"; filename=\"Hp.Meta.Restart.2026.nzb\"\r\nContent-Type: application/x-nzb\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(xml1.as_bytes());
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let ctype = format!("multipart/form-data; boundary={boundary}");
+        let r = http(port1, "/api?mode=addfile&apikey=sekrit&output=json", Some((&ctype, &body)));
+        let nzo = serde_json::from_str::<serde_json::Value>(&r)
+            .ok()
+            .and_then(|v| v["nzo_ids"][0].as_str().map(str::to_string))
+            .unwrap_or_else(|| panic!("addfile: {r}"));
+        let mut journal = PathBuf::new();
+        for _ in 0..300 {
+            if let Some(row) = harness::stored_job(&dir1, &nzo)
+                && let Some(out) = row["out_dir"].as_str()
+            {
+                journal = Path::new(out).join(".nzbfast.journal");
+                let ds = std::fs::read_to_string(&journal)
+                    .map(|t| t.lines().filter(|l| l.starts_with("D ")).count())
+                    .unwrap_or(0);
+                if ds >= 4 {
+                    return (nzo, journal);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let h = http(port1, "/api?mode=history&apikey=sekrit&output=json", None);
+        panic!(
+            "run 1 never journaled 4 decrypted (D) articles before finishing\n\
+             --- journal {journal:?} ---\n{}\n--- history ---\n{h}",
+            std::fs::read_to_string(&journal).unwrap_or_default()
+        );
+    })
+    .await
+    .unwrap();
+    drop(d1); // kill -9, mid-set
+
+    // (1) The durable row the next daemon will read still has it.
+    let row = harness::stored_job(&dir, &nzo).expect("queue row survives the kill");
+    assert_eq!(
+        row["password"], PW,
+        "the meta-only password must be on the durable queue row: {row}"
+    );
+    let journal_txt = std::fs::read_to_string(&journal).unwrap_or_default();
+    let d_ids: std::collections::HashSet<String> = journal_txt
+        .lines()
+        .filter(|l| l.starts_with("D "))
+        .filter_map(|l| l.rsplit(' ').next().map(str::to_string))
+        .collect();
+    assert!(d_ids.len() >= 4, "--- journal ---\n{journal_txt}");
+    let asked_before = body_log.lock().unwrap().len();
+    assert!(
+        asked_before < total,
+        "run 1 asked for the whole set before the kill, so this is not a mid-download restart"
+    );
+
+    // --- run 2: the restarted daemon picks the row up on its own.
+    let d2 = serve(&dir, build).await;
+    let port2 = d2.port;
+    let dir2 = dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut slot = serde_json::Value::Null;
+        for _ in 0..600 {
+            let h = http(port2, "/api?mode=history&apikey=sekrit&output=json", None);
+            if let Some(s) = serde_json::from_str::<serde_json::Value>(&h)
+                .ok()
+                .and_then(|v| v["history"]["slots"].as_array().cloned())
+                .and_then(|s| s.into_iter().find(|s| s["nzo_id"] == nzo.as_str()))
+                .filter(|s| s["status"] == "Completed" || s["status"] == "Failed")
+            {
+                slot = s;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(slot["status"], "Completed", "{slot}");
+
+        // (2) Byte-correct, one-pass: plaintext only, no volume left.
+        let job_dir = PathBuf::from(slot["storage"].as_str().unwrap());
+        assert!(job_dir.starts_with(dir2.join("complete")), "{job_dir:?}");
+        let listing: Vec<String> = std::fs::read_dir(&job_dir)
+            .expect("job dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !listing.iter().any(|n| n.ends_with(".rar")),
+            "an encrypted volume reached the completed folder - the resumed \
+             job lost the password or fell off the one-pass path: {listing:?}"
+        );
+        // Found by size: the default movie rename has already filed it
+        // as "Hp Meta Restart (2026).mkv".
+        let mkv = std::fs::read_dir(&job_dir)
+            .expect("job dir")
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| std::fs::metadata(p).is_ok_and(|m| m.len() == inner.len() as u64))
+            .unwrap_or_else(|| panic!("no payload-sized file in {job_dir:?}: {listing:?}"));
+        assert!(
+            std::fs::read(&mkv).ok().as_deref() == Some(&inner[..]),
+            "resumed output must be byte-identical to the posted payload: {listing:?}"
+        );
+
+        // (3) Nothing run 1 decrypted to disk is fetched again.
+        let refetched: Vec<String> = body_log.lock().unwrap()[asked_before..].to_vec();
+        let leaked: Vec<&String> = refetched.iter().filter(|id| d_ids.contains(*id)).collect();
+        assert!(
+            leaked.is_empty(),
+            "articles run 1 journaled as decrypted plaintext were refetched \
+             after the restart: {leaked:?}\n--- run 1 journal ---\n{journal_txt}"
+        );
+        assert!(
+            refetched.len() < total,
+            "the resumed job refetched the whole set ({} of {total})",
+            refetched.len()
+        );
+    })
+    .await
+    .unwrap();
+}

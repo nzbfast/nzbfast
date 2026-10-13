@@ -810,6 +810,71 @@ fn zip_entries_the_volume_files_as_one_object_serialize_instead_of_racing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Extract `first` then `last` under two spellings, three rounds, and
+/// hold the outcome to what THIS volume does with the pair: one object
+/// holding the last entry whole, or two files. Shared by the two
+/// guard tests below, which differ only in the pair.
+fn assert_zip_pair_matches_the_volume(tag: &str, a: &str, b: &str) {
+    use nzbkit::zip::fixtures::{Spec, zip_of};
+    let dir = temp_dir(tag);
+    let published = dir.join("pub");
+    std::fs::create_dir_all(&published).unwrap();
+    let probe = dir.join("probe");
+    std::fs::create_dir_all(&probe).unwrap();
+    std::fs::write(probe.join(a), b"x").unwrap();
+    let merges = std::fs::read(probe.join(b)).is_ok();
+    // A FIRST entry far larger than the LAST, for the reason the NFC/NFD
+    // test above measured: a raced pair then ends holding the first.
+    let first = vec![b'A'; 16 * 1024 * 1024];
+    let last = vec![b'Z'; 1024];
+    let zp = dir.join("pair.zip");
+    std::fs::write(
+        &zp,
+        zip_of(&[Spec::stored(a, &first), Spec::stored(b, &last)]),
+    )
+    .unwrap();
+    for round in 0..3 {
+        let out = dir.join(format!("r{round}"));
+        std::fs::create_dir_all(&out).unwrap();
+        extract_one_zip(&out, &published, std::slice::from_ref(&zp), None)
+            .expect("the archive must extract");
+        let landed = std::fs::read_dir(&out).unwrap().count();
+        if merges {
+            assert_eq!(landed, 1, "round {round}: one object, one file");
+            assert_eq!(
+                std::fs::read(out.join(b)).unwrap(),
+                last,
+                "round {round}: the collision was raced instead of serialized"
+            );
+        } else {
+            assert_eq!(landed, 2, "round {round}");
+            assert_eq!(std::fs::read(out.join(a)).unwrap(), first);
+            assert_eq!(std::fs::read(out.join(b)).unwrap(), last);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The duplicate-target guard's ASCII shortcut (26 Sep 2026): an archive
+/// whose every name is plain ASCII keys on the lowercase spelling instead
+/// of probing the volume per member. A case-only pair is the collision
+/// that shortcut must still catch.
+#[test]
+fn an_ascii_case_only_zip_pair_still_serializes_on_a_folding_volume() {
+    assert_zip_pair_matches_the_volume("zipascii", "Readme.TXT", "readme.txt");
+}
+
+/// And the shortcut is ALL OR NOTHING. APFS files U+037E GREEK QUESTION
+/// MARK as `;`, which no fold here reproduces, so only the volume can
+/// say these two are one object. A shortcut taken per NAME would key the
+/// ASCII one by spelling and probe the other, give them two keys, and
+/// race them on the pool; one non-ASCII name must send every target back
+/// to the probe.
+#[test]
+fn one_non_ascii_name_sends_every_zip_target_back_to_the_volume() {
+    assert_zip_pair_matches_the_volume("zipmixed", "a\u{037E}.txt", "a;.txt");
+}
+
 /// The plain duplicate-name case, which is legal in the format and has
 /// always extracted last-wins. It used to get there by DROPPING every
 /// entry but the last; it now gets there by writing the group in archive

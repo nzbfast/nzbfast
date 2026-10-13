@@ -207,6 +207,20 @@ if [ -f "$UNI" ] && command -v lipo >/dev/null 2>&1; then
     done
 fi
 
+# ---- CI-built payloads arrive as .gz only -----------------------------
+# Since 11 Oct 2026 the linux and windows payloads are built and attested
+# by provenance-release.yml on the public repo, which attaches only the
+# .gz (see the publish-release skill, step 4). The pre-flight below asks
+# for the RAW file, so recover it from the .gz when that is all there is.
+# The .gz itself is kept as it came - see the compress step.
+for plat in $PLATFORMS; do
+    f=$(payload "$plat")
+    if [ ! -f "$f" ] && [ -f "$f.gz" ]; then
+        gzip -dc "$f.gz" > "$f"
+        echo "recovered $(basename "$f") from the CI-built $(basename "$f").gz" >&2
+    fi
+done
+
 # ---- Pre-flight: refuse to build a manifest that installs nowhere ------
 WAIVED=$(printf ' %s ' "${ALLOW_MISSING:-}" | tr ',' ' ')
 missing=''
@@ -290,9 +304,21 @@ fi
 # `gzip -9 -n`: -n drops the name+mtime header fields, so the same input
 # bytes always give the same .gz bytes and a re-run cannot silently
 # change a sha256 the manifest already advertised.
+#
+# EXCEPT a .gz that already decompresses to exactly these bytes, which is
+# kept untouched. That is the CI-built payload: it is already attached to
+# the release, attested, and the release Mac never re-uploads it, so the
+# manifest must hash THAT file. Recompressing here would be harmless only
+# if this Mac's gzip wrote GNU gzip's bytes, and it does not - the
+# manifest would then advertise a sha256 no published asset has, and
+# every client would refuse the payload.
 for plat in $PLATFORMS; do
     f=$(payload "$plat")
     [ -f "$f" ] || continue
+    if [ -f "$f.gz" ] && gzip -dc "$f.gz" 2>/dev/null | cmp -s - "$f"; then
+        echo "kept $(basename "$f").gz as built (it decompresses to the payload)" >&2
+        continue
+    fi
     gzip -9 -n -c "$f" > "$f.gz"
 done
 

@@ -108,6 +108,26 @@ pub fn write_servers(config_path: &Path, servers: &[Value]) -> Result<()> {
             config_path.display()
         );
     }
+    // An EXISTING file this process cannot read is not an empty config.
+    // Every read helper (`load_json_config`, `read_servers`, the daemon's
+    // `current_servers`) answers None/empty for it - the same answer as a
+    // first run - so the caller's list was built from nothing, and writing
+    // it would rename `{"servers":[that list]}` over every other server,
+    // credential and top-level key. The rename needs the DIRECTORY, not
+    // the file, so it would succeed and report so. Only an ABSENT file is
+    // a first run; anything else that stops the read refuses the edit,
+    // before the `.orig` branch below (which needs the read too) or the
+    // empty root. Under `config_write_lock`, like the read it guards.
+    if let Err(e) = std::fs::read(config_path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        anyhow::bail!(
+            "{} exists but could not be read ({e}) - refusing to save server \
+             settings, which would replace every server and setting in it; \
+             fix the file's permissions and try again",
+            config_path.display()
+        );
+    }
     let root = crate::persist::load_json_config(config_path);
     // Still possible past the `.ini` guard: a corrupt/truncated JSON config,
     // or an ini-format file living under some other name. load_json_config
@@ -550,6 +570,53 @@ mod tests {
         assert!(write_servers(&shouty, &[]).is_err());
         assert_eq!(std::fs::read_to_string(&shouty).unwrap(), original);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A config that EXISTS but cannot be read is refused, not replaced.
+    /// Every read helper above answers None for it - the same answer as
+    /// an absent file - so a save used to build `{"servers":[new]}` and
+    /// rename it over every other server, credential and top-level key,
+    /// reporting success: the atomic rename needs the DIRECTORY, not the
+    /// file. Codex 13 Oct sweep F3.
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_write_over_a_config_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("nzbfast-setup-unread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.local.json");
+        let original =
+            r#"{"tmdb_key":"k","servers":[{"host":"a.example.com"},{"host":"b.example.com"}]}"#;
+        std::fs::write(&cfg, original).unwrap();
+        std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&cfg).is_ok() {
+            // Running as root: mode 000 does not stop a read, so there is
+            // no unreadable file to test against here.
+            std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let s = json!({"host":"new.example.com","port":563,"tls":true,"connections":20});
+        let err = write_servers(&cfg, &[s]).unwrap_err().to_string();
+        std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(err.contains("could not be read"), "unhelpful error: {err}");
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), original);
+        assert!(!dir.join("config.local.json.orig").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The control: an ABSENT config is first-run, and is created.
+    #[test]
+    fn creates_a_config_that_does_not_exist() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-setup-absent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.local.json");
+        let s = json!({"host":"a.example.com","port":563,"tls":true,"connections":20});
+        write_servers(&cfg, &[s]).unwrap();
+        assert_eq!(read_servers(&cfg).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

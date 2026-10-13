@@ -227,7 +227,7 @@ pub(super) async fn wait_for_slot(
                 }
             }
             _ = shared.admit_wake[idx].notified() => {}
-            _ = run_over(finished, shared) => return None,
+            _ = super::runlife::parked_run_over(finished, shared) => return None,
         }
     }
 }

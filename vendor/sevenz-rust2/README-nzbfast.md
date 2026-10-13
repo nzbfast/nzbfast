@@ -55,3 +55,20 @@ be reproducible, and would repeat an IV under one key), one seed gives
 one sequence, a scope puts back what it replaced, and the DEFAULT still
 varies per run. If this crate ever becomes a workspace member, move them
 here.
+
+## 3. `src/decoder.rs` - one thread for a small LZMA2 block
+
+`add_decoder` built the multithreaded `Lzma2ReaderMt` for every LZMA2
+block whenever the caller asked for more than one thread, and that
+reader spawns a worker thread in its constructor. In a non-solid archive
+every member is its own block, so a 4,096-file archive spawned 4,096
+decoder threads, each of which decoded one small independent run on its
+own. A block whose declared unpack size is at most `MT_MIN_UNPACK`
+(1 MiB, the smallest independent block 7-Zip's MT encoder writes) now
+takes the single-threaded `Lzma2Reader`. Measured 26 Sep 2026 on a
+4,096-member non-solid 7z: 0.94B of 12.84B instructions
+(`research/MANYSMALL-ZIP-7Z-PER-MEMBER-2026-09-26.md`). A size that lies
+small only selects the slower, single-worker reader; the decode is
+bounded the same way either way. Tested from
+`crates/nzbfast-unpack/src/rarfix/sevenz.rs`, for the reason item 2
+gives.

@@ -117,6 +117,9 @@ mod daemon_crashtx;
 // X5-12: a delete arriving ACROSS a synchronous resume replay - the
 // crash-transaction module's sibling row (sibling dir, size gate).
 mod daemon_replaydel;
+// A job's rate after a mid-job restart, and how a dead post fails
+// (sibling dir).
+mod daemon_resumerate;
 // The forward guard on the repeating-payload trap, and the waiver that
 // says a fixture is deliberately in it. A sibling the way `harness` is,
 // and reached from `harness::DaemonLog`'s own Drop, so every daemon this

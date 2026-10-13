@@ -428,7 +428,13 @@ impl Daemon {
         // save, a concurrent history compaction must carry the disk row or a
         // crash in the window loses the record from both stores.
         let _inflight = self.hist_inflight_begin(&nzo);
-        self.history.lock_ok().retain(|x| !Arc::ptr_eq(x, job));
+        // A record history REFUSED is carried across the move instead -
+        // its queue-store row is the only durable copy, and `queue_rows`
+        // would otherwise read "in neither list" as a delete (13 Oct 2026
+        // sweep, F2; `Owed::in_transit`).
+        self.hist_carry_across(job, &nzo, false, || {
+            self.history.lock_ok().retain(|x| !Arc::ptr_eq(x, job));
+        });
         // The harness's window: the record has left history and not yet
         // reached the queue.
         #[cfg(any(test, feature = "test-support"))]
@@ -436,6 +442,7 @@ impl Daemon {
         stamp_move(job);
         let seq = job.lock_ok().move_seq;
         self.queue.lock_ok().push_front(job.clone());
+        self.hist_carry_landed(job, &nzo, false);
         drop(publish);
         self.commit_to_queue(&nzo, seq, Requeue::Play);
     }

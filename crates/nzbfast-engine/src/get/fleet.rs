@@ -316,32 +316,20 @@ pub(super) async fn build_fleet(
     // reads are of `hub` and of settings.json + the environment, so
     // nothing between here and the map can change either answer.
     let (anchor_bps, anchor_measured, carry_bps) = line_evidence(hub);
-    let LineCapPlan {
-        line_cap,
-        line_cap_auto,
-        line_share,
-        headroom_share,
-        curve_fleet,
-    } = line_cap_plan(
+    let plan = line_cap_plan(
         config,
         anchor_bps,
         anchor_measured,
         carry_bps,
-        cfg_all.servers.len(),
+        cfg_all.servers.iter().map(|s| s.level).collect(),
     );
+    let (line_cap, line_cap_auto, curve_fleet) =
+        (plan.line_cap, plan.line_cap_auto, plan.curve_fleet);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    announce_knee_caps(
-        &cfg_all.servers,
-        &tuned,
-        connections,
-        now,
-        line_share,
-        line_cap,
-        live_tune,
-    );
+    announce_knee_caps(&cfg_all.servers, &tuned, connections, now, &plan, live_tune);
     let (host_caps, host_budgets) = hub_host_limits(hub, &cfg_all.servers).await;
     // TODO 112: with live tuning on (the `live_tune` setting, or
     // NZBFAST_LIVE_TUNE=1 as the dev override), the fleet is SPAWNED at
@@ -394,7 +382,8 @@ pub(super) async fn build_fleet(
                 tuned.get(&s.host),
                 now,
             );
-            if let Some(share) = line_share
+            let headroom_share = plan.headroom_share(s.level);
+            if let Some(share) = plan.line_share(s.level)
                 && !s.pin_connections
                 && share < base
             {
@@ -723,8 +712,7 @@ fn announce_knee_caps(
     tuned: &std::collections::HashMap<String, crate::conntune::Tuned>,
     connections: usize,
     now: u64,
-    line_share: Option<usize>,
-    line_cap: usize,
+    plan: &LineCapPlan,
     live_tune: bool,
 ) {
     // Would a stored knee cap this host, and how old is the number doing
@@ -762,8 +750,11 @@ fn announce_knee_caps(
             };
             // And say when this knee, not the fleet cap, is the thing
             // that binds; see `conntune::knee_under_cap_note`.
-            let under_cap =
-                crate::conntune::knee_under_cap_note(t.connections, line_share, line_cap);
+            let under_cap = crate::conntune::knee_under_cap_note(
+                t.connections,
+                plan.line_share(s.level),
+                plan.line_cap,
+            );
             Some(format!(
                 "{} capped at {} of {asked}, probed {age} ago{overdue}{under_cap}",
                 s.host, t.connections
@@ -1229,8 +1220,10 @@ mod line_cap_seed {
 
     /// The curve's FLOOR is fleet 25 over five servers = 5 each at
     /// 100 Mbit, and the pinned server keeps the number it was given.
-    /// The spawn is ten apiece - the ceiling's share, TODO 277 - so the
-    /// four capped servers run at 5 with 5 parked behind each.
+    /// The spawn is twenty apiece - the SECOND ceiling's share since
+    /// 12 Oct 2026 (`conntune::line_cap_headroom_fleet`), so the
+    /// cold-start probe has slots past 50 to wake - and the four capped
+    /// servers run at 5 with 15 parked behind each.
     #[tokio::test]
     async fn the_curves_floor_dials_five_per_server_and_a_pin_wins() {
         let hub = Arc::new(StreamHub {
@@ -1240,9 +1233,42 @@ mod line_cap_seed {
         let got = build(&five(), &Some(hub)).await;
         let want: Vec<(String, usize, Option<usize>)> = ["a", "b", "c", "d"]
             .iter()
-            .map(|h| (format!("{h}.example"), 10, Some(5)))
+            .map(|h| (format!("{h}.example"), 20, Some(5)))
             .chain(std::iter::once(("e.example".to_string(), 100, None)))
             .collect();
+        assert_eq!(got, want);
+    }
+
+    /// GH #103: the reporter's own topology - two level-0 accounts, a
+    /// level-1 and a level-2 block account - on a run whose seed sees no
+    /// line, so the fleet is the curve's floor of 25. The fill tier runs
+    /// at its five-socket floor and the primaries split the rest (8
+    /// each, where the equal split gave every server 7 and both fill
+    /// servers carried nothing). The SPAWN is wider than either number:
+    /// a primary's share of the 100-socket headroom fleet (50 until
+    /// 12 Oct 2026, `conntune::line_cap_headroom_fleet`), and a fill
+    /// server's EQUAL share of it, which is what the pool raises it to
+    /// once the queue goes dry (`linecap::fill_tail_share`) - parked
+    /// slots hold no connection, so this costs the fill account nothing
+    /// until then.
+    #[tokio::test]
+    async fn the_fill_tier_seeds_at_its_floor_and_spawns_for_the_tail() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"servers":[
+                 {"host":"a.example","connections":100,"level":0},
+                 {"host":"b.example","connections":50,"level":0},
+                 {"host":"c.example","connections":100,"level":1},
+                 {"host":"d.example","connections":50,"level":2,"block_account":true}
+               ]}"#,
+        )
+        .unwrap();
+        let got = build(&cfg, &None).await;
+        let want: Vec<(String, usize, Option<usize>)> = vec![
+            ("a.example".into(), 45, Some(8)),
+            ("b.example".into(), 45, Some(8)),
+            ("c.example".into(), 25, Some(5)),
+            ("d.example".into(), 25, Some(5)),
+        ];
         assert_eq!(got, want);
     }
 
@@ -1259,18 +1285,22 @@ mod line_cap_seed {
                 got.iter().all(|(h, spawned, target)| if h == "e.example" {
                     *spawned == 100 && target.is_none()
                 } else {
-                    *spawned == 10 && *target == Some(5)
+                    *spawned == 20 && *target == Some(5)
                 }),
                 "{got:?}"
             );
         }
     }
 
-    /// A line already at the curve's ceiling has nothing to grow into,
-    /// so the spawn and the target are the same number - the shape that
-    /// shipped, reached from the other end.
+    /// A line already at the curve's ceiling DIALS that ceiling, 10 a
+    /// server. Until 12 Oct 2026 it also spawned exactly that, the
+    /// shape that shipped reached from the other end. It now spawns the
+    /// second ceiling's 20, because the cold-start probe may walk any
+    /// automatic fleet past 50 once one of its rungs has paid, and a
+    /// typed 10 Gbit anchor is exactly the install whose seed could not
+    /// tell whether it should (`conntune::line_cap_headroom_fleet`).
     #[tokio::test]
-    async fn a_ten_gig_anchor_spawns_exactly_what_it_dials() {
+    async fn a_ten_gig_anchor_dials_the_ceiling_and_spawns_the_probes_room() {
         let hub = Arc::new(StreamHub {
             // 10 Gbit/s in bytes/s: past `fleet_for_line`'s ceiling.
             line_anchor_bps: std::sync::atomic::AtomicU64::new(1_250_000_000),
@@ -1281,7 +1311,7 @@ mod line_cap_seed {
             got.iter().all(|(h, spawned, target)| if h == "e.example" {
                 *spawned == 100 && target.is_none()
             } else {
-                *spawned == 10 && *target == Some(10)
+                *spawned == 20 && *target == Some(10)
             }),
             "{got:?}"
         );
@@ -1289,11 +1319,12 @@ mod line_cap_seed {
 
     /// TODO 275 item 7, OWED 3: the SEED half of the second ceiling has
     /// never run measured. Same config, same line as
-    /// `a_ten_gig_anchor_spawns_exactly_what_it_dials`, one bit
-    /// flipped - `line_anchor_measured` true - so
+    /// `a_ten_gig_anchor_dials_the_ceiling_and_spawns_the_probes_room`,
+    /// one bit flipped - `line_anchor_measured` true - so
     /// `line_cap_headroom_fleet` follows `LINE_CAP_SUPPLY_MAX_FLEET`
-    /// (100) rather than `LINE_CAP_MAX_FLEET` (50):
-    /// `server_share(100, 5)` is 20 where `server_share(50, 5)` is 10.
+    /// (100): `server_share(100, 5)` is 20. Since 12 Oct 2026 the
+    /// typed-anchor case spawns the same 20, so this pins that the
+    /// measured bit can never make the spawn SMALLER.
     /// The TARGET must not move - `fleet_for_carry` still clamps the
     /// seed at the first ceiling - only the spawn widens, so the in-run
     /// governor has a parked slot to wake if it ever raises this fleet
@@ -1342,7 +1373,7 @@ mod line_cap_seed {
         let got = build(&five(), &Some(hub)).await;
         let want: Vec<(String, usize, Option<usize>)> = ["a", "b", "c", "d"]
             .iter()
-            .map(|h| (format!("{h}.example"), 10, Some(5)))
+            .map(|h| (format!("{h}.example"), 20, Some(5)))
             .chain(std::iter::once(("e.example".to_string(), 100, None)))
             .collect();
         assert_eq!(

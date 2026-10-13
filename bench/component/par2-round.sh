@@ -263,6 +263,9 @@ for r in $(seq 1 "$ROUNDS"); do
     # bogus reading was mine: piping its output through `head` SIGPIPEs
     # it mid-repair, so never smoke-test a repair arm through a pager.)
     rarpar)   "$RARPAR" par repair "$WORK" > /dev/null 2>&1 ;;
+    # A second rarpar build in the same interleaved round (RARPAR_OLD), so a
+    # release-over-release comparison is not two races under two loads.
+    rarpar_old) "${RARPAR_OLD:?set RARPAR_OLD}" par repair "$WORK" > /dev/null 2>&1 ;;
     # --- rival-survey arms (see the env block above) ---------------------
     tbb)      LD_LIBRARY_PATH=$TBBLIB "$PAR2TBB" r -q "$par" > /dev/null 2> "$WORK/../last.err" ;;
     gopar)    "$GOPAR" r "$par" > /dev/null 2> "$WORK/../last.err" ;;

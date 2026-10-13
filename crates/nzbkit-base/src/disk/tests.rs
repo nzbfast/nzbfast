@@ -3017,3 +3017,68 @@ fn out_name_rel_memo_answers_what_out_name_of_would() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// GitHub #99: the macOS SMB client refuses `F_FULLFSYNC` on a read-only
+/// descriptor (EACCES) and on a directory (ENOTSUP), and every move to a
+/// share died on its first file. Drive the decision with those errnos
+/// injected, since no box here has an smbfs share to refuse for real.
+#[cfg(unix)]
+#[test]
+fn refused_full_sync_falls_back_to_plain_fsync() {
+    use std::cell::Cell;
+    use std::io;
+    for errno in [libc::EACCES, libc::ENOTSUP, libc::EOPNOTSUPP] {
+        let plain_ran = Cell::new(false);
+        let r = full_sync_or_plain(
+            || Err(io::Error::from_raw_os_error(errno)),
+            || {
+                plain_ran.set(true);
+                Ok(())
+            },
+        );
+        assert!(
+            r.is_ok(),
+            "errno {errno}: the fallback's answer is the answer"
+        );
+        assert!(plain_ran.get(), "errno {errno} must fall back to fsync");
+    }
+
+    // The fallback's OWN failure is reported, not swallowed: falling back
+    // must never turn a flush that failed twice into a success.
+    let r = full_sync_or_plain(
+        || Err(io::Error::from_raw_os_error(libc::EACCES)),
+        || Err(io::Error::from_raw_os_error(libc::EIO)),
+    );
+    assert_eq!(r.unwrap_err().raw_os_error(), Some(libc::EIO));
+
+    // A real failure of the full flush is NOT retried weaker: EIO and
+    // ENOSPC mean the bytes did not land, and plain fsync saying Ok on a
+    // second try would hand the mover a destination to delete the
+    // source against.
+    for errno in [libc::EIO, libc::ENOSPC] {
+        let r = full_sync_or_plain(
+            || Err(io::Error::from_raw_os_error(errno)),
+            || panic!("errno {errno} must not fall back"),
+        );
+        assert_eq!(r.unwrap_err().raw_os_error(), Some(errno));
+    }
+
+    // And a full flush that works is the whole answer: no second call.
+    let r = full_sync_or_plain(|| Ok(()), || panic!("full sync succeeded"));
+    assert!(r.is_ok());
+}
+
+/// The real handle path on this box's own filesystem: a read-only file
+/// descriptor and a directory descriptor both flush. On APFS that is the
+/// full flush succeeding; it is the shape the mover hands over.
+#[cfg(unix)]
+#[test]
+fn sync_handle_flushes_read_only_and_directory_descriptors() {
+    let dir = std::env::temp_dir().join(format!("nzbkit-sync-handle-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("f.bin");
+    std::fs::write(&p, b"payload").unwrap();
+    sync_handle(&File::open(&p).unwrap()).unwrap();
+    sync_handle(&File::open(&dir).unwrap()).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

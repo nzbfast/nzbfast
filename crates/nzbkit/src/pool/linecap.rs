@@ -12,7 +12,12 @@
 //!
 //! The rule: a small fleet ([`LINE_CAP_DEFAULT_FLEET`]), split equally
 //! across the servers, each share still subject to the account's own
-//! `connections` and to a pin.
+//! `connections` and to a pin. **Equally across the servers at the
+//! fleet's lowest level**, since GH #103: a fill server (any level
+//! above that) gets [`LINE_CAP_FILL_SHARE`] until the queue goes dry
+//! and its equal share after - see [`level_share`] and
+//! [`fill_tail_share`]. Every measurement below was a fleet of
+//! primaries, and a fleet all at one level splits exactly as it did.
 //!
 //! **TODO 277: the fleet SIZE is a function of the line again, and this
 //! time it can only ever grow.** Between 23 and 24 Aug 2026 it was a
@@ -301,6 +306,12 @@ pub const LINE_CAP_SUPPLY_MAX_FLEET: usize = 100;
 /// hour as a sole-provider job walled at ~0.35 Gbps - and it is NOT
 /// GH #62's five-server reporter, whose anchor reads "line". That
 /// install keeps 50, which is what item 7 decided.
+///
+/// **Since 12 Oct 2026 there is a second way in**: the cold-start probe
+/// asks this with `anchor_measured` true once one of its OWN rungs has
+/// paid ([`probe_step`]'s `proven`), because a rung that paid is a line
+/// seen to carry more. The supply arm still asks it with the anchor's
+/// real provenance.
 pub fn supply_ceiling(anchor_measured: bool, grant: usize) -> usize {
     if !anchor_measured {
         return LINE_CAP_MAX_FLEET;
@@ -513,9 +524,9 @@ pub fn fleet_for_line(line_bps: u64) -> usize {
 /// was until 27 Aug 2026. Measured that day
 /// (`research/LINECAP-SLOW-CARRY-2026-08-27.md`): a parked slot is a
 /// tokio TASK, not an OS thread - the only threads here are the I/O
-/// shards, and `get::shard_count` clamps those to 4 whatever the fleet
+/// shards, and `get::shard_count` holds those at 2 whatever the fleet
 /// - and it costs ~6.3 KB of RSS and no socket at all, so moving this
-/// constant 50 -> 100 is ~0.3 MB a job and at most one extra shard.
+/// constant 50 -> 100 is ~0.3 MB a job and no extra shard.
 ///
 /// What held it was the fourth property above: that ceiling IS the
 /// bound on a line reading that was TYPED rather than measured, which
@@ -711,6 +722,202 @@ pub fn fleet_step(
     }
 }
 
+/// The cold-start probe's gate, in bytes/s (2 Gbit): the probe may add
+/// sockets only while THIS run's fleet is moving at least this much.
+///
+/// This is what keeps the probe out of the regime §208 measured the cap
+/// winning in. The figure is an ACHIEVED rate, so it is a lower bound on
+/// the line: a run that reads it is on a line of at least 2 Gbit, and a
+/// 99 Mbit or 1 GbE line can never read it at all, whatever its
+/// sockets carry. It is the one comparison against an absolute rate in
+/// the probe, and it only ever proves that a line is fast. It never
+/// claims that one is slow.
+pub const LINE_CAP_PROBE_MIN_BPS: u64 = 250_000_000;
+
+/// How long a fleet holds before the probe reads what it bought, in ms.
+/// Added slots have to dial and the now-rate (1 s half-life) has to
+/// catch up with them: at 2 s it shows ~75% of a step, and
+/// [`LINE_CAP_PROBE_PAY_PCT`] leaves room for the other 25%.
+pub const LINE_CAP_PROBE_SETTLE_MS: u64 = 2_000;
+
+/// What the probe asks of the sockets it added, in percent: each added
+/// socket must carry at least this share of what the sockets already
+/// dialling carried on average. A line that is already full gives
+/// added sockets nearly nothing; sockets that are the bottleneck give
+/// close to 100%.
+pub const LINE_CAP_PROBE_PAY_PCT: u64 = 50;
+
+/// The cold-start probe's state between ticks (12 Oct 2026, claim
+/// `linecap-cold-start-fast-line-12oct`). Default is "nothing measured".
+///
+/// **What it fixes.** With no anchor, the `line_bps` that
+/// [`fleet_step`] reads is this fleet's own trained peak, so the curve
+/// climbs only while each socket beats [`LINE_CAP_SOCKET_BPS`], and the
+/// supply arm never fires because the line IS the fleet's own rate. On
+/// 12 Oct providers carried ~170 Mbit a socket against ~300 on 16 Sep,
+/// so a cold fleet on a 10 GbE line stalled at 25-35 sockets. A CLI
+/// `get` took 42-69 s on apollo13 against 32 s with the cap off, and a
+/// daemon's first 87 GB job took 114-141 s against 82
+/// (`research/BENCH-WEAVER-0147-2026-10-12.md` sections 3-4). The
+/// trained peak also waits ~7 s for a plateau before it reads anything,
+/// so the curve cannot move at all in the first seconds of a job.
+///
+/// **What it does.** It skips the line estimate entirely: it adds sockets
+/// and reads whether they paid. A rung pays when the added sockets each
+/// carried [`LINE_CAP_PROBE_PAY_PCT`]% of what the rung below carried
+/// per socket. The first rung that does not pay ends probing for the
+/// run. So the probe finds out whether the sockets are the limit, and
+/// that is the question the curve could not ask without a line reading.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Probe {
+    /// The fleet whose dwell is being timed, or 0 before the first tick.
+    fleet: usize,
+    /// When that dwell began, ms on the pool clock.
+    since: u64,
+    /// `(rate, dialling)` read at the end of the previous rung's dwell.
+    /// None = no baseline yet.
+    base: Option<(u64, usize)>,
+    /// A rung failed to pay, or the ceiling was reached. Latched.
+    done: bool,
+    /// A rung has PAID this run: sockets added on a line already moving
+    /// [`LINE_CAP_PROBE_MIN_BPS`] each carried their share. That is a
+    /// line seen to carry more, which is the provenance the second
+    /// ceiling asks for, so from here the probe may walk to `proven`.
+    paid: bool,
+}
+
+/// The rung the probe tries after `fleet`: 1.4x, rounded UP to a rung,
+/// so a 25-socket seed tries 35 and then 50. That is two probes to the
+/// first ceiling rather than five, because each probe costs a
+/// [`LINE_CAP_PROBE_SETTLE_MS`] dwell, and on a 7 s job five of them
+/// would be the whole job.
+fn probe_next(fleet: usize) -> usize {
+    (fleet * 7 / 5).div_ceil(LINE_CAP_RUNG) * LINE_CAP_RUNG
+}
+
+/// One tick of the cold-start probe ([`Probe`]): returns the fleet to
+/// run at, which is never below `fleet`, and the state for the next
+/// tick. Pure, like [`fleet_step`], which runs first. Its answer is the
+/// `fleet` handed in here.
+///
+/// `now_bps` and `dialling` are the same reading the supply arm takes.
+/// `now_bps == 0` (queue-dry, or nothing trained yet) is no evidence
+/// and leaves everything where it is. `ceiling` is [`supply_ceiling`]'s
+/// per-tick answer and bounds the probe's FIRST step exactly as it
+/// bounds the supply arm. On every install without a measured anchor
+/// that is [`LINE_CAP_MAX_FLEET`], a rung §208 Round A measured as free
+/// at 99 Mbit.
+///
+/// `proven` bounds every step AFTER a rung has paid. It is
+/// [`supply_ceiling`] asked as if the anchor were measured, because a
+/// rung that paid IS a measurement: the line was seen to carry more
+/// when the fleet grew, on a run already moving
+/// [`LINE_CAP_PROBE_MIN_BPS`], and nothing typed went into it. The
+/// caller still takes it back to [`LINE_CAP_MAX_FLEET`] on a capacity
+/// refusal or a full holds ledger, exactly as it does the supply arm's.
+/// Measured 12 Oct 2026 (`research/LINECAP-COLD-START-2026-10-12.md`):
+/// with only the first ceiling, a daemon's first 87 GB job reached 50
+/// in ~4 s and then ran +21% over uncapped, while the same probe on a
+/// measured anchor walked 45 -> 65 and 50 -> 70 and matched uncapped.
+///
+/// Four properties keep it out of what §208 protects:
+///
+/// * **It only fires on a line PROVEN fast**: the fleet must already be
+///   moving [`LINE_CAP_PROBE_MIN_BPS`], an achieved rate and so a lower
+///   bound on the line. A supply-bound 99 Mbit line never opens it.
+/// * **It stops at the first rung that does not pay**, so a line that
+///   the sockets already fill gets at most one rung of over-provisioning.
+/// * **It never shrinks the fleet** and never reads the anchor, so a
+///   typed line speed cannot drive it.
+/// * **It reads only this run's own gauge**: nothing it measures is
+///   banked or carried into another job except through the carry and
+///   the anchor, which already existed.
+pub fn probe_step(
+    p: Probe,
+    fleet: usize,
+    now: u64,
+    now_bps: u64,
+    dialling: usize,
+    ceiling: usize,
+    proven: usize,
+) -> (usize, Probe) {
+    if p.done || now_bps == 0 || dialling == 0 {
+        return (fleet, p);
+    }
+    // A fleet the curve moved, or the first tick: time a fresh dwell.
+    // The baseline is kept, because a marginal-carry comparison holds
+    // across rungs whoever raised them.
+    if fleet != p.fleet {
+        return (
+            fleet,
+            Probe {
+                fleet,
+                since: now,
+                ..p
+            },
+        );
+    }
+    if now.saturating_sub(p.since) < LINE_CAP_PROBE_SETTLE_MS || now_bps < LINE_CAP_PROBE_MIN_BPS {
+        return (fleet, p);
+    }
+    if let Some((r0, d0)) = p.base {
+        // The added sockets' marginal carry against the average carry
+        // of the rung below: (r - r0) / (d - d0) >= PAY% x r0 / d0,
+        // cross-multiplied. Sockets that never came up (an account
+        // that grants no more, a slot above the spawn) add no
+        // dialling, and they cannot pay.
+        let pays = dialling > d0
+            && (now_bps.saturating_sub(r0) as u128) * (d0 as u128) * 100
+                >= (r0 as u128) * ((dialling - d0) as u128) * (LINE_CAP_PROBE_PAY_PCT as u128);
+        if !pays {
+            return (fleet, Probe { done: true, ..p });
+        }
+    }
+    // Reaching this line with a baseline means the rung just judged
+    // paid. `max` so a caller handing a `proven` under `ceiling` can
+    // never make the probe stricter than the first step was.
+    let paid = p.paid || p.base.is_some();
+    let bound = match paid {
+        true => proven.max(ceiling),
+        false => ceiling,
+    };
+    let next = probe_next(fleet).min(bound);
+    if next <= fleet {
+        return (fleet, Probe { done: true, ..p });
+    }
+    (
+        next,
+        Probe {
+            fleet: next,
+            since: now,
+            base: Some((now_bps, dialling)),
+            done: false,
+            paid,
+        },
+    )
+}
+
+/// How many spawned slots the I/O shard layout should be sized for
+/// (`get::shard_count`'s input), given the fleet as built.
+///
+/// The spawn count, except on an automatic cap whose anchor was not
+/// MEASURED, where it is held to [`LINE_CAP_MAX_FLEET`]. Such a run now
+/// spawns the second ceiling's headroom so a probe that paid has slots
+/// to wake (`conntune::line_cap_headroom_fleet`). Until 13 Oct 2026 the
+/// shard count grew with this basis (`(n / 16).clamp(2, 4)`), and the
+/// hold kept those runs on 3 shards rather than 4. The count is now 2
+/// at any basis of 24 or more (`get::default_shard_count`,
+/// `research/IO-SHARDS-2-VS-4-2026-10-13.md`), so all the basis still
+/// decides is whether a run is sharded at all, and either value of it
+/// answers yes on any fleet the probe can reach.
+pub fn shard_basis(servers: &[(ServerConfig, PoolConfig)]) -> usize {
+    let spawned: usize = servers.iter().map(|(_, c)| c.connections).sum();
+    match seed_cap(servers) > 0 && seed_auto(servers) && !seed_anchor_measured(servers) {
+        true => spawned.min(LINE_CAP_MAX_FLEET),
+        false => spawned,
+    }
+}
+
 /// The fleet-wide connection budget under a cap of `fleet` sockets.
 /// `None` = no cap, i.e. the rule is off.
 ///
@@ -726,6 +933,111 @@ pub fn fleet_cap(fleet: usize) -> Option<usize> {
 /// is 17 each, not 16), and never below one connection.
 pub fn server_share(fleet: usize, n_servers: usize) -> usize {
     fleet.div_ceil(n_servers.max(1)).max(1)
+}
+
+/// GH #103: the most of a fleet budget a FILL server is handed - one at
+/// a level above the fleet's lowest. A fill server only ever fetches an
+/// article every live lower-level server has already refused
+/// (`Shared::required_mask_at`), and it never races for speed
+/// (`Shared::speculative_blocked`), so while the primaries hold the
+/// articles every socket of its share sits idle. The equal split gave
+/// it the same share as a primary: the #103 reporter's four servers
+/// (two level 0, a level 1, a level-2 block account) held 25 sockets
+/// each of a fleet of 100 and the two fill servers carried 0.0 MB, half
+/// the budget doing nothing while the primaries ran at a quarter each.
+///
+/// Five, one [`LINE_CAP_RUNG`], is enough to work holes as they appear
+/// rather than to carry a job: the default fleet's own equal share over
+/// five providers is also five, which is the measured floor every
+/// §208/§277 round ran a primary at. Never MORE than the equal share
+/// ([`level_share`] takes the smaller), so a tiny fleet cannot hand a
+/// fill tier more than it had before.
+pub const LINE_CAP_FILL_SHARE: usize = 5;
+
+/// One server's share of a fleet budget, given every server's `level`
+/// (`levels`, one entry per server the fleet counts, in any order) and
+/// this server's own.
+///
+/// **A fleet whose servers all sit at one level splits exactly as
+/// [`server_share`] does**, to the socket: every §208/§277 measurement
+/// behind the cap was a five-provider fleet of primaries, and nothing
+/// here may move what those rounds measured.
+///
+/// With a FILL tier present - any server above the lowest level in the
+/// fleet - each fill server gets [`LINE_CAP_FILL_SHARE`] (never more
+/// than the equal share), and the servers at the lowest level split
+/// what is left, rounding up like [`server_share`] and never below the
+/// equal share. "Lowest level" and not "level 0": the pool's tiering is
+/// relative (`required_mask_at` gates a level on the levels BELOW it),
+/// so a fleet of level-1 and level-2 servers has its level-1 servers as
+/// the primaries.
+///
+/// The budget total is conserved - primaries plus floors come to the
+/// fleet, give or take the round-up - because the cap is a FLEET
+/// quantity: a fill tier that starts working holes is spending sockets
+/// out of the same line, not out of a second one. A pinned server still
+/// counts in `levels`, exactly as it counted in `server_share`'s
+/// `n_servers`; the callers skip it when they apply a share.
+pub fn level_share(fleet: usize, levels: &[u32], level: u32) -> usize {
+    let equal = server_share(fleet, levels.len());
+    let Some(&top) = levels.iter().min() else {
+        return equal;
+    };
+    let n_fill = levels.iter().filter(|&&l| l > top).count();
+    if n_fill == 0 {
+        return equal;
+    }
+    let fill = LINE_CAP_FILL_SHARE.min(equal);
+    if level > top {
+        return fill;
+    }
+    server_share(fleet.saturating_sub(n_fill * fill), levels.len() - n_fill).max(equal)
+}
+
+/// GH #103: the share a server gets once the queue has gone dry, and
+/// the number its spawn headroom is sized to from the start.
+///
+/// A primary's is unchanged ([`level_share`], which is never under the
+/// equal share). A FILL server's is the equal share - [`server_share`]
+/// over the whole fleet, exactly the slice it had before #103 - because
+/// past queue-dry the primaries have nothing new to fetch and the fill
+/// tier's backlog (articles every primary refused) is the tail. Measured
+/// on the #103 loopback rig with 5% of articles missing from both
+/// primaries: a fill tier held at [`LINE_CAP_FILL_SHARE`] all the way
+/// through spent the last 20 s of a 37 s run working 57 holes on five
+/// sockets, where the equal split had spent 9 s
+/// (`research/GH-103-FLEET-SPLIT-FILL-SERVERS-2026-10-11.md`).
+///
+/// The fleet may therefore run past its cap in the tail, by the fill
+/// tier's restored share. That is deliberate: the cap exists because
+/// sockets trickling against each other for one line stalled and raced
+/// (§208), and in a queue-dry tail the primaries' sockets are idle.
+pub fn fill_tail_share(fleet: usize, levels: &[u32], level: u32) -> usize {
+    level_share(fleet, levels, level).max(server_share(fleet, levels.len()))
+}
+
+/// A fleet budget together with the levels it is divided over, for the
+/// callers that ask [`level_share`] once per server in a loop (the
+/// dashboard's "using M of N" card, the live-tune walker's clamp): the
+/// fleet is resolved ONCE, off one read of the settings, and every row
+/// is divided by the same rule the pool's own governor uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetSplit {
+    /// The fleet in sockets.
+    pub fleet: usize,
+    levels: Vec<u32>,
+}
+
+impl FleetSplit {
+    /// `levels` is every server the fleet counts, one entry each.
+    pub fn new(fleet: usize, levels: Vec<u32>) -> Self {
+        FleetSplit { fleet, levels }
+    }
+
+    /// A server at `level`'s share - [`level_share`].
+    pub fn share(&self, level: u32) -> usize {
+        level_share(self.fleet, &self.levels, level)
+    }
 }
 
 /// TODO 313 item 7: one server's target with a temporary surge loan on
@@ -835,6 +1147,16 @@ pub(super) struct LineCap {
     /// each tick. 0 = no claim, and the growth gate is inert.
     holds_cap: u64,
     targets: Vec<Option<(Arc<ConnTarget>, usize)>>,
+    /// GH #103: every server's level, in fleet order, so a share is
+    /// [`level_share`]'s and a fill tier is not handed a primary's
+    /// slice of the budget. One entry per server, pinned ones included,
+    /// exactly as `targets.len()` counted them before.
+    levels: Vec<u32>,
+    /// GH #103: the queue-dry latch as the governor last saw it. Past
+    /// queue-dry a fill server's share goes back to the equal one - see
+    /// [`LineCap::share`] - and the surge reads the same share, so the
+    /// latch lives here rather than in one caller's argument.
+    tail: AtomicBool,
     set: Vec<AtomicUsize>,
     at: AtomicU64,
     cur: AtomicUsize,
@@ -842,9 +1164,53 @@ pub(super) struct LineCap {
     fleet: AtomicUsize,
     sheds: AtomicU64,
     raises: AtomicU64,
+    /// The cold-start probe ([`probe_step`]). Behind a mutex, which is
+    /// never contended: the tick's CAS lets one caller a second in.
+    probe: std::sync::Mutex<Probe>,
 }
 
 impl LineCap {
+    /// Server `si`'s share of a fleet of `fleet` sockets - the ONE place
+    /// the governor and the surge both take it from, so the two cannot
+    /// divide one budget two ways.
+    ///
+    /// [`level_share`] until queue-dry, and past it a FILL server gets
+    /// the equal share back ([`fill_tail_share`]): with nothing fresh
+    /// left for the primaries, whatever the fill tier still holds - the
+    /// articles every primary refused - IS the tail, and a fixed floor
+    /// works it at a few sockets. The seed spawns the parked slots for
+    /// it ([`fill_tail_share`] is the spawn rule too), so the raise has
+    /// somewhere to land.
+    fn share(&self, fleet: usize, si: usize) -> usize {
+        let level = self.levels.get(si).copied().unwrap_or(0);
+        match self.tail.load(Ordering::Relaxed) {
+            true => fill_tail_share(fleet, &self.levels, level),
+            false => level_share(fleet, &self.levels, level),
+        }
+    }
+
+    /// The value the SEED left on server `si`'s target: [`level_share`]
+    /// of the seed cap, never the queue-dry share - the seed ran before
+    /// any queue went dry, and recognising a target as "still ours" by
+    /// the tail rule would disown every fill target at the very edge
+    /// that is meant to raise it.
+    fn seeded(&self, si: usize) -> usize {
+        level_share(
+            self.cap,
+            &self.levels,
+            self.levels.get(si).copied().unwrap_or(0),
+        )
+    }
+
+    /// Does this fleet have a fill tier at all - a server above its
+    /// lowest level? Only then can the tail move a share.
+    fn has_fill(&self) -> bool {
+        self.levels
+            .iter()
+            .min()
+            .is_some_and(|&top| self.levels.iter().any(|&l| l > top))
+    }
+
     /// Cap and anchor MAX-fold across the fleet, like the gauge's
     /// `pct`; a server contributes a target only if its config carries
     /// one (a pinned server never does).
@@ -881,6 +1247,8 @@ impl LineCap {
                 .iter()
                 .map(|(_, c)| c.live_target.clone().map(|t| (t, c.connections)))
                 .collect(),
+            levels: servers.iter().map(|(s, _)| s.level).collect(),
+            tail: AtomicBool::new(false),
             set: servers
                 .iter()
                 .map(|_| AtomicUsize::new(usize::MAX))
@@ -891,6 +1259,7 @@ impl LineCap {
             fleet: AtomicUsize::new(0),
             sheds: AtomicU64::new(0),
             raises: AtomicU64::new(0),
+            probe: std::sync::Mutex::new(Probe::default()),
         }
     }
 }
@@ -1235,12 +1604,33 @@ impl Shared {
                 true => LINE_CAP_MAX_FLEET,
                 false => supply_ceiling(lc.anchor_measured, lc.grant),
             };
-            let ceiling = match holds_allow_growth(
+            // The cold-start probe's ceiling once one of its rungs has
+            // PAID (`probe_step`'s `proven`): the second ceiling asked
+            // as if the anchor were measured, since a rung that paid is
+            // a measurement. The refusal and holds arms take it back
+            // exactly as they take back `durable`.
+            let proven_durable = match refused {
+                true => LINE_CAP_MAX_FLEET,
+                false => supply_ceiling(true, lc.grant),
+            };
+            let holds_ok = holds_allow_growth(
                 crate::memgauge::cur(crate::memgauge::Sub::Holds),
                 lc.holds_cap,
-            ) {
+            );
+            let ceiling = match holds_ok {
                 true => durable,
                 false => LINE_CAP_MAX_FLEET,
+            };
+            let proven = match holds_ok {
+                true => proven_durable,
+                false => LINE_CAP_MAX_FLEET,
+            };
+            // The ceiling this run will keep is the probe's once it has
+            // paid, and the gauge must say so, or `whyslow` convicts a
+            // cap that is walking to it.
+            let durable = match lc.probe.lock_ok().paid {
+                true => durable.max(proven_durable),
+                false => durable,
             };
             // TODO 275 item 7, the residue handoff's OWED 4: PUBLISH the
             // stand-down. `LiveStats::line_cap_ceiling` was seeded at
@@ -1274,7 +1664,7 @@ impl Shared {
                     lc.grant
                 );
             }
-            let (want, streak) = fleet_step(
+            let (curve, streak) = fleet_step(
                 cap,
                 lc.streak.load(Ordering::Relaxed) as u32,
                 line,
@@ -1283,6 +1673,18 @@ impl Shared {
                 ceiling,
             );
             lc.streak.store(streak as usize, Ordering::Relaxed);
+            // The cold-start probe runs on the curve's answer, so a
+            // rung the curve has just raised is timed afresh rather
+            // than judged on a dwell it did not have. It is never
+            // below `curve`.
+            let want = {
+                let mut probe = lc.probe.lock_ok();
+                let (want, next) =
+                    probe_step(*probe, curve, now, now_bps, dialling, ceiling, proven);
+                *probe = next;
+                want
+            };
+            let probed = want > curve;
             if want != cap {
                 lc.cur.store(want, Ordering::Relaxed);
                 lc.raises.fetch_add(1, Ordering::Relaxed);
@@ -1313,7 +1715,7 @@ impl Shared {
                 // still opens exactly as it did.
                 info!(
                     "line cap: fleet {cap} -> {want} ({:.0} Mbit line seen; seed fleet {}; \
-                     {} anchor{})",
+                     {} anchor{}{})",
                     line as f64 * 8.0 / 1e6,
                     lc.cap,
                     if lc.anchor_measured {
@@ -1329,9 +1731,26 @@ impl Shared {
                     // theirs to change. Silent at the first ceiling, so
                     // every install that is not in this regime keeps the
                     // line it had.
-                    match ceiling > LINE_CAP_MAX_FLEET {
+                    // A probe raise past the first ceiling ran under
+                    // `proven`, so that is the number in the way.
+                    match if probed && want > LINE_CAP_MAX_FLEET {
+                        proven
+                    } else {
+                        ceiling
+                    } {
+                        c if c <= LINE_CAP_MAX_FLEET => String::new(),
+                        c => format!("; ceiling {c} of the account's {}", lc.grant),
+                    },
+                    // The cold-start probe made this raise, not the
+                    // curve: say what the fleet was moving when it did.
+                    // Kept inside the parenthetical, after everything
+                    // the bench drivers' regexes read.
+                    match probed {
                         false => String::new(),
-                        true => format!("; ceiling {ceiling} of the account's {}", lc.grant),
+                        true => format!(
+                            "; probe at {:.0} Mbit on {dialling} sockets",
+                            now_bps as f64 * 8.0 / 1e6
+                        ),
                     },
                 );
                 cap = want;
@@ -1342,21 +1761,28 @@ impl Shared {
         // has already made still gets handed to the targets, which is
         // the one thing an anchorless run may resize.
         let allow_shed = lc.anchor_bps > 0;
-        if !allow_shed && cap <= lc.cap {
+        // GH #103: the queue-dry latch raises a fill tier's share (see
+        // `LineCap::share`), and that raise is one an anchorless run may
+        // make too: it shrinks nothing, and the slots it wakes were
+        // spawned for it. Only on the EDGE, so an anchorless tail does
+        // not walk every target once a second for nothing.
+        let fill_tail = tail && lc.has_fill() && !lc.tail.swap(true, Ordering::Relaxed);
+        if !allow_shed && cap <= lc.cap && !fill_tail {
             return;
         }
         lc.fleet.store(cap, Ordering::Relaxed);
-        let share = server_share(cap, lc.targets.len());
-        // The value the SEED left on this target, which is the share of
-        // the seed cap: a target still holding it is one the fleet
-        // build set and nobody has moved since, so the governor may
-        // raise it. Anything else is somebody's (the §112 walker's) and
-        // the pool will only ever LOWER it.
-        let seeded = server_share(lc.cap, lc.targets.len());
         for (si, slot) in lc.targets.iter().enumerate() {
             let Some((target, ceiling)) = slot else {
                 continue;
             };
+            // GH #103: per server, by level - see [`level_share`].
+            let share = lc.share(cap, si);
+            // The value the SEED left on this target, which is the share
+            // of the seed cap: a target still holding it is one the
+            // fleet build set and nobody has moved since, so the
+            // governor may raise it. Anything else is somebody's (the
+            // §112 walker's) and the pool will only ever LOWER it.
+            let seeded = lc.seeded(si);
             // TODO 313 item 7: the surge's loan is part of the number
             // this governor puts on the wire, not a raise made behind
             // its back. Adding it HERE is the whole of why two writers
@@ -1457,10 +1883,10 @@ impl Shared {
             0 => lc.cap,
             f => f,
         };
-        let base = server_share(cap, lc.targets.len()).min(*ceiling);
+        let base = lc.share(cap, si).min(*ceiling);
         let want = surge_want(base, self.surge.lent_on(si), *ceiling);
         let mine = lc.set[si].load(Ordering::Relaxed);
-        let seeded = server_share(lc.cap, lc.targets.len()).min(*ceiling);
+        let seeded = lc.seeded(si).min(*ceiling);
         let moved = target.update(|cur| {
             let ours = cur == mine || (mine == usize::MAX && cur == seeded);
             (ours && cur != want).then_some(want)

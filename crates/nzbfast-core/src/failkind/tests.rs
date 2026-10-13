@@ -102,6 +102,7 @@ fn quiet() -> LossCauses<'static> {
         bytes_arrived: 0,
         backbones: &[],
         post_age_days: 0,
+        server_refusals: &[],
     }
 }
 
@@ -268,6 +269,43 @@ mod producers {
                 disk_full: false,
                 mid_download: false,
                 post_unavailable: false,
+                transient: true,
+                another_copy: false,
+            },
+        );
+    }
+
+    /// A stall over a post every server was refusing - the 12 Oct 2026
+    /// dead-post legs, with their measured per-server counts. Not our
+    /// failure, so not `Transport`: that kind tells an *arr client to
+    /// retry the same dead grab instead of failing over. It must be
+    /// reportable, and it keeps its one automatic retry.
+    #[test]
+    fn a_stall_over_a_post_every_server_refused_is_missing_articles() {
+        let msg = declared(
+            62,
+            0,
+            &LossCauses {
+                stalled: true,
+                missing_segments: 6815,
+                total_segments: 6815,
+                server_refusals: &[798, 793, 1121, 409, 6186],
+                par2_slots: 1,
+                ..quiet()
+            },
+        );
+        assert!(msg.starts_with("download incomplete"), "{msg}");
+        assert_verdict(
+            &msg,
+            Verdict {
+                kind: FailKind::MissingArticles,
+                token: "missing",
+                hint: "",
+                action: "retry",
+                action_locked: "password",
+                disk_full: false,
+                mid_download: false,
+                post_unavailable: true,
                 transient: true,
                 another_copy: false,
             },

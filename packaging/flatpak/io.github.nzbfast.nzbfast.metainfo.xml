@@ -91,6 +91,21 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="1.7.1" date="2026-09-26">
+      <description>
+        <p>RAR sets that store a file under a different name in a later volume now unpack instead of failing, an optional switch deletes the files of downloads that failed for good, and ten verified faults are fixed.</p>
+      </description>
+    </release>
+    <release version="1.7.0" date="2026-09-21">
+      <description>
+        <p>The dashboard can be put behind a username and password, forced downloads are labelled and can be un-forced, every queue row says how long it has left, and a post that lies about its own file sizes no longer truncates what comes out of it.</p>
+      </description>
+    </release>
+    <release version="1.6.0" date="2026-09-18">
+      <description>
+        <p>Cancelling a download or removing a History entry can now be undone, Cancel during a repair actually stops it, a repair that finds a complete file under the wrong name renames it, and repairing a file larger than memory is much quicker.</p>
+      </description>
+    </release>
     <release version="1.5.0" date="2026-09-12">
       <description>
         <p>Repairs that used to be refused now finish, a long repair says what it is about to do and can be watched and cancelled, and making and checking recovery data is quicker on every machine measured.</p>

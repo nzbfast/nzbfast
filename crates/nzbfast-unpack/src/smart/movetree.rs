@@ -896,11 +896,16 @@ pub(super) fn copy_verified(from: &Path, to: &Path) -> std::io::Result<()> {
 /// reported successful and still be absent after a crash. Unix only - Windows
 /// has no directory handle to flush this way, and `File::open` on a directory
 /// fails there, so it is a deliberate no-op.
+///
+/// Through `nzbkit::disk::sync_handle`, because the macOS SMB client
+/// refuses the full flush on a directory descriptor with ENOTSUP and takes
+/// plain `fsync` (GitHub #99) - and unlike `nzbkit::disk::sync_dir` this
+/// one is not best-effort, so that refusal failed the move.
 pub fn sync_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         std::fs::File::open(dir)
-            .and_then(|f| f.sync_all())
+            .and_then(|f| nzbkit::disk::sync_handle(&f))
             .map_err(|e| err_at("fsync dir", dir, e))
     }
     #[cfg(not(unix))]
@@ -930,11 +935,15 @@ pub fn sync_dir(dir: &Path) -> std::io::Result<()> {
 fn sync_written_file(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        // Deliberately unchanged: a read-only descriptor is a valid fsync
-        // target here, and it flushes a mode-444 file, which opening for
-        // write would not even be allowed to touch.
+        // Still a read-only descriptor: it flushes a mode-444 file, which
+        // opening for write would not even be allowed to touch. But it is
+        // valid for `fsync(2)`, NOT for the `F_FULLFSYNC` std's `sync_all`
+        // issues on Apple targets - the macOS SMB client answers that one
+        // EACCES on a read-only descriptor, which failed every move to a
+        // share on its first file (GitHub #99). `sync_handle` keeps the
+        // full flush where it works and falls back to `fsync` there.
         std::fs::File::open(path)
-            .and_then(|f| f.sync_all())
+            .and_then(|f| nzbkit::disk::sync_handle(&f))
             .map_err(|e| err_at("fsync", path, e))
     }
     #[cfg(not(unix))]

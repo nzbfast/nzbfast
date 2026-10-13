@@ -327,24 +327,6 @@ pub fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::path::Path) {
             // permitted one is walked back by the next down cycles.
             let (anchor, _) = d.link_peak.effective(d.line_speed.load(Ordering::Relaxed));
             let line_saturated = anchor > 0 && total_rate >= anchor as f64 * 0.85;
-            // TODO 208 item 1: the walker walks WITHIN the fleet cap,
-            // never owns it - it is per-server and sheds one socket per
-            // ~7 epochs by design, and the cap is a fleet quantity.
-            // Clamped on `desired` below rather than folded into the
-            // controller's ceiling, so a cap that moves between jobs
-            // does not read as a settings change. TODO 277: the same
-            // `anchor` the saturation test above reads is what sizes
-            // the cap, so the walker's clamp grows with the line
-            // exactly as the job's own seed does.
-            // TODO 275 item 1 part 2: through the SEEDED form, or the
-            // clamp would hold the walker under a fleet the job it is
-            // walking inside already opened.
-            let line_share = crate::conntune::line_cap_share(
-                &config,
-                live.servers.len(),
-                anchor,
-                d.line_carry.carry_bps(),
-            );
             if line_saturated != announced_saturated {
                 info!(
                     "live-tune: link {} (fleet {:.0} Mbps vs anchor {:.0} Mbps)",
@@ -403,6 +385,33 @@ pub fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::path::Path) {
                     .into_iter()
                     .zip(cfg_enabled.iter().copied())
                     .collect();
+            // TODO 208 item 1: the walker walks WITHIN the fleet cap,
+            // never owns it - it is per-server and sheds one socket per
+            // ~7 epochs by design, and the cap is a fleet quantity.
+            // Clamped on `desired` below rather than folded into the
+            // controller's ceiling, so a cap that moves between jobs
+            // does not read as a settings change. TODO 277: the same
+            // `anchor` the saturation test above reads is what sizes
+            // the cap, so the walker's clamp grows with the line
+            // exactly as the job's own seed does.
+            // TODO 275 item 1 part 2: through the SEEDED form, or the
+            // clamp would hold the walker under a fleet the job it is
+            // walking inside already opened.
+            // GH #103: divided by LEVEL, in the live fleet's own order,
+            // so a fill server's clamp is its small fill share and a
+            // primary's is the larger one the job's seed gave it - the
+            // same `level_share` the pool's governor divides by. A row
+            // whose config is gone this epoch counts as a primary,
+            // which is what every row counted as before the split.
+            let line_share = crate::conntune::line_cap_share(
+                &config,
+                live.servers
+                    .iter()
+                    .map(|sl| cfg_by_row.get(sl.row_key.as_str()).map_or(0, |s| s.level))
+                    .collect(),
+                anchor,
+                d.line_carry.carry_bps(),
+            );
             // Hosts with more than one enabled row: their rows keep
             // their live controllers but never write the host-keyed
             // conntune store - see `flush_bucket`, which carries the
@@ -541,8 +550,8 @@ pub fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::path::Path) {
                 let before = st.tuner.target();
                 st.tuner.on_epoch(obs);
                 let mut desired = st.tuner.desired().min(ceiling);
-                if let Some(share) = line_share {
-                    desired = desired.min(share);
+                if let Some(split) = &line_share {
+                    desired = desired.min(split.share(srv_cfg.map_or(0, |s| s.level)));
                 }
                 if block {
                     desired = desired.min(st.tuner.target());

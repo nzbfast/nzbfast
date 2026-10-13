@@ -97,7 +97,11 @@ pub(super) fn planned_servers(d: &Daemon, cfg_path: &std::path::Path) -> Vec<Val
     // than the one the next job opens on a slow-carry link.
     let line_share = crate::conntune::line_cap_share(
         cfg_path,
-        c.servers.iter().filter(|s| s.enabled).count(),
+        c.servers
+            .iter()
+            .filter(|s| s.enabled)
+            .map(|s| s.level)
+            .collect(),
         anchor_bps,
         d.line_carry.carry_bps(),
     );
@@ -106,10 +110,10 @@ pub(super) fn planned_servers(d: &Daemon, cfg_path: &std::path::Path) -> Vec<Val
         .filter(|s| s.enabled)
         .map(|s| {
             let mut base = global.min(s.connections.max(1) as usize);
-            if let Some(share) = line_share
+            if let Some(split) = &line_share
                 && !s.pin_connections
             {
-                base = base.min(share);
+                base = base.min(split.share(s.level));
             }
             let budget = if live_tune && !s.pin_connections {
                 crate::conntune::seed_connections(store.get(&s.host), bkt, now, base)

@@ -80,15 +80,17 @@ pub enum YencError {
     /// short on the wire. Refused rather than returned short: the
     /// destination file is preallocated to the declared size, so a
     /// missing tail would stay as sparse zero bytes and a job with no
-    /// PAR2 set would complete with silently corrupt output.
+    /// PAR2 set would complete with silently corrupt output. The one
+    /// exception is a header whose own declared range proves every byte
+    /// arrived - see `trailerless_complete`.
     #[error("article ended without a =yend trailer (truncated)")]
     Truncated,
-    /// The `=ypart` range and the payload length contradict each other:
-    /// `begin > end`, or the inclusive range `end - begin + 1` is not
-    /// the number of bytes that decoded, or a non-empty part claimed a
-    /// nonzero offset while declining to declare `end=` at all. The
-    /// range is what positions the write, so an inconsistent one is a
-    /// write-anywhere primitive driven by untrusted input.
+    /// The article's placement cannot be settled: `=ypart` declared BOTH
+    /// `begin` and `end` and they contradict the decoded length in a way
+    /// that is not an exact swap, or a part numbered 2 or later carries no
+    /// usable range at all (so it would land at offset 0, on part 1). A
+    /// range with ONE field missing is placed and reported unvouched
+    /// rather than refused - see `place_part` for the whole rule.
     #[error("=ypart begin={begin} end={end} cannot hold {len} decoded bytes")]
     PartGeometry {
         /// 1-based inclusive first byte from `=ypart begin=`.
@@ -177,8 +179,10 @@ pub struct Decoded {
     pub begin: u64,
     /// Last byte of the range, 1-based and inclusive - so this part is
     /// `end - begin + 1` bytes long, which the decoder has already
-    /// checked against `data`. For a single-part post with no `=ypart`
-    /// line this is the `=ybegin size=` figure.
+    /// checked against `data` (or, where `=ypart` left a field out,
+    /// inferred from it and reported the article unvouched). For a
+    /// single-part post with no `=ypart` line this is the `=ybegin size=`
+    /// figure.
     pub end: u64,
     /// The decoded payload, exactly the bytes belonging at
     /// [`Decoded::offset`] in the named file. Ciphertext rather than
@@ -334,6 +338,14 @@ pub(crate) fn decode_framed(body: &[u8], enc_ok: bool) -> Result<(Decoded, bool)
     let mut seen_begin = false;
     let mut seen_yend = false;
     let mut seen_ypart = false;
+    // What `=ypart` literally declared, kept apart from the defaulted
+    // `begin`/`end` above so [`place_part`] can tell a missing or
+    // unreadable field from a declared one (the yEnc leniency fixture pass, Oct 2026).
+    let mut begin_decl: Option<u64> = None;
+    let mut end_decl: Option<u64> = None;
+    // A `=y` line we did not recognise sat between `=ybegin` and the first
+    // `=ypart` - see the `=ypart` arm for why that keeps its bytes.
+    let mut pre_part_control = false;
     let mut encryption = None;
     let mut data = Vec::with_capacity(body.len());
 
@@ -389,11 +401,28 @@ pub(crate) fn decode_framed(body: &[u8], enc_ok: bool) -> Result<(Decoded, bool)
                 end = file_size;
             }
         } else if let Some(fields) = header_fields(line, b"part", false) {
+            // The payload starts AFTER `=ypart`, so a text line a poster
+            // left between `=ybegin` and it is header-zone junk, not data.
+            // SABnzbd 5.1.2 and NZBGet 26.3 both start there (measured
+            // byte-exact, research/yenc-leniency-clients/); keeping the
+            // line failed the length and CRC gates and cost a PAR2 block.
+            // Only the FIRST `=ypart` clears: a second one is a duplicate
+            // header, and real payload after the first must never be lost.
+            // And never over an unrecognised `=y` control line: that is not
+            // stray text but a declaration we cannot read (an `=yencryption`
+            // with the spike flag off is exactly this), so its bytes stay
+            // in and the gates refuse the article, as they always did. The
+            // CRC still decides whatever is left.
+            if seen_begin && !seen_ypart && !pre_part_control {
+                data.clear();
+            }
             seen_ypart = true;
             let kv = parse_header(&fields);
             // yEnc `begin` is 1-based; a hostile/broken `begin=0` would
             // underflow offset() to u64::MAX. Clamp to the valid floor.
-            begin = num(&kv, "begin").filter(|&b| b >= 1).unwrap_or(1);
+            begin_decl = num(&kv, "begin").filter(|&b| b >= 1);
+            end_decl = num(&kv, "end").filter(|&e| e >= 1);
+            begin = begin_decl.unwrap_or(1);
             end = num(&kv, "end").unwrap_or(0);
         } else if let Some(fields) = header_fields(line, b"end", true) {
             seen_yend = true;
@@ -431,6 +460,9 @@ pub(crate) fn decode_framed(body: &[u8], enc_ok: bool) -> Result<(Decoded, bool)
                     .ok_or(YencError::BadEncryption)?,
             );
         } else if seen_begin {
+            if !seen_ypart && line.starts_with(b"=y") {
+                pre_part_control = true;
+            }
             decode_line(line, &mut data);
         }
     }
@@ -439,11 +471,24 @@ pub(crate) fn decode_framed(body: &[u8], enc_ok: bool) -> Result<(Decoded, bool)
         return Err(YencError::MissingBegin);
     }
     // No =yend trailer means the article was cut short (the NNTP dot arrived
-    // mid-body). Without this the decoder returns Ok on a partial payload;
+    // mid-body) unless the header's own range proves otherwise - checked
+    // just below. Without this the decoder returns Ok on a partial payload;
     // the destination was preallocated to the declared size, so the missing
     // tail stays as sparse zero bytes and a no-PAR job completes with
     // silently corrupt output.
-    if !seen_yend {
+    let declared = Declared {
+        part,
+        seen_ypart,
+        begin,
+        end,
+        begin_decl,
+        end_decl,
+        file_size,
+        len: data.len() as u64,
+    };
+    // ...unless the header's own range proves the payload is all here: see
+    // [`trailerless_complete`].
+    if !seen_yend && !trailerless_complete(&declared) {
         return Err(YencError::Truncated);
     }
     // Both part numbers present and disagreeing means the trailer does not
@@ -455,17 +500,7 @@ pub(crate) fn decode_framed(body: &[u8], enc_ok: bool) -> Result<(Decoded, bool)
     {
         return Err(YencError::PartNumberMismatch { begin: b, end: e });
     }
-    let gates = trailer_gates(
-        &trailer,
-        &Declared {
-            part,
-            seen_ypart,
-            begin,
-            end,
-            file_size,
-            len: data.len() as u64,
-        },
-    );
+    let gates = trailer_gates(&trailer, &declared);
     if let Some(len) = gates.len
         && len != data.len() as u64
     {
@@ -474,7 +509,7 @@ pub(crate) fn decode_framed(body: &[u8], enc_ok: bool) -> Result<(Decoded, bool)
             actual: len,
         });
     }
-    check_part_geometry(seen_ypart, begin, end, data.len() as u64)?;
+    let placed = place_part(&declared, gates.len_waived)?;
     let mut crc_verified = false;
     if let Some(header) = gates.crc {
         let computed = crc32fast::hash(&data);
@@ -497,12 +532,14 @@ pub(crate) fn decode_framed(body: &[u8], enc_ok: bool) -> Result<(Decoded, bool)
             name,
             file_size,
             part: declared_part(part),
-            begin,
-            end,
+            begin: placed.begin,
+            end: placed.end,
             data,
             encryption,
         },
-        crc_verified,
+        // A CRC proves the bytes, not where they go: a range [`place_part`]
+        // had to infer is left for PAR2 or the block MD5 to vouch for.
+        crc_verified && placed.vouched,
     ))
 }
 
@@ -523,6 +560,10 @@ pub(crate) struct Declared {
     pub seen_ypart: bool,
     pub(crate) begin: u64,
     pub end: u64,
+    /// `=ypart begin=` as written, `None` when absent, unreadable or 0.
+    pub begin_decl: Option<u64>,
+    /// `=ypart end=` as written, `None` when absent, unreadable or 0.
+    pub end_decl: Option<u64>,
     pub file_size: u64,
     pub len: u64,
 }
@@ -535,6 +576,10 @@ pub(crate) struct Gates {
     pub len: Option<u64>,
     pub crc: Option<u32>,
     pub crc_advisory: Option<u32>,
+    /// The trailer DID declare a length and it was set aside because the
+    /// `=ypart` range stands in for it - so [`place_part`] must enforce that
+    /// range exactly rather than repair it, or nothing checks the length.
+    pub len_waived: bool,
 }
 
 /// Decide which `=yend` fields are talking about THIS ARTICLE.
@@ -587,6 +632,7 @@ pub(crate) fn trailer_gates(t: &Trailer, d: &Declared) -> Gates {
         (None, c) => (c, None),
     };
     Gates {
+        len_waived: t.size.is_some() && len.is_none(),
         len,
         crc,
         crc_advisory,
@@ -731,6 +777,13 @@ pub(crate) fn declared_part(part: Option<u32>) -> Option<u32> {
 /// decoded to. Shared by both decoders - a divergence here is a divergence
 /// the differential fuzzer would (rightly) call a bug.
 ///
+/// Since 11 Oct 2026 the decoders reach this only through [`place_part`],
+/// for empty parts and for the arm where the range stands in for a
+/// trailer length; elsewhere a range missing ONE field is placed
+/// unvouched instead of refused. The `end == 0` reasoning below is kept
+/// as the record of why that arm was once a refusal - [`place_part`]'s
+/// header says why it no longer is.
+///
 /// `begin`/`end` are 1-based inclusive, so the range holds `end - begin + 1`
 /// bytes and the payload must be exactly that. Without this, a CRC-valid
 /// article could declare `=ypart begin=<1 TiB> end=<1 TiB>` and have its few
@@ -776,6 +829,125 @@ pub(crate) fn check_part_geometry(
         return Err(YencError::PartGeometry { begin, end, len });
     }
     Ok(())
+}
+
+/// Where a decoded article's bytes go: the 1-based inclusive range, and
+/// whether the header vouched for it. Returned by [`place_part`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Placed {
+    pub begin: u64,
+    pub end: u64,
+    /// The declared range agreed with the decoded length on its own terms.
+    /// `false` means [`place_part`] had to INFER part of the range, so a
+    /// passing article CRC proves the bytes but not where they belong: the
+    /// decoders then report the article unverified and the PAR2 block MD5
+    /// (or the settle read-back) decides, exactly as for an article that
+    /// carried no CRC at all.
+    pub vouched: bool,
+}
+
+/// Read an article's declared placement against the bytes that actually
+/// decoded, and say where they go. ONE function for BOTH decoders, for the
+/// reason [`check_part_geometry`] (which it wraps) is one.
+///
+/// Other clients decode `=ypart` ranges with a missing, unreadable or
+/// reversed `begin`/`end`. The fixture pass
+/// (`yenc_leniency_tests.rs`, research/YENC-LENIENCY-FIXTURES-2026-10-11.md)
+/// found every one of them REFUSED here, so a sloppy poster cost a PAR2
+/// block per article. Where the placement is still UNAMBIGUOUS the article
+/// is now placed and reported unvouched, and where it is not it is still
+/// refused:
+///
+/// * `begin` and `end` both declared and consistent: placed, vouched - the
+///   ordinary article, unchanged.
+/// * one of the two missing or unreadable: the other one and the decoded
+///   length fix the range, the same single-field trust every article's
+///   `begin` already carries (placement has only ever come from `begin`;
+///   `end` is a cross-check). Unvouched, because that cross-check is gone.
+/// * both declared, exactly swapped (`begin - end + 1 == len`): placed at the
+///   smaller, unvouched.
+/// * both declared and contradicting the length any other way: REFUSED.
+///   One of the two is wrong and nothing here can say which, so placing by
+///   `begin` alone would hand a PAR2-less job bytes nothing ever
+///   checks the position of - the live verifier is off with no set and the
+///   no-set settle trusts an unvouched span. A refusal costs one block.
+/// * a declared part 2 or later with NO usable range (no `=ypart` line, or
+///   one carrying neither field): REFUSED. It used to be placed at offset 0
+///   with its CRC counted as verified, on top of part 1's bytes.
+///
+/// The balloon defence is not in this function and never was: a hostile
+/// poster declares a CONSISTENT huge range for free (pinned accepted by
+/// `impossible_part_geometry_is_rejected_on_both_paths`). The bound is
+/// `clamp_to_declared_size` in the engine's workers, which cuts any part at
+/// the NZB's posted bytes, so an inferred range gains an attacker nothing a
+/// declared one did not already have.
+///
+/// `strict` is [`Gates::len_waived`]: when the trailer's length was set aside
+/// because the range stands in for it, the range must hold exactly or
+/// nothing has checked the length at all, so the old check applies as is.
+pub(crate) fn place_part(d: &Declared, strict: bool) -> Result<Placed, YencError> {
+    let (begin, end, len) = (d.begin, d.end, d.len);
+    let as_declared = |vouched| Placed {
+        begin,
+        end,
+        vouched,
+    };
+    let refuse = Err(YencError::PartGeometry { begin, end, len });
+    if !d.seen_ypart {
+        if declared_part(d.part).is_some_and(|p| p > 1) && len > 0 {
+            return refuse;
+        }
+        return Ok(as_declared(true));
+    }
+    if strict || len == 0 {
+        check_part_geometry(true, begin, end, len)?;
+        return Ok(as_declared(true));
+    }
+    let inferred = |begin: u64, end: u64| Placed {
+        begin,
+        end,
+        vouched: false,
+    };
+    match (d.begin_decl, d.end_decl) {
+        (Some(b), Some(e)) if b <= e && e - b + 1 == len => Ok(Placed {
+            begin: b,
+            end: e,
+            vouched: true,
+        }),
+        (Some(b), Some(e)) if b > e && b - e + 1 == len => Ok(inferred(e, b)),
+        (Some(_), Some(_)) => refuse,
+        (Some(b), None) => match b.checked_add(len - 1) {
+            Some(e) => Ok(inferred(b, e)),
+            None => refuse,
+        },
+        (None, Some(e)) if e >= len => Ok(inferred(e - len + 1, e)),
+        (None, Some(_)) => refuse,
+        (None, None) if declared_part(d.part).is_some_and(|p| p > 1) => refuse,
+        (None, None) => Ok(inferred(1, len)),
+    }
+}
+
+/// An article with no `=yend` trailer whose header nonetheless proves every
+/// byte arrived: a fully declared `=ypart` range of exactly the decoded
+/// length, or - with no `=ypart` and no part number past 1 - a `=ybegin
+/// size=` equal to it.
+///
+/// The "missing `=yend`" shape from the leniency fixture pass. The trailer is how a decoder
+/// knows a body was not cut short (F12 - a provider can serve a stored-short
+/// body with a proper terminator), so a body without one stays `Truncated`
+/// unless the length is proved some other way. A cut anywhere inside the
+/// payload leaves it short of the range and still refuses. With no trailer
+/// there is no CRC either, so an accepted body is reported unverified,
+/// which is what a bare `=yend` already gets.
+pub(crate) fn trailerless_complete(d: &Declared) -> bool {
+    if d.len == 0 {
+        return false;
+    }
+    if d.seen_ypart {
+        matches!((d.begin_decl, d.end_decl), (Some(b), Some(e)) if e >= b && e - b + 1 == d.len)
+    } else {
+        declared_part(d.part).is_none_or(|p| p == 1) && d.file_size == d.len
+    }
 }
 
 /// Decode one payload line (yEnc unescaping) onto `out`. `pub(crate)` because
@@ -1192,16 +1364,21 @@ mod tests {
         assert_eq!(crate::yenc_simd::decode(&good).unwrap().data, payload);
     }
 
-    /// The same write-anywhere primitive, reached by simply OMITTING
-    /// `end=` instead of lying about it.
+    /// A part that OMITS `end=` is placed at its `begin`, unvouched.
     ///
-    /// Both decoders default a missing `end` to 0, and the geometry
-    /// check used to return Ok on `end == 0` - so an article that
-    /// declined to declare its range got the arbitrary offset without
-    /// even having to make the range self-consistent, which is a strictly
-    /// easier bypass than the one the test above pins.
+    /// This test used to pin the opposite: a missing `end` was refused as a
+    /// "strictly easier bypass" of the write-anywhere guard above. It never
+    /// was one - the test above accepts a CONSISTENT range a terabyte in,
+    /// which a hostile poster writes as easily as an inconsistent one - and
+    /// the bound that actually holds a part inside its file is the engine's
+    /// `clamp_to_declared_size` (the NZB's posted bytes). Meanwhile the
+    /// refusal cost an honest-but-sloppy poster a PAR2 block per article,
+    /// and other clients decode the shape. So the
+    /// article is placed where its `begin` says - the only field placement
+    /// has ever come from - and reported UNVOUCHED, because the `end`
+    /// cross-check is gone: PAR2 or the block MD5 decides it.
     #[test]
-    fn a_part_that_declares_no_end_may_not_claim_an_offset() {
+    fn a_part_that_declares_no_end_is_placed_at_begin_unvouched() {
         let payload = test_data(4096);
         let article = |ypart: &str| -> Vec<u8> {
             let mut body = format!(
@@ -1214,29 +1391,34 @@ mod tests {
             body.extend_from_slice(&single[starts..]);
             body
         };
+        let unvouched = |body: &[u8]| {
+            let (d, oracle_vouched) = decode_checked(body).unwrap();
+            let mut buf = Vec::new();
+            let (m, i) = crate::yenc_simd::decode_into_integrity(body, &mut buf, true).unwrap();
+            assert_eq!(d.data, payload);
+            assert_eq!(buf, payload);
+            assert!(
+                !oracle_vouched && !i.crc_checked,
+                "an inferred range is never vouched"
+            );
+            assert_eq!((d.begin, d.end), (m.begin, m.end));
+            (d.begin, d.end)
+        };
 
-        let no_end = article("=ypart begin=1099511627777");
-        assert!(matches!(
-            decode(&no_end),
-            Err(YencError::PartGeometry { len: 4096, .. })
-        ));
-        assert!(matches!(
-            crate::yenc_simd::decode(&no_end),
-            Err(YencError::PartGeometry { len: 4096, .. })
-        ));
-
-        // `end=0` spelled out reaches the same default and is the same
-        // article.
-        let zero_end = article("=ypart begin=1099511627777 end=0");
-        assert!(decode(&zero_end).is_err());
-        assert!(crate::yenc_simd::decode(&zero_end).is_err());
-
-        // A part at the top of the file has nowhere to place itself, so
-        // an absent `end` costs nothing and stays accepted - this is the
-        // shape real single-part posts take.
-        let at_one = article("=ypart begin=1");
-        assert_eq!(decode(&at_one).unwrap().data, payload);
-        assert_eq!(crate::yenc_simd::decode(&at_one).unwrap().data, payload);
+        // The same placement a consistent declaration gets - no new primitive.
+        let full = article("=ypart begin=1099511627777 end=1099511631872");
+        assert_eq!(decode(&full).unwrap().offset(), 1_099_511_627_776);
+        assert_eq!(
+            unvouched(&article("=ypart begin=1099511627777")),
+            (1_099_511_627_777, 1_099_511_631_872)
+        );
+        // `end=0` spelled out reaches the same default and is the same article.
+        assert_eq!(
+            unvouched(&article("=ypart begin=1099511627777 end=0")),
+            (1_099_511_627_777, 1_099_511_631_872)
+        );
+        // A part at the top of the file, the shape real single-part posts take.
+        assert_eq!(unvouched(&article("=ypart begin=1")), (1, 4096));
 
         // And the empty part that legitimately produces `end == 0` is
         // still legal wherever it sits.
@@ -1657,8 +1839,10 @@ mod tests {
         assert_both_decode(&multi, part2, "control CRLF multipart");
 
         // Control 2: the retry must not rescue a GENUINELY truncated
-        // article. Cut the trailer off, in both framings.
-        let cut = &single[..at(&single, b"=yend")];
+        // article. Cut INSIDE the payload, in both framings - a cut exactly
+        // at the trailer leaves every byte the header declared, which since
+        // the leniency fixture pass decodes unvouched (`trailerless_complete`).
+        let cut = &single[..at(&single, b"=yend") - 40];
         assert_eq!(decode(cut), Err(YencError::Truncated), "CRLF, no trailer");
         assert_eq!(
             decode(&cr_framed(cut)),
@@ -2057,3 +2241,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "yenc_leniency_tests.rs"]
+mod leniency_tests;

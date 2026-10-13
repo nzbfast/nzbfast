@@ -175,6 +175,20 @@ impl Shared {
     /// is exactly why an enumeration written from the verdict sites
     /// missed it - and why "every way a Work leaves the queue for good"
     /// is the rule to check a new site against, not this list's length.
+    ///
+    /// THE UNIT IS AN ARTICLE, NOT A HOLD, and every site above refunds
+    /// exactly one. So only the FIRST hold on a Work charges (`recheck_430
+    /// == 0`); a later hold by a different group - backbone B held it
+    /// while A was dark, A came back and refused last - records its bits
+    /// in the slot the article already has, even when the budget is
+    /// full. Charging each new group was a slot lost per such article
+    /// for the run (Codex 13 Oct sweep F6). The fix is NOT a
+    /// `count_ones()` refund: a mirror group sets several bits on ONE
+    /// charge, and that refund was tried once (21 Sep 2026) and reverted
+    /// for driving the counter under other articles' live holds. The
+    /// predicate `recheck_430 != 0` is the one the release and
+    /// `recharge_recheck` already use, so all three agree on what holds
+    /// a slot.
     pub(super) fn take_recheck(&self, w: &mut Work, cfg: &PoolConfig, group_bits: u32) -> bool {
         if !cfg.recheck_430 || w.recheck_430 & group_bits == group_bits {
             return false;
@@ -182,8 +196,11 @@ impl Shared {
         // Claim a slot before promising one: two workers reaching a
         // terminal verdict at once would both read a budget with one
         // slot left and both hold, which is how a bound becomes a
-        // suggestion. The add is undone on refusal.
-        if self.recheck_held.fetch_add(1, Ordering::AcqRel) >= cfg.recheck_430_max {
+        // suggestion. The add is undone on refusal. An article that
+        // already holds one is not asking for another.
+        if w.recheck_430 == 0
+            && self.recheck_held.fetch_add(1, Ordering::AcqRel) >= cfg.recheck_430_max
+        {
             self.recheck_held.fetch_sub(1, Ordering::AcqRel);
             return false;
         }
@@ -199,7 +216,8 @@ impl Shared {
     }
 
     /// TODO 315: a held article's re-ask has been answered, however it
-    /// was answered - give its slot back. Saturating, because the one
+    /// was answered - give its slot back. One slot, however many groups
+    /// held it: [`Self::take_recheck`] charges only the first. Saturating, because the one
     /// thing this must never do is wrap the budget and disable the
     /// whole mechanism for the rest of the run.
     pub(super) fn release_recheck(&self, w: &Work) {

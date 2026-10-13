@@ -2572,6 +2572,14 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
 <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
   <button class="ghost mini" id="addNzbBtn" data-i18n-title="queue.add.title" title="Choose an .nzb file to download - dropping one anywhere on this page works too" data-i18n="queue.add">+ Add NZB…</button>
   <input class="txt" id="addLink" data-i18n-placeholder="queue.link.ph" placeholder="or paste an nzblnk: link here" aria-label="or paste an nzblnk: link here" style="flex:1;min-width:0;max-width:340px" spellcheck="false">
+  <!-- GitHub #97: search the WHOLE queue, not the page on screen. The
+       daemon matches (SAB's search= on the queue read, the same names
+       the history search matches), so it reaches row 9,000 of a queue
+       the page only holds 250 of. Static markup, never re-rendered, so
+       a poll cannot take the caret. -->
+  <input id="qSearch" class="mini" type="search" data-i18n-placeholder="queue.search" placeholder="search queue…" aria-label="search queue…"
+    oninput="setQSearch(this.value)" onkeydown="if(event.key==='Escape'){this.value='';setQSearch('')}"
+    spellcheck="false" style="margin-inline-start:auto;max-width:180px;min-width:0">
 </div>
   <div class="chartwrap" style="height:52px;margin-bottom:8px;display:none"><canvas id="burnChart" data-i18n-title="queue.burn.title" title="What is still to download across the whole queue - the burn-down to zero"></canvas></div>
   <div id="qspace" class="warn" style="display:none;font-size:12.5px;margin-bottom:8px"></div>
@@ -6854,8 +6862,25 @@ let qAppliedWin=null;
 // because a page cannot answer a question about the queue.
 const QUEUE_PAGE=250;
 let qLimitOverride=0;
+// GitHub #97: the queue search, sent as SAB's own `search=` and matched
+// by the daemon over the whole queue. A live row the search misses
+// still rides the page (`pin_live`) so the hero card keeps its job, but
+// marked `search_miss` - the table leaves those out (qTableSlots).
+let qSearch='';
 function queueWindowExtra(){
-  return '&limit='+(qLimitOverride||QUEUE_PAGE)+'&pin_live=1';
+  return '&limit='+(qLimitOverride||QUEUE_PAGE)+'&pin_live=1'
+    +(qSearch?'&search='+encodeURIComponent(qSearch):'');
+}
+let qSearchT=0;
+function setQSearch(v){
+  clearTimeout(qSearchT);
+  qSearchT=setTimeout(()=>{
+    const q=(v||'').trim();
+    if(q===qSearch) return;
+    // A new search starts from the first page again: the window a
+    // "show more" grew was a window over the OLD match set.
+    qSearch=q; qLimitOverride=0; dashQRev=0; tick();
+  },300);
 }
 // Same shape as histShowMore: raise the window, zero the revision so
 // the next tick cannot be answered "unchanged", and refetch.
@@ -6867,10 +6892,23 @@ function qShowMore(){
 // page. `noofslots` is the daemon's own filtered count, taken before
 // its window; the fallback keeps an older daemon (or a payload that
 // predates the header) rendering off what it did send.
+//
+// While a search is active `noofslots` counts the MATCHES, so the whole
+// queue's count is `noofslots_total` - and every caller of this one
+// (the header count, the title, the burn-down, Clear queue) means the
+// whole queue. The pager means the matches: that is qMatched.
 function qCount(q){
-  const n=q&&q.noofslots;
-  return typeof n==='number' ? n : (((q&&q.slots)||[]).length);
+  const n=q&&(qSearch?q.noofslots_total:q.noofslots);
+  return typeof n==='number' ? n : qMatched(q);
 }
+// Rows the caller's search matched, before the window.
+function qMatched(q){
+  const n=q&&q.noofslots;
+  return typeof n==='number' ? n : qTableSlots(q).length;
+}
+// The rows the queue TABLE lists: the page, less any live row that only
+// rides it for the hero card (see qSearch).
+function qTableSlots(q){ return ((q&&q.slots)||[]).filter(s=>!s.search_miss); }
 // True while the queue holds rows this page was not sent. Guards the
 // two places that treat "not in the payload" as "gone from the queue" -
 // a selection and an open drawer.
@@ -6882,7 +6920,9 @@ function qCount(q){
 // and a row falling off the end of the window is not a row that left
 // the queue. Those cues are daemon events now and have no such blind
 // spot, which was the whole prize for moving them.
-function qTruncated(q){ return qCount(q) > (((q&&q.slots)||[]).length); }
+// A search is truncation too: every row it did not match is in the
+// queue and not in the payload.
+function qTruncated(q){ return !!qSearch || qMatched(q) > qTableSlots(q).length; }
 function histWindowExtra(){
   const cur=histFilter();
   const lim=histExpanded()?Math.max(200,histLimitOverride):histRows();
@@ -10839,7 +10879,9 @@ function visibleHold(q){
 // focus - same guard idea as the schedule editor's :focus check.
 function renderQueue(){
   const tb=document.querySelector('#queue tbody');
-  const slots=(lastQ&&lastQ.slots)||[], mbps=lastMbps;
+  // `live` is every row the payload carried, the live ones a search
+  // missed included; `slots` is what the table lists.
+  const live=(lastQ&&lastQ.slots)||[], slots=qTableSlots(lastQ), mbps=lastMbps;
   // Free space on the download disk (SAB's diskspace1, GB), shown in
   // the card header - and a queue-wide forecast under it: bytes still
   // to fetch, with sets that land volumes on disk and unpack afterwards
@@ -10950,7 +10992,9 @@ function renderQueue(){
   // and deferred (slow) jobs run only when nothing else can. Paused items
   // are skipped by the picker, so they neither wait nor make others wait.
   const prioRank={Force:2,High:1,Normal:0,Low:-1};
-  const runnable=slots
+  // Over `live`, so a downloading row a search hides still heads the
+  // line for the rows the search shows.
+  const runnable=live
     .map((s,i)=>({s,i,left:parseFloat(s.mbleft)||0}))
     .filter(x=>x.s.status==='Downloading'||x.s.status==='Queued')
     .sort((a,b)=>{
@@ -10968,7 +11012,10 @@ function renderQueue(){
     // A downloading row's ETA is its OWN bytes over its OWN rate; only a
     // queued row is estimated from the line (everything ahead of it, over
     // the whole line's rate). See jobEta.
-    const cum=finishMb[s.nzo_id], est=jobEta(s,mbps,cum);
+    // Under a search the rows it hid are still ahead of a queued one,
+    // and this page cannot sum what it was not sent - so a queued row
+    // says "-" rather than an estimate that leaves them out.
+    const cum=qSearch?undefined:finishMb[s.nzo_id], est=jobEta(s,mbps,cum);
     const dl=s.status==='Downloading', pz=s.status==='Paused', tail=isTail(s), open=openDrawer===s.nzo_id;
     // U1: the write-out tail gets the plain "not stuck" ETA tooltip.
     const wtail=tail&&(s.finishing||s.status==='Moving');
@@ -11116,24 +11163,29 @@ function renderQueue(){
     // §129 2f: the checkbox renders its state straight from the Set, so
     // selection survives every setHtml tbody re-render by construction.
     const selBox=`<td class="selcol" onclick="selCellClick(event,'q',this)" ondblclick="event.stopPropagation()"><input type="checkbox" class="rowsel" data-sel="${s.nzo_id}"${qSel.has(s.nzo_id)?' checked':''} onclick="selClick(event,'q',this)" aria-label="${escA(t('sel.row','Select {name}',{name:s.filename||s.name}))}"></td>`;
-    return `<tr class="qrow${open?' open':''}" data-id="${s.nzo_id}" data-i="${i}" data-drag="${dl||tail?'0':'1'}" tabindex="0" role="button" aria-expanded="${open}">${selBox}<td>${esc(s.filename||s.name)}${tail?'':forceChip(s)}${identName(s)}${mediaBadge(s.media)}${shapeBadge(s.archive_shape)}${catBadge(s.cat)}${originGlyph(s.origin)}${ruleBadge(s)}${pz?' '+pzLabel:''}${tail?` <span class="dim">· ${tailWord}</span>`:''}${defer}</td><td class="nowrap">${fmtMB(s.mb)}</td>
+    return `<tr class="qrow${open?' open':''}" data-id="${s.nzo_id}" data-i="${i}" data-drag="${dl||tail||qSearch?'0':'1'}" tabindex="0" role="button" aria-expanded="${open}">${selBox}<td>${esc(s.filename||s.name)}${tail?'':forceChip(s)}${identName(s)}${mediaBadge(s.media)}${shapeBadge(s.archive_shape)}${catBadge(s.cat)}${originGlyph(s.origin)}${ruleBadge(s)}${pz?' '+pzLabel:''}${tail?` <span class="dim">· ${tailWord}</span>`:''}${defer}</td><td class="nowrap">${fmtMB(s.mb)}</td>
       <td class="nowrap dim"${tail?` title="${escA(t('queue.left.done','nothing left to download - every byte is in; this row is finishing'))}"`:''}>${tail?'-':fmtMB(s.mbleft)}</td><td class="nowrap mono" title="${escA(wtail?t('queue.eta.tail','not stuck: downloading is finished, and anything packed has been unpacked - the row leaves the queue once the last files are written'):tail||actWord?t('queue.eta.finishing','the download is done - this is the work that follows it'):dl&&est.kind==='stalled'?t('queue.eta.stalled.title','No data has arrived for this download recently, so there is no honest time left to show. It counts down again as soon as data moves.'):dl?t('queue.eta.active','time to finish this download'):t('queue.eta.queued','estimated finish, once the items ahead complete'))}">${tail?`<span class="dim">${tailWord}</span>`:actWord?`<span class="dim">${actWord}</span>`:pz?'-':est.kind==='stalled'?`<span class="warn">${t('queue.eta.stalled','stalled')}</span>`:fmtEta(est.kind==='eta'?est.secs:Infinity)}</td>
       <td><div class="bar"><i style="width:${s.percentage}%"></i></div>${actSub(s)}</td>
       <td class="nowrap" style="text-align:end">${ctl}</td></tr>`+
       (open?`<tr class="drawer"><td colspan="7">${drawerHtml(s)}</td></tr>`:'');
-  }).join('')||`<tr><td colspan="7" class="dim"><button type="button" class="idlepick" title="${
+  }).join('')||(qSearch?`<tr><td colspan="7" class="dim">${esc(t('queue.search.none','No download in the queue matches "{q}".',{q:qSearch}))}</td></tr>`
+    :`<tr><td colspan="7" class="dim"><button type="button" class="idlepick" title="${
       escA(t('queue.empty.nzblnk','An nzblnk link works too: paste it anywhere on this page.'))}">${
-      t('queue.empty.drop','Nothing downloading. Drop a .nzb anywhere, or click here to choose one.')}</button></td></tr>`);
+      t('queue.empty.drop','Nothing downloading. Drop a .nzb anywhere, or click here to choose one.')}</button></td></tr>`));
   updateSelBar('q');
   // Say what is being withheld rather than just stopping - a
   // queue that ends silently at 250 of 15,000 reads as lost downloads.
   // Same pager as history's, and for the same reason: the window is a
   // real request to the daemon, which builds only the rows inside it.
-  const qmore=qCount(lastQ)-slots.length;
-  setHtml('queueMore', qmore>0
+  // Under a search the pager pages the MATCHES, and says how many of
+  // the queue matched even when they all fit.
+  const qmore=qMatched(lastQ)-slots.length;
+  setHtml('queueMore', (qmore>0
     ? `<button class="ghost mini" onclick="qShowMore()">${esc(
-        t('queue.more','show {n} more of {total}',{n:Math.min(QUEUE_PAGE,qmore),total:qCount(lastQ)}))}</button>`
-    : '');
+        t('queue.more','show {n} more of {total}',{n:Math.min(QUEUE_PAGE,qmore),total:qMatched(lastQ)}))}</button>`
+    : '')+(qSearch&&qMatched(lastQ)
+    ? `${qmore>0?' · ':''}<span class="dim">${esc(t('queue.search.count','{n} of {total} match',{n:qMatched(lastQ),total:qCount(lastQ)}))}</span>`
+    : ''));
   restoreKbdFocus();
 }
 // Detail drawer body: live per-file progress + verify + per-server

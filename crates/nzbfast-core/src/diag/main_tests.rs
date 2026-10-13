@@ -111,6 +111,101 @@ fn no_parity_and_confirmed_missing_is_said_plainly_but_still_retries() {
     );
 }
 
+/// The 12 Oct 2026 dead-post legs (five real providers, a synthetic
+/// post whose every message-id never existed), with the per-server counts the
+/// first leg logged. No article had all five refusals when the stall
+/// watchdog fired, so the unanimous count was zero, and the stall arm
+/// said "No server said any article was missing" and classified
+/// `Transport` - over 9,307 id-proven refusals.
+#[test]
+fn a_stall_over_a_post_every_server_refused_blames_the_post() {
+    let refusals = [798, 793, 1121, 409, 6186];
+    let dead = || LossCauses {
+        stalled: true,
+        missing_segments: 6815,
+        total_segments: 6815,
+        server_refusals: &refusals,
+        par2_slots: 1,
+        ..no_causes()
+    };
+    assert!(dead().fleet_refused_the_post());
+    let (kind, msg) = super::incomplete_verdict(62, 0, &dead());
+    assert_eq!(kind, crate::failkind::FailKind::MissingArticles, "{msg}");
+    assert!(msg.starts_with("download incomplete"), "{msg}");
+    assert!(msg.contains("between 409 and 6186 articles each"), "{msg}");
+    assert!(msg.contains("delivered 0 of 6815 segment(s)"), "{msg}");
+    assert!(
+        !msg.contains("No server said any article was missing"),
+        "{msg}"
+    );
+    assert!(!msg.contains("fault on THIS machine"), "{msg}");
+
+    // Each guard on its own puts it back on the stall arm.
+    // A server that never voted may be the one carrying the post.
+    let gone = ["news.deadprov.com".to_string()];
+    let with_dead = LossCauses {
+        dead_servers: &gone,
+        ..dead()
+    };
+    assert!(!with_dead.fleet_refused_the_post());
+    let left = LossCauses {
+        left_servers: &gone,
+        ..dead()
+    };
+    assert!(!left.fleet_refused_the_post());
+    // One server below the floor.
+    let thin = [798, 793, 1121, 12, 6186];
+    assert!(
+        !LossCauses {
+            server_refusals: &thin,
+            ..dead()
+        }
+        .fleet_refused_the_post()
+    );
+    // A healthy post that stalled: the fleet delivered more than the
+    // quietest server refused.
+    let healthy = LossCauses {
+        missing_segments: 2000,
+        ..dead()
+    };
+    assert!(!healthy.fleet_refused_the_post());
+    // No per-server accounting claims nothing.
+    assert!(
+        !LossCauses {
+            server_refusals: &[],
+            ..dead()
+        }
+        .fleet_refused_the_post()
+    );
+}
+
+/// The thin half of the same defect: a stall with real refusals on
+/// record, too few or too uneven for the verdict above, must still not
+/// say nobody refused anything. It stays the stall's own kind.
+#[test]
+fn a_stall_with_per_server_refusals_does_not_deny_them() {
+    let refusals = [40, 3, 0];
+    let (kind, msg) = super::incomplete_verdict(
+        94,
+        0,
+        &LossCauses {
+            stalled: true,
+            missing_segments: 8000,
+            total_segments: 9000,
+            server_refusals: &refusals,
+            par2_slots: 4,
+            ..no_causes()
+        },
+    );
+    assert_eq!(kind, crate::failkind::FailKind::Transport, "{msg}");
+    assert!(msg.contains("connection pool stalled"), "{msg}");
+    assert!(
+        !msg.contains("No server said any article was missing"),
+        "{msg}"
+    );
+    assert!(msg.contains("refused 43 request(s) by message-id"), "{msg}");
+}
+
 #[test]
 fn a_stalled_pool_does_not_report_a_healthy_post_as_missing() {
     let stalled = super::incomplete_reason(
@@ -1114,6 +1209,7 @@ fn no_causes() -> LossCauses<'static> {
         bytes_arrived: 0,
         backbones: &[],
         post_age_days: 0,
+        server_refusals: &[],
     }
 }
 

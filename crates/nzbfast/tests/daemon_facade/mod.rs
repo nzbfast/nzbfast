@@ -20,6 +20,30 @@
 
 use super::*;
 
+/// Standard base64 (with padding) for an NZBGet `append` payload, which
+/// carries the NZB as base64 in its second parameter.
+fn b64(data: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(A[(n >> 18) as usize & 63] as char);
+        out.push(A[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 {
+            A[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            A[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 /// M14a/b: the extended SABnzbd facade - two-tier keys, priorities
 /// (incl. Force-runs-while-paused and add-paused), park-to-history,
 /// retry, failed_only, pagination, del_files.
@@ -859,29 +883,6 @@ async fn nzbget_jsonrpc_facade_cycle() {
     .await;
     let port = d.port;
 
-    // Simple std base64 encoder for the append payload.
-    fn b64(data: &[u8]) -> String {
-        const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::new();
-        for c in data.chunks(3) {
-            let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
-            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-            out.push(A[(n >> 18) as usize & 63] as char);
-            out.push(A[(n >> 12) as usize & 63] as char);
-            out.push(if c.len() > 1 {
-                A[(n >> 6) as usize & 63] as char
-            } else {
-                '='
-            });
-            out.push(if c.len() > 2 {
-                A[n as usize & 63] as char
-            } else {
-                '='
-            });
-        }
-        out
-    }
-
     tokio::task::spawn_blocking(move || {
         let rpc = |method: &str, params: String| -> String {
             let body = format!("{{\"method\":\"{method}\",\"params\":{params},\"id\":7}}");
@@ -1020,27 +1021,6 @@ async fn jsonrpc_pause_and_delete_announce_the_idle_edge() {
     let port = d.port;
 
     tokio::task::spawn_blocking(move || {
-        fn b64(data: &[u8]) -> String {
-            const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            let mut out = String::new();
-            for c in data.chunks(3) {
-                let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
-                let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-                out.push(A[(n >> 18) as usize & 63] as char);
-                out.push(A[(n >> 12) as usize & 63] as char);
-                out.push(if c.len() > 1 {
-                    A[(n >> 6) as usize & 63] as char
-                } else {
-                    '='
-                });
-                out.push(if c.len() > 2 {
-                    A[n as usize & 63] as char
-                } else {
-                    '='
-                });
-            }
-            out
-        }
         let rpc = |method: &str, params: String| -> String {
             let body = format!("{{\"method\":\"{method}\",\"params\":{params},\"id\":9}}");
             http(
@@ -2073,6 +2053,261 @@ async fn sab_output_xml_is_opt_in_and_shaped_like_sabs() {
             .unwrap_or_else(|e| panic!("not JSON ({e}): {bad_json}"));
         assert_eq!(v["error"], "API Key Incorrect");
         assert_eq!(v["status"], false);
+    })
+    .await
+    .unwrap();
+}
+
+/// The completed folder must carry the WHOLE submitted release name. A
+/// client that names it from a SHORTENED name, cut at the first
+/// season/year/quality token (`Beverly.Hills.90210.S06.1080p...` filed as
+/// `Beverly Hills 90210`, `PAW.Patrol.S11E42-E43...` as
+/// `PAW Patrol - S11E42`), gets every episode refused by Sonarr
+/// ("Episode 6x01 was unexpected considering the ... folder name"). SAB
+/// and NZBGet name the folder from the full submitted name and the *arr
+/// apps rely on it, so this pins ours:
+///
+/// - a season pack and an `SxxEyy-Eyy` multi-episode release keep their
+///   WHOLE name as the completed folder, after the job has finished and
+///   the default finalize naming (`auto_rename` on) has run;
+/// - through the SAB API (`addfile`, by upload filename and by
+///   `nzbname`) AND the NZBGet JSON-RPC `append`, with and without a
+///   category;
+/// - SAB's `storage` and NZBGet's `DestDir` / `FinalDir` - the three
+///   fields an *arr reads the import path from - all name that folder;
+/// - an NZB whose body is obfuscated and whose `<meta type="name">`
+///   says something ELSE still lands under the name the *arr submitted:
+///   the meta never overrides it (memory
+///   `nzbfast-doubled-release-names-are-the-posters` - the stem is the
+///   submitter's, never ours to rewrite).
+#[tokio::test(flavor = "multi_thread")]
+async fn arr_release_names_keep_their_whole_folder_name_through_both_apis() {
+    const SEASON: &str = "Beverly.Hills.90210.S06.1080p.AMZN.WEB-DL.DDP2.0.H.264-NTb";
+    const MULTI: &str =
+        "PAW.Patrol.S11E42-E43.Pups.Save.the.Day.1080p.AMZN.WEB-DL.DDP2.0.H.264-LAZY";
+    // Every leg is a DIFFERENT release of the same shape: submitting one
+    // episode twice is held as a duplicate (`duplicate_key`), which is a
+    // different behaviour from the one this test is about.
+    const SEASON_NG: &str = "Beverly.Hills.90210.S07.1080p.AMZN.WEB-DL.DDP2.0.H.264-NTb";
+    const MULTI_NG: &str =
+        "PAW.Patrol.S11E44-E45.Pups.Save.the.Day.1080p.AMZN.WEB-DL.DDP2.0.H.264-LAZY";
+    const SEASON_OBF: &str = "Beverly.Hills.90210.S08.1080p.AMZN.WEB-DL.DDP2.0.H.264-NTb";
+    let dir = std::env::temp_dir().join(format!("nzbfast-arrnames-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    // One small payload file per job, each under its own article ids.
+    // (api, submitted name, category, payload file in the NZB, meta name)
+    let legs: [(&str, &str, &str, &str, Option<&str>); 5] = [
+        (
+            "sab",
+            SEASON,
+            "",
+            "Beverly.Hills.90210.S06E01.1080p.AMZN.WEB-DL.DDP2.0.H.264-NTb.mkv",
+            None,
+        ),
+        (
+            "sab",
+            MULTI,
+            "tv",
+            "PAW.Patrol.S11E42-E43.Pups.Save.the.Day.1080p.AMZN.WEB-DL.DDP2.0.H.264-LAZY.mkv",
+            None,
+        ),
+        (
+            "nzbget",
+            SEASON_NG,
+            "tv",
+            "Beverly.Hills.90210.S07E01.1080p.AMZN.WEB-DL.DDP2.0.H.264-NTb.mkv",
+            None,
+        ),
+        (
+            "nzbget",
+            MULTI_NG,
+            "",
+            "PAW.Patrol.S11E44-E45.Pups.Save.the.Day.1080p.AMZN.WEB-DL.DDP2.0.H.264-LAZY.mkv",
+            None,
+        ),
+        (
+            "sab",
+            SEASON_OBF,
+            "series",
+            "a8f3c0e19b7d4e2f6a1c9d0b.mkv",
+            Some("Beverly Hills 90210 S06"),
+        ),
+    ];
+    let mut articles = HashMap::new();
+    let mut nzbs = Vec::new();
+    for (i, (_, _, _, file, meta)) in legs.iter().enumerate() {
+        let data = payload(60_000, 50 + i as u8);
+        let segs = make_file_articles(file, &data, 40_000, &format!("an{i}"), &mut articles);
+        let mut xml = String::from(
+            "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n",
+        );
+        if let Some(m) = meta {
+            xml.push_str(&format!("  <head><meta type=\"name\">{m}</meta></head>\n"));
+        }
+        xml.push_str(&format!(
+            "  <file poster=\"x\" date=\"0\" subject=\"&quot;{file}&quot; yEnc (1/{})\">\n    <groups><group>g</group></groups>\n    <segments>\n",
+            segs.len()
+        ));
+        for (id, bytes, num) in &segs {
+            xml.push_str(&format!(
+                "      <segment bytes=\"{bytes}\" number=\"{num}\">{id}</segment>\n"
+            ));
+        }
+        xml.push_str("    </segments>\n  </file>\n</nzb>\n");
+        nzbs.push(xml);
+    }
+    let srv = MockServer::start(articles, Chaos::default()).await;
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--out")
+            .arg(dir.join("complete"));
+        c
+    })
+    .await;
+    let port = d.port;
+
+    let complete = dir.join("complete");
+    tokio::task::spawn_blocking(move || {
+        let rpc = |method: &str, params: String| -> serde_json::Value {
+            let body = format!("{{\"method\":\"{method}\",\"params\":{params},\"id\":3}}");
+            let r = http(
+                port,
+                "/jsonrpc",
+                Some(("application/json", body.as_bytes())),
+            );
+            serde_json::from_str(&r).unwrap_or_else(|_| panic!("{method}: {r}"))
+        };
+        // Submit every leg the way its client does. Sonarr's SAB client
+        // uploads `<title>.nzb`; the obfuscated leg uploads under the
+        // obfuscated file name and passes the title as `nzbname`, the
+        // other path an *arr or a remote app takes.
+        enum Id {
+            Sab(String),
+            Nzbget(i64),
+        }
+        let mut ids = Vec::new();
+        for ((api, name, cat, file, meta), xml) in legs.iter().zip(&nzbs) {
+            if *api == "sab" {
+                let upload = if meta.is_some() {
+                    format!("{}.nzb", file.trim_end_matches(".mkv"))
+                } else {
+                    format!("{name}.nzb")
+                };
+                let mut q = format!("/api?mode=addfile&output=json&cat={cat}");
+                if meta.is_some() {
+                    q.push_str(&format!("&nzbname={name}"));
+                }
+                let boundary = "----arrnames";
+                let mut body = Vec::new();
+                body.extend_from_slice(
+                    format!(
+                        "--{boundary}\r\nContent-Disposition: form-data; name=\"name\"; filename=\"{upload}\"\r\nContent-Type: application/x-nzb\r\n\r\n"
+                    )
+                    .as_bytes(),
+                );
+                body.extend_from_slice(xml.as_bytes());
+                body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+                let ctype = format!("multipart/form-data; boundary={boundary}");
+                let r = http(port, &q, Some((&ctype, &body)));
+                let nzo = serde_json::from_str::<serde_json::Value>(&r)
+                    .ok()
+                    .and_then(|v| v["nzo_ids"][0].as_str().map(str::to_string))
+                    .unwrap_or_else(|| panic!("addfile {name}: {r}"));
+                ids.push(Id::Sab(nzo));
+            } else {
+                let ap = rpc(
+                    "append",
+                    format!(
+                        "[\"{name}.nzb\",\"{}\",\"{cat}\",0,false,false,\"\",0,\"SCORE\"]",
+                        b64(xml.as_bytes())
+                    ),
+                );
+                let id = ap["result"].as_i64().unwrap_or(0);
+                assert!(id > 0, "append {name}: {ap}");
+                ids.push(Id::Nzbget(id));
+            }
+        }
+
+        // Wait for every job to finish, finalize naming included.
+        let mut sab_hist = serde_json::Value::Null;
+        for _ in 0..300 {
+            let h = http(port, "/api?mode=history&output=json", None);
+            sab_hist = serde_json::from_str(&h).unwrap_or(serde_json::Value::Null);
+            let done = sab_hist["history"]["slots"]
+                .as_array()
+                .map(|s| s.iter().filter(|s| s["status"] == "Completed").count())
+                .unwrap_or(0);
+            if done == legs.len() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let slots = sab_hist["history"]["slots"].as_array().cloned().unwrap_or_default();
+        assert_eq!(
+            slots.iter().filter(|s| s["status"] == "Completed").count(),
+            legs.len(),
+            "every leg must complete: {sab_hist}"
+        );
+        let ng_hist = rpc("history", "[]".into());
+        let ng = ng_hist["result"].as_array().cloned().unwrap_or_default();
+
+        for ((api, name, cat, _, meta), id) in legs.iter().zip(&ids) {
+            let want = if cat.is_empty() {
+                complete.join(name)
+            } else {
+                complete.join(cat).join(name)
+            };
+            let leg = format!("{api} {name} cat={cat:?} meta={meta:?}");
+            // The SAB view of every job, whichever API submitted it.
+            let slot = match id {
+                Id::Sab(nzo) => slots.iter().find(|s| s["nzo_id"] == nzo.as_str()),
+                Id::Nzbget(_) => slots.iter().find(|s| {
+                    Path::new(s["storage"].as_str().unwrap_or_default()) == want
+                }),
+            }
+            .unwrap_or_else(|| panic!("{leg}: no SAB history slot at {want:?}: {sab_hist}"));
+            let storage = PathBuf::from(slot["storage"].as_str().unwrap_or_default());
+            assert_eq!(
+                storage, want,
+                "{leg}: SAB `storage` must be the WHOLE submitted name"
+            );
+            assert!(storage.is_dir(), "{leg}: {storage:?} is not on disk");
+            // And the NZBGet view of the NZBGet-submitted ones.
+            if let Id::Nzbget(nid) = id {
+                let g = ng
+                    .iter()
+                    .find(|g| g["NZBID"].as_i64() == Some(*nid))
+                    .unwrap_or_else(|| panic!("{leg}: no NZBGet history row: {ng_hist}"));
+                for key in ["DestDir", "FinalDir"] {
+                    assert_eq!(
+                        g[key].as_str().map(PathBuf::from),
+                        Some(want.clone()),
+                        "{leg}: NZBGet `{key}` must be the WHOLE submitted name: {g}"
+                    );
+                }
+            }
+        }
     })
     .await
     .unwrap();

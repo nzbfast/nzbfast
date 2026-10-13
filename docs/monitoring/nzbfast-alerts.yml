@@ -1,0 +1,97 @@
+# Prometheus alert rules for nzbfast. Every metric below is one the
+# daemon's /metrics endpoint emits; see docs/MONITORING.md for the scrape
+# config and the list. Load with `rule_files:` in prometheus.yml.
+groups:
+  - name: nzbfast
+    rules:
+      - alert: NzbfastDown
+        expr: up{job="nzbfast"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "nzbfast is not answering scrapes"
+          description: "{{ $labels.instance }} has not answered a /metrics scrape for 2 minutes. If the daemon is up, check the API key in the scrape config."
+
+      - alert: NzbfastNoThroughput
+        # A job is downloading, nothing is paused, the daemon is not
+        # offline, and the rate is zero. Rate is a 5 s window, so ask
+        # for the whole stretch.
+        expr: |
+          nzbfast_queue_jobs{state="downloading"} > 0
+          and on(instance) nzbfast_paused == 0
+          and on(instance) nzbfast_offline == 0
+          and on(instance) nzbfast_download_rate_bytes_per_second == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "nzbfast has a job downloading but no throughput"
+          description: "{{ $labels.instance }} has had a downloading job and a zero download rate for 5 minutes."
+
+      - alert: NzbfastOffline
+        expr: nzbfast_offline == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "nzbfast reports it is offline"
+          description: "{{ $labels.instance }} has reported offline for 5 minutes."
+
+      - alert: NzbfastProviderDown
+        expr: nzbfast_server_down == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A provider is granting no sessions"
+          description: "{{ $labels.server }} (index {{ $labels.index }}) on {{ $labels.instance }} has granted no sessions for 5 minutes."
+
+      - alert: NzbfastHighMissingRate
+        # Share of article dispatches a provider answered 430/423.
+        # Both counters reset per run, which rate() reads as a restart.
+        expr: |
+          sum by (instance, server, index) (rate(nzbfast_server_articles_missing_total[10m]))
+            /
+          sum by (instance, server, index) (rate(nzbfast_server_articles_tried_total[10m]))
+            > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Most articles from one provider are missing"
+          description: "{{ $labels.server }} answered no-such-article for over half of its dispatches in the last 10 minutes."
+
+      - alert: NzbfastFailedJobsRising
+        # history_jobs is a gauge (history is trimmed on its own
+        # schedule), so compare it with itself an hour ago and fire only
+        # on a rise.
+        expr: nzbfast_history_jobs{outcome="failed"} - nzbfast_history_jobs{outcome="failed"} offset 1h >= 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Several jobs failed in the last hour"
+          description: "{{ $labels.instance }} gained {{ $value }} failed history entries over the last hour."
+
+      - alert: NzbfastHighMemory
+        expr: nzbfast_memory_rss_bytes / nzbfast_memory_budget_bytes > 1.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "nzbfast resident memory is well past its budget"
+          description: "{{ $labels.instance }} RSS has been over 1.5x its memory budget for 10 minutes."
+
+      # DISK. nzbfast does not export a disk figure, so there is no
+      # nzbfast_* disk rule. If you run node_exporter on the same host,
+      # this one uses ITS metric (adjust the mountpoint to your
+      # download folder's filesystem) and is left commented out:
+      #
+      # - alert: DownloadDiskLow
+      #   expr: node_filesystem_avail_bytes{mountpoint="/downloads"} / node_filesystem_size_bytes{mountpoint="/downloads"} < 0.10
+      #   for: 10m
+      #   labels:
+      #     severity: warning
+      #   annotations:
+      #     summary: "Under 10% free on the download filesystem"

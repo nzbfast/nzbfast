@@ -1702,6 +1702,63 @@ fn http_post(port: u16, req: &str, body: &str) -> String {
     out.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
 }
 
+/// A server save over a config the daemon cannot READ must refuse, and
+/// leave the file byte-identical. Every read on that path answered "no
+/// servers" for it, so the save used to append the submitted server to
+/// an empty list and atomically rename `{"servers":[new]}` over every
+/// other server, credential and top-level key - reporting success,
+/// because the rename needs the directory and not the file. Codex 13 Oct
+/// sweep F3. The two saves before the damage are the controls: a first
+/// save creates the list, and an edit by index keeps the other server.
+#[cfg(unix)]
+#[test]
+fn a_server_save_over_an_unreadable_config_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("unreadable");
+    let d = serve(&dir);
+    let cfg = dir.join("config.json");
+    for body in [
+        r#"{"index":-1,"server":{"host":"news.one.example","port":563,"connections":8,"password":"pw1"}}"#,
+        r#"{"index":-1,"server":{"host":"news.two.example","port":563,"connections":8,"password":"pw2"}}"#,
+        r#"{"index":0,"server":{"host":"news.one.example","port":563,"connections":4}}"#,
+    ] {
+        let r = http_post(d.port, "/api?mode=server_save&output=json", body);
+        assert!(r.contains("\"status\":true"), "control save failed: {r}");
+    }
+    let before = std::fs::read(&cfg).unwrap();
+    let root: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(root["servers"].as_array().map(Vec::len), Some(2), "{root}");
+    assert_eq!(root["servers"][0]["connections"], 4, "{root}");
+    assert!(
+        root["servers"][0]["password"].is_string(),
+        "an edit with a blank password keeps the stored one: {root}"
+    );
+
+    std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&cfg).is_ok() {
+        // Root reads through mode 000: nothing unreadable to test.
+        std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o600)).unwrap();
+        drop(d);
+        return;
+    }
+    let r = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":1,"server":{"host":"news.new.example","port":563,"connections":8}}"#,
+    );
+    std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        r.contains("\"status\":false"),
+        "a save over an unreadable config must fail: {r}"
+    );
+    assert_eq!(
+        std::fs::read(&cfg).unwrap(),
+        before,
+        "the unreadable config must be left exactly as it was"
+    );
+    drop(d);
+}
+
 /// TODO 110: the per-server address allowance (`max_source_ips`) is a
 /// setting in three places - the server_save merge, the dashboard form,
 /// and get_config's servers block - and this pins the round trip through

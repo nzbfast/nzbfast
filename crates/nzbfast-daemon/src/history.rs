@@ -515,10 +515,7 @@ impl HistQuery {
                 .filter(|c| !c.is_empty() && *c != "*")
                 .cloned(),
             ids: nzo_ids_param(params),
-            search: params
-                .get("search")
-                .map(|s| s.trim().to_lowercase())
-                .filter(|s| !s.is_empty()),
+            search: search_needle(params),
             bucket: params
                 .get("bucket")
                 .filter(|b| matches!(b.as_str(), "done" | "failed" | "locked"))
@@ -635,16 +632,11 @@ pub fn history_page(d: &Daemon, q: &HistQuery, summary: bool) -> (Vec<Value>, us
         {
             continue;
         }
-        if let Some(needle) = &q.search {
-            let hit = j.name.to_lowercase().contains(needle)
-                || j.category.to_lowercase().contains(needle)
-                || j.identity_name.to_lowercase().contains(needle)
-                || j.filed_base
-                    .as_ref()
-                    .is_some_and(|b| b.to_lowercase().contains(needle));
-            if !hit {
-                continue;
-            }
+        if q.search
+            .as_ref()
+            .is_some_and(|needle| !j.matches_search(needle))
+        {
+            continue;
         }
         // Facets over the search/category set, BEFORE the failed_only
         // bucket narrows it - they are what the bucket chips display.
@@ -1521,4 +1513,14 @@ fn history_row(d: &Daemon, j: &Job, held: &[crate::altcand::HeldSpare]) -> Value
             },
         })
     }
+}
+
+/// SAB's `search=` as [`Job::matches_search`] wants it: trimmed,
+/// lowercased, and absent when blank. Shared by `mode=history` and
+/// `mode=queue` so the two parse the parameter one way.
+pub fn search_needle(params: &std::collections::HashMap<String, String>) -> Option<String> {
+    params
+        .get("search")
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
 }
