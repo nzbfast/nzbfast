@@ -853,8 +853,36 @@ jobs:
       # survived, and ad-hoc signs inside-out. ENGINE= hands it the build
       # above so the app bundles the same engine the zip and the updater
       # payload carry.
+      # make-app.sh's private-string check reads packaging/private-patterns.txt,
+      # and that list is deliberately NOT in the public tree (publishing it
+      # would publish what it protects). On the public repo it arrives as the
+      # PRIVATE_PATTERNS Actions secret, readable only by the repo owner and
+      # masked in logs. A missing secret refuses here, never silently skips:
+      # a check that cannot find its list must not report clean. The first
+      # public run, v1.8.0 on 13 Oct 2026, failed exactly that way.
+      - name: Private-strings list for the bundle check
+        env:
+          PRIVATE_PATTERNS: ${{ secrets.PRIVATE_PATTERNS }}
+        run: |
+          set -euo pipefail
+          if [ -f packaging/private-patterns.txt ]; then
+            echo "packaging/private-patterns.txt is in the checkout - using it"
+            exit 0
+          fi
+          if [ -z "$PRIVATE_PATTERNS" ]; then
+            echo "::error::PRIVATE_PATTERNS secret is not set on this repo; make-app.sh cannot check the bundle for private strings"
+            exit 1
+          fi
+          printf '%s\n' "$PRIVATE_PATTERNS" > packaging/private-patterns.txt
+          echo "wrote the list from the secret ($(grep -cv '^[[:space:]]*\(#\|$\)' packaging/private-patterns.txt) patterns)"
+
       - name: NzbFast.app
         run: ENGINE="$PWD/target/nzbfast-universal" macapp/make-app.sh
+
+      # Never let the list outlive the step that needed it, whatever happened.
+      - name: Remove the private-strings list
+        if: ${{ always() && github.repository == 'nzbfast/nzbfast' }}
+        run: rm -f packaging/private-patterns.txt
 
       - name: Check the bundle
         run: macapp/check-app.sh macapp/build/NzbFast.app
