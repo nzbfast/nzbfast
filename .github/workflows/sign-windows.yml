@@ -113,7 +113,7 @@ jobs:
 
       - name: Upload UNSIGNED installer
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nzbfast-setup-unsigned
           path: packaging/windows/out/nzbfast-*-windows-x64-setup.exe
@@ -131,7 +131,7 @@ jobs:
       #
       - name: Sign installer via SignPath Foundation
         if: ${{ inputs.sign }}
-        uses: signpath/github-action-submit-signing-request@ced31329c0317e779dad2eec2a7c3bb46ea1343e # v1
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
@@ -163,7 +163,7 @@ jobs:
       #
       - name: Upload SIGNED installer
         if: ${{ inputs.sign }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nzbfast-setup-signed
           path: packaging/windows/out-signed/*.exe
@@ -296,7 +296,7 @@ jobs:
       # the SignPath project configuration.
       - name: Upload UNSIGNED installer (arm64)
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nzbfast-setup-arm64-beta-unsigned
           path: packaging/windows/out/nzbfast-*-windows-arm64-beta-setup.exe
@@ -311,7 +311,7 @@ jobs:
       #
       - name: Sign ARM64 installer via SignPath Foundation
         if: ${{ inputs.sign }}
-        uses: signpath/github-action-submit-signing-request@ced31329c0317e779dad2eec2a7c3bb46ea1343e # v1
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
@@ -343,7 +343,7 @@ jobs:
       #
       - name: Upload SIGNED ARM64 installer
         if: ${{ inputs.sign }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nzbfast-setup-arm64-beta-signed
           path: packaging/windows/out-signed/*.exe
