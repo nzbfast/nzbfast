@@ -81,13 +81,19 @@ pub(super) fn restore_runtime_state(
 ///
 /// Resolved rather than canonicalized: the directory may not exist
 /// yet on a first run, and canonicalize() fails on a missing path.
+///
+/// `std::path::absolute` and not `current_dir().join(..)`: on Windows a
+/// drive-relative `C:downloads` carries a prefix, so joining it onto the
+/// cwd REPLACES the cwd and answers `C:downloads` again - still relative,
+/// and the one path this function exists to never publish (Gemini
+/// 14 Oct sweep L5). `absolute` resolves it against that drive's own
+/// current directory, as the OS does; on Unix it is the same cwd join,
+/// minus any `.` components.
 pub(super) fn absolute_out_root(out_root: PathBuf) -> PathBuf {
     if out_root.is_absolute() {
         out_root
     } else {
-        std::env::current_dir()
-            .map(|c| c.join(&out_root))
-            .unwrap_or(out_root)
+        std::path::absolute(&out_root).unwrap_or(out_root)
     }
 }
 
@@ -1292,9 +1298,9 @@ fn build_daemon(
         scoreboard: seeded_scoreboard(&settings_path),
         corr_confirm_enabled: seed_corr_confirm_enabled(&settings_path),
         corr_confirm_source: seed_corr_confirm_source(&settings_path),
-        // Spots are new, so there is no existing-install case to seed
-        // from: nobody has one running today. Straight off until asked.
-        spot_enabled: seed_spot_enabled(&settings_path),
+        // Follows the resolved index switch unless spots were saved
+        // on or off by hand: a fresh install scans nothing (GitHub #100).
+        spot_enabled: seed_spot_enabled(&settings_path, index_enabled),
         spot_groups: seed_spot_groups(&settings_path),
         spot_backfill: seed_spot_backfill(&settings_path),
         spot_deepen: seed_spot_deepen(&settings_path),

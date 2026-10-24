@@ -3001,8 +3001,33 @@ fn a_settings_file_of_wizard_answers_is_still_a_first_run() {
         !beyond(r#"{"index_interests":""}"#),
         "answering \"nothing\" is an answer"
     );
+    // import-sab's adopted passwords file, alone or beside the wizard's.
+    assert!(
+        !beyond(r#"{"password_file":"/srv/sab/passwords.txt"}"#),
+        "import-sab's answer alone"
+    );
+    assert!(!beyond(
+        r#"{"index_interests":"linux","password_file":"/srv/sab/passwords.txt"}"#
+    ));
     // Anything the daemon itself wrote means it has run.
     assert!(beyond(r#"{"index_interests":"linux","auto_speed":false}"#));
+    assert!(beyond(r#"{"password_file":"/p","auto_speed":false}"#));
+    // `import-sab --arr` (GitHub #102): the whole preset, with or without
+    // the passwords file beside it, is still a first run - and one real
+    // setting beside it is not.
+    let preset = serde_json::Value::Object(
+        nzbfast_core::import_sab::ARR_PRESET
+            .iter()
+            .map(|(k, _)| (k.to_string(), serde_json::json!(false)))
+            .collect(),
+    );
+    assert!(!beyond(&preset.to_string()), "the --arr preset alone");
+    let mut with_pw = preset.clone();
+    with_pw["password_file"] = serde_json::json!("/p");
+    assert!(!beyond(&with_pw.to_string()));
+    let mut with_more = preset;
+    with_more["auto_speed"] = serde_json::json!(false);
+    assert!(beyond(&with_more.to_string()));
     assert!(beyond(r#"{"apikey":"k"}"#));
     // An empty object carries no wizard answer to explain itself, so
     // the old rule stands: the file exists, the install has run.

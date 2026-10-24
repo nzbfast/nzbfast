@@ -839,16 +839,27 @@ fn the_reference_implementation_verifies_a_wide_set_we_wrote() {
     // matched, so pin that every one of them was named and none was
     // reported missing. Without this the degraded arm above could grade
     // nothing at all and still read as interop.
+    //
+    // Matched in the spelling par2 PRINTS, which is the local one: on
+    // Windows par2cmdline turns every `/` of a packet name into `\`
+    // before it opens the file (`TranslateFilenameFromPar2ToLocal`), and
+    // its `Opening:`, `Target: ... - found.` and `... - missing.` lines
+    // all name that on-disk path. Matching the packet's `/` spelling
+    // there failed every nested member on every Windows run - and, worse,
+    // made the `- missing` check below unable to fire for one at all.
     for m in &members {
+        let shown = if cfg!(windows) {
+            m.name.replace('/', "\\")
+        } else {
+            m.name.clone()
+        };
         assert!(
-            text.contains(m.name.as_str()),
-            "par2 {version:?} never named {}:\n{text}",
-            m.name
+            text.contains(shown.as_str()),
+            "par2 {version:?} never named {shown}:\n{text}"
         );
         assert!(
-            !text.contains(&format!("{}\" - missing", m.name)),
-            "par2 {version:?} could not find {}:\n{text}",
-            m.name
+            !text.contains(&format!("{shown}\" - missing")),
+            "par2 {version:?} could not find {shown}:\n{text}"
         );
     }
 }

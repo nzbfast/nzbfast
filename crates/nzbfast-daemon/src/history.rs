@@ -144,8 +144,12 @@ pub fn history_change_cat(d: &Daemon, id: &str, cat: &str) -> Value {
                 (Some(root), _) => root,
                 (None, Some(root)) if !cat.is_empty() => root.join(cat),
                 (None, Some(root)) => root,
-                (None, None) if !cat.is_empty() => crate::naming::out_dir(d).join(cat),
-                (None, None) => crate::naming::out_dir(d),
+                // `cat_dir`, the folder a fresh add of this category is
+                // placed under and `finalize_names` files into, so a
+                // category whose `cat_meta.dir` renames its subfolder is
+                // honoured here too. It answers the download root for
+                // the empty category. Gemini 14 Oct 2026 sweep, H3.
+                (None, None) => d.cat_dir(cat),
             }
         } else if let Some(root) = d.write_through_root(cat) {
             // TODO 317: a job that has NOT completed is recategorized
@@ -156,14 +160,12 @@ pub fn history_change_cat(d: &Daemon, id: &str, cat: &str) -> Value {
             // move - a payload that never reaches the destination and
             // nothing to say why.
             root
-        } else if cat.is_empty() {
-            crate::naming::out_dir(d)
         } else {
-            crate::naming::out_dir(d).join(cat)
+            d.cat_dir(cat)
         };
         // Pick a free name rather than merging blind. The queued-job arm
-        // goes through refile_out_dir with dir_claim, and retry does the
-        // same, for the reason its comment gives: re-using a claimed
+        // goes through refile_out_dir with a claim, and retry's refile
+        // does the same, for the reason its comment gives: re-using a claimed
         // directory would put two live jobs in it. Without this, re-adding
         // the same NZB under another category (which claims the folder while
         // held as a duplicate) and then recategorising the finished one
@@ -188,7 +190,16 @@ pub fn history_change_cat(d: &Daemon, id: &str, cat: &str) -> Value {
         }
         let dest = {
             let _publish = d.add_lock.lock_ok();
-            let dest = choose_out_dir(&base.join(&stem), &stem, &|p| d.dir_claim(p)).0;
+            // `dir_claim_for_add`: this is a FRESH placement - the
+            // record names the source, never this destination - so a
+            // directory that holds files and that no record names is
+            // somebody else's ground (a result whose history row was
+            // cleared without its files, the user's own library
+            // folder) and is climbed past. The record-only claim read
+            // it as Free, merged the payload into it, and a later
+            // "Remove and delete files" on this row then took the
+            // stranger's files with it. Gemini 14 Oct 2026 sweep, H3.
+            let dest = choose_out_dir(&base.join(&stem), &stem, &|p| d.dir_claim_for_add(p)).0;
             d.reserved.lock_ok().insert(dest.clone());
             dest
         };
@@ -1236,12 +1247,14 @@ fn history_row(d: &Daemon, j: &Job, held: &[crate::altcand::HeldSpare]) -> Value
             "disk_full": j.state == JobState::Failed && disk_full_failure(&j.fail_message),
             // What the retry actually needs FREE, which is not the
             // set size: the volumes are already on the disk, so the
-            // room owed is the extracted payload - and, for an
-            // ENCRYPTED set, the finish decrypt's temp copy beside
-            // it as well. The drawer used to gate its Retry button
-            // on `bytes` alone and would have lit it up one whole
-            // payload too early on exactly the shape that hit this
-            // (RAR5 encrypted, a tester, 2 Aug).
+            // room owed is the extracted payload. The drawer used to
+            // gate its Retry button on `bytes` alone and would have
+            // lit it up one whole payload too early on exactly the
+            // shape that hit this (RAR5 encrypted, a tester, 2 Aug) -
+            // whose finish decrypt then also wrote a temp copy beside
+            // the ciphertext. TODO 27 phase 3 (23 Aug 2026) retired
+            // that pass, so no encrypted extra is owed any more; see
+            // `unpack_space_needed`.
             "space_needed": retry_space_needed(j),
             // The failure classifier as a token, so the drawer can
             // say what to DO per kind - and suppress Retry for the

@@ -187,6 +187,10 @@ As section 4.5, in full. Notes on what the core does with it:
 - `keep_damaged` defaults to **true**, not to JSON's `false`: the
   `<name>.1` copy of a damaged original is the only thing standing
   between a wrong repair and a lost file.
+  It is honoured on its own and is NOT `purge`'s to override: `purge`
+  removes the recovery files, and the `.1` copies go only when
+  `keep_damaged` is false (after a repair that completed and
+  re-verified).
 - **`-B` is not supported on repair.** A repair whose data directory is
   not the recovery set's directory fails with the CLI's own refusal.
   Verify honours it in full, because it only reads.

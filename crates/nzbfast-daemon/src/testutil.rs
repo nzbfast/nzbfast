@@ -329,7 +329,12 @@ pub fn test_daemon(dir: &Path) -> Arc<Daemon> {
         scoreboard: super::settings_restore::seeded_scoreboard(&settings_path),
         corr_confirm_enabled: seed_corr_confirm_enabled(&settings_path),
         corr_confirm_source: seed_corr_confirm_source(&settings_path),
-        spot_enabled: seed_spot_enabled(&settings_path),
+        // `true` stands in for "indexing on" so a test daemon keeps the
+        // spots-on default it always had: the switch is what makes
+        // `index_db_wanted()` open the database, and tasks'
+        // lane_proof_tests reach the index through it. A fresh install's
+        // spots-off default (GitHub #100) is held by spot_seed_tests.
+        spot_enabled: seed_spot_enabled(&settings_path, true),
         spot_groups: seed_spot_groups(&settings_path),
         spot_backfill: seed_spot_backfill(&settings_path),
         spot_deepen: seed_spot_deepen(&settings_path),

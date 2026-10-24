@@ -433,9 +433,13 @@ env:
   # a reasonable number of minutes; the bits are the same project at the
   # same tag.
   #
-  # NOT pr-check.yml's par2cmdline-turbo: that job installs a FORK, for
-  # a leg whose par2 is a fixture creator, where any conforming par2
-  # will do. Here it is the parity oracle.
+  # pr-check.yml installed par2cmdline-turbo here, a FORK, on the theory
+  # that its par2 was only a fixture creator and any conforming par2
+  # would do. It was not: the same parity tests run in that job, and
+  # apt's 0.8.1 on its Linux leg kept every public PR red on them. Since
+  # 24 Oct 2026 it carries this same tag and SHA256 in its own `env:` -
+  # a second copy, because one workflow cannot read another's env - so
+  # a bump here is a bump there in the same commit.
   #
   # The version string is derived from PAR2REF_TAG by dropping the `v`,
   # so the tag stays single-source - but THE SHA256 BELOW MOVES WITH IT.

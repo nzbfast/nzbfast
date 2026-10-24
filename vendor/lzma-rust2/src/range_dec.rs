@@ -719,10 +719,19 @@ impl RangeReader for RangeDecoderBuffer {
     }
 
     fn try_read_u8(&mut self) -> crate::Result<u8> {
-        self.buf
+        // nzbfast: advance past the byte, as every other `RangeReader`'s
+        // `try_read_u8` and this type's own `read_u8` do. Upstream returned
+        // the byte and left `pos` where it was, so `new_stream` over this
+        // reader would have read its first code byte twice. No caller in
+        // this crate reaches that today (`new_stream` is only handed a
+        // `Read`), which is why it never showed; README-nzbfast.md item 10.
+        let byte = self
+            .buf
             .get(self.pos)
             .copied()
-            .ok_or_else(|| error_eof("unexpected end of range coder input"))
+            .ok_or_else(|| error_eof("unexpected end of range coder input"))?;
+        self.pos += 1;
+        Ok(byte)
     }
 
     #[inline(always)]
@@ -756,5 +765,36 @@ impl RangeReader for RangeDecoderBuffer {
     #[inline(always)]
     fn buf(&self) -> &[u8] {
         self.buf.as_slice()
+    }
+}
+
+/// nzbfast: README-nzbfast.md item 10.
+#[cfg(test)]
+mod try_read_u8_tests {
+    use super::{RangeDecoder, RangeDecoderBuffer, RangeReader};
+
+    /// `try_read_u8` must consume the byte it returns. NEGATIVE CONTROL,
+    /// run: drop the `self.pos += 1` from `RangeDecoderBuffer::try_read_u8`
+    /// and both assertions fail - the second read returns the first byte
+    /// again, and `new_stream` folds the zero lead byte into `code`.
+    #[test]
+    fn the_buffer_reader_advances_past_the_byte_it_returns() {
+        let mut r = RangeDecoderBuffer {
+            buf: vec![0x11, 0x22],
+            pos: 0,
+        };
+        assert_eq!(r.try_read_u8().unwrap(), 0x11);
+        assert_eq!(r.try_read_u8().unwrap(), 0x22);
+        assert!(r.try_read_u8().is_err(), "past the end is an error");
+
+        let rc = RangeDecoder::new_stream(RangeDecoderBuffer {
+            buf: vec![0x00, 0xAA, 0xBB, 0xCC, 0xDD],
+            pos: 0,
+        })
+        .unwrap();
+        assert_eq!(
+            rc.code, 0xAABB_CCDD,
+            "the lead byte is not part of the code"
+        );
     }
 }

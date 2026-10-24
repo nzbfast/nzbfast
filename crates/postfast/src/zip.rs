@@ -177,6 +177,12 @@ pub fn extract_set<S: AsRef<[u8]>>(set: &[S]) -> Result<Vec<(String, Vec<u8>)>, 
         let mut e = r
             .by_index(i)
             .map_err(|e| format!("the zip set has no entry {i}: {e}"))?;
+        // zip 9 decodes the name on demand and can refuse it, so it is a
+        // Result now; an undecodable name is a set that does not round-trip.
+        let name = e
+            .name()
+            .map_err(|err| format!("the zip entry {i} has no readable name: {err}"))?
+            .into_owned();
         // A directory entry is not a member and would show up as an
         // extra name in the round trip. Nothing this writer emits
         // should be one - it writes exactly the entries it was handed -
@@ -187,13 +193,13 @@ pub fn extract_set<S: AsRef<[u8]>>(set: &[S]) -> Result<Vec<(String, Vec<u8>)>, 
             return Err(format!(
                 "the zip set holds a DIRECTORY entry {:?}, which this writer never emits - \
                  the zip crate grew a behaviour that would make every member count wrong",
-                e.name()
+                name
             ));
         }
         let mut bytes = Vec::with_capacity(usize::try_from(e.size()).unwrap_or(0));
         e.read_to_end(&mut bytes)
-            .map_err(|err| format!("the zip entry {:?} does not extract: {err}", e.name()))?;
-        out.push((e.name().to_string(), bytes));
+            .map_err(|err| format!("the zip entry {name:?} does not extract: {err}"))?;
+        out.push((name, bytes));
     }
     Ok(out)
 }

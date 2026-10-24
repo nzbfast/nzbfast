@@ -219,14 +219,16 @@ pub struct RepairSpec {
     pub extra_dirs: Vec<PathBuf>,
     #[serde(default)]
     pub options: VerifyOptions,
-    /// `-p`: delete the recovery files and this run's backups once the
-    /// repair has completed.
+    /// `-p`: delete the recovery files once the repair has completed.
+    /// Unlike the CLI's `-p` it does NOT decide the backups' fate on its
+    /// own: that is `keep_damaged`'s, whatever this says.
     #[serde(default)]
     pub purge: bool,
     /// Keep the `<name>.1` copy of each damaged original. The engine's
     /// backup-aside is unconditional; `false` removes the copies after
     /// a repair that completed, which is what the reference's own
-    /// `-p` half does for them.
+    /// `-p` half does for them, and `true` keeps them even under
+    /// `purge` (`parfast::cli::BackupPolicy`).
     #[serde(default = "yes")]
     pub keep_damaged: bool,
 }

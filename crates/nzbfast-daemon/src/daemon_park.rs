@@ -2151,7 +2151,7 @@ pub struct CustodyBatch {
     /// Path arithmetic under the queue lock, the unlinks in the slow
     /// half - a destination that has gone offline must not turn a delete
     /// into a stalled queue.
-    early_gone: Vec<std::path::PathBuf>,
+    early_gone: Vec<crate::earlyfile::EarlyCopy>,
     /// Removals this batch handed to `park()` because the pipeline is
     /// still writing. Counted rather than listed: nothing here can
     /// report their outcome, and the count is what stops the answer
@@ -2393,6 +2393,7 @@ mod park_custody_tests {
                 // Pre-dest record: the take derives the destination,
                 // which is the configuration this rig sets up.
                 dest: None,
+                dest_mtime_ns: None,
             }];
         }
         job
@@ -2424,7 +2425,11 @@ mod park_custody_tests {
         batch.plan(&d, &mut job.lock_ok(), None, true);
 
         assert_eq!(
-            batch.early_gone,
+            batch
+                .early_gone
+                .iter()
+                .map(|c| c.path.clone())
+                .collect::<Vec<_>>(),
             vec![dest.join("Pack.S01").join("ep1.mkv")],
             "the destination copy of a job being cancelled mid-download was left behind"
         );
@@ -2468,7 +2473,11 @@ mod park_custody_tests {
         batch.plan(&d, &mut job.lock_ok(), None, false);
 
         assert_eq!(
-            batch.early_gone,
+            batch
+                .early_gone
+                .iter()
+                .map(|c| c.path.clone())
+                .collect::<Vec<_>>(),
             vec![dest.join("Pack.S01").join("ep1.mkv")],
             "a files-KEPT delete still owes the destination copy back"
         );

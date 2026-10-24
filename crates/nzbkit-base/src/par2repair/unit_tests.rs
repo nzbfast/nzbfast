@@ -1103,10 +1103,60 @@ fn the_fast_tier_agrees_with_the_chain_on_honest_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An honest member with junk APPENDED - every declared byte intact,
+/// the disk copy longer than the FileDesc says - is clean-but-oversized
+/// on the chain tier (`clean`, not `intact`: the repair's `needs_resize`
+/// truncates it with a bare `set_len`, no recovery block spent). The
+/// fast tier answered "damaged" on the same bytes until the Gemini
+/// 14 Oct 2026 sweep (M2): its block pass reads the final partial slice
+/// through its declared boundary, so the junk landed in the tail block,
+/// and below 16 KiB the head digest took the junk too. The fast tier
+/// now declines an oversized member to the chain pass, which clamps at
+/// the declared length; both sizes are pinned because the two failures
+/// were in different checks.
+#[test]
+fn the_fast_tier_agrees_with_the_chain_on_an_oversized_member() {
+    let dir = tmpdir("fastover");
+    let bs = 4096usize;
+    for (tag, len) in [
+        (
+            "past the parallel floor",
+            (HASH_PAR_MIN_BYTES as usize) + bs * 3 + 91,
+        ),
+        ("under the 16 KiB head", 1000),
+    ] {
+        let data = payload(len, 73);
+        let meta = meta_for("over.bin", &data, bs);
+        let p = dir.join("over.bin");
+        let mut long = data.clone();
+        long.extend_from_slice(&[0xa5u8; 100]);
+        std::fs::write(&p, &long).unwrap();
+        for threads in [1usize, 8] {
+            let slow = verify_pass1_tiered(&p, &meta, bs, threads, false).unwrap();
+            let fast = verify_pass1_tiered(&p, &meta, bs, threads, true).unwrap();
+            assert!(
+                slow.clean && !slow.intact,
+                "{tag}: control - the chain calls it clean but oversized (threads={threads})"
+            );
+            assert_eq!(fast.clean, slow.clean, "{tag}: clean (threads={threads})");
+            assert_eq!(
+                fast.intact, slow.intact,
+                "{tag}: intact (threads={threads})"
+            );
+            assert_eq!(
+                fast.present, slow.present,
+                "{tag}: presence (threads={threads})"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The ONE shape the tiers disagree on, pinned honestly rather than
 /// hidden: H7's crafted set (FileDesc of A, IFSC of B, same name, length
 /// and head) passes the fast tier and fails the chain. This is the
-/// documented cost of `--fast-check` and why it is opt-in.
+/// documented cost of `--fast-check`, why it first shipped opt-in, and
+/// what a stock run accepts now that both surfaces arm it by default.
 #[test]
 fn the_fast_tier_diverges_only_on_h7() {
     let dir = tmpdir("h7fast");

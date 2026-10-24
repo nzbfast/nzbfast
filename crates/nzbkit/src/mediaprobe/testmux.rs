@@ -196,6 +196,26 @@ pub fn mkv_chapters() -> Vec<u8> {
     out
 }
 
+/// One edition whose first ChapterAtom NESTS a second (a sub-chapter -
+/// ordered-chapter muxes write these), then a plain sibling.
+pub fn mkv_nested_chapters() -> Vec<u8> {
+    let atom = |start_ms: u64, title: &str, inner: &[u8]| {
+        let mut a = uint(&[0x91], start_ms * 1_000_000); // ChapterTimeStart
+        a.extend(el(&[0x80], &str_el(&[0x85], title))); // ChapterDisplay
+        a.extend_from_slice(inner);
+        el(&[0xB6], &a)
+    };
+    let mut edition = uint(&[0x45, 0xBC], 1); // EditionUID
+    edition.extend(atom(0, "Parent", &atom(100, "Child", &[])));
+    edition.extend(atom(250, "Sibling", &[]));
+    let mut seg = info(60_000.0, None);
+    seg.extend(tracks(&[video_track("V_MPEG4/ISO/AVC", AVCC, &[])]));
+    seg.extend(el(&[0x10, 0x43, 0xA7, 0x70], &el(&[0x45, 0xB9], &edition)));
+    let mut out = ebml_head("matroska");
+    out.extend(el(SEGMENT, &seg));
+    out
+}
+
 /// One SeekHead>Seek entry. SeekPosition is written as a fixed 8-byte
 /// integer and `el` writes every size as a fixed 4-byte vint, so an
 /// entry's size does not depend on the offset it carries - which is

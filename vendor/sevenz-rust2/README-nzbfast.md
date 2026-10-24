@@ -72,3 +72,48 @@ small only selects the slower, single-worker reader; the decode is
 bounded the same way either way. Tested from
 `crates/nzbfast-unpack/src/rarfix/sevenz.rs`, for the reason item 2
 gives.
+
+## 4. `src/reader.rs` - the stream map for a header with no kFilesInfo
+
+Added 16 Sep 2026 (`49913e9b24`) and left off this list until 14 Oct,
+when a sweep pointed out that the "whole list" claim above had stopped
+being true. kFilesInfo is optional, but `calculate_stream_map` ran only
+inside `read_files_info`, so a header carrying kMainStreamsInfo blocks
+and no kFilesInfo parsed Ok with an EMPTY stream map, and the decode
+paths then indexed it - an index-out-of-bounds panic on the 7z chase
+thread, which has no catch_unwind. `read_header` now calculates the map
+either way, and `build_decode_stack`, `build_decode_stack2`,
+`BlockDecoder::entries` and `BlockDecoder::for_each_entries` use `.get()`
+on the map and refuse a block naming more sub-streams than the archive
+has files. Every hunk is marked `nzbfast:` at the site. Tested from
+`crates/nzbkit/src/extract/sevenz.rs`, module `headerless_files_tests`,
+for the reason item 2 gives. (`src/lib.rs` and `src/encoder_options.rs`
+also differ from upstream; those hunks are item 2's.)
+
+## 5. `src/reader.rs` + `src/decoder.rs` - declared sizes stay `u64`, and the CRC is always compared
+
+Upstream cast every archive-declared size (`pack_sizes`, `unpack_sizes`,
+`file.size`) to `usize` on its way into `BoundedReader`,
+`Crc32VerifyingReader` and `add_decoder`. On a 32-bit target (the armv7
+beta build) that is the size modulo 4 GiB, so a 7z member of 4 GiB or
+more read short and failed its CRC, or at an exact multiple of 4 GiB
+read as empty. Those readers now hold the `u64` and narrow only through
+`clamp_to_remaining`, whose result never exceeds the caller's buffer.
+`add_decoder` takes the `u64` too (its LZMA arm already wanted one).
+The encoded header, which is buffered whole, refuses an unpack size
+that does not fit a `usize` rather than truncating it.
+
+`Crc32VerifyingReader` held its length as an `i64` and returned `Ok(0)`
+whenever that read `<= 0`. So a declared size of 2^63 or more (negative
+on the cast), and an inner reader that ran dry before the declared
+length, both ended the stream with the CRC never compared. It now
+compares the CRC exactly when the declared length has arrived (a
+zero-length stream included), and an early end of the inner stream is
+an `UnexpectedEof` error. nzbfast's own extract arms already refused a
+short member by length (`copied != entry.size`), so for them this moves
+the refusal into the library; the probes, postfast and `read_file` had
+no such guard. Tests: `crates/nzbfast-unpack/src/rarfix/sevenz.rs`,
+module `sevenz_crc_reader_tests`, which fail against the old reader.
+The BCJ2 reader's twin of the 32-bit cast is fixed in
+`vendor/lzma-rust2` (its README, item 11). Found by the 14 Oct 2026
+Gemini sweep (H14).

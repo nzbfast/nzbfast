@@ -150,20 +150,27 @@ fn tags_from(xml: &str, from: usize) -> impl Iterator<Item = Tag<'_>> {
             }
             let after = &xml[lt + 1..];
             let body = after.strip_prefix('/').unwrap_or(after);
-            let len = body
-                .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
-                .unwrap_or(body.len());
             let opens_name = body
                 .chars()
                 .next()
                 .is_some_and(|c| c.is_alphabetic() || c == '_' || c == ':');
-            if len == 0 || !opens_name {
+            // Checked BEFORE the name is measured: measuring first walked
+            // to the next whitespace for every `<` that cannot open a tag,
+            // so a run of `<1<1<1...` with no whitespace was quadratic in
+            // the run (22 Oct 2026 read-only sweep, F6). A first char that
+            // opens a name also makes `len` nonzero.
+            if !opens_name {
                 i = lt + 1;
                 continue;
             }
+            let len = body
+                .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+                .unwrap_or(body.len());
             let name = &after[..len + (after.len() - body.len())];
             let end = tag_end(xml, lt).unwrap_or(xml.len());
             i = end + 1;
+            #[cfg(test)]
+            tests::LEXED.with(|n| n.set(n.get() + 1));
             return Some(Tag { at: lt, end, name });
         }
     })
@@ -218,32 +225,48 @@ pub(crate) fn elem_tags<'a>(xml: &'a str, local: &'a str) -> Vec<&'a str> {
 /// a CDATA description does not end the item early. Scanning resumes
 /// after the close, so an element nested inside a match is part of its
 /// body rather than a match of its own.
+///
+/// ONE LEXER PASS, whatever the document holds. Every search this
+/// function makes starts just past a tag the full-document pass also
+/// stops at, so the tags it would find from there are exactly a suffix of
+/// that pass's; the document is lexed once, keeping only tags whose local
+/// name is `local`, and each close is looked up by binary search in its
+/// spelling's list of close positions. The negative cache this replaced
+/// was keyed by spelling, so `<p0:item><p1:item>...` with no closes cost
+/// one whole-suffix rescan per distinct prefix: 23 s for 32,000 openers
+/// in a 0.4 MiB body, below every fetch cap (22 Oct 2026 read-only
+/// sweep, F6).
 pub(crate) fn elements<'a>(xml: &'a str, local: &'a str) -> Vec<(&'a str, Option<&'a str>)> {
+    let tags: Vec<Tag<'a>> = tags_from(xml, 0)
+        .filter(|t| local_name(t.name.strip_prefix('/').unwrap_or(t.name)) == local)
+        .collect();
+    // Close positions per spelling, ascending because `tags` is in
+    // document order.
+    let mut closes: std::collections::HashMap<&str, Vec<usize>> = Default::default();
+    for (k, t) in tags.iter().enumerate() {
+        if let Some(name) = t.name.strip_prefix('/') {
+            closes.entry(name).or_default().push(k);
+        }
+    }
     let mut out = Vec::new();
-    let mut from = 0;
-    // A name whose close search has failed once fails from every later
-    // position too, so it is not searched for again: a body of ten
-    // thousand unclosed `<item>`s costs one pass, not ten thousand.
-    let mut unclosed: Vec<&str> = Vec::new();
-    while let Some(t) =
-        tags_from(xml, from).find(|t| !t.name.starts_with('/') && local_name(t.name) == local)
-    {
-        let tag = &xml[t.at..t.end];
-        from = t.end + 1;
-        if tag.ends_with('/') || unclosed.contains(&t.name) {
-            out.push((tag, None));
+    let mut k = 0;
+    while k < tags.len() {
+        let t = tags[k];
+        k += 1;
+        if t.name.starts_with('/') {
             continue;
         }
-        let close = tags_from(xml, from).find(|c| c.name.strip_prefix('/') == Some(t.name));
+        let tag = &xml[t.at..t.end];
+        let close = (!tag.ends_with('/'))
+            .then(|| closes.get(t.name))
+            .flatten()
+            .and_then(|at| at.get(at.partition_point(|&c| c < k)));
         match close {
-            Some(c) => {
-                out.push((tag, Some(&xml[from..c.at])));
-                from = c.end + 1;
+            Some(&c) => {
+                out.push((tag, Some(&xml[t.end + 1..tags[c].at])));
+                k = c + 1;
             }
-            None => {
-                unclosed.push(t.name);
-                out.push((tag, None));
-            }
+            None => out.push((tag, None)),
         }
     }
     out
@@ -416,6 +439,10 @@ pub(crate) fn unescape(s: &str) -> String {
 mod tests {
     use super::*;
 
+    thread_local! {
+        pub(super) static LEXED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     #[test]
     fn comments_cdata_pis_and_declarations_hide_their_markup() {
         let xml = r#"<?xml version="1.0"?><!DOCTYPE rss [ <!ENTITY e "<item>"> ]>
@@ -563,5 +590,86 @@ mod tests {
         // The soup is soup: a generator stuck on empty documents proves
         // nothing (this test's first draft was one).
         assert!(bytes > 20_000 * 40, "{bytes}");
+    }
+
+    /// 22 Oct 2026 read-only sweep, F6: distinct unclosed spellings of
+    /// the wanted name each cost a whole-suffix rescan, so 32,000 of them
+    /// in a 0.4 MiB body took 23 s. The bound is on LEXER WORK, not the
+    /// clock: one pass visits each tag once.
+    #[test]
+    fn many_distinct_unclosed_prefixes_lex_the_document_once() {
+        const N: usize = 32_000;
+        let mut doc = String::from("<rss><channel>");
+        for k in 0..N {
+            doc.push_str(&format!("<p{k}:item>"));
+        }
+        doc.push_str("</channel></rss>");
+        LEXED.with(|n| n.set(0));
+        let got = elements(&doc, "item");
+        let lexed = LEXED.with(|n| n.get());
+        assert_eq!(got.len(), N);
+        assert!(got.iter().all(|(_, body)| body.is_none()));
+        assert_eq!(lexed, N + 4, "one lexer pass over N openers and 4 others");
+    }
+
+    /// The lexer's own half of F6: a `<` that cannot open a name used to
+    /// measure a name to the next whitespace before being refused, so a
+    /// whitespace-free run of them was quadratic (50,000 took 1.4 s in
+    /// release). Bounded on the clock, generously, because a refused `<`
+    /// is not a tag visit there is anything to count for.
+    #[test]
+    fn a_run_of_non_name_lts_is_linear() {
+        let doc = format!("<x>{}<y>", "<1".repeat(200_000));
+        let t = std::time::Instant::now();
+        assert_eq!(start_tag_names(&doc).collect::<Vec<_>>(), ["x", "y"]);
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            t.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_valid_prefixed_feed_still_pairs_every_item() {
+        let xml = "<rss><channel><a:item><a:title>one</a:title></a:item>\
+                   <b:item>two</b:item><item>three</item><item/></channel></rss>";
+        let got: Vec<_> = elements(xml, "item").into_iter().map(|(_, b)| b).collect();
+        assert_eq!(
+            got,
+            [
+                Some("<a:title>one</a:title>"),
+                Some("two"),
+                Some("three"),
+                None
+            ]
+        );
+        assert_eq!(tag_text(xml, "title"), Some("one"));
+        // Nested same spelling: the outer opener takes the FIRST close,
+        // and the stray close after it is not a match of its own.
+        let got: Vec<_> = elements("<i><i>in</i></i>", "i")
+            .into_iter()
+            .map(|(_, b)| b)
+            .collect();
+        assert_eq!(got, [Some("<i>in")]);
+    }
+
+    #[test]
+    fn a_same_prefix_missing_close_leaves_its_neighbours_alone() {
+        let xml = "<a:i>1</a:i><a:i>2<b:i>3</b:i>";
+        let got: Vec<_> = elements(xml, "i").into_iter().map(|(_, b)| b).collect();
+        assert_eq!(got, [Some("1"), None, Some("3")]);
+        // A close BEFORE the opener never closes it.
+        let got: Vec<_> = elements("</a:i><a:i>x", "i")
+            .into_iter()
+            .map(|(_, b)| b)
+            .collect();
+        assert_eq!(got, [None]);
+        // An opener takes the first later close of its spelling, past a
+        // second opener of the same spelling.
+        let got: Vec<_> = elements("<a:i>x<a:i>y</a:i>", "i")
+            .into_iter()
+            .map(|(_, b)| b)
+            .collect();
+        assert_eq!(got, [Some("x<a:i>y")]);
     }
 }

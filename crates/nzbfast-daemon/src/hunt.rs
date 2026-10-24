@@ -1878,11 +1878,13 @@ pub fn hunt_pick(d: &Daemon, nzo_id: &str, key: &str) -> std::result::Result<Str
 /// because that one has no `hold_for` argument and lives in
 /// `crates/nzbfast-daemon/src/daemon.rs`, which sat on its size-gate ceiling when this
 /// was written (recalibrated 31 Aug 2026). The one
-/// thing it does that `enqueue_as` does not is the failure-link
-/// stamp, which is eleven lines and is here - and it needs its own
-/// save for the reason that one states: `enqueue` saved the queue
-/// before the stamp existed, so a restart in the window would lose
-/// the link off a row that is about to run.
+/// thing it does that `enqueue_as` does not is the failure link, which
+/// rides into the row as it is built through `enqueue_as_with`'s
+/// [`crate::job::AddExtras`]. It used to be stamped afterwards onto the row a scan
+/// of the live queue found, with a second save: a restart between the
+/// saves lost the link, and a copy filed straight to failed history
+/// (`dupe_action = "fail"`, a pre-queue reject) was never in the queue
+/// to be found (Codex 22 Oct 2026 sweep F4, sibling).
 fn hunt_hold(
     d: &Daemon,
     req: &HuntRequest,
@@ -1891,7 +1893,13 @@ fn hunt_hold(
     fetched: Option<&Fetched>,
     origin: &str,
 ) -> Result<String> {
-    let e = d.enqueue_as(
+    let mut extras = crate::job::AddExtras::default();
+    if let Some(f) = fetched.filter(|f| !f.failure_link.is_empty()) {
+        extras.failure_link = f.failure_link.clone();
+        extras.failure_host = f.host.clone();
+        extras.failure_https = f.https;
+    }
+    let e = d.enqueue_as_with(
         None,
         bytes,
         &cand.stem,
@@ -1902,25 +1910,8 @@ fn hunt_hold(
         origin,
         DupeExempt::Nobody,
         Some(&req.nzo_id),
+        extras,
     )?;
-    if let Some(f) = fetched.filter(|f| !f.failure_link.is_empty()) {
-        let stamped = {
-            let q = d.queue.lock_ok();
-            match q.iter().find(|j| j.lock_ok().nzo_id == e.nzo_id) {
-                Some(job) => {
-                    let mut g = job.lock_ok();
-                    g.failure_link = f.failure_link.clone();
-                    g.failure_host = f.host.clone();
-                    g.failure_https = f.https;
-                    true
-                }
-                None => false,
-            }
-        };
-        if stamped {
-            d.save_queue();
-        }
-    }
     Ok(e.nzo_id)
 }
 

@@ -2131,6 +2131,21 @@ fn print_repairable_detail(survey: &Survey, sink: &mut Sink) {
 /// refused however it got here.
 pub fn purge(loaded: &Loaded, created: &[PathBuf], sink: &mut Sink) {
     sink.line(Level::Terse, "");
+    purge_backups(loaded, created, sink);
+    sink.line(Level::Terse, "Purge par files.");
+    for path in &loaded.par_files {
+        let name = display_name(&loaded.dir, path);
+        if path.exists() && std::fs::remove_file(path).is_ok() {
+            sink.line(Level::Terse, &format!("Remove \"{name}\"."));
+        }
+    }
+}
+
+/// The backup half of [`purge`] on its own, under the same provenance
+/// and protected-member rules: what a host that keeps the recovery files
+/// but not the damaged copies asks for (`cli::BackupPolicy::Remove`).
+/// Prints nothing when there is nothing to remove.
+pub fn purge_backups(loaded: &Loaded, created: &[PathBuf], sink: &mut Sink) {
     // The backup half is announced ONLY when there is a backup to
     // remove: the captured `sweep/p` row purges an intact set and prints
     // `Purge par files.` with no backup header above it, while
@@ -2152,13 +2167,6 @@ pub fn purge(loaded: &Loaded, created: &[PathBuf], sink: &mut Sink) {
             }
         }
         sink.line(Level::Terse, "");
-    }
-    sink.line(Level::Terse, "Purge par files.");
-    for path in &loaded.par_files {
-        let name = display_name(&loaded.dir, path);
-        if path.exists() && std::fs::remove_file(path).is_ok() {
-            sink.line(Level::Terse, &format!("Remove \"{name}\"."));
-        }
     }
 }
 

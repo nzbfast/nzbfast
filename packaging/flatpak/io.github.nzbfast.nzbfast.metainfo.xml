@@ -91,6 +91,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="1.8.0" date="2026-10-14">
+      <description>
+        <p>Faster downloads on fast lines and with backup servers, dead posts reported as dead instead of blamed on your machine, the main downloads built and attested on GitHub, and seven verified faults fixed.</p>
+      </description>
+    </release>
     <release version="1.7.1" date="2026-09-26">
       <description>
         <p>RAR sets that store a file under a different name in a later volume now unpack instead of failing, an optional switch deletes the files of downloads that failed for good, and ten verified faults are fixed.</p>

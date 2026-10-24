@@ -486,13 +486,19 @@ pub fn verify_pass1(
 /// tier gives up is the one spec-legal set where the two claims disagree
 /// (H7: a FileDesc from file A beside an IFSC from file B, same name,
 /// length and head - `the_fast_tier_diverges_only_on_h7` pins it), and
-/// that is why it is opt-in. The bool is a parameter here for the same
+/// that is why it was first shipped opt-in. It is no longer: both
+/// shipping surfaces arm it by default (`parfast` unless `--slow`, the
+/// daemon's `fast_final_check`), so a stock run accepts that divergence
+/// - see `crate::par2::set_fast_check`. (This said "that is why it is
+/// opt-in" until the Gemini 14 Oct 2026 sweep, L9.) The bool is a
+/// parameter here for the same
 /// reason [`crate::par2::verify_file_path_tiered`] takes one: the tests
 /// run both tiers over one fixture in one process, which a global two
 /// parallel tests race on cannot do.
 ///
 /// The tier answers only when the IFSC describes every byte of the
-/// member; otherwise it declines to the unchanged pass. It never carries
+/// member and the member is no longer than declared; otherwise it
+/// declines to the unchanged pass. It never carries
 /// a `resume` state (no chain ran), so a repair's self-prove of such a
 /// target takes the per-block route too ([`blocks_match_fast`]).
 #[doc(hidden)]
@@ -533,6 +539,19 @@ fn fast_pass1(
         Err(e) => return Err(e.into()),
     };
     let disk_len = f.metadata()?.len();
+    // An OVERSIZED member declines to the chain pass. Neither check
+    // below stops at the declared length: the block pass reads the
+    // final partial slice through its boundary (the reference bitmap
+    // `verify_file_path_tiered` keeps), and the head digest reads up to
+    // 16 KiB whatever the member's size, so junk past the end failed an
+    // honest member as damaged. The chain pass clamps at the declared
+    // length and calls it clean-but-oversized, which `needs_resize`
+    // answers with a bare truncation rather than a recovery block
+    // (Gemini 14 Oct 2026 sweep M2,
+    // `the_fast_tier_agrees_with_the_chain_on_an_oversized_member`).
+    if disk_len > file.length {
+        return Ok(None);
+    }
     let head_ok = crate::par2::verify_head(file, &mut f)?;
     let blocks = crate::par2::verify_blocks_path_or_streaming(
         path, &mut f, file, bs as u64, disk_len, threads,

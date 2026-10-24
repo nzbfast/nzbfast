@@ -253,6 +253,7 @@ fn a_row_with_early_copies_refuses_the_whole_batch() {
         mtime_ns: 0,
         nzf_id: String::new(),
         dest: Some(nas.clone()),
+        dest_mtime_ns: None,
     }];
 
     let j = hist_delete_arm(&d, &params(&[("name", "delete")]), "all");

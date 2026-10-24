@@ -2862,9 +2862,10 @@ mod unit_tests;
 // nzbkit-base cut on 3 Sep 2026. Four of their tests drive a fleet
 // through `pool::fetch_all_multi`, and `pool` is a SIBLING of this
 // crate, not something under it - so the file went up to the facade
-// whole, as `nzbkit`'s own `nntp_resolve_tests`. The three items it
-// reaches here (`dial_in_order`, `CandidateWalk`, `dial_candidate_cap`)
-// are `#[doc(hidden)] pub` for it and for nothing else.
+// whole, as `nzbkit`'s own `nntp_resolve_tests`. The one item it still
+// reaches here, `dial_in_order`, is `#[doc(hidden)] pub` for it and for
+// nothing else. (This named three until the Gemini 14 Oct 2026 sweep,
+// L9; `CandidateWalk` and `dial_candidate_cap` no longer exist.)
 
 #[cfg(test)]
 mod dial_race_tests;

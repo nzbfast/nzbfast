@@ -881,12 +881,6 @@ public static class Strings
     /// <summary>1 problem</summary>
     public const string VerifyProblemsOne = "1 problem";
 
-    /// <summary>Exclude from repair</summary>
-    public const string VerifyRowExclude = "Exclude from repair";
-
-    /// <summary>Excluded from repair</summary>
-    public const string VerifyRowExcluded = "Excluded from repair";
-
     /// <summary>Rename to the expected name</summary>
     public const string VerifyRowRename = "Rename to the expected name";
 
@@ -1237,8 +1231,6 @@ public static System.Collections.Generic.IReadOnlyDictionary<string, string> All
             ["verify.pill.verifying"] = "Verifying {percent}",
             ["verify.problems_count"] = "{count} problems",
             ["verify.problems_one"] = "1 problem",
-            ["verify.row.exclude"] = "Exclude from repair",
-            ["verify.row.excluded"] = "Excluded from repair",
             ["verify.row.rename"] = "Rename to the expected name",
             ["verify.scan.added"] = "{count} extra folders will be searched",
             ["verify.scan.clear"] = "Clear extra folders",

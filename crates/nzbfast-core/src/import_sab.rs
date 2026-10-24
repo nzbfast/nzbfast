@@ -178,45 +178,137 @@ fn adopt_password_file(ini: &str, out_path: &Path) {
     if !Path::new(&pw_path).is_file() {
         return;
     }
+    let wrote = edit_settings(out_path, "SABnzbd's password_file", |doc| {
+        if doc
+            .get("password_file")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|p| !p.trim().is_empty())
+        {
+            return false;
+        }
+        doc["password_file"] = json!(pw_path);
+        true
+    });
+    if wrote {
+        println!("  adopted SABnzbd's archive passwords file: {pw_path}");
+    }
+}
+
+/// `--arr`: the dashboard's "Sonarr, Radarr or another app drives it"
+/// preset (`roleDefs()` in web/dashboard.html, the `arr` role), for an
+/// install set up from the command line, which never sees that card
+/// (GitHub #102). Key, value and stored type exactly as the card's Apply
+/// writes them; `the_arr_preset_matches_the_dashboard_card` holds the two
+/// copies together, so a row added to the card fails here until it is
+/// added below.
+///
+/// Every key is a setup answer to the first-run API key test
+/// (`SETUP_ANSWER_KEYS` in nzbfast-daemon's bootstrap.rs): this runs
+/// before the daemon has, and a settings.json holding only these must
+/// still mint a key.
+pub const ARR_PRESET: &[(&str, ArrValue)] = &[
+    ("dupe_action", ArrValue::Str("fail")),
+    ("out_umask", ArrValue::Str("002")),
+    ("arr_giveup_threshold", ArrValue::Num(3)),
+    ("index_enabled", ArrValue::Bool(false)),
+    ("spot_enabled", ArrValue::Bool(false)),
+    ("auto_rename", ArrValue::Bool(false)),
+    ("delete_to_trash", ArrValue::Bool(false)),
+];
+
+/// One [`ARR_PRESET`] value, in the type the daemon reads that key back
+/// as (`dupe_action` and `out_umask` are strings, the threshold a
+/// number, the rest switches).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrValue {
+    Str(&'static str),
+    Num(u64),
+    Bool(bool),
+}
+
+impl ArrValue {
+    fn json(self) -> serde_json::Value {
+        match self {
+            ArrValue::Str(s) => json!(s),
+            ArrValue::Num(n) => json!(n),
+            ArrValue::Bool(b) => json!(b),
+        }
+    }
+}
+
+/// Write [`ARR_PRESET`] into the sibling settings.json. A key the user
+/// already saved is kept, exactly as the card leaves an unticked row
+/// alone: the preset fills in, it never overrides.
+fn adopt_arr_preset(out_path: &Path) {
+    let mut set: Vec<&str> = Vec::new();
+    let mut kept: Vec<&str> = Vec::new();
+    let wrote = edit_settings(out_path, "the Sonarr/Radarr preset", |doc| {
+        for (k, v) in ARR_PRESET {
+            if doc.get(*k).is_some() {
+                kept.push(k);
+            } else {
+                doc[*k] = v.json();
+                set.push(k);
+            }
+        }
+        !set.is_empty()
+    });
+    if wrote {
+        println!(
+            "  Sonarr/Radarr preset: set {} (finished downloads are left for the app to rename, file and clean up)",
+            set.join(", ")
+        );
+    }
+    if !kept.is_empty() {
+        println!("  kept your own value for: {}", kept.join(", "));
+    }
+}
+
+/// Load the sibling settings.json, let `edit` change it, and write it
+/// back if `edit` says it did. Returns whether a write landed. `what`
+/// names the change in the two refusal lines.
+///
+/// The daemon's own loader rules apply here too (review sweep 3 Aug
+/// MH1): a torn primary with a good .bak must recover from the .bak,
+/// and a store that exists but yields NOTHING must be refused - a raw
+/// parse-to-{} would write a valid settings.json that the next daemon
+/// start trusts, refreshing the .bak from it and permanently erasing
+/// every other saved setting. (A daemon saving settings concurrently
+/// can still race this CLI write; import-sab is a setup-time command
+/// and documents running it with the daemon stopped.)
+fn edit_settings(
+    out_path: &Path,
+    what: &str,
+    edit: impl FnOnce(&mut serde_json::Value) -> bool,
+) -> bool {
     let settings = out_path.with_file_name("settings.json");
-    // The daemon's own loader rules apply here too (review sweep 3 Aug
-    // MH1): a torn primary with a good .bak must recover from the .bak,
-    // and a store that exists but yields NOTHING must be refused - a
-    // raw parse-to-{} would write a valid one-key settings.json that
-    // the next daemon start trusts, refreshing the .bak from it and
-    // permanently erasing every other saved setting. (A daemon saving
-    // settings concurrently can still race this CLI write; import-sab
-    // is a setup-time command and documents running it with the daemon
-    // stopped.)
     if crate::persist::json_store_unreadable(&settings) {
         println!(
-            "  (not recording SABnzbd's password_file: {} exists but won't parse - \
+            "  (not recording {what}: {} exists but won't parse - \
              fix or remove it first)",
             settings.display()
         );
-        return;
+        return false;
     }
     let mut doc = crate::persist::load_json_with_backup(&settings)
         .filter(|v| v.is_object())
         .unwrap_or_else(|| json!({}));
-    if doc
-        .get("password_file")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|p| !p.trim().is_empty())
-    {
-        return;
+    if !edit(&mut doc) {
+        return false;
     }
-    doc["password_file"] = json!(pw_path);
     match serde_json::to_string_pretty(&doc)
         .map_err(anyhow::Error::from)
         .and_then(|s| crate::persist::write_atomic(&settings, s.as_bytes()).map_err(Into::into))
     {
-        Ok(()) => println!("  adopted SABnzbd's archive passwords file: {pw_path}"),
-        Err(e) => println!("  (could not record SABnzbd's password_file: {e})"),
+        Ok(()) => true,
+        Err(e) => {
+            println!("  (could not record {what}: {e})");
+            false
+        }
     }
 }
 
-pub fn import(ini_path: &Path, out_path: &Path, force: bool) -> Result<()> {
+pub fn import(ini_path: &Path, out_path: &Path, force: bool, arr: bool) -> Result<()> {
     let text = std::fs::read_to_string(ini_path)
         .with_context(|| format!("reading {}", ini_path.display()))?;
     let mut servers = parse_servers(&text);
@@ -319,6 +411,9 @@ pub fn import(ini_path: &Path, out_path: &Path, force: bool) -> Result<()> {
     crate::persist::write_atomic(out_path, cfg.as_bytes())
         .with_context(|| format!("writing {}", out_path.display()))?;
     adopt_password_file(&text, out_path);
+    if arr {
+        adopt_arr_preset(out_path);
+    }
     for s in &servers {
         println!(
             "  imported {} → {}:{} ({} conns{}{}{}{})",
@@ -479,7 +574,7 @@ enable = 1
         let ini = dir.join("sabnzbd.ini");
         std::fs::write(&ini, INI_TIERS).unwrap();
         let out = dir.join("config.local.json");
-        import(&ini, &out, false).unwrap();
+        import(&ini, &out, false, false).unwrap();
 
         // Raw JSON: zero-valued keys stay omitted so a plain single-server
         // import still writes a minimal config.
@@ -552,15 +647,15 @@ enable = 1
         let ini = dir.join("sabnzbd.ini");
         std::fs::write(&ini, INI).unwrap();
         let out = dir.join("config.local.json");
-        import(&ini, &out, false).unwrap();
+        import(&ini, &out, false, false).unwrap();
         // Round-trips through our real config loader.
         let cfg = nzbkit::config::Config::load(&out).unwrap();
         assert_eq!(cfg.servers.len(), 2);
         assert_eq!(cfg.servers[0].host, "fill.cheap.net");
         assert_eq!(cfg.servers[1].connections, 50);
         // Refuses to clobber without --force.
-        assert!(import(&ini, &out, false).is_err());
-        assert!(import(&ini, &out, true).is_ok());
+        assert!(import(&ini, &out, false, false).is_err());
+        assert!(import(&ini, &out, true, false).is_ok());
 
         // ...and refuses an `.ini` TARGET whatever --force says. That
         // path is the SABnzbd config nzbfast reads and cannot write, and
@@ -576,7 +671,7 @@ enable = 1
         std::fs::write(&sab, INI).unwrap();
         for force in [false, true] {
             assert!(
-                import(&ini, &sab, force).is_err(),
+                import(&ini, &sab, force, false).is_err(),
                 "an .ini target must be refused with force={force}"
             );
         }
@@ -605,7 +700,7 @@ enable = 1
         )
         .unwrap();
 
-        import(&ini, &out, true).unwrap();
+        import(&ini, &out, true, false).unwrap();
         let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
         assert_eq!(
             raw["tmdb_key"], "keepme",
@@ -621,7 +716,7 @@ enable = 1
         // A file that is not JSON at all still gets overwritten rather than
         // erroring - there is nothing in it to preserve.
         std::fs::write(&out, "not json").unwrap();
-        import(&ini, &out, true).unwrap();
+        import(&ini, &out, true, false).unwrap();
         assert_eq!(nzbkit::config::Config::load(&out).unwrap().servers.len(), 2);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -651,6 +746,110 @@ enable = 1
     /// SAB's password_file rides the import into the sibling
     /// settings.json - when the file really exists, and never over a
     /// path the user already saved.
+    /// GitHub #102: `--arr` fills in the dashboard card's preset and
+    /// keeps anything the user already saved, the way an unticked row on
+    /// the card is left alone. Without the flag nothing is written.
+    #[test]
+    fn import_arr_applies_the_preset_and_keeps_saved_values() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-impsab-arr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ini = dir.join("sabnzbd.ini");
+        std::fs::write(&ini, INI).unwrap();
+        let out = dir.join("config.json");
+        let read = || -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(dir.join("settings.json")).unwrap()).unwrap()
+        };
+
+        import(&ini, &out, true, false).unwrap();
+        assert!(
+            !dir.join("settings.json").exists(),
+            "an import without --arr wrote settings"
+        );
+
+        import(&ini, &out, true, true).unwrap();
+        let got = read();
+        for (k, v) in ARR_PRESET {
+            assert_eq!(got[*k], v.json(), "{k}");
+        }
+        assert_eq!(got["auto_rename"], false);
+        assert_eq!(got["arr_giveup_threshold"], 3);
+
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"auto_rename":true,"out_umask":"022"}"#,
+        )
+        .unwrap();
+        import(&ini, &out, true, true).unwrap();
+        let got = read();
+        assert_eq!(got["auto_rename"], true, "a saved value was overridden");
+        assert_eq!(got["out_umask"], "022", "a saved value was overridden");
+        assert_eq!(got["delete_to_trash"], false, "the rest still filled in");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The CLI preset and the dashboard card are two copies of one list
+    /// (the card is JavaScript, this is Rust), so this reads the card's
+    /// `arr` rows out of the shipped page and requires the same keys and
+    /// values. A row added to the card fails here until ARR_PRESET has it.
+    /// The card holds FORM values - the threshold is `'3'`, which its
+    /// setter parses and stores as a number - so a number is compared by
+    /// value, quoted or not; the stored type is ARR_PRESET's to state.
+    #[test]
+    fn the_arr_preset_matches_the_dashboard_card() {
+        let page = include_str!("../../../web/dashboard.html");
+        let start = page
+            .find("{id:'arr',")
+            .expect("the dashboard lost its arr role - this test reads it");
+        let rest = &page[start + 1..];
+        let end = rest.find("{id:'").unwrap_or(rest.len());
+        let block = &rest[..end];
+        // Each row opens `{k:'<key>', id:'s_<key>', v:<value>` and the
+        // value is a quoted string or a bare number.
+        let card: Vec<(String, String)> = block
+            .split("{k:'")
+            .skip(1)
+            .filter_map(|r| {
+                let (key, tail) = r.split_once('\'')?;
+                let v = tail.split_once("v:")?.1.trim_start();
+                let v = match v.strip_prefix('\'') {
+                    Some(q) => format!("'{}'", q.split_once('\'')?.0),
+                    None => v.chars().take_while(char::is_ascii_digit).collect(),
+                };
+                Some((key.to_string(), v))
+            })
+            .collect();
+        assert!(!card.is_empty(), "read no rows from the arr card");
+        let ours: Vec<(String, String)> = ARR_PRESET
+            .iter()
+            .map(|(k, v)| {
+                let v = match v {
+                    ArrValue::Str(s) => format!("'{s}'"),
+                    ArrValue::Num(n) => n.to_string(),
+                    ArrValue::Bool(b) => u8::from(*b).to_string(),
+                };
+                (k.to_string(), v)
+            })
+            .collect();
+        let numeric: Vec<&str> = ARR_PRESET
+            .iter()
+            .filter(|(_, v)| matches!(v, ArrValue::Num(_)))
+            .map(|(k, _)| *k)
+            .collect();
+        let card: Vec<(String, String)> = card
+            .into_iter()
+            .map(|(k, v)| match numeric.contains(&k.as_str()) {
+                true => (k, v.trim_matches('\'').to_string()),
+                false => (k, v),
+            })
+            .collect();
+        let mut a = card.clone();
+        let mut b = ours.clone();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "the card's rows and ARR_PRESET disagree");
+    }
+
     #[test]
     fn import_adopts_password_file() {
         let dir = std::env::temp_dir().join(format!("nzbfast-impsab-pw-{}", std::process::id()));
@@ -665,7 +864,7 @@ enable = 1
         )
         .unwrap();
         let out = dir.join("config.json");
-        import(&ini, &out, true).unwrap();
+        import(&ini, &out, true, false).unwrap();
         let settings: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("settings.json")).unwrap()).unwrap();
         assert_eq!(settings["password_file"], pw.to_string_lossy().as_ref());
@@ -676,7 +875,7 @@ enable = 1
             r#"{"password_file":"/my/own.txt"}"#, // a PATH, not a password - leakcheck-allow-synthetic
         )
         .unwrap();
-        import(&ini, &out, true).unwrap();
+        import(&ini, &out, true, false).unwrap();
         let settings: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("settings.json")).unwrap()).unwrap();
         assert_eq!(settings["password_file"], "/my/own.txt");
@@ -684,7 +883,7 @@ enable = 1
         // A dangling path in the ini is ignored entirely.
         std::fs::remove_file(dir.join("settings.json")).unwrap();
         std::fs::remove_file(&pw).unwrap();
-        import(&ini, &out, true).unwrap();
+        import(&ini, &out, true, false).unwrap();
         assert!(
             !dir.join("settings.json").exists(),
             "dangling path must not be adopted"
@@ -721,7 +920,7 @@ enable = 1
             r#"{"completed_dir": "/mnt/done", "ui_locale": "de"}"#,
         )
         .unwrap();
-        import(&ini, &out, true).unwrap();
+        import(&ini, &out, true, false).unwrap();
         let doc: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
         assert_eq!(doc["completed_dir"], "/mnt/done", "backup keys preserved");
@@ -733,7 +932,7 @@ enable = 1
         std::fs::write(&settings, "{\"completed_dir\": \"/mn").unwrap();
         std::fs::remove_file(dir.join("settings.json.bak")).unwrap();
         let before = std::fs::read(&settings).unwrap();
-        import(&ini, &out, true).unwrap();
+        import(&ini, &out, true, false).unwrap();
         assert_eq!(
             std::fs::read(&settings).unwrap(),
             before,

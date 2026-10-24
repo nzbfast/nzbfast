@@ -159,6 +159,28 @@ pub fn dash_url(port: u16, tls: bool, data_dir: &Path, proof: Option<IdentityPro
     }
 }
 
+/// The download folder a `get_config` answer names, but ONLY from a
+/// listener whose identity is proven (see [`IdentityProof`]).
+///
+/// "Open Downloads Folder" hands this string to `ShellExecuteW("open")`
+/// after `create_dir_all`, and both of those do something with ANY
+/// string: `open` on a path to an `.exe` runs it, on a URL starts a
+/// browser, and a `\\host\share` path makes Windows dial that host over
+/// SMB with the user's credentials before anything is opened. Without a
+/// proof the far side is whatever bound the port - the keyless request
+/// already withholds the API key from it, and this withholds our shell
+/// from it too (Gemini sweep 14 Oct H6). The caller falls back to the
+/// tray's own out_dir, which is what an unproven listener got anyway
+/// whenever the real daemon refused the keyless call.
+pub fn proven_out_dir(config: Option<&Value>, proof: Option<IdentityProof>) -> Option<String> {
+    proof?;
+    config?
+        .pointer("/config/nzbfast/out_dir")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(String::from)
+}
+
 /// Is this the answer of an nzbfast daemon?
 ///
 /// Two bodies count as ours:
@@ -686,9 +708,18 @@ impl ListenerWatch {
     /// generation, because this runs on a repeating timer and a balloon
     /// every thirty seconds would be worse than the silence it
     /// replaced.
+    ///
+    /// An attachable answer ENDS the generation. The silent arm fires
+    /// on an engine that is merely wedged (TODO 166's ~80 s index
+    /// transaction), and that engine comes back on its own: left set,
+    /// `reported` kept the Restart item on the menu of a healthy engine
+    /// and swallowed the balloon for its real death later (Gemini sweep
+    /// 14 Oct M15). The run of three is still the debounce, so this
+    /// buys no extra balloons from a listener that is merely slow.
     pub fn record(&mut self, v: Verdict) -> Option<Verdict> {
         if v.attachable() {
             self.silent = 0;
+            self.reported = false;
             return None;
         }
         if v.answered() {
@@ -1262,6 +1293,33 @@ mod tests {
         // not invent a credential or refuse to talk.
         let d = data_dir("none", Some("{}"), None);
         assert_eq!(apikey(&d), None);
+    }
+
+    /// "Open Downloads Folder" shell-opens this string, so an unproven
+    /// listener (a port squatter answering `get_config` with an `.exe`
+    /// path, a URL or a UNC share) must never supply it - Gemini sweep
+    /// 14 Oct H6. A proven engine's answer is the user's own config.
+    #[test]
+    fn only_a_proven_listener_names_the_downloads_folder() {
+        use super::proven_out_dir;
+        let squat: serde_json::Value = serde_json::from_str(
+            r#"{"config":{"nzbfast":{"out_dir":"C:\\Windows\\System32\\calc.exe"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            proven_out_dir(Some(&squat), None),
+            None,
+            "unproven: ignored"
+        );
+
+        let ours: serde_json::Value =
+            serde_json::from_str(r#"{"config":{"nzbfast":{"out_dir":"D:\\nzb"}}}"#).unwrap();
+        let p = || Some(proof_minted_for_tests());
+        assert_eq!(proven_out_dir(Some(&ours), p()).as_deref(), Some("D:\\nzb"));
+        assert_eq!(proven_out_dir(None, p()), None, "no answer");
+        let blank: serde_json::Value =
+            serde_json::from_str(r#"{"config":{"nzbfast":{"out_dir":"  "}}}"#).unwrap();
+        assert_eq!(proven_out_dir(Some(&blank), p()), None, "blank");
     }
 
     /// Whatever the key turns out to be, it has to survive the query
@@ -2215,6 +2273,31 @@ mod tests {
             Some(Verdict::Stranger),
             "a fresh engine gets a fresh verdict history"
         );
+    }
+
+    /// A wedged engine that answers again is not gone: the Restart item
+    /// comes off, and its real death later still gets its balloon
+    /// (Gemini sweep 14 Oct M15).
+    #[test]
+    fn an_engine_that_answers_again_ends_the_generation() {
+        use super::{ListenerWatch, Verdict};
+        let mut w = ListenerWatch::new();
+        w.record(Verdict::Silent);
+        w.record(Verdict::Silent);
+        assert_eq!(w.record(Verdict::Silent), Some(Verdict::Silent));
+        assert!(w.engine_gone());
+        assert_eq!(w.record(Verdict::Proven), None);
+        assert!(!w.engine_gone(), "a healthy engine offers no Restart");
+        w.record(Verdict::Silent);
+        w.record(Verdict::Silent);
+        assert_eq!(
+            w.record(Verdict::Silent),
+            Some(Verdict::Silent),
+            "the real death is still reported"
+        );
+        // Adopted is attachable too, and ends the generation the same way.
+        assert_eq!(w.record(Verdict::Adopted), None);
+        assert_eq!(w.record(Verdict::Stranger), Some(Verdict::Stranger));
     }
 
     /// Waiting out the full cadence three times would leave a dead

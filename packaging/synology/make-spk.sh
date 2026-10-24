@@ -5,6 +5,11 @@
 # cross-compiler here.
 #
 #   packaging/synology/make-spk.sh 1.0.11 [outdir]
+#   NZBFAST_PAYLOAD_DIR=<dir> packaging/synology/make-spk.sh 1.0.11 [outdir]
+#
+# The shipped package is built by provenance-release.yml's
+# `linux-packages` job (the second form), and attested there; the first
+# form is for rebuilding one from a published release by hand.
 #
 # Produces ONE package, nzbfast-<ver>-noarch.spk, carrying both the
 # x86_64 and aarch64 binaries; scripts/postinst keeps the one this NAS can
@@ -49,6 +54,19 @@ SKEL="$SELF/spk"
 if command -v sha256sum >/dev/null 2>&1; then SHA256C="sha256sum -c -"
 else SHA256C="shasum -a 256 -c -"; fi
 
+# Owner metadata, in whichever spelling this tar takes. bsdtar (the Mac,
+# FreeBSD) zeroes with --uid/--gid/--uname/--gname; GNU tar (a Linux
+# runner, where provenance-release.yml builds the shipped package) rejects
+# those outright and writes no names at all under --numeric-owner. Both
+# leave uid/gid 0 and empty name strings, which is what
+# check-archive-identity.py's STRICT .spk arm demands. A function, not a
+# variable: POSIX sh cannot carry the empty-string arguments in one.
+if tar --version 2>&1 | head -1 | grep -qi bsdtar; then
+    owner_tar() { tar --uid 0 --gid 0 --uname "" --gname "" "$@"; }
+else
+    owner_tar() { tar --owner=0 --group=0 --numeric-owner "$@"; }
+fi
+
 DIR="$(mktemp -d)"
 trap 'rm -rf "$DIR"' EXIT
 mkdir -p "$OUTDIR"
@@ -57,10 +75,26 @@ OUTDIR="$(cd "$OUTDIR" && pwd)"
 # Fetch + verify the released linux binaries. Each archive is checked
 # against its OWN checksum line and that line has to exist, so a partial
 # SHA256SUMS.txt cannot let an unverified binary into a package.
-for a in linux-x64 linux-arm64; do
-    curl -fsSL -o "$DIR/nzbfast-$VER-$a.tar.gz" "$REL/nzbfast-$VER-$a.tar.gz"
-done
-curl -fsSL -o "$DIR/SHA256SUMS.txt" "$REL/SHA256SUMS.txt"
+#
+# NZBFAST_PAYLOAD_DIR is the other source, and the one a release uses
+# since 23 Oct 2026: provenance-release.yml's `linux-packages` job builds
+# this package on a runner, in the same run that builds and attests the
+# two linux tarballs, before the release is public - so there is no
+# release page to curl yet. The directory holds the same three files
+# under the same names (the job writes SHA256SUMS.txt over the attested
+# tarballs it took), and every check below runs unchanged. It is the
+# same bytes the release page then carries, under the one name each, so
+# the rule above - only bytes a published checksum covers - still holds.
+if [ -n "${NZBFAST_PAYLOAD_DIR:-}" ]; then
+    for f in "nzbfast-$VER-linux-x64.tar.gz" "nzbfast-$VER-linux-arm64.tar.gz" SHA256SUMS.txt; do
+        cp "$NZBFAST_PAYLOAD_DIR/$f" "$DIR/$f"
+    done
+else
+    for a in linux-x64 linux-arm64; do
+        curl -fsSL -o "$DIR/nzbfast-$VER-$a.tar.gz" "$REL/nzbfast-$VER-$a.tar.gz"
+    done
+    curl -fsSL -o "$DIR/SHA256SUMS.txt" "$REL/SHA256SUMS.txt"
+fi
 for a in linux-x64 linux-arm64; do
     art="nzbfast-$VER-$a.tar.gz"
     n=$(grep -c "[ *]$art\$" "$DIR/SHA256SUMS.txt" || true)
@@ -132,8 +166,7 @@ EOF
     # .spk. tar writes the building user's name into every entry, and the
     # inner archive is where it hides: zeroing only the outer tar leaves a
     # perfectly clean-looking package whose payload still names someone.
-    (cd "$work/package" && tar --format=ustar --uid 0 --gid 0 \
-        --uname "" --gname "" -czf "$work/package.tgz" .)
+    (cd "$work/package" && owner_tar --format=ustar -czf "$work/package.tgz" .)
     rm -rf "$work/package"
 
     # The .spk itself is a PLAIN tar, not compressed. Owner metadata is
@@ -144,8 +177,7 @@ EOF
     # port it claims, and these do get passed around by hand.
     name="nzbfast-$VER-noarch"
     [ "$PORT" = "6789" ] || name="$name-port$PORT"
-    (cd "$work" && tar --format=ustar --uid 0 --gid 0 --uname "" --gname "" \
-        -cf "$OUTDIR/$name.spk" \
+    (cd "$work" && owner_tar --format=ustar -cf "$OUTDIR/$name.spk" \
         INFO package.tgz conf scripts PACKAGE_ICON.PNG PACKAGE_ICON_256.PNG)
     echo "built $OUTDIR/$name.spk (port $PORT)"
 }

@@ -715,6 +715,41 @@ article_bytes = 20000
         );
     }
 
+    /// Gemini 14 Oct sweep M17: the same damage on a SPLIT row reaches
+    /// the part it lands in. The parts were cut from the clean source
+    /// before this plane ran and posted as cut, so every span on a split
+    /// row was dropped and the row posted an undamaged payload.
+    #[test]
+    fn a_damaged_span_on_a_split_row_reaches_the_posted_part() {
+        let p = Profile::parse(&format!(
+            "{}{SET}\n[fault]\ncorrupt_payload = [{{ file = \"payload.bin\", at = 70000, bytes = 64 }}]\n",
+            BASE.replace("bytes = 120000", "bytes = 120000, split = 2")
+        ))
+        .expect("profile parses");
+        let l = generate(&p).unwrap_or_else(|e| panic!("layout generates: {e}"));
+        let part = &l
+            .files
+            .iter()
+            .find(|(n, _)| n == "payload.bin.002")
+            .expect("the second part is posted")
+            .1;
+        let expected = &l
+            .expect
+            .files
+            .iter()
+            .find(|(n, _)| n == "payload.bin")
+            .expect("the joined payload is expected")
+            .1;
+        // Part two starts at 60000, so the span sits at 10000 in it.
+        assert_ne!(
+            part[10000..10064],
+            expected[70000..70064],
+            "the named span must be spoiled in the part that carries it"
+        );
+        assert_eq!(part[..10000], expected[60000..70000]);
+        assert_eq!(part[10064..], expected[70064..]);
+    }
+
     /// ...and a profile that names no span forks nothing, so every row
     /// that came before this plane is byte-identical to what it was.
     #[test]

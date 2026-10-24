@@ -788,6 +788,24 @@ fn cleanup_selects(entry: &str, ext: &str, name: &str, rel: &str) -> bool {
 /// file's own extension either way, so a pattern that happens to sweep
 /// recovery files still reports them as recovery files.
 pub fn cleanup(dir: &Path, exts: &[String]) -> (usize, usize) {
+    cleanup_inner(dir, exts, false)
+}
+
+/// [`cleanup`] for a job whose archives are still LOCKED - encrypted
+/// with no password that opens them, or refused by the unlock ladder.
+///
+/// Those volumes are not leftovers: they are the whole payload, parked
+/// for the password that unpacks them, and an unlock re-runs the whole
+/// tail, with the ordinary sweep, once one opens them. So a list entry that selects an
+/// archive (`rar`, `r00`, `7z`, a pattern like `*.r*`) spares every file
+/// `is_packed_archive` calls packed - by name, by magic, and as a
+/// member of a zip or numbered split set - and everything else the list
+/// names goes exactly as it would for an unlocked job.
+pub fn cleanup_sparing_archives(dir: &Path, exts: &[String]) -> (usize, usize) {
+    cleanup_inner(dir, exts, true)
+}
+
+fn cleanup_inner(dir: &Path, exts: &[String], spare_archives: bool) -> (usize, usize) {
     let mut removed = 0;
     let mut par2 = 0;
     // Read once, for the whole sweep: see `remove_user_file`.
@@ -795,9 +813,21 @@ pub fn cleanup(dir: &Path, exts: &[String]) -> (usize, usize) {
     let staging = trash_staging_dir(dir);
     let mut sweep = |d: &Path, prefix: &str| {
         let Ok(rd) = std::fs::read_dir(d) else { return };
+        // Set membership is a directory question, so it is asked once
+        // per directory, and only when something is to be spared.
+        let sets = spare_archives.then(|| {
+            let mut split_parts = crate::container_part_set(d);
+            split_parts.extend(crate::split_part_set(d));
+            (zip_part_set(d), split_parts)
+        });
         for entry in rd.flatten() {
             let path = entry.path();
             if !is_real_file(&path) {
+                continue;
+            }
+            if let Some((zip_parts, split_parts)) = &sets
+                && is_packed_archive(&path, zip_parts, split_parts)
+            {
                 continue;
             }
             let ext = path

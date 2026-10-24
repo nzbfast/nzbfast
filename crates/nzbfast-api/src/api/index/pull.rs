@@ -596,7 +596,13 @@ pub(super) fn m_spot_grab(
             .unwrap_or(-100);
         let cat = params.get("cat_name").cloned().unwrap_or_default();
         let dupe_ok = params.get("dupe_ok").map(String::as_str) == Some("1");
-        let spot = d.with_index_read(|ix| ix.spot_by_msgid(&msgid).ok().flatten());
+        // index_read_checked: a busy read pool flattened to None here
+        // and answered "no such spot - rescan" for a spot the index
+        // holds (Gemini 14 Oct sweep L6). Busy is transient; say so.
+        let spot = match d.index_read_checked(|ix| ix.spot_by_msgid(&msgid).ok().flatten()) {
+            Ok(spot) => spot,
+            Err(why) => return Some(why.refusal()),
+        };
         match spot {
             None => json!({"status": false,
                             "error": "no such spot - rescan and try again"}),

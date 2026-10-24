@@ -52,6 +52,30 @@ pub enum Redundancy {
     TargetBytes(u64),
 }
 
+/// What a COMPLETED repair does with the `<name>.1` copies it made of
+/// each damaged original before writing over it.
+///
+/// Not a switch, and no command line can spell it: the reference has no
+/// such control, so the CLI always runs [`BackupPolicy::Reference`]. It
+/// exists for the long-lived host (`parfast-session`), whose Repair pane
+/// carries a "Keep damaged copies" tick beside "Delete the recovery
+/// files" - two decisions the reference fuses into one `-p`. Until 14 Oct
+/// 2026 the session documented that tick and never read it, so `-p`
+/// deleted the copies the user had just asked to keep (sweep H7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackupPolicy {
+    /// par2cmdline's: `-p` removes this run's backups along with the
+    /// recovery files, and without `-p` they stay.
+    #[default]
+    Reference,
+    /// Keep them whatever `-p` says. `-p` still removes the recovery
+    /// files.
+    Keep,
+    /// Remove them once the repair has completed and re-verified,
+    /// whether or not `-p` was given.
+    Remove,
+}
+
 /// Everything the switches said, already validated against each other.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
@@ -172,6 +196,9 @@ pub struct Options {
     pub par2: Option<PathBuf>,
     /// The data files named after it.
     pub files: Vec<PathBuf>,
+    /// The `<name>.1` backups' fate after a completed repair. Never set
+    /// by the parser; see [`BackupPolicy`].
+    pub backups: BackupPolicy,
 }
 
 /// A parsed command line.

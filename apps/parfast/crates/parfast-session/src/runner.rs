@@ -12,7 +12,7 @@
 //! # The process-global knobs
 //!
 //! `nzbkit::mem::set_cpu_workers`, `set_process_budget`,
-//! `par2repair::set_joint_arm` and `digest_cache::publish` are
+//! `par2repair::reset_joint_reach` and `digest_cache::publish` are
 //! PROCESS-wide (`set_file_workers` is the CLI's `-T`, which has no
 //! GUI counterpart, so this crate never calls it). A CLI sets them
 //! once in `run_with` and exits; a long-lived app has to set them per
@@ -306,12 +306,7 @@ impl Default for KnobLock {
 /// this function's spec back to itself. It sits in that crate and not
 /// in this one's unit tests because it needs a process to itself - the
 /// header of that file says why, and the reason is this function.
-fn apply_knobs(
-    threads: Option<usize>,
-    memory_mb: Option<u64>,
-    fast_solver: bool,
-    digest_cache: bool,
-) {
+fn apply_knobs(threads: Option<usize>, memory_mb: Option<u64>, digest_cache: bool) {
     match threads.filter(|&t| t > 0) {
         Some(t) => nzbkit::mem::set_cpu_workers(t),
         None => nzbkit::mem::clear_cpu_workers(),
@@ -332,12 +327,16 @@ fn apply_knobs(
         )),
         None => nzbkit::mem::clear_process_budget(),
     }
-    // A plain `bool` and not an `Option`: every caller already resolved
-    // the job's answer against the Settings field, which is itself a
-    // `bool`, so the absent case this used to carry could not arise -
-    // and an `Option` that is always `Some` is the shape the two knobs
-    // above went wrong in.
-    nzbkit::par2repair::set_joint_arm(fast_solver);
+    // The joint Forney solve's ARM is not published, deliberately. It is
+    // the engine's default on every class that can run it, and the CLI
+    // stopped touching it when `--fast` was dropped (d89e1027da). This
+    // used to publish `fast_solver` - default `false` - so every job the
+    // apps ran forced the slower solve the CLI no longer uses (Gemini
+    // sweep H11, 14 Oct 2026). `fast_solver` now selects nothing, as
+    // `verify_options` already said; `NZBFAST_FORNEY_JOINT` stays the
+    // measurement control. Pinned by `parfast-ffi`'s
+    // `tests/joint_arm.rs`, in a process of its own for `knobs.rs`'s
+    // reason. The reach report is still per job.
     nzbkit::par2repair::reset_joint_reach();
     // The Settings pane's "Remember checksums of large files", published
     // in BOTH directions for the CLI's reason (`parfast::run_with`): a job
@@ -558,6 +557,47 @@ fn verify_options(
     }
 }
 
+/// The `parfast v` / `parfast r` line equivalent to a verify or repair
+/// job, spelt from the SAME `Options` the job runs under, for
+/// `JobSnapshot::command`. That field was documented and never filled
+/// (Gemini sweep M18.5), so a host's "show the equivalent command" had
+/// nothing from the core for these two kinds. The log level is the
+/// app's setting rather than the job's and is left out, as `-T` is.
+pub(crate) fn verify_command_line(o: &parfast::cli::Options, repair: bool) -> String {
+    let mut parts = vec![
+        "parfast".to_string(),
+        if repair { "r" } else { "v" }.to_string(),
+    ];
+    parts.extend(verify_command_args(o).iter().map(|a| planner::quote(a)));
+    parts.join(" ")
+}
+
+/// [`verify_command_line`]'s argv, unquoted, which the round-trip test
+/// parses back.
+fn verify_command_args(o: &parfast::cli::Options) -> Vec<String> {
+    let mut a = Vec::new();
+    if let Some(t) = o.threads {
+        a.push(format!("-t{t}"));
+    }
+    if o.purge {
+        a.push("-p".to_string());
+    }
+    if o.rename_only {
+        a.push("-O".to_string());
+    }
+    if o.data_skip {
+        a.push("-N".to_string());
+    }
+    if let Some(s) = o.skip_leaway {
+        a.push(format!("-S{s}"));
+    }
+    if let Some(p) = &o.par2 {
+        a.push(p.to_string_lossy().into_owned());
+    }
+    a.extend(o.files.iter().map(|f| f.to_string_lossy().into_owned()));
+    a
+}
+
 /// The verify half, orchestrated here rather than through
 /// `parfast::verify::run` because the SURVEY is the product: `run`
 /// answers an exit code and prints, and a block map cannot be drawn
@@ -573,13 +613,12 @@ fn run_verify(job: &Job, spec: &VerifySpec, started: Instant) -> Outcome {
     apply_knobs(
         spec.options.threads.or(job.settings.performance.threads),
         job.settings.performance.memory_mb,
-        spec.options
-            .fast_solver
-            .unwrap_or(job.settings.performance.fast_solver),
         job.settings.performance.digest_cache,
     );
     let mut sink = sink_for(job);
+    let command = verify_command_line(&opts, false);
     job.publisher.update(|s| {
+        s.command = command;
         s.phase = Phase::Scanning;
         s.phase_text = "Reading the recovery set".to_string();
         s.survey = Some(SurveyModel::pending(
@@ -648,23 +687,33 @@ fn run_verify(job: &Job, spec: &VerifySpec, started: Instant) -> Outcome {
 /// rail - the `<name>.1` backup aside, the `-p` purge's provenance
 /// rule, the `-B` refusal - is the CLI's own and not a second copy.
 fn run_repair(job: &Job, spec: &RepairSpec, started: Instant) -> Outcome {
-    let opts = verify_options(
+    let mut opts = verify_options(
         &spec.par2,
         &spec.extra_dirs,
         &spec.options,
         spec.purge,
         job.settings.advanced.log_level,
     );
+    // "Keep damaged copies" is its own decision and not `-p`'s half of
+    // one: the CLI's purge removes this run's backups with the recovery
+    // files, which took the copy a user had ticked to keep, and an
+    // unticked box kept it anyway because nothing read the field
+    // (Gemini sweep H7, 14 Oct 2026). The engine still owns the delete,
+    // under its provenance and protected-member rules.
+    opts.backups = if spec.keep_damaged {
+        parfast::cli::BackupPolicy::Keep
+    } else {
+        parfast::cli::BackupPolicy::Remove
+    };
     apply_knobs(
         spec.options.threads.or(job.settings.performance.threads),
         job.settings.performance.memory_mb,
-        spec.options
-            .fast_solver
-            .unwrap_or(job.settings.performance.fast_solver),
         job.settings.performance.digest_cache,
     );
     let mut sink = sink_for(job);
+    let command = verify_command_line(&opts, true);
     job.publisher.update(|s| {
+        s.command = command;
         s.phase = Phase::Hashing;
         s.phase_text = "Verifying before repair".to_string();
     });
@@ -760,9 +809,17 @@ fn run_repair(job: &Job, spec: &RepairSpec, started: Instant) -> Outcome {
 /// the written-file report after it: a file the guard would not protect
 /// but the report would claim is a file destroyed without warning and
 /// then listed as this job's own output.
+///
+/// The base is matched exactly (the engine writes it as given) and the
+/// `.par2` / `.vol` parts in any case, because the index keeps the case
+/// the user typed (`set.PAR2`) while `parfast::create` strips that
+/// suffix case-blind (Gemini sweep H9).
 fn set_member(base: &str, name: &str) -> bool {
-    name == format!("{base}.par2")
-        || (name.starts_with(&format!("{base}.vol")) && name.ends_with(".par2"))
+    let Some(rest) = name.strip_prefix(base) else {
+        return false;
+    };
+    let rest = rest.to_ascii_lowercase();
+    rest == ".par2" || (rest.starts_with(".vol") && rest.ends_with(".par2"))
 }
 
 /// The first file of `output`'s recovery set already on disk, if any.
@@ -846,7 +903,6 @@ fn run_create(job: &Job, spec: &CreateSpec, _started: Instant) -> Outcome {
     apply_knobs(
         spec.perf.threads.or(job.settings.performance.threads),
         spec.perf.memory_mb.or(job.settings.performance.memory_mb),
-        job.settings.performance.fast_solver,
         job.settings.performance.digest_cache,
     );
     // THE WHOLE SET, not just the index. A create writes one `.par2`
@@ -887,6 +943,10 @@ fn run_create(job: &Job, spec: &CreateSpec, _started: Instant) -> Outcome {
         return Outcome::failed("exists", format!("{} already exists", clash.display()));
     }
     job.publisher.update(|s| {
+        // The preview's own line, which is the argv this create parsed
+        // its `Options` from (see above) - filled for the snapshot that
+        // `JobSnapshot::command` promises and nothing set (M18.5).
+        s.command = preview.command.clone();
         s.phase = Phase::Solving;
         s.phase_text = format!(
             "Creating {} recovery blocks over {} source blocks",
@@ -1601,6 +1661,25 @@ mod checksums {
                 ),
             );
         }
+        // ...and the LINE must read back as the name. The reader trims
+        // each line and skips `;` / `#` comments, so a name with a
+        // trailing space (or a leading one in an SFV, or a leading
+        // comment marker there) was written and then verified as
+        // Missing; the round trip above put the raw name through the
+        // resolver and never through the line (Gemini sweep M1).
+        if let Some(odd) = members.iter().find(|m| {
+            checksum::name_as_read_back(&m.name, spec.format).as_deref() != Some(m.name.as_str())
+        }) {
+            return Outcome::failed(
+                "unrepresentable_name",
+                format!(
+                    "{:?} cannot be written into a .{} file so that it reads back as the \
+                     same name; rename it or choose another format",
+                    odd.name,
+                    spec.format.extension()
+                ),
+            );
+        }
         let total = members.len();
         let entries: Vec<(String, std::path::PathBuf)> = members
             .iter()
@@ -1627,13 +1706,7 @@ mod checksums {
         // STAGED and renamed over, the same shape the queue store uses:
         // a failed or interrupted write must not leave a truncated
         // manifest where a complete one was.
-        let tmp = spec.output.with_extension(format!(
-            "{}.parfast-tmp",
-            spec.output
-                .extension()
-                .map(|e| e.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        ));
+        let tmp = staging_path(&spec.output);
         if let Err(e) = std::fs::write(&tmp, text.as_bytes()) {
             let _ = std::fs::remove_file(&tmp);
             return Outcome::failed("io", format!("{}: {e}", tmp.display()));
@@ -1751,6 +1824,25 @@ mod checksums {
         }
     }
 
+    /// Where a checksum create stages its manifest before renaming it
+    /// over `output`. UNIQUE per call - the process id and a counter -
+    /// and not the fixed `<output>.<ext>.parfast-tmp` it used to be: two
+    /// jobs writing the same output at concurrency above 1 shared that
+    /// one staging file, so one could rename the other's half-written
+    /// bytes into place, or find its own gone (Gemini sweep M18.6).
+    pub(super) fn staging_path(output: &std::path::Path) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        output.with_extension(format!(
+            "{}.parfast-tmp-{}-{n}",
+            output
+                .extension()
+                .map(|e| e.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            std::process::id()
+        ))
+    }
+
     fn publish_file_progress(job: &Job, i: usize, total: usize, started: Instant, verb: &str) {
         let frac = if total == 0 {
             1.0
@@ -1781,6 +1873,88 @@ pub fn kind_label(kind: JobKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The no-overwrite guard and the written-file report read one
+    /// predicate, and it has to recognise the set the engine writes for
+    /// an index typed in upper or mixed case (Gemini sweep H9).
+    /// The verify/repair line a snapshot carries parses back into the
+    /// switches the job ran under (Gemini sweep M18.5: the field was
+    /// never filled), quoting included.
+    #[test]
+    fn the_verify_and_repair_command_lines_parse_back_to_the_jobs_options() {
+        let o = crate::job::VerifyOptions {
+            rename_only: true,
+            data_skipping: true,
+            skip_leaway: Some(128),
+            fast_solver: None,
+            threads: Some(3),
+        };
+        let extra = vec![std::path::PathBuf::from("/abs/other dir")];
+        for (repair, purge) in [(false, false), (true, false), (true, true)] {
+            let opts = verify_options(
+                std::path::Path::new("/abs/my set.par2"),
+                &extra,
+                &o,
+                purge,
+                0,
+            );
+            let line = verify_command_line(&opts, repair);
+            assert!(
+                line.starts_with(if repair { "parfast r " } else { "parfast v " }),
+                "{line}"
+            );
+            assert!(line.contains("'/abs/my set.par2'"), "quoted: {line}");
+            let argv: Vec<String> = std::iter::once(if repair { "r" } else { "v" }.to_string())
+                .chain(verify_command_args(&opts))
+                .collect();
+            let back = parfast::cli::parse("parfast", &argv).expect("parses").opts;
+            assert_eq!(back.threads, opts.threads, "{line}");
+            assert_eq!(back.purge, opts.purge, "{line}");
+            assert_eq!(back.rename_only, opts.rename_only, "{line}");
+            assert_eq!(back.data_skip, opts.data_skip, "{line}");
+            assert_eq!(back.skip_leaway, opts.skip_leaway, "{line}");
+            assert_eq!(back.par2, opts.par2, "{line}");
+            assert_eq!(back.files, opts.files, "{line}");
+        }
+    }
+
+    /// Two checksum creates over one output never share a staging file
+    /// (Gemini sweep M18.6), and the staging file still sits beside the
+    /// output, so the rename over it stays on one filesystem.
+    #[test]
+    fn two_checksum_creates_stage_to_different_files() {
+        let out = std::path::Path::new("/abs/dir/sums.sfv");
+        let a = checksums::staging_path(out);
+        let b = checksums::staging_path(out);
+        assert_ne!(a, b);
+        for p in [&a, &b] {
+            assert_eq!(p.parent(), out.parent(), "{p:?}");
+            assert!(
+                p.to_string_lossy()
+                    .starts_with("/abs/dir/sums.sfv.parfast-tmp-"),
+                "{p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_set_member_is_recognised_whatever_case_its_suffix_is_in() {
+        let base = planner::base_name(std::path::Path::new("/abs/Movie.PAR2"));
+        assert_eq!(base, "Movie");
+        for name in [
+            "Movie.par2",
+            "Movie.PAR2",
+            "Movie.Par2",
+            "Movie.vol000+01.par2",
+            "Movie.vol0+1.PAR2",
+            "Movie.VOL3-7.par2",
+        ] {
+            assert!(set_member(&base, name), "{name} is one of the set's");
+        }
+        for name in ["Movie.mkv", "movie.par2", "Movie2.par2", "Movie.par2.bak"] {
+            assert!(!set_member(&base, name), "{name} is not one of the set's");
+        }
+    }
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// The gate blocks while paused and comes back the moment the

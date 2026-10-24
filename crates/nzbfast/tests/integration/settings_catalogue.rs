@@ -2748,3 +2748,92 @@ fn mem_limit_is_restart_only_and_the_surface_says_so() {
         "set.perf.mem.inforce is not in the English catalogue"
     );
 }
+
+/// Every role-preset row is a real setting, written through its own
+/// control (GitHub #102).
+///
+/// `roleDefs()` in the dashboard names each recommendation by its
+/// settings key AND the id of the control whose label and value it
+/// shows, and `applyRole` sends the key straight to `mode=config`. A key
+/// the allowlist does not know is refused at Apply, and an id that names
+/// a different setting's control shows the wrong "now" value - both
+/// silently, in a list whose whole promise is "each row is an ordinary
+/// setting". Read from the page source, so a row added tomorrow is held
+/// to it the day it lands.
+#[test]
+fn every_role_preset_row_is_a_real_setting_on_its_own_control() {
+    let dash = include_str!("../../../../web/dashboard.html");
+    let at = dash
+        .find("function roleDefs(){")
+        .expect("roleDefs() has moved or been renamed in the dashboard");
+    let body = &dash[at..];
+    let body = &body[..body
+        .find("\n]; }")
+        .expect("roleDefs() lost its closing `]; }`")];
+    let allow = allowlist();
+    let mut rows: Vec<(String, String, String, String)> = Vec::new();
+    let mut role = String::new();
+    for line in body.lines() {
+        let l = line.trim_start();
+        if let Some(rest) = l.strip_prefix("{id:'") {
+            role = rest[..rest.find('\'').unwrap()].to_string();
+        }
+        let Some(rest) = l.strip_prefix("{k:'") else {
+            continue;
+        };
+        let k = &rest[..rest.find('\'').unwrap()];
+        let rest = &rest[rest.find("id:'").expect("a row with no control id") + 4..];
+        let id = &rest[..rest.find('\'').unwrap()];
+        let rest = &rest[rest.find("v:").expect("a row with no value") + 2..];
+        let v = rest[..rest.find(',').unwrap()].trim().trim_matches('\'');
+        rows.push((role.clone(), k.to_string(), id.to_string(), v.to_string()));
+    }
+    assert!(
+        rows.len() >= 6,
+        "read too few preset rows to be the real list: {rows:?}"
+    );
+    for (role, k, id, _) in &rows {
+        assert!(
+            allow.contains(k),
+            "role {role:?} recommends {k:?}, which apply_setting does not accept"
+        );
+        let ctl = dash
+            .split(&format!("id=\"{id}\""))
+            .nth(1)
+            .unwrap_or_else(|| {
+                panic!("role {role:?} row {k:?} names a control {id:?} the page lacks")
+            });
+        let ctl = &ctl[..ctl.find('>').unwrap_or(ctl.len())];
+        // Either the generic writer, or a dedicated handler whose body
+        // writes this key (the index switch reloads the page, so it has
+        // its own: `setIndexEnabled`).
+        let saves = ctl.contains(&format!("setCfg('{k}'")) || {
+            let h = ctl
+                .split("onchange=\"")
+                .nth(1)
+                .and_then(|s| s.split('(').next())
+                .unwrap_or("");
+            let f = dash.split(&format!("function {h}(")).nth(1).unwrap_or("");
+            let f = &f[..f.find("\nfunction ").unwrap_or(f.len())];
+            !h.is_empty() && f.contains(&format!("name={k}&"))
+        };
+        assert!(
+            saves,
+            "role {role:?} row {k:?} shows control {id:?}, which saves a different setting"
+        );
+    }
+    // The "an app drives it" answer leaves finished downloads alone.
+    let arr: Vec<(&str, &str)> = rows
+        .iter()
+        .filter(|r| r.0 == "arr")
+        .map(|r| (r.1.as_str(), r.3.as_str()))
+        .collect();
+    for want in [
+        ("auto_rename", "0"),
+        ("delete_to_trash", "0"),
+        ("spot_enabled", "0"),
+        ("index_enabled", "0"),
+    ] {
+        assert!(arr.contains(&want), "the arr role lost {want:?}: {arr:?}");
+    }
+}

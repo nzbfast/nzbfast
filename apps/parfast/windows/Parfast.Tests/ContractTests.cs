@@ -321,12 +321,12 @@ public class ContractTests
 
         var changed = defaults with
         {
-            General = defaults.General with { OpenPar2 = "verify_repair" },
+            General = defaults.General with { OpenPar2 = "verify_then_repair" },
             Concurrency = 3,
         };
         Assert.True(core.SetSettings(changed));
         var readBack = core.GetSettings();
-        Assert.Equal("verify_repair", readBack.General.OpenPar2);
+        Assert.Equal("verify_then_repair", readBack.General.OpenPar2);
         Assert.True(readBack.AutoRepairOnOpen);
         Assert.Equal(3, readBack.Concurrency);
 
@@ -342,7 +342,7 @@ public class ContractTests
             Assert.Equal(System.Text.Json.JsonValueKind.Object, g.ValueKind);
         }
 
-        Assert.Equal("verify_repair", root.GetProperty("general").GetProperty("open_par2").GetString());
+        Assert.Equal("verify_then_repair", root.GetProperty("general").GetProperty("open_par2").GetString());
         Assert.Equal(3, root.GetProperty("concurrency").GetInt32());
         Assert.Equal("none", root.GetProperty("post_queue_action").GetString());
 

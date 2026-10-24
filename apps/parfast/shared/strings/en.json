@@ -112,8 +112,6 @@
     "verify.file.blocks_of": "{ok} of {total}",
     "verify.file_strip_summary": "{ok} of {total} blocks present",
     "verify.row.rename": "Rename to the expected name",
-    "verify.row.exclude": "Exclude from repair",
-    "verify.row.excluded": "Excluded from repair",
     "verify.action.verify_again": "Verify again",
     "verify.action.scan_other": "Scan other folders...",
     "verify.action.repair": "Repair",

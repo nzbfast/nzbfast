@@ -586,6 +586,60 @@ fn set_cors_origin_gates_the_charset_and_normalizes_the_list() {
     assert!(set_cors_origin(&d, "cors_origin", "*, https://a.example").is_err());
 }
 
+/// Gemini 14 Oct 2026 sweep, M13: the three bounded counts clamp in
+/// u64 BEFORE narrowing. `(v as u32).min(..)` wrapped 2^32 to 0 first,
+/// so the largest possible typo landed at the floor - a hold count of
+/// 0, a heal sweep that starts nothing - instead of the ceiling.
+#[test]
+fn bounded_counts_clamp_before_they_narrow() {
+    let (_t, d) = daemon_in("narrow");
+    let wrap = (1u64 << 32).to_string();
+    assert_eq!(
+        apply_setting(&d, "alt_hold_count", &wrap).unwrap().1,
+        json!(10)
+    );
+    assert_eq!(
+        apply_setting(&d, "alt_max_copies", &wrap).unwrap().1,
+        json!(10)
+    );
+    assert_eq!(
+        apply_setting(&d, "heal_auto_max_jobs", &wrap).unwrap().1,
+        json!(super::super::heal::MAX_HEAL_JOBS)
+    );
+}
+
+/// Gemini 14 Oct 2026 sweep, M13, the restore half: a settings.json
+/// value meets the setter's rule. `alt_max_copies` had no clamp at all
+/// (a saved 0 made every spare read as already spent), the other two
+/// wrapped like the setters did, and `cors_origin` was installed
+/// without the shape check its setter makes.
+#[test]
+fn restored_settings_meet_the_setters_rules() {
+    let (_t, d) = daemon_in("restorebounds");
+    let saved = json!({
+        "alt_hold_count": 1u64 << 32,
+        "alt_max_copies": 0,
+        "heal_auto_max_jobs": 1u64 << 32,
+        "cors_origin": "https://a.example/path",
+    });
+    crate::settings_restore::restore_ui_and_index_settings(&d, saved.as_object().unwrap());
+    assert_eq!(d.alt.hold_count.load(Ordering::Relaxed), 10);
+    assert_eq!(d.alt.max_copies.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        d.heal_auto.max_jobs.load(Ordering::Relaxed) as usize,
+        super::super::heal::MAX_HEAL_JOBS
+    );
+    assert_eq!(
+        *d.cors_origin.lock_ok(),
+        CORS_DEFAULT,
+        "a malformed saved origin must leave the default in place"
+    );
+    // A saved EMPTY string still survives as "send no header".
+    let saved = json!({"cors_origin": ""});
+    crate::settings_restore::restore_ui_and_index_settings(&d, saved.as_object().unwrap());
+    assert_eq!(*d.cors_origin.lock_ok(), "");
+}
+
 #[cfg(feature = "indexer")]
 #[test]
 fn set_index_evict_order_membership() {

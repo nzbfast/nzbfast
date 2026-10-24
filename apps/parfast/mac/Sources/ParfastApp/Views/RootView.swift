@@ -173,6 +173,12 @@ struct RootView: View {
         switch app.mode {
         case .create: return app.create.preview?.command
         case .verify:
+            // The core's own line for the job on screen, which says `r` and
+            // carries the repair's switches when that job is a repair. The
+            // bare `v` line is only for a set nothing has run on yet.
+            if let command = app.verify.snapshot?.command, !command.isEmpty {
+                return command
+            }
             guard let path = app.verify.par2Path else { return nil }
             return "parfast v \(path)"
         case .checksums, .queue: return nil

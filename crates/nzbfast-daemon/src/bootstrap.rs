@@ -8,15 +8,37 @@
 
 use super::*;
 
-/// Settings keys the `nzbfast setup` wizard writes BEFORE the daemon has
-/// ever run - it is a separate process, so its answers land in
-/// settings.json ahead of first start.
+/// Settings keys a setup-time COMMAND writes BEFORE the daemon has ever
+/// run - each is a separate process, so its answers land in
+/// settings.json ahead of first start:
+///
+/// - `index_interests`: the `nzbfast setup` wizard's indexing answer.
+/// - `password_file`: `nzbfast import-sab`, when the sabnzbd.ini names an
+///   archive-passwords file that exists (import_sab::adopt_password_file).
+/// - the seven keys of `import-sab --arr` (import_sab::ARR_PRESET, the
+///   dashboard's Sonarr/Radarr card as a CLI flag; GitHub #102), held to
+///   that list by `setup_answers_cover_the_arr_preset`.
 ///
 /// They must not read as "an existing install" to the first-run API key
-/// test: a user who answered "index sport" in the wizard would otherwise
-/// get an unkeyed daemon, which is the exact hole that test exists to
-/// close.
-pub(super) const SETUP_ANSWER_KEYS: &[&str] = &["index_interests"];
+/// test: a user who answered "index sport" in the wizard, or migrated
+/// from SABnzbd with a passwords file, would otherwise get an unkeyed
+/// daemon, which is the exact hole that test exists to close. The
+/// import-sab half was that hole until 24 Oct 2026 - a fresh install
+/// imported from SABnzbd came up open on 0.0.0.0. An install that has
+/// actually run is still caught by its `.spool`, which the caller tests
+/// first, so a daemon-saved `password_file` alone never mints a key
+/// under a running install. A new setup-time writer adds its key HERE.
+pub(super) const SETUP_ANSWER_KEYS: &[&str] = &[
+    "index_interests",
+    "password_file",
+    "dupe_action",
+    "out_umask",
+    "arr_giveup_threshold",
+    "index_enabled",
+    "spot_enabled",
+    "auto_rename",
+    "delete_to_trash",
+];
 
 /// Does settings.json hold anything beyond the wizard's own answers?
 ///

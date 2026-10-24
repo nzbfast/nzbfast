@@ -744,8 +744,12 @@ fn in_set_harvest_possible(out_dir: &Path, set: &nzbkit::par2::Par2Set, shortfal
         .files
         .iter()
         .map(|f| {
-            std::fs::metadata(out_dir.join(nzbkit::disk::sanitize_out_name(&f.name)))
-                .is_ok_and(|m| m.is_file() && m.len() == f.length)
+            // `join_out_name`: see the note in `gridrefute.rs`.
+            std::fs::metadata(nzbkit::disk::join_out_name(
+                out_dir,
+                &nzbkit::disk::sanitize_out_name(&f.name),
+            ))
+            .is_ok_and(|m| m.is_file() && m.len() == f.length)
         })
         .collect();
     if !landed.iter().any(|&l| l) || landed.iter().all(|&l| l) {

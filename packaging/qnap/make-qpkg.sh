@@ -16,9 +16,21 @@
 # packaged binaries were a separate CI cross-build of the same source
 # (72cad10c / 71d12ee9) and matched neither tarball (9cc8c994 / a11ce1ac)
 # nor any checksum published anywhere. The .qpkg is now built AFTER the
-# release, from the release, like the Synology .spk - see the
-# `qnap-qpkg` workflow and step 4c of the publish-release skill. Do not
-# reintroduce a payload source the release page cannot vouch for.
+# release, from the release, like the Synology .spk. Do not reintroduce
+# a payload source the release page cannot vouch for.
+#
+#   NZBFAST_PAYLOAD_DIR=<dir> packaging/qnap/make-qpkg.sh 1.1.2 [outdir]
+#
+# is NOT that, and it is how the shipped package is built since 23 Oct
+# 2026. provenance-release.yml's `linux-packages` job runs it in the same
+# run that builds and attests nzbfast-X.Y.Z-linux-{x64,arm64}.tar.gz,
+# against a DRAFT release, with those two tarballs (and a SHA256SUMS.txt
+# over them) in <dir>. The binaries inside the package are therefore the
+# binaries inside the attested tarballs - the files the release page
+# carries under one name each and SHA256SUMS.txt then covers - not a
+# second cross-build. The 1.1.3 defect was a DIFFERENT BUILD; this is the
+# same bytes arriving before the page is public. The checks below run
+# identically on either source. Step 2a of the publish-release skill.
 #
 # Produces ONE package, nzbfast-<ver>-qnap-beta.qpkg, carrying both the
 # x86_64 and aarch64 binaries; nzbfast-setup.sh keeps the one this NAS can
@@ -95,18 +107,19 @@ if [ "$(uname -s)" = "Darwin" ]; then
   about a file that is right there on the host. Setting TMPDIR does not
   move it - that message is about the mount, not about qpkg.cfg.
 
-  Build it in CI, on the Ubuntu runner where QDK works - dispatch on the
-  private repo, which is where every other release workflow is run:
+  A release's package is built in CI: provenance-release.yml's
+  \`linux-packages\` job, from step 2a of the publish-release skill,
+  builds and attests it on an Ubuntu runner with the rest of the
+  release. For a packaging smoke against a published release, dispatch
+  qnap-qpkg.yml AT the tag:
 
       TAG=v$VER
       gh workflow run qnap-qpkg.yml --ref "\$TAG" -f tag="\$TAG"
 
-  \`--ref\` is load-bearing and the workflow refuses a dispatch without
+  \`--ref\` is load-bearing and that workflow refuses a dispatch without
   it: \`-f tag=\` selects only the PAYLOAD, while qpkg.cfg,
   package_routines and the pinned QDK qinstall.sh that runs as ROOT on
-  the NAS all come from whatever the run checked out. Step 4c of the
-  publish-release skill is the rest of it - the release page has to be
-  up first, and the artifact is scanned and uploaded by hand.
+  the NAS all come from whatever the run checked out.
 EOF
     exit 1
 fi
@@ -123,10 +136,20 @@ OUTDIR="$(cd "$OUTDIR" && pwd)"
 # Fetch + verify the released linux binaries. Each archive is checked
 # against its OWN checksum line and that line has to exist, so a partial
 # SHA256SUMS.txt cannot let an unverified binary into a package.
-for a in linux-x64 linux-arm64; do
-    curl -fsSL -o "$DIR/nzbfast-$VER-$a.tar.gz" "$REL/nzbfast-$VER-$a.tar.gz"
-done
-curl -fsSL -o "$DIR/SHA256SUMS.txt" "$REL/SHA256SUMS.txt"
+#
+# NZBFAST_PAYLOAD_DIR: the same three files from a directory instead of
+# the release page - see the header for why this is not the `--binaries`
+# form coming back.
+if [ -n "${NZBFAST_PAYLOAD_DIR:-}" ]; then
+    for f in "nzbfast-$VER-linux-x64.tar.gz" "nzbfast-$VER-linux-arm64.tar.gz" SHA256SUMS.txt; do
+        cp "$NZBFAST_PAYLOAD_DIR/$f" "$DIR/$f"
+    done
+else
+    for a in linux-x64 linux-arm64; do
+        curl -fsSL -o "$DIR/nzbfast-$VER-$a.tar.gz" "$REL/nzbfast-$VER-$a.tar.gz"
+    done
+    curl -fsSL -o "$DIR/SHA256SUMS.txt" "$REL/SHA256SUMS.txt"
+fi
 for a in linux-x64 linux-arm64; do
     art="nzbfast-$VER-$a.tar.gz"
     n=$(grep -c "[ *]$art\$" "$DIR/SHA256SUMS.txt" || true)
@@ -333,8 +356,9 @@ else
     echo "    - put qbuild on PATH (see packaging/qnap/README.md), or" >&2
     echo "    - install Docker or Podman and re-run this - the Dockerfile" >&2
     echo "      beside this script builds the pinned QDK, or" >&2
-    echo "    - let CI do it: the qnap-qpkg workflow builds the package" >&2
-    echo "      on an Ubuntu runner. Dispatch it AT THE TAG:" >&2
+    echo "    - let CI do it: a release's package comes from" >&2
+    echo "      provenance-release.yml (publish-release step 2a); for a" >&2
+    echo "      smoke, dispatch qnap-qpkg.yml AT THE TAG:" >&2
     echo "          gh workflow run qnap-qpkg.yml --ref v$VER -f tag=v$VER" >&2
     echo "  Do not hand-assemble the package layout instead." >&2
     exit 1

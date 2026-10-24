@@ -180,6 +180,40 @@ impl Daemon {
         exempt: DupeExempt<'_>,
         hold_for: Option<&str>,
     ) -> Result<Enqueued> {
+        self.enqueue_as_with(
+            id,
+            nzb_bytes,
+            name,
+            category,
+            priority,
+            pp,
+            password,
+            origin,
+            exempt,
+            hold_for,
+            AddExtras::default(),
+        )
+    }
+
+    /// [`Self::enqueue_as`] with the [`AddExtras`] an add carries set on
+    /// the row as it is BUILT - so an add that files straight to history
+    /// (a pre-queue reject, `dupe_action = "fail"`) keeps them as surely
+    /// as one that queues.
+    #[expect(clippy::too_many_arguments)]
+    pub fn enqueue_as_with(
+        &self,
+        id: Option<&str>,
+        nzb_bytes: &[u8],
+        name: &str,
+        category: &str,
+        priority: i32,
+        pp: Option<i64>,
+        password: Option<&str>,
+        origin: &str,
+        exempt: DupeExempt<'_>,
+        hold_for: Option<&str>,
+        extras: AddExtras,
+    ) -> Result<Enqueued> {
         let nzo_id = self.mint_nzo_id(id);
         let nzb = nzbkit::nzb::Nzb::parse(nzb_bytes)?;
         let AddIdentity {
@@ -298,8 +332,9 @@ impl Daemon {
         // user made themselves - and downloading into it truncates
         // those files at the first decoded article. It answers
         // `Occupied`, which climbs and records no replace. The retry
-        // path deliberately keeps the bare claim; the full argument is
-        // on `dir_claim_for_add`.
+        // path's IN-PLACE reuse deliberately keeps the bare claim (its
+        // refile branch is a fresh placement and asks this one); the
+        // full argument is on `dir_claim_for_add`.
         let (out_dir, replaces) = crate::persist::blocking_db(|| {
             choose_out_dir(&base_out_dir, &dir_stem, &|p| self.dir_claim_for_add(p))
         });
@@ -431,15 +466,20 @@ impl Daemon {
             queued_at: Some(Instant::now()),
             queued_unix: Some(unix_now()),
             idle_at_add: runner_idle,
-            // Stamped by `enqueue_fetched` when the NZB came from a URL
-            // and the indexer sent an X-DNZB-Failure header.
-            failure_link: String::new(),
-            failure_host: String::new(),
-            failure_https: false,
-            failure_depth: 0,
+            // Carried in by `enqueue_fetched_with` when the NZB came from
+            // a URL and the indexer sent an X-DNZB-Failure header. Set
+            // HERE, not stamped after the add returns: `enqueue_fetched`
+            // used to find the row by scanning the live queue, and an add
+            // filed straight to history (a pre-queue reject, `dupe_action
+            // = "fail"`) is not in it, so its Failed record lost the link
+            // a Retry from history would report through (Codex 22 Oct
+            // sweep F4, sibling).
+            failure_link: extras.failure_link,
+            failure_host: extras.failure_host,
+            failure_https: extras.failure_https,
+            failure_depth: extras.failure_depth,
             // TODO 280: every add starts at 0. The refeed path stamps
-            // the child's depth after this returns, exactly as
-            // `enqueue_fetched` stamps a failure-link replacement's.
+            // the child's depth after this returns.
             refeed_depth: 0,
             identify: String::new(),
             media: None,
@@ -506,7 +546,7 @@ impl Daemon {
             identity_src: String::new(),
             auto_retry_at: None,
             auto_retry_why: None,
-            pp_params: Vec::new(),
+            pp_params: extras.pp_params,
             sab_pp: hook_pp,
             script_override: hook_script,
             replaces,
@@ -986,8 +1026,10 @@ impl Daemon {
             password = nzb.password().map(str::to_string);
         }
         // Zip-packed post, spotted from the NZB's own file list before a
-        // single byte is fetched. We cannot unpack one, so saying it here
-        // costs the user a click instead of a download. Name-shaped
+        // single byte is fetched. Store and deflate zips unpack natively
+        // (since 30 Jul 2026; this was written when none did), but an
+        // exotic codec still arrives packed, so saying it here costs the
+        // user a click instead of a download. Name-shaped
         // evidence only - an obfuscated container has no name to read, and
         // guessing from a subject line would cry wolf on ordinary posts.
         let zip_packed = nzb

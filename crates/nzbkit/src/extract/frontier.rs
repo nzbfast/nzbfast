@@ -1111,20 +1111,34 @@ impl FrontierBuffer {
             st.resync_retained();
             return Ok(Some((base, data)));
         }
-        if let Some((&s, &(po, len))) = st.paged.iter().next() {
+        while let Some((&s, &(po, len))) = st.paged.iter().next() {
             let sc = self
                 .scratch
                 .as_ref()
                 .ok_or_else(|| io::Error::other("paged span with no scratch"))?
                 .clone();
-            let mut b = vec![0u8; len];
+            // Only the part at or above `base` ships. A fold can run the
+            // RAM run through a paged region (see `page_cold`'s tail arm)
+            // and a trim can then take `base` past it; below `base` the
+            // volume file is the authoritative copy, and `chase_span`
+            // writes a differing repair there WITHOUT reaching the
+            // reconciliation in `write_span` (clipped to `end > base`).
+            // Shipping the paged bytes would write the pre-repair copy
+            // back over the repaired file (Gemini 14 Oct sweep M5).
+            let skip = st.base.saturating_sub(s).min(len as u64) as usize;
+            let mut b = vec![0u8; len - skip];
             // Read BEFORE release: the idle truncate must never beat a
             // read of a region a span still references.
-            sc.read(po, &mut b)?;
+            if !b.is_empty() {
+                sc.read(po + skip as u64, &mut b)?;
+            }
             st.paged.remove(&s);
             st.paged_bytes -= len;
             sc.release(len);
-            return Ok(Some((s, b)));
+            if b.is_empty() {
+                continue;
+            }
+            return Ok(Some((s + skip as u64, b)));
         }
         if let Some((s, v)) = st.pending.pop_first() {
             st.resync_retained();
@@ -1343,9 +1357,13 @@ impl FrontierBuffer {
     /// §156.3b: no scratch WRITE happens under `state`. Each batch is
     /// pick-and-clone under the lock, append with the lock RELEASED,
     /// then a commit that re-proves the span is still exactly the bytes
-    /// written (a differing rewrite in the window sets `conflict` and
-    /// the commit walks away; scratch regions are write-once, so an
-    /// orphaned one is just released). The bounded per-span preads the
+    /// written (a differing rewrite in the window moves `rewrite_seq`
+    /// and the commit walks away; scratch regions are write-once, so an
+    /// orphaned one is just released). `conflict` alone is NOT that
+    /// proof: it is only set for a rewrite below `served`, and a repair
+    /// of bytes the decode has not reached yet - every repair, under
+    /// the §94 B gate - leaves it clear. Committing then would drop the
+    /// corrected RAM copy and publish the stale clone in its place. The bounded per-span preads the
     /// readers and `write_span` do under this lock stay as they were -
     /// the unbounded hold was this pass writing `budget - window` bytes
     /// in one go, and worse, doing it under the extractor lock too (the
@@ -1367,7 +1385,7 @@ impl FrontierBuffer {
             if rounds > 64 {
                 break;
             }
-            let batch: Vec<(u64, Vec<u8>)> = {
+            let (batch, seq): (Vec<(u64, Vec<u8>)>, u64) = {
                 let mut st = self.state.lock_ok();
                 // A conflicted or aborted buffer is about to demote;
                 // leave its spans where the demote expects them.
@@ -1424,7 +1442,9 @@ impl FrontierBuffer {
                     picked.push((s, st.pending[&s].clone()));
                 }
                 st.resync_retained();
-                picked
+                // The rewrite generation the clones were taken at, read
+                // under the same lock: the commit's byte-identity proof.
+                (picked, st.rewrite_seq)
             };
             if batch.is_empty() {
                 break;
@@ -1440,16 +1460,20 @@ impl FrontierBuffer {
                     }
                 }
             }
+            #[cfg(test)]
+            page_cold_hook::fire(self);
             {
                 let mut st = self.state.lock_ok();
                 for (s, v, off) in written {
                     let e = s + v.len() as u64;
-                    // Same-length is the whole identity check: rewrites
-                    // reconcile in place (a differing one sets the
-                    // conflict checked below), and a replacement is
+                    // Same length plus an unmoved `rewrite_seq` is the
+                    // identity check: rewrites reconcile in place, a
+                    // DIFFERING one bumps the generation (wherever it
+                    // landed, served or not), and a replacement is
                     // always strictly longer.
                     let intact = !st.conflict
                         && st.abort.is_none()
+                        && st.rewrite_seq == seq
                         && st.pending.get(&s).is_some_and(|cur| cur.len() == v.len());
                     let overlap = st
                         .paged
@@ -1498,7 +1522,7 @@ impl FrontierBuffer {
             const TAIL_CHUNK: usize = 8 << 20;
             let mut retries = 0usize;
             while need >= HOLDS_PAGE_MIN && retries < 8 {
-                let chunk: Option<(u64, Vec<u8>, u64)> = {
+                let chunk: Option<(u64, Vec<u8>, u64, u64)> = {
                     let st = self.state.lock_ok();
                     if st.conflict || st.abort.is_some() || st.data.is_empty() {
                         None
@@ -1519,18 +1543,20 @@ impl FrontierBuffer {
                             None
                         } else {
                             let cut = st.data.len() - take;
-                            Some((at, st.data[cut..].to_vec(), end))
+                            Some((at, st.data[cut..].to_vec(), end, st.rewrite_seq))
                         }
                     }
                 };
-                let Some((at, bytes, end)) = chunk else {
+                let Some((at, bytes, end, seq)) = chunk else {
                     break;
                 };
                 let Some(off) = sc.append(&bytes, cap) else {
                     break;
                 };
+                #[cfg(test)]
+                page_cold_hook::fire(self);
                 let mut st = self.state.lock_ok();
-                if !Self::tail_stood_still(&st, at, end, bytes.len()) {
+                if !Self::tail_stood_still(&st, at, end, bytes.len(), seq) {
                     drop(st);
                     sc.release(bytes.len());
                     retries += 1;
@@ -1567,9 +1593,16 @@ impl FrontierBuffer {
     /// inserting a `paged` region below the new `base`. The `len` arm is
     /// the sibling of the `data.len() >= n` check `trim_consistent`
     /// already carries for the three-phase spill.
-    fn tail_stood_still(st: &FrontierState, at: u64, end: u64, len: usize) -> bool {
+    ///
+    /// `seq` is the `rewrite_seq` the clone was taken at, and the same
+    /// tripwire `trim_consistent` carries: a same-length repair of
+    /// unserved tail bytes moves neither the frontier nor `data`'s
+    /// length and leaves `conflict` clear, so without it the commit
+    /// truncated the corrected bytes and published the stale clone.
+    fn tail_stood_still(st: &FrontierState, at: u64, end: u64, len: usize, seq: u64) -> bool {
         !st.conflict
             && st.abort.is_none()
+            && st.rewrite_seq == seq
             && st.frontier_ram() == end
             && st.data.len() >= len
             && !st
@@ -1928,6 +1961,48 @@ impl rars::BlockingRangeSource for FrontierBuffer {
     }
 }
 
+/// A seam in [`FrontierBuffer::page_cold`] between the scratch append
+/// (lock RELEASED) and the commit that re-takes the lock: the window a
+/// rewrite can land in from another thread. A test arms it on its own
+/// thread to land that rewrite deterministically; unarmed it is a
+/// no-op, and it is compiled into test builds only.
+#[cfg(test)]
+pub(super) mod page_cold_hook {
+    use super::FrontierBuffer;
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnMut(&FrontierBuffer)>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Run `f` once per scratch write `page_cold` makes on this thread
+    /// until [`clear`].
+    pub(crate) fn set(f: impl FnMut(&FrontierBuffer) + 'static) {
+        HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    pub(crate) fn clear() {
+        HOOK.with(|h| *h.borrow_mut() = None);
+    }
+
+    pub(super) fn fire(buf: &FrontierBuffer) {
+        // Taken out for the call so the hook may itself call back into
+        // the buffer (it does: that is the point) without a re-borrow.
+        let Some(mut f) = HOOK.with(|h| h.borrow_mut().take()) else {
+            return;
+        };
+        f(buf);
+        HOOK.with(|h| {
+            let mut slot = h.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(f);
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2176,6 +2251,60 @@ mod tests {
             b.read_at(45_000, &mut out).unwrap()
         });
         assert_eq!(n, 20_000);
+    }
+
+    /// Gemini 14 Oct sweep M5. A delivery that starts at or below the
+    /// RAM edge and runs past a paged region folds straight THROUGH it
+    /// (the fold appends every park the RAM edge reaches), so the region
+    /// stays in `paged` while `data` now covers the same bytes - the
+    /// "a fold ran through one" shape `page_cold` already steps around.
+    /// Harmless while the copies agree; but a drop-behind trim can then
+    /// take `base` past the region, and a later repair rewrite wholly
+    /// below `base` is written to the volume file by `chase_span` and
+    /// never reaches `write_span`'s reconciliation (that is clipped to
+    /// `end > base`). The demote then popped the stale paged copy and
+    /// wrote it back over the repaired file. Below `base` the file is
+    /// the authoritative copy, so `pop_span` must ship only the part of
+    /// a paged region at or above it.
+    #[test]
+    fn demote_never_ships_a_paged_copy_below_base() {
+        let dir = tmpdir("frontier-paged-below-base");
+        let sc = Arc::new(HoldsScratch::new(&dir));
+        let buf = FrontierBuffer::new_gated(100_000, None, Some(sc.clone()), None);
+        // Page the data tail: RAM [0, 20_000), paged [20_000, 40_000).
+        buf.write_span(0, &pat(0, 40_000));
+        assert_eq!(buf.page_cold(1 << 20, 20_000, true), 20_000);
+        // A re-delivery from below the RAM edge past the paged region
+        // folds through it.
+        buf.write_span(10_000, &pat(10_000, 40_000));
+        assert_eq!(buf.state.lock().unwrap().frontier_ram(), 50_000);
+        assert!(!buf.conflicted());
+        // The volume file, as the spill and `chase_span` leave it.
+        let mut disk = vec![0u8; 50_000];
+        let (at, spilled) = buf.trim_to(u64::MAX, 1).expect("trim");
+        disk[at as usize..at as usize + spilled.len()].copy_from_slice(&spilled);
+        assert_eq!(buf.base(), 50_000);
+        // A repair rewrite wholly below `base`, the `offset < base` arm
+        // of `chase_span`: forfeit, write the file, then the buffer.
+        let fix = [0xEE; 5_000];
+        buf.mark_conflict();
+        disk[25_000..30_000].copy_from_slice(&fix);
+        buf.write_span(25_000, &fix);
+        // The demote.
+        while let Some((off, bytes)) = buf.pop_span().unwrap() {
+            disk[off as usize..off as usize + bytes.len()].copy_from_slice(&bytes);
+        }
+        let mut want = pat(0, 50_000);
+        want[25_000..30_000].copy_from_slice(&fix);
+        assert_eq!(
+            first_diff(0, &disk, &want),
+            None,
+            "the demote wrote a stale paged copy over the repaired file"
+        );
+        assert_eq!(sc.st().live, 0, "scratch live must drain with the pops");
+        drop(buf);
+        sc.cleanup();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// §156.2's sibling at the WRITE site: `write_span` reconciled a
@@ -2456,15 +2585,15 @@ mod tests {
         let buf = FrontierBuffer::new(100_000);
         buf.write_span(0, &pat(0, 20_000));
         // What the off-lock half planned: the last 8,000 bytes.
-        let (at, end, len) = {
+        let (at, end, len, seq) = {
             let st = buf.state.lock_ok();
             let end = st.frontier_ram();
-            (end - 8_000, end, 8_000usize)
+            (end - 8_000, end, 8_000usize, st.rewrite_seq)
         };
         {
             let st = buf.state.lock_ok();
             assert!(
-                FrontierBuffer::tail_stood_still(&st, at, end, len),
+                FrontierBuffer::tail_stood_still(&st, at, end, len, seq),
                 "an untouched tail must commit"
             );
         }
@@ -2479,9 +2608,156 @@ mod tests {
         );
         assert!(st.data.len() < len);
         assert!(
-            !FrontierBuffer::tail_stood_still(&st, at, end, len),
+            !FrontierBuffer::tail_stood_still(&st, at, end, len, seq),
             "committing here subtracts the chunk from a drained `data`"
         );
+    }
+
+    /// Bytes that differ from `pat` at every offset: a same-length
+    /// repair of the range, as a PAR2 rewrite delivers it.
+    fn repaired(off: usize, n: usize) -> Vec<u8> {
+        pat(off, n).into_iter().map(|b| !b).collect()
+    }
+
+    /// Reads `[off, off + n)` back through the forward-only reader.
+    fn read_back(buf: &FrontierBuffer, off: usize, n: usize) -> Vec<u8> {
+        use rars::BlockingRangeSource as _;
+        let mut out = vec![0u8; n];
+        let mut pos = 0usize;
+        while pos < n {
+            let got = buf.read_at((off + pos) as u64, &mut out[pos..]).unwrap();
+            assert_ne!(got, 0, "reader starved at {}", off + pos);
+            pos += got;
+        }
+        out
+    }
+
+    /// Arms the `page_cold` seam to deliver `bytes` at `at` on the FIRST
+    /// scratch write only, so the rewrite lands in the window between
+    /// the off-lock append and the commit.
+    fn rewrite_in_page_window(at: u64, bytes: Vec<u8>) {
+        let mut once = Some(bytes);
+        page_cold_hook::set(move |buf| {
+            if let Some(b) = once.take() {
+                buf.write_span(at, &b);
+            }
+        });
+    }
+
+    /// F1 of the 22 Oct 2026 read-only sweep, pending-span arm. A
+    /// same-length repair of a PARKED span the decode has not reached
+    /// lands while `page_cold` has the span's clone out on scratch. It
+    /// leaves `conflict` clear by design (unserved), and the length
+    /// still matches, so the old guard committed: the corrected RAM
+    /// copy was dropped and the stale clone published in its place.
+    #[test]
+    fn page_cold_pending_commit_refuses_a_clone_an_unserved_repair_outdated() {
+        let dir = tmpdir("frontier-page-pending-repair");
+        let sc = Arc::new(HoldsScratch::new(&dir));
+        let buf = FrontierBuffer::new_gated(40_000, None, Some(sc.clone()), None);
+        buf.write_span(0, &pat(0, 10_000));
+        buf.write_span(20_000, &pat(20_000, 10_000)); // parks
+        let seq0 = buf.state.lock_ok().rewrite_seq;
+        rewrite_in_page_window(20_000, repaired(20_000, 10_000));
+        let moved = buf.page_cold(1 << 20, usize::MAX, false);
+        page_cold_hook::clear();
+        assert!(!buf.conflicted(), "an unserved repair is no conflict");
+        assert_eq!(buf.state.lock_ok().rewrite_seq, seq0 + 1);
+        // The stale region was refused and released; the next round
+        // re-cloned the CORRECTED park and paged that instead.
+        assert_eq!(moved, 10_000);
+        {
+            let st = buf.state.lock_ok();
+            assert!(st.pending.is_empty());
+            assert_eq!(st.paged_bytes, 10_000);
+            assert_eq!(sc.st().live, st.paged_bytes as u64, "stale region leaked");
+        }
+        let mut got = vec![0u8; 10_000];
+        buf.peek(20_000, &mut got).unwrap();
+        assert_eq!(
+            got,
+            repaired(20_000, 10_000),
+            "the repair must survive paging"
+        );
+        buf.write_span(10_000, &pat(10_000, 10_000));
+        buf.write_span(30_000, &pat(30_000, 10_000));
+        assert_eq!(read_back(&buf, 20_000, 10_000), repaired(20_000, 10_000));
+    }
+
+    /// The same window over the contiguous TAIL: a same-length repair
+    /// of unserved tail bytes moves neither `frontier_ram()` nor
+    /// `data`'s length, so `tail_stood_still` passed and the commit
+    /// truncated the corrected bytes out of RAM.
+    #[test]
+    fn page_cold_tail_commit_refuses_a_clone_an_unserved_repair_outdated() {
+        let dir = tmpdir("frontier-page-tail-repair");
+        let sc = Arc::new(HoldsScratch::new(&dir));
+        let buf = FrontierBuffer::new_gated(20_000, None, Some(sc.clone()), None);
+        buf.write_span(0, &pat(0, 20_000));
+        rewrite_in_page_window(12_000, repaired(12_000, 8_000));
+        let moved = buf.page_cold(1 << 20, 8_000, true);
+        page_cold_hook::clear();
+        assert!(!buf.conflicted(), "an unserved repair is no conflict");
+        assert_eq!(moved, 8_000, "the retry pages the corrected tail");
+        {
+            let st = buf.state.lock_ok();
+            assert_eq!(st.data.len(), 12_000);
+            assert_eq!(st.paged_bytes, 8_000);
+            assert_eq!(sc.st().live, st.paged_bytes as u64, "stale region leaked");
+        }
+        let mut want = pat(0, 12_000);
+        want.extend(repaired(12_000, 8_000));
+        assert_eq!(read_back(&buf, 0, 20_000), want);
+    }
+
+    /// Control: an AGREEING duplicate in the same window is no rewrite
+    /// at all (`rewrite_seq` stands), so each arm's first commit takes
+    /// and nothing is written twice - the tripwire must not turn every
+    /// routing duplicate into a refused page.
+    #[test]
+    fn page_cold_commits_through_an_agreeing_duplicate_in_the_window() {
+        let dir = tmpdir("frontier-page-dup");
+        let sc = Arc::new(HoldsScratch::new(&dir));
+        let buf = FrontierBuffer::new_gated(40_000, None, Some(sc.clone()), None);
+        buf.write_span(0, &pat(0, 20_000));
+        buf.write_span(30_000, &pat(30_000, 10_000)); // parks
+        let seq0 = buf.state.lock_ok().rewrite_seq;
+        let fired = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let seen = fired.clone();
+        page_cold_hook::set(move |b| {
+            seen.set(seen.get() + 1);
+            b.write_span(30_000, &pat(30_000, 10_000));
+            b.write_span(12_000, &pat(12_000, 8_000));
+        });
+        let moved = buf.page_cold(1 << 20, 18_000, true);
+        page_cold_hook::clear();
+        assert_eq!(buf.state.lock_ok().rewrite_seq, seq0);
+        assert_eq!(moved, 18_000);
+        assert_eq!(fired.get(), 2, "one scratch write per arm, no retries");
+        assert_eq!(sc.st().live, 18_000);
+        assert_eq!(read_back(&buf, 0, 20_000), pat(0, 20_000));
+    }
+
+    /// Control: a differing rewrite of bytes the decode has ALREADY
+    /// READ sets the sticky conflict, so the commit walks away and the
+    /// buffer is left exactly as the demote expects it - corrected
+    /// bytes in RAM, nothing paged, the refused region released.
+    #[test]
+    fn page_cold_tail_leaves_a_below_served_rewrite_in_ram() {
+        let dir = tmpdir("frontier-page-served");
+        let sc = Arc::new(HoldsScratch::new(&dir));
+        let buf = FrontierBuffer::new_gated(20_000, None, Some(sc.clone()), None);
+        buf.write_span(0, &pat(0, 20_000));
+        assert_eq!(read_back(&buf, 0, 20_000), pat(0, 20_000));
+        rewrite_in_page_window(12_000, repaired(12_000, 8_000));
+        let moved = buf.page_cold(1 << 20, 8_000, true);
+        page_cold_hook::clear();
+        assert!(buf.conflicted());
+        assert_eq!(moved, 0);
+        let st = buf.state.lock_ok();
+        assert_eq!(st.paged_bytes, 0);
+        assert_eq!(&st.data[12_000..], &repaired(12_000, 8_000)[..]);
+        assert_eq!(sc.st().live, 0, "the refused region must be released");
     }
 
     #[test]

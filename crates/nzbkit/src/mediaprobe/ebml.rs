@@ -166,6 +166,10 @@ struct State {
     cur_seek_pos: Option<u64>,
     chap_start: Option<u64>,
     chap_title: Option<String>,
+    /// ChapterAtoms open around the walk cursor. Atoms NEST (sub-
+    /// chapters), and the two fields above are flat, so a parent is
+    /// filed the moment its first child opens - see `open`.
+    chap_depth: usize,
     /// Tags: (track UID or None for "the file"), bits per second.
     bps: Vec<(Option<u64>, u64)>,
     tag_uid: Option<u64>,
@@ -458,7 +462,7 @@ fn walk<R: Read + Seek>(
                 info.incomplete("the container nests too deeply to inspect");
                 break;
             }
-            open(st, id);
+            open(info, st, id);
             stack.push((id, elem_end));
             pos = body;
             continue;
@@ -486,14 +490,23 @@ fn walk<R: Read + Seek>(
     Ok(())
 }
 
-fn open(st: &mut State, id: u32) {
+fn open(info: &mut MediaInfo, st: &mut State, id: u32) {
     match id {
         TRACK_ENTRY => st.track = TrackBuf::fresh(),
         SEEK => {
             st.cur_seek_id = None;
             st.cur_seek_pos = None;
         }
+        EDITION => st.chap_depth = 0,
         CHAPTER_ATOM => {
+            // A nested atom: file the parent NOW, while the flat fields
+            // still hold its start and title (its own fields precede its
+            // children). Filing it at its close instead read the last
+            // child's start with no title, and lost the parent.
+            if st.chap_depth > 0 {
+                push_chapter(info, st);
+            }
+            st.chap_depth += 1;
             st.chap_start = None;
             st.chap_title = None;
         }
@@ -503,6 +516,21 @@ fn open(st: &mut State, id: u32) {
             st.tag_value = None;
         }
         _ => {}
+    }
+}
+
+/// File the chapter the flat fields hold, CONSUMING them, so an
+/// enclosing atom's close (or a second nested child's open) cannot file
+/// it again.
+fn push_chapter(info: &mut MediaInfo, st: &mut State) {
+    let title = st.chap_title.take();
+    if let Some(start) = st.chap_start.take()
+        && info.chapters.len() < MAX_CHAPTERS
+    {
+        info.chapters.push(Chapter {
+            start_ms: start / 1_000_000,
+            title: title.unwrap_or_default(),
+        });
     }
 }
 
@@ -518,14 +546,8 @@ fn close(info: &mut MediaInfo, st: &mut State, id: u32) {
             }
         }
         CHAPTER_ATOM => {
-            if let Some(start) = st.chap_start
-                && info.chapters.len() < MAX_CHAPTERS
-            {
-                info.chapters.push(Chapter {
-                    start_ms: start / 1_000_000,
-                    title: st.chap_title.take().unwrap_or_default(),
-                });
-            }
+            push_chapter(info, st);
+            st.chap_depth = st.chap_depth.saturating_sub(1);
         }
         SIMPLE_TAG => {
             if st.tag_name.as_deref() == Some("BPS")
@@ -1076,6 +1098,22 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// Gemini 14 Oct sweep L3: a nested ChapterAtom shared the parent's
+    /// flat `chap_start`/`chap_title`, so the child overwrote the
+    /// parent's start and the parent's close pushed a second, untitled
+    /// chapter at the CHILD's time - the parent itself was lost.
+    #[test]
+    fn a_nested_chapter_keeps_its_parent() {
+        let b = super::super::testmux::mkv_nested_chapters();
+        let i = probe(&b);
+        let got: Vec<(u64, &str)> = i
+            .chapters
+            .iter()
+            .map(|c| (c.start_ms, c.title.as_str()))
+            .collect();
+        assert_eq!(got, vec![(0, "Parent"), (100, "Child"), (250, "Sibling")]);
     }
 
     /// A muxer that wrote Chapters after the clusters is the normal

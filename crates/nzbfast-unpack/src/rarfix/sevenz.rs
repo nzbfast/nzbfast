@@ -1200,3 +1200,159 @@ mod sevenz_extract_tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+/// The vendored reader's CRC verification (vendor/sevenz-rust2
+/// README-nzbfast.md item 5). `Crc32VerifyingReader` compared the CRC only
+/// once its signed `remaining` reached zero, so a member whose packed
+/// stream ran dry first - or whose declared size was 2^63 or more and so
+/// started negative - ended in `Ok(0)` with the CRC never compared. The
+/// extract arm above guards the length itself (`copied != entry.size`);
+/// these pin the library's own answer, which every OTHER caller (the
+/// probes, postfast, `read_file`) relies on.
+///
+/// The fixture is hand-built: one Copy-method folder whose header
+/// declares `unpack` bytes over a pack area of `pack.len()`, one file,
+/// one sub-stream CRC. These tests live here, not in the vendored crate,
+/// because that crate is a patch dependency with no test runner in this
+/// workspace (its README, item 2).
+///
+/// NEGATIVE CONTROL, run: with the pre-fix `i64` reader restored, both
+/// short arms read `Ok` with ten bytes.
+#[cfg(test)]
+mod sevenz_crc_reader_tests {
+    /// 7z "number" encoding, the inverse of the reader's `ReadNumber`: the
+    /// first byte's top `i` bits say how many little-endian bytes follow,
+    /// and its remaining low bits carry the high part; 0xFF is a full u64.
+    fn num(v: u64) -> Vec<u8> {
+        for i in 0..8u32 {
+            if v < (1u64 << (7 * (i + 1))) {
+                let high = (v >> (8 * i)) as u8;
+                let flag = if i == 0 {
+                    0u8
+                } else {
+                    ((0xFFu16 << (8 - i)) & 0xFF) as u8
+                };
+                let mut out = vec![flag | high];
+                for b in 0..i {
+                    out.push((v >> (8 * b)) as u8);
+                }
+                return out;
+            }
+        }
+        let mut out = vec![0xFF];
+        out.extend_from_slice(&v.to_le_bytes());
+        out
+    }
+
+    fn header(pack_size: u64, unpack: u64, crc: u32) -> Vec<u8> {
+        let mut h = vec![0x01u8, 0x04]; // kHeader, kMainStreamsInfo
+        h.push(0x06); // kPackInfo
+        h.extend(num(0));
+        h.extend(num(1));
+        h.push(0x09); // kSize
+        h.extend(num(pack_size));
+        h.push(0x00);
+        h.push(0x07); // kUnpackInfo
+        h.push(0x0B); // kFolder
+        h.extend(num(1)); // one folder
+        h.push(0x00); // not external
+        h.extend(num(1)); // one coder
+        h.push(0x01); // idSize 1, simple, no attributes
+        h.push(0x00); // Copy
+        h.push(0x0C); // kCodersUnpackSize
+        h.extend(num(unpack));
+        h.push(0x00);
+        h.push(0x08); // kSubStreamsInfo
+        h.push(0x0A); // kCRC
+        h.push(0x01); // all defined
+        h.extend_from_slice(&crc.to_le_bytes());
+        h.push(0x00);
+        h.push(0x00); // end of streams info
+        h.push(0x05); // kFilesInfo
+        h.extend(num(1));
+        let name: Vec<u8> = "a.bin"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        h.push(0x11); // kName
+        h.extend(num(name.len() as u64 + 1));
+        h.push(0x00); // not external
+        h.extend(name);
+        h.push(0x00); // end of files info
+        h.push(0x00); // end of header
+        h
+    }
+
+    fn archive(pack: &[u8], unpack: u64, crc: u32) -> Vec<u8> {
+        let header = header(pack.len() as u64, unpack, crc);
+        let mut out = vec![b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C, 0x00, 0x04];
+        let crc_at = out.len();
+        out.extend_from_slice(&[0; 4]);
+        let sh_at = out.len();
+        out.extend_from_slice(&(pack.len() as u64).to_le_bytes());
+        out.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        out.extend_from_slice(&crc32fast::hash(&header).to_le_bytes());
+        let sh = crc32fast::hash(&out[sh_at..sh_at + 20]);
+        out[crc_at..crc_at + 4].copy_from_slice(&sh.to_le_bytes());
+        out.extend_from_slice(pack);
+        out.extend_from_slice(&header);
+        out
+    }
+
+    /// Reads every entry to its end; the bytes read, or the error.
+    fn read_all(arch: Vec<u8>) -> Result<Vec<u8>, String> {
+        let mut r = sevenz_rust2::ArchiveReader::new(
+            std::io::Cursor::new(arch),
+            sevenz_rust2::Password::empty(),
+        )
+        .map_err(|e| format!("open: {e}"))?;
+        let mut got = Vec::new();
+        r.for_each_entries(|_e, rd| {
+            rd.read_to_end(&mut got)?;
+            Ok(true)
+        })
+        .map_err(|e| e.to_string())?;
+        Ok(got)
+    }
+
+    const PAYLOAD: &[u8] = b"0123456789";
+
+    /// The fixture itself is sound: the honest archive reads back, and a
+    /// wrong CRC on it is caught. Without this the short arms below could
+    /// pass on a parse error.
+    #[test]
+    fn the_hand_built_fixture_reads_back_and_its_crc_is_checked() {
+        let crc = crc32fast::hash(PAYLOAD);
+        assert_eq!(read_all(archive(PAYLOAD, 10, crc)).unwrap(), PAYLOAD);
+        let err = read_all(archive(PAYLOAD, 10, crc ^ 1)).unwrap_err();
+        assert!(err.to_lowercase().contains("checksum"), "{err}");
+    }
+
+    /// A pack area that runs dry before the declared size is an error,
+    /// never `Ok` with a short member and an uncompared CRC.
+    #[test]
+    fn a_member_short_of_its_declared_size_is_an_error() {
+        let crc = crc32fast::hash(b"01234567890123456789");
+        let got = read_all(archive(PAYLOAD, 20, crc));
+        let err = got.expect_err("a short member read as Ok");
+        assert!(
+            !err.starts_with("open:"),
+            "refused at parse, not read: {err}"
+        );
+    }
+
+    /// A declared size with bit 63 set made the old signed `remaining`
+    /// negative, so the very first read returned `Ok(0)` - an empty member
+    /// and no CRC comparison at all.
+    #[test]
+    fn a_size_past_i64_max_is_not_an_empty_unchecked_member() {
+        let crc = crc32fast::hash(PAYLOAD);
+        let got = read_all(archive(PAYLOAD, (1u64 << 63) + 5, crc));
+        let err = got.expect_err("a bit-63 size read as Ok");
+        assert!(
+            !err.starts_with("open:"),
+            "refused at parse, not read: {err}"
+        );
+    }
+}

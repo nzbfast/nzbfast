@@ -4009,7 +4009,11 @@ async function openPerson(id, backKey){
   const j=await api('person',`&value=${encodeURIComponent(id)}`);
   if(seq!==openSeq) return;
   if(!j.status){
-    sheet.innerHTML=`<div class="pbody"><div class="dim">${t('wall.person.gone','That person is no longer in the index.')}</div></div>`;
+    // `person` refuses a busy read pool rather than calling the person
+    // gone, so the two answers get two lines.
+    sheet.innerHTML=`<div class="pbody"><div class="dim">${j.busy
+      ? t('wall.cand.busy','The index is busy right now. Wait a moment and open this again.')
+      : t('wall.person.gone','That person is no longer in the index.')}</div></div>`;
     return;
   }
   const yours=j.titles||[];
@@ -4066,6 +4070,14 @@ async function loadFilmography(id, btn){
     // Only what the index does NOT already have: the halves above
     // already answered "what of theirs do I have", and this surface's
     // job is the gap - which is also what makes it worth watchlisting.
+    // A refused read (`busy`, the index read pool was saturated) carries
+    // no credits and must not read as "you already have everything":
+    // say so and leave the button for a retry.
+    if(j.busy){
+      box.innerHTML=`<span class="dim" style="font-size:12.5px">${
+        t('wall.cand.busy','The index is busy right now. Wait a moment and open this again.')}</span>`;
+      return;
+    }
     const rest=(j.credits||[]).filter(c=>!c.have);
     if(!rest.length){
       // "Nothing more" and "the provider would not answer" are different

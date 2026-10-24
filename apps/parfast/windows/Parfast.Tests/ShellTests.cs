@@ -234,6 +234,63 @@ public class ShellTests
         Assert.NotEqual(Strings.QueueFinishConfirmShutdown, Strings.QueueFinishConfirmSleep);
     }
 
+    /// <summary>
+    /// Sleep and shut down are armed in the core only once confirmed, so a queue
+    /// that drains while the question is on screen does nothing (Gemini sweep H12).
+    /// </summary>
+    [Fact]
+    public void SleepAndShutDownAreNotArmedUntilConfirmed()
+    {
+        var (shell, core, host) = New();
+        shell.Queue.SetPostAction(PostQueueAction.Shutdown);
+        Assert.Equal(PostQueueAction.None, core.QueueSnapshot().PostAction);
+        core.RaisePostActionDue();
+        core.Advance(TimeSpan.Zero);
+        Assert.Empty(host.Performed);
+
+        shell.Queue.CancelPostAction();
+        shell.Queue.ConfirmPostAction();
+        Assert.Equal(PostQueueAction.None, core.QueueSnapshot().PostAction);
+
+        shell.Queue.SetPostAction(PostQueueAction.Sleep);
+        shell.Queue.ConfirmPostAction();
+        Assert.Equal(PostQueueAction.Sleep, core.QueueSnapshot().PostAction);
+    }
+
+    /// <summary>
+    /// "Verify, then repair" reaches the core in the core's own spelling, and a
+    /// later, unrelated settings edit still lands (Gemini sweep H12: the old
+    /// spelling was refused and then re-sent with every edit after it).
+    /// </summary>
+    [Fact]
+    public void VerifyThenRepairIsSavedInTheCoresSpelling()
+    {
+        var (shell, core, _) = New();
+        shell.Settings.VerifyThenRepair = true;
+        Assert.Equal("verify_then_repair", core.GetSettings().General.OpenPar2);
+        Assert.True(core.GetSettings().AutoRepairOnOpen);
+        shell.Settings.PurgeAfterRepair = !shell.Settings.PurgeAfterRepair;
+        Assert.Equal(shell.Settings.PurgeAfterRepair, core.GetSettings().General.PurgeAfterRepair);
+    }
+
+    /// <summary>
+    /// The log-level picker's rows are Quiet, Normal, Verbose, Debug and the core's
+    /// values for them are -2, 0, 1, 2 (Gemini sweep M18.4).
+    /// </summary>
+    [Fact]
+    public void TheLogLevelPickerMapsRowsToTheCoresValues()
+    {
+        var (shell, core, _) = New();
+        Assert.Equal(0, core.GetSettings().Advanced.LogLevel);
+        Assert.Equal(1, shell.Settings.LogLevelIndex);
+        foreach (var (row, value) in new[] { (0, -2), (1, 0), (2, 1), (3, 2) })
+        {
+            shell.Settings.LogLevelIndex = row;
+            Assert.Equal(value, core.GetSettings().Advanced.LogLevel);
+            Assert.Equal(row, shell.Settings.LogLevelIndex);
+        }
+    }
+
     [Fact]
     public void OnlyAFinishedJobCanBeRemoved()
     {

@@ -33,9 +33,9 @@ encoder_*.cc not compiled) — we only need decode + CRC.
 
 Local patches
 -------------
-The tree is NO LONGER a pristine snapshot. One defect is patched in place,
-in two files, and a re-sync must re-apply it or re-check that upstream has
-fixed it:
+The tree is NO LONGER a pristine snapshot. Two defects are patched in
+place, across four files, and a re-sync must re-apply both or re-check
+that upstream has fixed them:
 
 - src/decoder_neon64.cc and src/decoder_neon.cc, 2 Sep 2026. Both ARM
   decode kernels loaded a whole 16-byte vector (`vld1q_u8` /

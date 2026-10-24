@@ -3136,28 +3136,6 @@
         }
       }
     },
-    "verify.row.exclude": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Exclude from repair"
-          }
-        }
-      }
-    },
-    "verify.row.excluded": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Excluded from repair"
-          }
-        }
-      }
-    },
     "verify.row.rename": {
       "extractionState": "manual",
       "localizations": {

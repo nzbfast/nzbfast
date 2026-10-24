@@ -872,12 +872,6 @@
   <data name="verify_problems_one" xml:space="preserve">
     <value>1 problem</value>
   </data>
-  <data name="verify_row_exclude" xml:space="preserve">
-    <value>Exclude from repair</value>
-  </data>
-  <data name="verify_row_excluded" xml:space="preserve">
-    <value>Excluded from repair</value>
-  </data>
   <data name="verify_row_rename" xml:space="preserve">
     <value>Rename to the expected name</value>
   </data>

@@ -617,6 +617,7 @@ fn reconcile_keeps_only_a_copy_the_tail_has_not_moved() {
             mtime_ns,
             nzf_id: format!("h-{n}"),
             dest: Some(dest.clone()),
+            dest_mtime_ns: None,
         });
     }
     job.lock_ok().early_published = recs;
@@ -671,6 +672,7 @@ fn reconcile_never_leaves_a_file_in_both_places() {
         mtime_ns,
         nzf_id: "h-ep1".into(),
         dest: Some(dest.clone()),
+        dest_mtime_ns: None,
     }];
     d.early_reconcile(&job);
     assert!(
@@ -706,6 +708,7 @@ fn reconcile_takes_back_copies_at_a_destination_the_job_left() {
             mtime_ns,
             nzf_id: format!("h-{n}"),
             dest: Some(old_dest.clone()),
+            dest_mtime_ns: None,
         });
     }
     job.lock_ok().early_published = recs;
@@ -752,6 +755,7 @@ fn reconcile_takes_back_copies_when_the_destination_is_unconfigured() {
         mtime_ns,
         nzf_id: "h-ep1".into(),
         dest: Some(dest.clone()),
+        dest_mtime_ns: None,
     }];
     // Move-completed switched off mid-download.
     *d.move_completed.write_ok() = None;
@@ -789,6 +793,7 @@ fn a_copy_already_gone_from_the_destination_settles_as_resent() {
         mtime_ns,
         nzf_id: "h-ep1".into(),
         dest: Some(dest.clone()),
+        dest_mtime_ns: None,
     }];
     // No copy at the destination: the user took it.
 
@@ -835,6 +840,7 @@ fn an_unreachable_destination_leaves_the_record_for_the_next_attempt() {
         mtime_ns,
         nzf_id: "h-ep1".into(),
         dest: Some(dest.clone()),
+        dest_mtime_ns: None,
     }];
 
     // The NAS drops: the destination directory stops answering.
@@ -886,12 +892,16 @@ fn a_delete_takes_back_what_was_published() {
         // fallback - spend re-derives through `move_dest_for`, which is
         // what every record written before the field did.
         dest: None,
+        dest_mtime_ns: None,
     }];
     let taken = {
         let mut g = job.lock_ok();
         d.early_take(&mut g)
     };
-    assert_eq!(taken, vec![dest.join("ep1.mkv")]);
+    assert_eq!(
+        taken.iter().map(|c| c.path.clone()).collect::<Vec<_>>(),
+        vec![dest.join("ep1.mkv")]
+    );
     assert!(job.lock_ok().early_published.is_empty());
     early_unlink(&taken);
     assert!(!dest.join("ep1.mkv").exists());
@@ -926,6 +936,7 @@ fn a_delete_after_a_repoint_takes_back_the_recorded_paths() {
         mtime_ns: 0,
         nzf_id: "h-ep1".into(),
         dest: Some(old_dest.clone()),
+        dest_mtime_ns: None,
     }];
     *d.move_completed.write_ok() = Some(dir.join("new-nas"));
     let taken = {
@@ -933,7 +944,7 @@ fn a_delete_after_a_repoint_takes_back_the_recorded_paths() {
         d.early_take(&mut g)
     };
     assert_eq!(
-        taken,
+        taken.iter().map(|c| c.path.clone()).collect::<Vec<_>>(),
         vec![old_dest.join("ep1.mkv")],
         "the copy is where it was published, not where the settings point now"
     );
@@ -999,6 +1010,7 @@ fn the_published_list_survives_the_store() {
             mtime_ns: 99,
             nzf_id: "0123456789abcdef".into(),
             dest: Some(PathBuf::from("/tmp/nas/Some.Release")),
+            dest_mtime_ns: Some(1_700_000_000_123_456_789),
         },
         // A record written before the dest field: absent must read as
         // None ("re-derive at spend"), never as a path.
@@ -1008,6 +1020,7 @@ fn the_published_list_survives_the_store() {
             mtime_ns: 0,
             nzf_id: String::new(),
             dest: None,
+            dest_mtime_ns: None,
         },
     ];
     let wire = crate::job::job_json(&j);
@@ -1020,6 +1033,19 @@ fn the_published_list_survives_the_store() {
     for e in wire2["early_published"].as_array_mut().unwrap() {
         e.as_object_mut().unwrap().remove("dest");
     }
+    // And a record written before the copy's own stamp (Codex sweep F1):
+    // absent reads as None, the length-only judgement it always had.
+    let mut wire3 = wire.clone();
+    for e in wire3["early_published"].as_array_mut().unwrap() {
+        e.as_object_mut().unwrap().remove("dest_mtime_ns");
+    }
+    let back3 = crate::job::job_from_json(&wire3).expect("pre-stamp round trip");
+    assert!(
+        back3
+            .early_published
+            .iter()
+            .all(|e| e.dest_mtime_ns.is_none())
+    );
     let back2 = crate::job::job_from_json(&wire2).expect("pre-dest round trip");
     assert_eq!(back2.early_published.len(), 2);
     assert!(
@@ -1171,4 +1197,186 @@ fn a_member_named_at_the_cap_still_gets_a_writable_staging_name() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Publish `ep1.mkv` through the real door, so the record is exactly
+/// what a run writes, and hand back (job, out, dest, body).
+fn published(d: &Arc<Daemon>, dir: &Path) -> (Arc<Mutex<Job>>, PathBuf, PathBuf, Vec<u8>) {
+    *d.move_completed.write_ok() = Some(dir.join("nas"));
+    let out = crate::naming::out_dir(d).join("Some.Release");
+    let body = vec![7u8; 2 << 20];
+    let job = job_with(d, &out, &[("ep1.mkv", &body)]);
+    job.lock_ok().state = JobState::Downloading;
+    let dest = d.move_dest_for(&out, "").unwrap();
+    let pace = |_: u64| {};
+    let got = d.early_publish_one(
+        &job,
+        "SABnzbd_nzo_early1",
+        &dest,
+        &cand(&out, "ep1.mkv"),
+        &pace,
+    );
+    assert!(matches!(got, Publish::Landed(_)), "the premise moved");
+    (job, out, dest, body)
+}
+
+/// Put a STRANGER at `dst` the way a user or another tool would: a new
+/// file written beside it and renamed over, so it is a different entry
+/// with its own mtime. The sleep is what makes the mtime differ on a
+/// coarse-tick filesystem too.
+fn replace_with(dst: &Path, bytes: &[u8]) {
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let tmp = dst.with_file_name("stranger.tmp");
+    std::fs::write(&tmp, bytes).unwrap();
+    std::fs::rename(&tmp, dst).unwrap();
+}
+
+/// Codex sweep F1: the destination is the user's completed folder, and
+/// between publish and settle anything may replace the copy there - a
+/// re-grab, a hand copy, a tool restoring a backup. The reconcile judged
+/// the destination by LENGTH alone, so a same-length stranger read as
+/// "our copy, unchanged" and the job's own verified SOURCE was deleted,
+/// leaving bytes nobody verified as the only completed file. The stranger
+/// must survive untouched and the source must travel with the move.
+#[test]
+fn reconcile_never_trusts_a_same_length_stranger_at_the_destination() {
+    let dir = scratch("stranger-same");
+    let d = test_daemon(&dir);
+    let (job, out, dest, body) = published(&d, &dir);
+    let stranger = vec![9u8; body.len()];
+    replace_with(&dest.join("ep1.mkv"), &stranger);
+
+    d.early_reconcile(&job);
+
+    assert_eq!(
+        std::fs::read(out.join("ep1.mkv")).ok(),
+        Some(body),
+        "the job's verified source was deleted on a length match against a \
+         file it never published"
+    );
+    assert_eq!(
+        std::fs::read(dest.join("ep1.mkv")).unwrap(),
+        stranger,
+        "a file this job did not publish is not this job's to touch"
+    );
+    assert!(
+        job.lock_ok().early_published.is_empty(),
+        "settled, not deferred"
+    );
+}
+
+/// F1's other arm: a stranger of a DIFFERENT length fell through to the
+/// take-back, which unlinked the bare path - deleting the user's file.
+#[test]
+fn reconcile_never_deletes_a_different_length_stranger() {
+    let dir = scratch("stranger-len");
+    let d = test_daemon(&dir);
+    let (job, out, dest, body) = published(&d, &dir);
+    replace_with(&dest.join("ep1.mkv"), b"somebody else's file");
+
+    d.early_reconcile(&job);
+
+    assert_eq!(
+        std::fs::read(dest.join("ep1.mkv")).ok(),
+        Some(b"somebody else's file".to_vec()),
+        "the take-back deleted a file it never published"
+    );
+    assert_eq!(std::fs::read(out.join("ep1.mkv")).unwrap(), body);
+}
+
+/// The source's own rewrite sends reconcile to the take-back arm, and
+/// that arm must prove identity too - it is the same unlink.
+#[test]
+fn a_take_back_after_a_repair_never_deletes_a_stranger() {
+    let dir = scratch("stranger-repair");
+    let d = test_daemon(&dir);
+    let (job, out, dest, body) = published(&d, &dir);
+    let stranger = vec![9u8; body.len()];
+    replace_with(&dest.join("ep1.mkv"), &stranger);
+    // Repair rewrote the source in place: same length, new mtime.
+    std::fs::write(out.join("ep1.mkv"), vec![8u8; body.len()]).unwrap();
+
+    d.early_reconcile(&job);
+
+    assert_eq!(std::fs::read(dest.join("ep1.mkv")).ok(), Some(stranger));
+}
+
+/// The delete/cancel/failure door: `early_take` + `early_unlink` removed
+/// each recorded path blind. A cancelled job must take back ITS copy and
+/// nothing that has since taken the name.
+#[test]
+fn a_delete_never_takes_back_a_file_that_replaced_the_copy() {
+    let dir = scratch("stranger-delete");
+    let d = test_daemon(&dir);
+    let (job, _out, dest, body) = published(&d, &dir);
+    let stranger = vec![9u8; body.len()];
+    replace_with(&dest.join("ep1.mkv"), &stranger);
+    let taken = {
+        let mut g = job.lock_ok();
+        g.state = JobState::Failed;
+        d.early_take(&mut g)
+    };
+    early_unlink(&taken);
+    assert_eq!(
+        std::fs::read(dest.join("ep1.mkv")).ok(),
+        Some(stranger),
+        "a delete took back a file this job never published"
+    );
+}
+
+/// And the one this all must not cost: an UNTOUCHED copy is still ours on
+/// both doors - kept by the reconcile (the source goes), taken back by a
+/// delete.
+#[test]
+fn an_untouched_copy_is_still_recognised_as_ours() {
+    let dir = scratch("ours");
+    let d = test_daemon(&dir);
+    let (job, out, dest, body) = published(&d, &dir);
+    d.early_reconcile(&job);
+    assert!(
+        !out.join("ep1.mkv").exists(),
+        "the copy is kept, the source goes"
+    );
+    assert_eq!(std::fs::read(dest.join("ep1.mkv")).unwrap(), body);
+
+    let dir2 = scratch("ours-delete");
+    let d2 = test_daemon(&dir2);
+    let (job2, _out2, dest2, _) = published(&d2, &dir2);
+    let taken = {
+        let mut g = job2.lock_ok();
+        g.state = JobState::Failed;
+        d2.early_take(&mut g)
+    };
+    early_unlink(&taken);
+    assert!(
+        !dest2.join("ep1.mkv").exists(),
+        "our own copy is taken back"
+    );
+}
+
+/// A LINK at the destination name is never the copy, whatever it
+/// resolves to: `metadata` follows it (so a link to a same-length file
+/// passed the length test) while `remove_file` removes the link entry.
+#[cfg(unix)]
+#[test]
+fn a_link_that_replaced_the_copy_is_never_trusted_or_removed() {
+    let dir = scratch("stranger-link");
+    let d = test_daemon(&dir);
+    let (job, out, dest, body) = published(&d, &dir);
+    let elsewhere = dir.join("library-ep1.mkv");
+    std::fs::write(&elsewhere, vec![9u8; body.len()]).unwrap();
+    let dst = dest.join("ep1.mkv");
+    std::fs::remove_file(&dst).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &dst).unwrap();
+
+    d.early_reconcile(&job);
+
+    assert_eq!(std::fs::read(out.join("ep1.mkv")).ok(), Some(body));
+    assert!(
+        std::fs::symlink_metadata(&dst)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        "the user's link was removed"
+    );
+    assert!(elsewhere.exists());
 }

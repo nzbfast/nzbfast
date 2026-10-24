@@ -77,7 +77,7 @@ lands. `make-qpkg.sh` therefore runs it natively when `qbuild` is on
 available it refuses rather than assembling the format by hand.
 
 **On macOS it refuses before it does anything at all**, and the command
-above is not the one to run there - dispatch the workflow instead. The
+above is not the one to run there - a release builds it in CI. The
 container is not the way round it either, even though `qbuild` itself is
 happy inside one: `make-qpkg.sh` stages into `mktemp -d`, macOS `mktemp`
 given no template ignores `$TMPDIR` and always answers under
@@ -88,27 +88,26 @@ tree on the host. Re-running with `TMPDIR` set does not move it. That
 cost an hour on 4 Sep 2026 cutting v1.4.0, which is why the refusal is
 now the first thing the script does.
 
-Every release gets one, and it is built AFTER the release rather than
-during it. The **qnap-qpkg** workflow is the one that ships it: dispatch
-it with the tag once the release page is up, then scan and upload the
-artifact by hand, exactly as the Synology `.spk` is done. Step 4c of the
-publish-release skill is the checklist. The same workflow runs by itself
-on any pull request touching this directory, since `qbuild` does not run
-on a maintainer's Mac and nothing else would exercise a `qpkg.cfg` edit
-before a release.
+Every release gets one, built and attested by the `linux-packages` job
+in `.github/workflows/provenance-release.yml` (since 23 Oct 2026), in
+the same run that builds the linux tarballs, with
+`NZBFAST_PAYLOAD_DIR` pointing `make-qpkg.sh` at those two tarballs.
+The **qnap-qpkg** workflow is a smoke build only: it runs by itself on
+any pull request touching this directory, since `qbuild` does not run on
+a maintainer's Mac and nothing else would exercise a `qpkg.cfg` edit
+before a release, and its artifact is never a release asset.
 
-Until 16 Aug 2026 the release run built it instead, in a `qnap-beta` job
-that fed `make-qpkg.sh` the musl binaries the `packages` job already
-cross-compiled for the .deb and .rpm - which is what let the package be
-built while the release page was still empty. The cost was a package
-whose payload nothing published a checksum for. Measured on 1.1.3: the
-packaged binaries were `72cad10c` (x86_64) and `71d12ee9` (aarch64),
-while the binaries in `nzbfast-1.1.3-linux-x64.tar.gz` and
-`-arm64.tar.gz` were `9cc8c994` and `a11ce1ac`. Same source, same
-version, different builder. `SHA256SUMS.txt` covers the `.qpkg` as a
-file, not the binaries inside it, so a QNAP owner had no way to check
-that what they were installing was the release. Waiting for the release
-page costs one dispatch and answers that.
+The payload is always the release's own linux tarballs, never a separate
+build. Until 16 Aug 2026 the release run built the package from the musl
+binaries the `packages` job cross-compiled for the .deb and .rpm, and
+the cost was a package whose payload nothing published a checksum for.
+Measured on 1.1.3: the packaged binaries were `72cad10c` (x86_64) and
+`71d12ee9` (aarch64), while the binaries in
+`nzbfast-1.1.3-linux-x64.tar.gz` and `-arm64.tar.gz` were `9cc8c994`
+and `a11ce1ac`. Same source, same version, different builder. From
+16 Aug to 23 Oct 2026 the fix was to build the package after publish
+from the published tarballs; since then it is built before publish from
+the same tarballs, which the release then publishes and attests.
 
 **Adding an architecture** is three places: a binary in `shared/bin/`
 named `nzbfast-<uname -m>`, the `case` in `nzbfast-setup.sh` that links

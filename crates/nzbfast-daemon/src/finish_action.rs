@@ -479,7 +479,7 @@ pub fn tick(d: &Arc<Daemon>) -> std::time::Duration {
         // (fire, then clear) would let a second pass fire the same
         // countdown twice. The claim fails if the choice moved on since
         // this countdown was armed, whatever the choice now reads.
-        if let Some(a) = d.finish.claim(p.action, p.epoch) {
+        if let Some(a) = claim_durably(d, p.action, p.epoch) {
             fire(d, a);
         }
         return IDLE_TICK;
@@ -525,7 +525,7 @@ pub fn tick(d: &Arc<Daemon>) -> std::time::Duration {
     // landing a moment later would have cancelled the countdown: the new
     // choice is served by the next drain, never by this pass's reading.
     if !action.counts_down() {
-        if let Some(a) = d.finish.claim(action, epoch) {
+        if let Some(a) = claim_durably(d, action, epoch) {
             fire(d, a);
         }
         return IDLE_TICK;
@@ -541,19 +541,52 @@ pub fn tick(d: &Arc<Daemon>) -> std::time::Duration {
     COUNTDOWN_TICK
 }
 
-/// Do it.
+/// The `queue_finished_action` transaction from `settings::apply_and_save`,
+/// joined by every path here that writes that setting live AND on disk.
 ///
-/// Only ever called with what `FinishState::claim` handed back, so a
-/// one-shot action is already disarmed in memory by the time it gets
-/// here.
-fn fire(d: &Arc<Daemon>, action: FinishAction) {
+/// Codex sweep 22 Oct 2026, F3: `apply_and_save` holds this across its
+/// live mutation and its save, and cancel and the firing disarm did not
+/// take it. So an arm that had set Shutdown live and not yet saved it
+/// could be cancelled in between - live and disk both to `none`, success
+/// returned - and then save Shutdown on resuming: live off, disk armed,
+/// and the next start restored the arm the user had just cancelled. The
+/// mirror order (a claim disarms live, a new arm saves Shutdown, then the
+/// claim's late disarm writes `none`) left live armed over a disk that
+/// said off. Serializing only the file writes would not help: it is the
+/// live mutation and its save that have to be one step against an arm.
+///
+/// LOCK ORDER: this, then `FinishState::ctl` - the order `apply_and_save`
+/// already takes them in (`apply_setting` -> `set_action`). Never taken
+/// while `ctl` is held, and never across `drain_blocker` or the action
+/// itself.
+fn action_tx() -> Arc<Mutex<()>> {
+    crate::settings::setting_tx("queue_finished_action")
+}
+
+/// [`FinishState::claim`] plus, for a one-shot action, its persisted
+/// disarm, as one step inside [`action_tx`]. The claim keeps its
+/// generation semantics unchanged; the transaction only orders it, and
+/// the save that belongs to it, against an arm or a cancel.
+fn claim_durably(d: &Arc<Daemon>, action: FinishAction, epoch: u64) -> Option<FinishAction> {
+    let tx = action_tx();
+    let _held = tx.lock_ok();
+    let a = d.finish.claim(action, epoch)?;
     // Persist the disarm BEFORE running anything. A shutdown that
     // reaches the OS never comes back here to tidy up, and a sleep comes
     // back to the same empty queue it slept on - either way the stored
     // value has to already say "none" or the next start re-arms itself.
-    if action.one_shot() {
+    if a.one_shot() {
         persist_disarm(d);
     }
+    Some(a)
+}
+
+/// Do it.
+///
+/// Only ever called with what [`claim_durably`] handed back, so a
+/// one-shot action is already disarmed in memory AND on disk by the time
+/// it gets here.
+fn fire(d: &Arc<Daemon>, action: FinishAction) {
     if test_sink(d, action) {
         return;
     }
@@ -566,12 +599,15 @@ fn fire(d: &Arc<Daemon>, action: FinishAction) {
 
 /// Put the setting back to `none`, live and on disk.
 pub fn disarm(d: &Arc<Daemon>) {
+    let tx = action_tx();
+    let _held = tx.lock_ok();
     d.finish.set_action(FinishAction::None);
     persist_disarm(d);
 }
 
 /// The on-disk half of [`disarm`], for callers that already switched the
-/// live value off inside their own critical section.
+/// live value off inside their own critical section. Callers hold
+/// [`action_tx`] across that switch and this write.
 fn persist_disarm(d: &Arc<Daemon>) {
     if !save_settings(
         &d.settings_path,
@@ -600,12 +636,20 @@ fn persist_disarm(d: &Arc<Daemon>) {
 pub fn cancel(d: &Arc<Daemon>) -> Value {
     // One critical section for the countdown, the arm and the
     // generation, so a watcher pass that read the arm before this click
-    // cannot install or fire anything after it.
-    let (had, armed) = d.finish.cancel_all();
-    let disarmed = armed.one_shot();
-    if disarmed {
-        persist_disarm(d);
-    }
+    // cannot install or fire anything after it - and the whole of it,
+    // with its save, inside the setting's transaction, so an arm still
+    // between its live write and its save finishes first rather than
+    // re-arming the disk behind this click (F3, see `action_tx`).
+    let (had, disarmed) = {
+        let tx = action_tx();
+        let _held = tx.lock_ok();
+        let (had, armed) = d.finish.cancel_all();
+        let disarmed = armed.one_shot();
+        if disarmed {
+            persist_disarm(d);
+        }
+        (had, disarmed)
+    };
     if let Some(p) = had {
         announce(d, p.action, "cancelled", "cancelled from the dashboard");
     }

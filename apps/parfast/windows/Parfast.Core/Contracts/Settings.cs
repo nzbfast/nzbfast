@@ -49,13 +49,24 @@ public sealed record ParfastSettings
     /// because this lane did exactly that.
     /// </remarks>
     [JsonIgnore]
-    public bool AutoRepairOnOpen => General.OpenPar2 == "verify_repair";
+    public bool AutoRepairOnOpen => General.OpenPar2 == GeneralSettings.VerifyThenRepair;
 }
 
 public sealed record GeneralSettings
 {
-    /// <summary>"verify" or "verify_repair". The canonical key for plan 5.6.</summary>
-    [JsonPropertyName("open_par2")] public string OpenPar2 { get; init; } = "verify";
+    /// <summary>
+    /// The core's two spellings of <c>open_par2</c> (its <c>OpenAction</c> enum,
+    /// snake_case). The second was written here as <c>"verify_repair"</c>, which
+    /// the core refuses, so turning the setting on failed every settings write
+    /// that followed it (Gemini sweep H12).
+    /// </summary>
+    public const string Verify = "verify";
+
+    /// <inheritdoc cref="Verify"/>
+    public const string VerifyThenRepair = "verify_then_repair";
+
+    /// <summary><see cref="Verify"/> or <see cref="VerifyThenRepair"/>. The canonical key for plan 5.6.</summary>
+    [JsonPropertyName("open_par2")] public string OpenPar2 { get; init; } = Verify;
 
     [JsonPropertyName("purge_after_repair")] public bool PurgeAfterRepair { get; init; }
     [JsonPropertyName("keep_damaged_copies")] public bool KeepDamagedCopies { get; init; } = true;

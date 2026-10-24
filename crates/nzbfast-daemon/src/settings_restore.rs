@@ -423,8 +423,16 @@ pub fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::M
     // §141: absent leaves the `*` default in place; an explicitly saved
     // empty string is a deliberate "send no Access-Control header" and
     // has to survive the restart as one.
-    if let Some(v) = saved.get("cors_origin").and_then(Value::as_str) {
-        *daemon.cors_origin.lock_ok() = v.to_string();
+    //
+    // Through the setter, so a hand-edited value meets the same shape
+    // rule a saved one did (Gemini 14 Oct 2026 sweep, M13). The emit
+    // site drops a header `tiny_http` refuses, so this is not what
+    // stops response splitting - it is what stops an origin with a path
+    // in it from being restored as a setting that can never match.
+    if let Some(v) = saved.get("cors_origin").and_then(Value::as_str)
+        && let Err(e) = crate::settings::apply_setting(daemon, "cors_origin", v)
+    {
+        warn!(target: "settings", "ignoring saved cors_origin: {e}");
     }
     // TODO 19 (public request #4): the optional dashboard login.
     //
@@ -484,7 +492,7 @@ pub fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::M
         daemon
             .alt
             .hold_count
-            .store((v as u32).min(10), Ordering::Relaxed);
+            .store(v.min(10) as u32, Ordering::Relaxed);
     }
     if let Some(v) = saved.get("alt_auto_switch").and_then(Value::as_bool) {
         daemon.alt.auto_switch.store(v, Ordering::Relaxed);
@@ -493,7 +501,14 @@ pub fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::M
         daemon.alt.auto_search.store(v, Ordering::Relaxed);
     }
     if let Some(v) = saved.get("alt_max_copies").and_then(Value::as_u64) {
-        daemon.alt.max_copies.store(v as u32, Ordering::Relaxed);
+        // The setter's 1..=10, which this arm skipped: a saved 0 made
+        // every spare look already spent (`copies >= max_copies`), and
+        // the clamp is in u64 so a value past u32 cannot wrap under it
+        // (Gemini 14 Oct 2026 sweep, M13).
+        daemon
+            .alt
+            .max_copies
+            .store(v.clamp(1, 10) as u32, Ordering::Relaxed);
     }
     if let Some(v) = saved.get("alt_max_extra_bytes").and_then(Value::as_u64) {
         daemon.alt.max_extra_bytes.store(v, Ordering::Relaxed);
@@ -513,7 +528,7 @@ pub fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::M
     }
     if let Some(v) = saved.get("heal_auto_max_jobs").and_then(Value::as_u64) {
         daemon.heal_auto.max_jobs.store(
-            (v as u32).min(crate::heal::MAX_HEAL_JOBS as u32),
+            v.min(crate::heal::MAX_HEAL_JOBS as u64) as u32,
             Ordering::Relaxed,
         );
     }
@@ -1048,17 +1063,59 @@ pub fn seed_scoreboard_calibrate(settings_path: &Path) -> std::sync::atomic::Ato
     )
 }
 
-pub fn seed_spot_enabled(settings_path: &Path) -> std::sync::atomic::AtomicBool {
-    // Default ON (TODO 131, measured in E3): ~182 verified named
-    // releases a day with fetchable NZBs, promoted to first-class wall
-    // cards. A saved setting always wins - anyone who switched spots
-    // off stays off.
-    std::sync::atomic::AtomicBool::new(
-        load_settings(settings_path)
-            .get("spot_enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-    )
+/// Spots follow indexing unless the user has saved an answer of their
+/// own. `index_enabled` is the already-RESOLVED switch from
+/// [`resolve_index_enabled`], so a fresh install starts with both off and
+/// an install that was already indexing keeps its spots.
+///
+/// This was a flat default ON (TODO 131: ~182 verified named releases a
+/// day promoted to wall cards), which made a fresh install scan free.pt
+/// through the user's providers within two minutes of first start while
+/// every page said indexing is opt-in (GitHub #100). A saved setting
+/// still wins either way, so anyone who switched spots on or off keeps
+/// that answer.
+pub fn seed_spot_enabled(
+    settings_path: &Path,
+    index_enabled: bool,
+) -> std::sync::atomic::AtomicBool {
+    std::sync::atomic::AtomicBool::new(spot_enabled_from(
+        &load_settings(settings_path),
+        index_enabled,
+    ))
+}
+
+fn spot_enabled_from(saved: &serde_json::Map<String, Value>, index_enabled: bool) -> bool {
+    saved
+        .get("spot_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(index_enabled)
+}
+
+#[cfg(test)]
+mod spot_seed_tests {
+    use super::*;
+
+    #[test]
+    fn a_fresh_install_starts_with_spots_off() {
+        assert!(!spot_enabled_from(json!({}).as_object().unwrap(), false));
+    }
+
+    #[test]
+    fn an_install_that_indexes_keeps_its_spots() {
+        assert!(spot_enabled_from(json!({}).as_object().unwrap(), true));
+    }
+
+    #[test]
+    fn a_saved_answer_wins_over_the_index_switch() {
+        assert!(spot_enabled_from(
+            json!({"spot_enabled": true}).as_object().unwrap(),
+            false
+        ));
+        assert!(!spot_enabled_from(
+            json!({"spot_enabled": false}).as_object().unwrap(),
+            true
+        ));
+    }
 }
 
 pub fn seed_spot_groups(settings_path: &Path) -> Mutex<Vec<String>> {

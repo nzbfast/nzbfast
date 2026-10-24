@@ -77,11 +77,15 @@ impl<R: Read> Read for Decoder<R> {
 /// independent blocks at four dictionaries and never below 1 MiB, so a
 /// block this small is one independent run and the MT reader spawns a
 /// thread per block to decode it on one worker anyway.
-const MT_MIN_UNPACK: usize = 1 << 20;
+const MT_MIN_UNPACK: u64 = 1 << 20;
 
 pub fn add_decoder<I: Read>(
     input: I,
-    uncompressed_len: usize,
+    // nzbfast: `u64`, the type the archive declares it in. Upstream took a
+    // `usize`, which every caller filled with `as usize` - a 32-bit
+    // truncation - and the LZMA arm widened straight back. README-nzbfast.md
+    // item 5.
+    uncompressed_len: u64,
     coder: &Coder,
     #[allow(unused)] password: &Password,
     max_mem_limit_kb: usize,
@@ -106,9 +110,8 @@ pub fn add_decoder<I: Read>(
             }
             let dict_size = get_lzma_dic_size(coder)?;
             let props = coder.properties[0];
-            let lz =
-                LzmaReader::new_with_props(input, uncompressed_len as _, props, dict_size, None)
-                    .map_err(|e| Error::bad_password(e, !password.is_empty()))?;
+            let lz = LzmaReader::new_with_props(input, uncompressed_len, props, dict_size, None)
+                .map_err(|e| Error::bad_password(e, !password.is_empty()))?;
             Ok(Decoder::Lzma(Box::new(lz)))
         }
         EncoderMethod::ID_LZMA2 => {

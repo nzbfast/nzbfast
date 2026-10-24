@@ -198,6 +198,19 @@ pub(crate) fn strip_password_label(line: &str) -> Option<&str> {
 /// magic-bearing). Any volume of an encrypted set carries the crypt
 /// record - a multi-volume set repeats it in every volume's header - so
 /// the first match is enough to probe candidates.
+///
+/// A MAGIC-ONLY candidate must also pass
+/// [`nzbkit::extract::archive_sniff_eligible`], the rule every extract
+/// collector applies (`collect_obfuscated_rar_volumes` among them). A
+/// `.cbr` is a RAR by its bytes and a deliverable by its name, so
+/// nothing will ever extract it - and counting it here made a locked
+/// comic read as a locked archive: `unlockpw::unlock` took the RAR road,
+/// `reextract_dir_why` found no set and answered its no-work success,
+/// and that was reported as the password working, with a genuinely
+/// locked zip beside the comic never tried (Codex 22 Oct sweep F7). A
+/// NAMED RAR (`.rar`, `.rNN`) and the numeric/rollover shapes
+/// `looks_like_named_rar` accepts on magic stay in, so a locked
+/// `movie.001` set is still seen.
 pub(crate) fn first_encrypted_rar(dir: &std::path::Path) -> Option<PathBuf> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
         .into_iter()
@@ -207,9 +220,10 @@ pub(crate) fn first_encrypted_rar(dir: &std::path::Path) -> Option<PathBuf> {
         .map(|e| e.path())
         .collect();
     paths.sort();
-    paths
-        .into_iter()
-        .find(|p| (looks_like_named_rar(p) || rar_magic(p)) && nzbkit::rar::needs_password(p))
+    paths.into_iter().find(|p| {
+        (looks_like_named_rar(p) || (nzbkit::extract::archive_sniff_eligible(p) && rar_magic(p)))
+            && nzbkit::rar::needs_password(p)
+    })
 }
 
 /// What a bounded 7z key check can honestly say.

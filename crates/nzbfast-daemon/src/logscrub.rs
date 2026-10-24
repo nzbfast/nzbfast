@@ -38,8 +38,9 @@ const MIN_IDENT: usize = 4;
 impl LogScrub {
     /// Everything this install would rather not publish: its provider
     /// hosts, usernames and passwords, its indexer keys, its
-    /// notification targets' tokens and webhook secrets, and its own API
-    /// keys.
+    /// notification targets' tokens and webhook secrets, its *arr
+    /// instances' API keys, its list sources' account tokens, the
+    /// scoreboard's indexer key, and its own API keys.
     ///
     /// Hosts and usernames become NUMBERED placeholders rather than
     /// `***`, because a scrubbed log still has to be readable: "server2
@@ -93,6 +94,25 @@ impl LogScrub {
             // get_config for the same reason `token` is.
             push(Some(t.secret.clone()), "***".into(), MIN_KEY, false);
         }
+        // The three credential stores this list missed until the
+        // Gemini 14 Oct 2026 sweep (H4): each is masked in get_config
+        // and documented as never logged, which is exactly the promise
+        // this backstop exists to keep when a call site forgets. An
+        // *arr instance's API key (the give-up breaker's), a Plex
+        // account token from a list source (the account itself - see
+        // `ListSource`), and the scoreboard's own indexer key.
+        for a in d.arr_instances.lock_ok().iter() {
+            push(Some(a.apikey.clone()), "***".into(), MIN_KEY, false);
+        }
+        for src in d.lists.sources.lock_ok().iter() {
+            push(Some(src.token.clone()), "***".into(), MIN_KEY, false);
+        }
+        push(
+            d.scoreboard.key.lock_ok().clone(),
+            "***".into(),
+            MIN_KEY,
+            false,
+        );
         for k in [
             d.apikey.lock_ok().clone(),
             d.nzbkey.lock_ok().clone(),

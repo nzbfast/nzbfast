@@ -391,7 +391,15 @@ pub(super) async fn download_guards(
         hold(1).await;
         return None;
     }
-    let mut only_force = d.paused.load(Ordering::Relaxed);
+    // Two different questions, kept apart (Gemini 14 Oct sweep M14):
+    // `quota_held` is "is a GUARD holding normal jobs right now", which is
+    // what decides whether the space/quota hold clears below, and
+    // `only_force` is the pick verdict, which a user pause ALSO sets.
+    // They were one variable, so a disk or quota hold that lifted while
+    // the queue was paused never cleared: the stale banner (with the
+    // last free/spent figures frozen in it) stayed up until the user
+    // unpaused, and over a Force job downloading at full speed.
+    let mut quota_held = false;
     let quota = d.quota.load(Ordering::Relaxed);
     let period = d.quota_period.load(Ordering::Relaxed) as char;
     if quota > 0 || ledger.is_some() {
@@ -451,9 +459,10 @@ pub(super) async fn download_guards(
             quota as f64 / 1e9,
             fresh,
         );
-        only_force = true;
+        quota_held = true;
     }
-    if guard_reason.is_some() && !only_force {
+    let only_force = quota_held || d.paused.load(Ordering::Relaxed);
+    if guard_reason.is_some() && !quota_held {
         info!(target: "guard", "cleared");
         *guard_reason = None;
         d.note_event(
@@ -930,3 +939,56 @@ pub(super) fn settle_job_tail(
 #[cfg(test)]
 #[path = "runner_block_tests.rs"]
 mod runner_block_tests;
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    /// Gemini 14 Oct sweep M14: a disk hold that lifts while the queue
+    /// is PAUSED clears. `only_force` carried both the user's pause and
+    /// "a guard is holding", so with the queue paused the clear edge
+    /// never ran and the low-disk banner stayed up, frozen at its last
+    /// figures, until the user unpaused.
+    #[tokio::test]
+    async fn a_lifted_disk_hold_clears_while_the_queue_is_paused() {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-guard-paused-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.json");
+        std::fs::write(&config, r#"{"servers":[{"host":"news.example.invalid"}]}"#).unwrap();
+        let d = crate::testutil::test_daemon(&dir);
+        // The disk guard is off (the space came back / the minimum was
+        // lowered), the user's pause is on, and the hold from before is
+        // still published.
+        d.min_free.store(0, Ordering::Relaxed);
+        d.paused.store(true, Ordering::Relaxed);
+        // Through `publish_hold`, the one set edge: a bare store here
+        // would trip `every_queue_hold_set_edge_goes_through_one_helper`,
+        // which scans this file.
+        publish_hold(&d, "disk", 1.0, 5.0, false);
+        let mut reason = Some("disk".to_string());
+        let lane = PostprocLane::new(d.clone());
+        let verdict = download_guards(
+            &d,
+            &config,
+            &lane,
+            &mut reason,
+            &mut None,
+            &mut None,
+            &mut ServerProbe::default(),
+            true,
+        )
+        .await;
+        assert_eq!(verdict, Some(true), "a paused queue still picks Force only");
+        assert_eq!(reason, None, "the lifted disk guard must clear");
+        assert!(
+            d.queue_hold.lock_ok().is_none(),
+            "the disk banner must come down while paused"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

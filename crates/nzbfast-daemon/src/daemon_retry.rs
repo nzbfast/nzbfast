@@ -354,10 +354,11 @@ impl Daemon {
         // Re-derive it from the CURRENT root + this job's category, exactly
         // as a fresh add resolves it. A path still under the current root is
         // left untouched, so an ordinary failed retry keeps its own folder,
-        // its journal and its progress. (refile_out_dir honours the category
-        // as a subfolder; a cat_meta `dir` rename is not re-applied here, the
-        // same as the filed/taken paths above - a pre-existing gap, not this
-        // fix's concern.)
+        // its journal and its progress. (Every refile below resolves the
+        // category through `cat_dir`, so a cat_meta `dir` rename lands where
+        // a fresh add of that category would. It used to re-derive
+        // `<root>/<category>` and file the job outside the folder the user
+        // configured; Gemini 14 Oct 2026 sweep, H3.)
         // TODO 317: a write-through job's out_dir is DELIBERATELY
         // outside the download root - it is under its category's
         // destination - so the root test alone calls every one of them
@@ -374,21 +375,25 @@ impl Daemon {
                 .move_dest_root(&category)
                 .is_some_and(|(root, _)| cur.starts_with(&root));
         if filed || taken || stale {
-            let (dir, replaces) = match &wt_root {
-                // The destination root already IS this category's
-                // folder, so `refile_out_dir`'s category component must
-                // not be repeated under it. Same stem spelling either
-                // way - `refile_out_dir`'s own note about the two sites
-                // having to agree applies to this arm too.
-                Some(root) => {
-                    let stem =
-                        nzbkit::disk::sanitize_filename_capped(name.trim_end_matches(".nzb"));
-                    crate::job::choose_out_dir(&root.join(&stem), &stem, &|p| self.dir_claim(p))
-                }
-                None => refile_out_dir(&crate::naming::out_dir(self), &category, &name, &|p| {
-                    self.dir_claim(p)
-                }),
-            };
+            // The claim a FRESH placement asks for, and this is one: the
+            // record left history above and every candidate below is a
+            // directory it is moving TO, never the one it is leaving. A
+            // folder holding files that no record names (a result whose
+            // history row was cleared without its files) read as Free
+            // under the record-only claim, and the re-download then
+            // wrote straight into it. The in-place reuse that
+            // `dir_claim_for_add`'s doc warns about is the OTHER branch,
+            // which never reaches this call. Gemini 14 Oct 2026 sweep, H3.
+            let claim = |p: &std::path::Path| self.dir_claim_for_add(p);
+            // The destination root already IS this category's folder
+            // under write-through; otherwise it is `cat_dir`, the folder
+            // a fresh add of this category is placed under. The stem is
+            // spelled as `refile_out_dir` and `Daemon::enqueue` spell it -
+            // that function's note about the sites having to agree
+            // applies to both arms.
+            let root = wt_root.clone().unwrap_or_else(|| self.cat_dir(&category));
+            let stem = nzbkit::disk::sanitize_filename_capped(name.trim_end_matches(".nzb"));
+            let (dir, replaces) = crate::job::choose_out_dir(&root.join(&stem), &stem, &claim);
             let mut j = job.lock_ok();
             info!(
                 target: "retry",

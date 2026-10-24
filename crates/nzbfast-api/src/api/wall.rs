@@ -928,10 +928,18 @@ fn m_person(
             .and_then(|v| v.parse().ok())
             .unwrap_or(-1);
         let art_dir = d.spool.join("art");
-        match d.with_index_read(|ix| {
+        // index_read_checked, not with_index_read: the flattening
+        // wrapper turns a saturated read pool into None, and None here
+        // answered "no such person" for a person the index holds
+        // (Gemini 14 Oct sweep L6) - `m_people_search`'s reason.
+        let found = match d.index_read_checked(|ix| {
             let p = ix.person_get(id).ok()??;
             Some((p, ix.person_titles(id).unwrap_or_default()))
         }) {
+            Ok(found) => found,
+            Err(why) => return Some(why.refusal()),
+        };
+        match found {
             Some((p, titles)) => json!({
                 "status": true,
                 "id": p.id, "name": p.name, "born": p.born, "bio": p.bio,
@@ -970,7 +978,13 @@ fn m_person_more(
             .get("value")
             .and_then(|v| v.parse().ok())
             .unwrap_or(-1);
-        match d.with_index_read(|ix| ix.person_get(id).ok().flatten()) {
+        // Checked for `m_person`'s reason: a busy pool is not "no such
+        // person".
+        let found = match d.index_read_checked(|ix| ix.person_get(id).ok().flatten()) {
+            Ok(found) => found,
+            Err(why) => return Some(why.refusal()),
+        };
+        match found {
             Some(p) => {
                 let (filmo, complete) =
                     crate::wall::person_filmography(p.tvmaze_id, &p.wikidata_qid);

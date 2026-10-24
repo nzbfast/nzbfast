@@ -810,7 +810,7 @@ pub(super) fn hist_delete_arm(
     // list is the ONLY thing that names those files, so a
     // restart after this delete orphans them at the
     // destination forever.
-    let mut early_gone: Vec<std::path::PathBuf> = Vec::new();
+    let mut early_gone: Vec<crate::earlyfile::EarlyCopy> = Vec::new();
     // GH #86: the rows this request can put back, captured
     // under each record's own lock before the loop below
     // stamps it and drops its spool copy.

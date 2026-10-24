@@ -975,8 +975,16 @@ fn finish(
                 return crate::EXIT_REPAIR_FAILED;
             }
             sink.line(Level::Terse, "Repair complete.");
-            if opts.purge {
-                verify::purge(loaded, created, sink);
+            // The backups' fate is `-p`'s on the command line, which
+            // never sets anything but `Reference`; a host may hold the
+            // two apart (see `cli::BackupPolicy`).
+            match (opts.purge, opts.backups) {
+                (true, crate::cli::BackupPolicy::Keep) => verify::purge(loaded, &[], sink),
+                (true, _) => verify::purge(loaded, created, sink),
+                (false, crate::cli::BackupPolicy::Remove) => {
+                    verify::purge_backups(loaded, created, sink)
+                }
+                (false, _) => {}
             }
             crate::EXIT_SUCCESS
         }

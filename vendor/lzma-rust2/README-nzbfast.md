@@ -226,3 +226,29 @@ a reservation already clamped to `PREALLOC_CAP` and an upper bound no
 true total. Refusing a large declaration outright was considered and
 REJECTED: a work unit is a whole 7-Zip solid block, which is legitimately
 unbounded, so any refusal threshold would refuse real archives.
+
+## 10. `src/range_dec.rs` - `RangeDecoderBuffer::try_read_u8` advances
+
+Upstream's `try_read_u8` on the buffer reader returned the byte at `pos`
+without moving `pos`, unlike its own `read_u8` and unlike the slice and
+`Read` readers' `try_read_u8`. `RangeDecoder::new_stream` over that reader
+would therefore have read the zero lead byte into `code`. Nothing in this
+crate hands `new_stream` a buffer reader today (the LZMA2 path primes the
+buffer through `prepare` / `prepare_from_slice`), so it was a latent
+contract break rather than a live decode bug. Found by the 14 Oct 2026
+Gemini sweep (L7). Regression test
+`range_dec::try_read_u8_tests::the_buffer_reader_advances_past_the_byte_it_returns`,
+which fails with the advance removed.
+
+## 11. `src/filter/bcj2.rs` - the remaining-size clamp compares in `u64`
+
+`Bcj2Reader::read` clamped the caller's buffer with
+`self.uncompressed_size as usize`, a `u64` the archive declares. On a
+32-bit target that is the size modulo 4 GiB, so a BCJ2 stream over
+4 GiB was clamped to its low word and, once the remainder reached an
+exact 4 GiB, read as EOF - a short member. `clamp_to_remaining` compares
+in `u64` and narrows only a figure already below the buffer length.
+Test `filter::bcj2::clamp_tests`, which asserts the 4 GiB cases on every
+target (it is the 32-bit build where the old cast fails them). Found by
+the 14 Oct 2026 Gemini sweep (H14); the sevenz-rust2 half is that
+crate's README item 5.

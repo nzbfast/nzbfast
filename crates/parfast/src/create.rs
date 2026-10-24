@@ -283,7 +283,22 @@ fn is_own_output(path: &Path, par2: Option<&Path>, base: &str) -> bool {
     // (`strip_par2_suffix`).
     let lower = name.to_ascii_lowercase();
     let prefix = format!("{}.vol", base.to_ascii_lowercase());
-    lower.starts_with(&prefix) && lower.ends_with(".par2")
+    if !(lower.starts_with(&prefix) && lower.ends_with(".par2")) {
+        return false;
+    }
+    // ...and IN THE DIRECTORY the set is written to. A volume name is
+    // only this create's output beside its index: `/src/backup.vol0+1.par2`
+    // handed in as a source for `/out/backup.par2` is somebody's file to
+    // protect, and was skipped as "the recovery set's own file" on the
+    // name alone (Gemini sweep H9). By identity, as the index is, so
+    // `./x` and its absolute spelling agree.
+    let dir_of = |p: &Path| -> PathBuf {
+        match p.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+            _ => PathBuf::from("."),
+        }
+    };
+    par2.is_none_or(|p| same_file(&dir_of(path), &dir_of(p)))
 }
 
 /// Do these two paths name the same file on disk? Through a symlink, a
@@ -559,8 +574,17 @@ fn collect(
 /// `<name>.par2` with the extension off, whatever case it was spelled
 /// in. Anything else is returned whole.
 fn strip_par2_suffix(name: &str) -> &str {
+    // `get`, not an index: five BYTES back from the end can land inside
+    // a multi-byte character (`é€€` is 8 bytes and byte 3 is mid-`€`),
+    // and slicing there panicked the whole create.
     match name.len().checked_sub(5) {
-        Some(cut) if name[cut..].eq_ignore_ascii_case(".par2") => &name[..cut],
+        Some(cut)
+            if name
+                .get(cut..)
+                .is_some_and(|tail| tail.eq_ignore_ascii_case(".par2")) =>
+        {
+            &name[..cut]
+        }
         _ => name,
     }
 }
@@ -2221,6 +2245,42 @@ mod tests {
         assert_eq!(strip_par2_suffix("movie"), "movie");
         assert_eq!(strip_par2_suffix(".par2"), "");
         assert_eq!(strip_par2_suffix("par2"), "par2");
+        // Five bytes back from the end is mid-character here.
+        assert_eq!(
+            strip_par2_suffix("\u{e9}\u{20ac}\u{20ac}"),
+            "\u{e9}\u{20ac}\u{20ac}"
+        );
+    }
+
+    /// A volume NAME is this create's output only in the directory the
+    /// set is written to. Another set's volume handed in from elsewhere
+    /// is a source to protect, not a file to skip (Gemini sweep H9).
+    #[test]
+    fn a_volume_named_like_the_set_elsewhere_is_not_its_own_output() {
+        let root = std::env::temp_dir().join(format!(
+            "parfast-own-output-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).expect("src");
+        std::fs::create_dir_all(root.join("out")).expect("out");
+        let par2 = root.join("out").join("backup.par2");
+        let elsewhere = root.join("src").join("backup.vol00+01.par2");
+        std::fs::write(&elsewhere, b"someone else's volume").expect("fixture");
+        assert!(!is_own_output(&elsewhere, Some(&par2), "backup"));
+        // Beside the index it still is, existing or not.
+        assert!(is_own_output(
+            &root.join("out").join("backup.vol00+01.par2"),
+            Some(&par2),
+            "backup"
+        ));
+        assert!(is_own_output(
+            &root.join("out").join("BACKUP.VOL0+1.PAR2"),
+            Some(&par2),
+            "backup"
+        ));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A temp directory with one 30 KB source in it, for the

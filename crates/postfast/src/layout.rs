@@ -494,9 +494,21 @@ fn build(
         &mut recovered,
     )?;
     let posted_payload: &[assemble::SourceFile] = wire.as_deref().unwrap_or(&sources);
-    let carried = match &split {
-        Some(s) => s.posted.as_slice(),
-        None => carried_files(&contained, posted_payload),
+    // A split cuts the parts from the CLEAN source, because the recovery
+    // set above has to describe the clean bytes. So when G1 forked a
+    // damaged wire copy, the posted parts are cut again from THAT: they
+    // used to be the clean parts whatever the fault plane did, and every
+    // `corrupt_payload` span on a split row was silently dropped (Gemini
+    // 14 Oct sweep M17). Same cut, same names - `split::apply` is a pure
+    // function of the profile and the bytes' length.
+    let resplit: Option<Vec<assemble::SourceFile>> = match (&split, wire.as_deref()) {
+        (Some(_), Some(w)) => split::apply(profile, w).map(|s| s.posted),
+        _ => None,
+    };
+    let carried = match (&split, &resplit) {
+        (_, Some(parts)) => parts.as_slice(),
+        (Some(s), None) => s.posted.as_slice(),
+        (None, None) => carried_files(&contained, posted_payload),
     };
     // P5: a described-but-unposted placeholder reaches the naming
     // plane, the encoder and the NZB not at all. It has no wire name to

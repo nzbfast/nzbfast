@@ -1217,8 +1217,13 @@ impl SampleIter for MkvSampleIter {
                 }
             };
             // An unknown-size cluster ends where the next segment-level
-            // element begins; that is the format's only terminator.
-            if is_segment_level(id) && self.pos >= self.cluster_end {
+            // element begins; that is the format's only terminator. Its
+            // end is `u64::MAX`, which `pos` never reaches, so it is
+            // tested for by name (a stored `seg_end` made this arm
+            // unreachable: the loop only runs while `pos < seg_end`).
+            if is_segment_level(id)
+                && (self.pos >= self.cluster_end || self.cluster_end == u64::MAX)
+            {
                 self.cluster_end = 0;
             }
             let inside_cluster = self.pos < self.cluster_end;
@@ -1238,7 +1243,7 @@ impl SampleIter for MkvSampleIter {
             };
             match id {
                 CLUSTER => {
-                    self.cluster_end = bend;
+                    self.cluster_end = if unknown { u64::MAX } else { bend };
                     self.cluster_ts = 0;
                     self.pos = body;
                     continue;
@@ -2426,6 +2431,41 @@ mod tests {
         let s = MemSource(vec![0x81]);
         let (v, _, unknown) = read_size(&s, 0, NOW).unwrap();
         assert_eq!((v, unknown), (1, false));
+    }
+
+    /// Gemini 14 Oct sweep M7: an unknown-size Cluster ends where the
+    /// next segment-level element begins. The walk stored `seg_end` as
+    /// its end, and the reset only fired at `pos >= cluster_end`, which
+    /// the loop's own `pos < seg_end` guard made unreachable - so the
+    /// cluster never closed, and a block-shaped element anywhere after a
+    /// Cues was decoded as a sample of the stale cluster.
+    #[test]
+    fn an_unknown_size_cluster_closes_at_the_next_segment_level_element() {
+        let block = |rel: u8| vec![0x81, 0x00, rel, 0x80, 0xAA, 0xBB];
+        let mut cluster = vec![0x1F, 0x43, 0xB6, 0x75, 0xFF];
+        cluster.extend(testmux::uint(&[0xE7], 0));
+        cluster.extend(testmux::el(&[0xA3], &block(0)));
+        let mut file = cluster;
+        file.extend(testmux::el(&[0x1C, 0x53, 0xBB, 0x6B], &[0xEC, 0x80]));
+        file.extend(testmux::el(&[0xA3], &block(40)));
+        let src = MemSource(file.clone());
+        let mut it = MkvSampleIter {
+            scale_ns: 1_000_000,
+            tick_mul: 1,
+            seg_end: file.len() as u64,
+            pos: 0,
+            cluster_end: 0,
+            cluster_ts: 0,
+            map: vec![(1, 1, None)],
+            queue: VecDeque::new(),
+            done: false,
+            warnings: Vec::new(),
+        };
+        let mut n = 0;
+        while it.next(&src, NOW).unwrap().is_some() {
+            n += 1;
+        }
+        assert_eq!(n, 1, "a block past the Cues is outside every cluster");
     }
 
     /// A timescale that divides a second passes ticks straight through;

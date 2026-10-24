@@ -221,6 +221,7 @@ public class CapabilityTests
         var shell = new ShellViewModel(core, new ImmediateDispatcher(), host);
 
         shell.Queue.SetPostAction(PostQueueAction.Sleep);
+        shell.Queue.ConfirmPostAction();
         core.RaisePostActionDue();
         core.Advance(TimeSpan.Zero);
         core.Advance(TimeSpan.Zero);
@@ -237,6 +238,7 @@ public class CapabilityTests
         var shell = new ShellViewModel(core, new ImmediateDispatcher(), host);
 
         shell.Queue.SetPostAction(PostQueueAction.Shutdown);
+        shell.Queue.ConfirmPostAction();
         core.RaisePostActionDue();
         for (var i = 0; i < 10; i++)
         {

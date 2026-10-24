@@ -8,6 +8,31 @@ permissions:
 concurrency:
   group: pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
+env:
+  # THE PINNED par2cmdline REFERENCE, one tag for BOTH jobs below. Several
+  # tests in this suite are not "does par2 run" checks but parity checks
+  # against par2cmdline itself - postfast's catalog conformance guard,
+  # parfast's `creator_packet` byte-for-byte comparison, nzbkit-base's
+  # wide-set interop - so the binary on PATH is the ORACLE, and two
+  # different oracles on the two legs would be calling two different
+  # answers parity.
+  #
+  # NOT `apt-get install par2`, and this is the load-bearing half. Ubuntu
+  # ships 0.8.1, which cannot verify ANY set describing a 0-byte member
+  # (upstream #128, fixed in 1.0.0) and names its volume files in an older
+  # spelling, and every public PR was red on exactly those two tests for
+  # as long as this job installed it. Built from tag on Linux and cached;
+  # the upstream release asset on Windows, because par2cmdline's autotools
+  # build is not a thing windows-latest does in a reasonable number of
+  # minutes - the same project at the same tag either way.
+  #
+  # The Windows version string is derived from PAR2REF_TAG by dropping the
+  # `v`, so the tag stays single-source - but THE SHA256 MOVES WITH IT.
+  # Bump both in the same commit or the Windows step fails closed on a
+  # mismatch, which is the intended direction.
+  PAR2REF_TAG: "v1.3.0"
+  PAR2REF_KEY_SUFFIX: "v1"
+  PAR2REF_WIN_X64_SHA256: "4164d2e689b6bca6a14c4d4a303582ff40307b5739737f1d29695b65002b13ea"
 jobs:
   build-and-test:
     if: github.repository == 'nzbfast/nzbfast'
@@ -45,7 +70,10 @@ jobs:
         run: rustup toolchain install stable --profile minimal && rustup default stable
       # par2 CREATES the recovery sets the repair e2e then damages and
       # repairs (nzbfast's own verify and repair are built in, so this is
-      # a fixture tool, not a runtime one).
+      # a fixture tool, not a runtime one), and is the parity oracle for
+      # the interop tests - which is why it is the pinned reference from
+      # the steps below and not the distro package (see PAR2REF_TAG in
+      # `env:` above).
       #
       # unrar is TODO 60b, and the same kind of dependency: the
       # `prefer_external_unrar` setting routes a named compressed set to
@@ -58,8 +86,51 @@ jobs:
       # It comes from multiverse; `unrar-free` is a different
       # implementation, not a drop-in, so do not swap it in if this ever
       # fails to install.
-      - name: test deps (par2 and unrar for the unpack suites)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq par2 unrar
+      - name: test deps (unrar for the unpack suites)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq unrar
+      # restore + save as SEPARATE steps, for the reason the cargo cache
+      # below gives: the combined action saves nothing from a red job, and
+      # a PR being iterated on is red more often than not.
+      - name: restore the pinned par2cmdline reference
+        id: par2ref
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/par2ref
+          key: par2cmdline-${{ env.PAR2REF_TAG }}-${{ runner.os }}-${{ env.PAR2REF_KEY_SUFFIX }}
+      - name: build par2cmdline from tag ${{ env.PAR2REF_TAG }}
+        if: steps.par2ref.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$PAR2REF_TAG" \
+            https://github.com/Parchive/par2cmdline.git "$RUNNER_TEMP/par2src"
+          cd "$RUNNER_TEMP/par2src"
+          ./automake.sh
+          ./configure
+          make -j"$(nproc)"
+          ./par2 --version
+          mkdir -p ~/par2ref
+          cp par2 ~/par2ref/par2
+      - if: steps.par2ref.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/par2ref
+          key: par2cmdline-${{ env.PAR2REF_TAG }}-${{ runner.os }}-${{ env.PAR2REF_KEY_SUFFIX }}
+      # FAILING TO FIND IS FAILING: refuse outright rather than let the
+      # par2 tests' skip arm read as a pass. `$GITHUB_PATH` so the bare
+      # `par2` the integration tests spawn resolves to the pinned binary in
+      # every later step; NZBFAST_PAR2_BIN too, for the tests that read it
+      # instead of PATH. `$HOME` rather than `~` because a workflow env
+      # value expands neither.
+      - name: point the par2 tests at the pinned reference
+        run: |
+          set -euo pipefail
+          if ! "$HOME/par2ref/par2" -V; then
+            echo "::error::the pinned par2cmdline reference is not at ~/par2ref/par2."
+            echo "::error::the par2 tests would skip, which reads as a pass."
+            exit 1
+          fi
+          echo "$HOME/par2ref" >> "$GITHUB_PATH"
+          echo "NZBFAST_PAR2_BIN=$HOME/par2ref/par2" >> "$GITHUB_ENV"
       # Cargo.lock moves on EVERY release (packaging/bump-version.sh
       # rewrites it), so `hashFiles('Cargo.lock')` sent this job cold on
       # every release for the sake of two changed lines. Measured on
@@ -320,25 +391,59 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The same test dependency the Linux job installs with apt, for the
-      # same reason: the e2e fixtures CREATE the PAR2 recovery sets they then
-      # damage and repair, and `par2` is the creator. nzbfast itself needs no
-      # external par2 - verify and repair are built in - so this is a fixture
-      # tool, not a runtime one. Pinned by tag and checked by SHA256 rather
-      # than trusted, since it is fetched from a third party and put on PATH.
-      - name: test deps (par2 for repair e2e)
+      # The same test dependency the Linux job installs, for the same
+      # reasons: the e2e fixtures CREATE the PAR2 recovery sets they then
+      # damage and repair, and `par2` is the creator; and the interop tests
+      # compare our engine against it, so it is the parity oracle too.
+      # nzbfast itself needs no external par2 - verify and repair are built
+      # in - so this is a test tool, not a runtime one.
+      #
+      # THE SAME TAG AS THE LINUX LEG (PAR2REF_TAG in `env:` above), and no
+      # longer par2cmdline-turbo: that is a FORK, and a fork on one leg
+      # and upstream on the other would be two oracles. Checked by SHA256
+      # rather than trusted, since it is fetched from a third party and put
+      # on PATH. Retried five times because a runner that cannot reach
+      # github.com for 20 seconds is not a code defect. Not cached: a few
+      # hundred KB against a cache round trip is not a trade.
+      - name: test deps (the pinned par2cmdline reference)
         shell: pwsh
         run: |
-          $ver = "1.4.0"
-          $url = "https://github.com/animetosho/par2cmdline-turbo/releases/download/v$ver/par2cmdline-turbo-$ver-win-x64.zip"
-          Invoke-WebRequest -Uri $url -OutFile par2.zip
-          $want = "7905d1d6aced2b2ca30d824b4954e6bf740dc9d6cfec718b0ab146b5fc0d6327"
-          $got = (Get-FileHash par2.zip -Algorithm SHA256).Hash.ToLower()
-          Write-Host "par2 zip sha256 = $got"
-          if ($got -ne $want) { throw "par2 zip sha256 mismatch: got $got, expected $want" }
-          New-Item -ItemType Directory -Force -Path C:\par2 | Out-Null
-          Expand-Archive par2.zip -DestinationPath C:\par2 -Force
-          "C:\par2" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          $ver = $env:PAR2REF_TAG -replace '^v', ''
+          $url = "https://github.com/Parchive/par2cmdline/releases/download/$env:PAR2REF_TAG/par2cmdline-$ver-win-x64.zip"
+          $want = $env:PAR2REF_WIN_X64_SHA256
+          $ok = $false
+          foreach ($i in 1..5) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile par2.zip
+              $got = (Get-FileHash par2.zip -Algorithm SHA256).Hash.ToLower()
+              if ($got -eq $want) { $ok = $true; break }
+              Write-Host "attempt ${i}: sha256 mismatch (got $got, expected $want)"
+            } catch {
+              Write-Host "attempt ${i}: $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds (5 * $i)
+          }
+          if (-not $ok) { throw "par2cmdline $env:PAR2REF_TAG download failed after 5 attempts (expected sha256 $want)" }
+          New-Item -ItemType Directory -Force -Path C:\par2ref | Out-Null
+          Expand-Archive par2.zip -DestinationPath C:\par2ref -Force
+          Remove-Item par2.zip
+          & C:\par2ref\par2.exe -V
+          if ($LASTEXITCODE -ne 0) { throw "the par2 reference does not run" }
+          "C:\par2ref" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "NZBFAST_PAR2_BIN=C:\par2ref\par2.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      # FAILING TO FIND IS FAILING: prove the bare `par2` the tests spawn
+      # resolves, in the shell they spawn it from, before the suite gets a
+      # chance to skip. The step above proves the file runs; this proves
+      # the PATH prepend took.
+      - name: prove `par2` resolves for the suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! par2 -V; then
+            echo "::error::the pinned par2cmdline reference is not on PATH."
+            echo "::error::the par2 tests would skip, which reads as a pass."
+            exit 1
+          fi
       # No toolchain step: rust-toolchain.toml pins 1.97.0 and rustup
       # installs it for the msvc host on the first cargo invocation. An
       # explicit `rustup default stable` would be overridden by that pin

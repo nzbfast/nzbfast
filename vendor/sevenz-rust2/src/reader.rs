@@ -22,13 +22,33 @@ const MAX_MEM_LIMIT_KB: usize = usize::MAX / 1024;
 /// read; this only stops a tiny archive from forcing a huge up-front allocation.
 const MAX_PREALLOC_BYTES: usize = 4 << 20;
 
+/// nzbfast: how many of `buf_len` bytes a read may take when `remaining`
+/// are left, computed without narrowing `remaining` first.
+///
+/// Every size this module bounds a reader by is an archive-declared `u64`
+/// (`pack_sizes`, `unpack_sizes`, `file.size`), and upstream cast each to
+/// `usize` on the way in. On a 32-bit target that is the size modulo
+/// 4 GiB, so a member of 4 GiB or more was read short or, at an exact
+/// multiple, as empty. The result here never exceeds `buf_len`, so the one
+/// narrowing cast is of a figure already known to fit. README-nzbfast.md
+/// item 5.
+#[inline]
+fn clamp_to_remaining(buf_len: usize, remaining: u64) -> usize {
+    if buf_len as u64 > remaining {
+        remaining as usize
+    } else {
+        buf_len
+    }
+}
+
 pub struct BoundedReader<R: Read> {
     inner: R,
-    remain: usize,
+    // nzbfast: `u64`, not `usize` - see `clamp_to_remaining`.
+    remain: u64,
 }
 
 impl<R: Read> BoundedReader<R> {
-    pub fn new(inner: R, max_size: usize) -> Self {
+    pub fn new(inner: R, max_size: u64) -> Self {
         Self {
             inner,
             remain: max_size,
@@ -41,9 +61,9 @@ impl<R: Read> Read for BoundedReader<R> {
         if self.remain == 0 {
             return Ok(0);
         }
-        let bound = buf.len().min(self.remain);
+        let bound = clamp_to_remaining(buf.len(), self.remain);
         let size = self.inner.read(&mut buf[..bound])?;
-        self.remain -= size;
+        self.remain -= size as u64;
         Ok(size)
     }
 }
@@ -92,7 +112,7 @@ impl<'a, R: Read + Seek> Read for SharedBoundedReader<'a, R> {
 
         inner.seek(SeekFrom::Start(self.cur))?;
 
-        let bound = buf.len().min((self.bounds.1 - self.cur) as usize);
+        let bound = clamp_to_remaining(buf.len(), self.bounds.1 - self.cur);
         let size = inner.read(&mut buf[..bound])?;
         self.cur += size as u64;
         Ok(size)
@@ -109,39 +129,69 @@ impl<'a, R: Read + Seek> SharedBoundedReader<'a, R> {
     }
 }
 
+/// nzbfast: `remaining` is a `u64` and the stream ends in exactly one of
+/// two ways - the declared length arrives and the CRC is compared, or the
+/// inner reader runs dry first and that is an error. Upstream held the
+/// declared `usize` as an `i64` and returned `Ok(0)` whenever it read
+/// `<= 0`, so a size of 2^63 or more (negative), a 32-bit truncation to 0,
+/// and an inner EOF before the declared length all ended the stream
+/// without the CRC ever being compared. README-nzbfast.md item 5.
 struct Crc32VerifyingReader<R> {
     inner: R,
     crc_digest: Hasher,
     expected_value: u64,
-    remaining: i64,
+    remaining: u64,
+    verified: bool,
 }
 
 impl<R: Read> Crc32VerifyingReader<R> {
-    fn new(inner: R, remaining: usize, expected_value: u64) -> Self {
+    fn new(inner: R, remaining: u64, expected_value: u64) -> Self {
         Self {
             inner,
             crc_digest: Hasher::new(),
             expected_value,
-            remaining: remaining as i64,
+            remaining,
+            verified: false,
         }
+    }
+
+    fn verify(&mut self) -> io::Result<()> {
+        self.verified = true;
+        let d = std::mem::replace(&mut self.crc_digest, Hasher::new()).finalize();
+        if d as u64 != self.expected_value {
+            return Err(std::io::Error::other(Error::ChecksumVerificationFailed));
+        }
+        Ok(())
     }
 }
 
 impl<R: Read> Read for Crc32VerifyingReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.remaining <= 0 {
+        if self.verified {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            // A zero-length stream still has a CRC (of nothing) to compare.
+            self.verify()?;
+            return Ok(0);
+        }
+        if buf.is_empty() {
             return Ok(0);
         }
         let size = self.inner.read(buf)?;
-        if size > 0 {
-            self.remaining -= size as i64;
-            self.crc_digest.update(&buf[..size]);
+        if size == 0 {
+            // The stream ended short of its declared length, so there is
+            // no CRC to compare it against - which is a failure, not an
+            // end of file.
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "7z stream ended before its declared size; CRC not verifiable",
+            ));
         }
-        if self.remaining <= 0 {
-            let d = std::mem::replace(&mut self.crc_digest, Hasher::new()).finalize();
-            if d as u64 != self.expected_value {
-                return Err(std::io::Error::other(Error::ChecksumVerificationFailed));
-            }
+        self.crc_digest.update(&buf[..size]);
+        self.remaining = self.remaining.saturating_sub(size as u64);
+        if self.remaining == 0 {
+            self.verify()?;
         }
         Ok(size)
     }
@@ -467,8 +517,12 @@ impl Archive {
 
         reader.seek(SeekFrom::Start(block_offset))?;
         let coder_len = block.coders.len();
-        let unpack_size = block.get_unpack_size() as usize;
-        let pack_size = archive.pack_sizes[first_pack_stream_index] as usize;
+        // nzbfast: the decoded header is buffered whole by the caller, so
+        // it must fit a `usize`; refuse rather than truncate on 32-bit.
+        let unpack_size_u64 = block.get_unpack_size();
+        let unpack_size = usize::try_from(unpack_size_u64)
+            .map_err(|_| Error::other("encoded header unpack size exceeds address space"))?;
+        let pack_size = archive.pack_sizes[first_pack_stream_index];
         let input_reader = BoundedReader::new(reader, pack_size);
         let mut decoder: Box<dyn Read> = Box::new(input_reader);
         let mut decoder = if coder_len > 0 {
@@ -480,7 +534,7 @@ impl Archive {
                 }
                 let next = add_decoder(
                     decoder,
-                    block.get_unpack_size_at_index(index) as usize,
+                    block.get_unpack_size_at_index(index),
                     coder,
                     password,
                     MAX_MEM_LIMIT_KB,
@@ -493,7 +547,11 @@ impl Archive {
             decoder
         };
         if block.has_crc {
-            decoder = Box::new(Crc32VerifyingReader::new(decoder, unpack_size, block.crc));
+            decoder = Box::new(Crc32VerifyingReader::new(
+                decoder,
+                unpack_size_u64,
+                block.crc,
+            ));
         }
 
         Ok((decoder, unpack_size))
@@ -1359,7 +1417,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
         block_index: usize,
         password: &Password,
         thread_count: u32,
-    ) -> Result<(Box<dyn Read + 'r>, usize), Error> {
+    ) -> Result<(Box<dyn Read + 'r>, u64), Error> {
         let block = &archive.blocks[block_index];
         if block.total_input_streams > block.total_output_streams {
             return Self::build_decode_stack2(source, archive, block_index, password, thread_count);
@@ -1405,7 +1463,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
         }
 
         source.seek(SeekFrom::Start(block_offset))?;
-        let pack_size = archive.pack_sizes[first_pack_stream_index] as usize;
+        let pack_size = archive.pack_sizes[first_pack_stream_index];
 
         let mut decoder: Box<dyn Read> = Box::new(BoundedReader::new(source, pack_size));
         let block = &archive.blocks[block_index];
@@ -1417,7 +1475,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             }
             let next = add_decoder(
                 decoder,
-                block.get_unpack_size_at_index(index) as usize,
+                block.get_unpack_size_at_index(index),
                 coder,
                 password,
                 MAX_MEM_LIMIT_KB,
@@ -1428,7 +1486,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
         if has_crc {
             decoder = Box::new(Crc32VerifyingReader::new(
                 decoder,
-                block.get_unpack_size() as usize,
+                block.get_unpack_size(),
                 crc,
             ));
         }
@@ -1442,7 +1500,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
         block_index: usize,
         password: &Password,
         thread_count: u32,
-    ) -> Result<(Box<dyn Read + 'r>, usize), Error> {
+    ) -> Result<(Box<dyn Read + 'r>, u64), Error> {
         const MAX_CODER_COUNT: usize = 32;
         let block = &archive.blocks[block_index];
         if block.coders.len() > MAX_CODER_COUNT {
@@ -1538,14 +1596,11 @@ impl<R: Read + Seek> ArchiveReader<R> {
         if block.has_crc {
             decoder = Box::new(Crc32VerifyingReader::new(
                 decoder,
-                block.get_unpack_size() as usize,
+                block.get_unpack_size(),
                 block.crc,
             ));
         }
-        Ok((
-            decoder,
-            archive.pack_sizes[first_pack_stream_index] as usize,
-        ))
+        Ok((decoder, archive.pack_sizes[first_pack_stream_index]))
     }
 
     fn get_in_stream<'r>(
@@ -1618,8 +1673,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
         let uncompressed_len = *block
             .unpack_sizes
             .get(in_stream_index)
-            .ok_or_else(|| Error::other("in_stream_index out of range"))?
-            as usize;
+            .ok_or_else(|| Error::other("in_stream_index out of range"))?;
         if coder.num_in_streams == 1 {
             let input = Self::get_in_stream(
                 block,
@@ -1665,7 +1719,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
                     thread_count,
                 )?);
             }
-            return Ok(Box::new(Bcj2Reader::new(inputs, uncompressed_len as u64)));
+            return Ok(Box::new(Bcj2Reader::new(inputs, uncompressed_len)));
         }
 
         Err(Error::unsupported(format!(
@@ -1738,8 +1792,10 @@ impl<R: Read + Seek> ArchiveReader<R> {
                     &mut self.source,
                 )
                 .for_each_entries(&mut |archive_entry, reader| {
-                    let mut data =
-                        Vec::with_capacity((archive_entry.size as usize).min(MAX_PREALLOC_BYTES));
+                    let mut data = Vec::with_capacity(clamp_to_remaining(
+                        MAX_PREALLOC_BYTES,
+                        archive_entry.size,
+                    ));
                     reader.read_to_end(&mut data)?;
 
                     if std::ptr::eq(archive_entry, target_file_ptr) {
@@ -1770,16 +1826,13 @@ impl<R: Read + Seek> ArchiveReader<R> {
                     self.thread_count,
                 )?;
 
-                let mut data = Vec::with_capacity((file.size as usize).min(MAX_PREALLOC_BYTES));
+                let mut data =
+                    Vec::with_capacity(clamp_to_remaining(MAX_PREALLOC_BYTES, file.size));
                 let mut decoder: Box<dyn Read> =
-                    Box::new(BoundedReader::new(&mut block_reader, file.size as usize));
+                    Box::new(BoundedReader::new(&mut block_reader, file.size));
 
                 if file.has_crc {
-                    decoder = Box::new(Crc32VerifyingReader::new(
-                        decoder,
-                        file.size as usize,
-                        file.crc,
-                    ));
+                    decoder = Box::new(Crc32VerifyingReader::new(decoder, file.size, file.crc));
                 }
 
                 decoder.read_to_end(&mut data)?;
@@ -1943,13 +1996,9 @@ impl<'a, R: Read + Seek> BlockDecoder<'a, R> {
             let file = &archive.files[file_index];
             if file.has_stream && file.size > 0 {
                 let mut decoder: Box<dyn Read> =
-                    Box::new(BoundedReader::new(&mut block_reader, file.size as usize));
+                    Box::new(BoundedReader::new(&mut block_reader, file.size));
                 if file.has_crc {
-                    decoder = Box::new(Crc32VerifyingReader::new(
-                        decoder,
-                        file.size as usize,
-                        file.crc,
-                    ));
+                    decoder = Box::new(Crc32VerifyingReader::new(decoder, file.size, file.crc));
                 }
                 if !each(file, &mut decoder)
                     .map_err(|e| e.maybe_bad_password(!self.password.is_empty()))?

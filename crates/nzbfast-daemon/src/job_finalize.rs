@@ -229,8 +229,11 @@ pub(super) fn finalize_payload(
         }
     }
     // Something in a SUCCESSFUL job is still packed
-    // and we have no unpacker for it (today: any
-    // zip). Read off the finished directory rather
+    // and could not be unpacked (today: a zip that is
+    // damaged, encrypted with no working password, or
+    // uses a method this build does not carry - store
+    // and deflate zips have unpacked natively since
+    // 30 Jul 2026). Read off the finished directory rather
     // than threaded out of the engine, exactly like
     // the encrypted-volume check above - which also
     // means a resumed or retried job reports it
@@ -282,12 +285,28 @@ pub(super) fn finalize_payload(
     // that was not really used.
     d3.note_tail_stage(&nzo3, "renaming");
     let mut cleaned = (0usize, 0usize);
+    // A still-locked job keeps its archives whatever the list
+    // names: they are the payload, parked for the password that
+    // unpacks them, and an unlock re-runs this whole pass, the
+    // ordinary sweep included, once one opens them. A list naming `rar` / `7z` used to delete
+    // them here, leaving that password nothing to open. The rest
+    // of the list still applies, so an unlocked job's sweep and
+    // a locked job's non-archive deletes are both unchanged.
+    let still_locked = needs_pw || unlock_refused.is_some();
     if !exts.is_empty() {
-        cleaned = crate::smart::cleanup(&out2, &exts);
+        cleaned = if still_locked {
+            crate::smart::cleanup_sparing_archives(&out2, &exts)
+        } else {
+            crate::smart::cleanup(&out2, &exts)
+        };
     }
     // Auto-rename & cleanup run only once the payload is
     // actually unpacked (a still-locked job has no media
-    // to rename or non-junk to keep).
+    // to rename or non-junk to keep). "Cleanup" there is
+    // `finalize_names`' own junk sweep, the `!needs_pw` arm
+    // below; the `cleanup_exts` sweep just above has run on
+    // a still-locked job too since M23 introduced it, which
+    // predates the locked-job arm - sparing its archives.
     // `.or(moved)`: a renamed/relocated folder wins,
     // but an A6 hand-over with no rename still has to
     // report its new directory.
@@ -312,7 +331,7 @@ pub(super) fn finalize_payload(
     // A rollback that cannot complete is reported and nothing is
     // deleted: `moved` then still points at the canonical directory,
     // which is where the payload actually is.
-    let unusable = needs_pw || unlock_refused.is_some();
+    let unusable = still_locked;
     if let Some(p) = published.take() {
         if unusable {
             let from = out2.clone();
@@ -543,6 +562,73 @@ mod tests {
             "a rolled-back hand-over must not report a new directory"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A cleanup list that names archive extensions must never take the
+    /// archives of a job that is still LOCKED.
+    ///
+    /// The `cleanup_exts` sweep runs on every finished job, and an
+    /// encrypted set completes with its volumes still packed by design:
+    /// they are parked for the password that unlocks them, and an
+    /// unlock re-runs this pass, sweep included, once one opens them. A list naming
+    /// `rar` / `7z` (a common "tidy up after extraction" setup) used to
+    /// delete those volumes on the spot, so the password supplied later
+    /// had nothing left to open. Everything else the list names still
+    /// goes, which is the control half: the `.nfo` must be swept, or a
+    /// rule that skipped the sweep wholesale would pass this too.
+    #[test]
+    fn a_cleanup_list_never_takes_a_locked_jobs_archive_volumes() {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-locked-cleanup-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = crate::testutil::test_daemon(&dir);
+        d.identity_lookup.store(false, Ordering::Relaxed);
+
+        let payload: Vec<u8> = (0..40_000u32).map(|i| (i * 7 + 3) as u8).collect();
+        std::fs::write(
+            dir.join("release.7z"),
+            locked_archive_bytes("a-key-nobody-here-has", &payload),
+        )
+        .unwrap();
+        // RAR volumes beside it, by name and by magic. Their bodies are
+        // not real archives; what is under test is that the sweep spares
+        // the SHAPE, whatever the unlock ladder made of the contents.
+        std::fs::write(dir.join("other.rar"), b"Rar!\x1a\x07\x00 head").unwrap();
+        std::fs::write(dir.join("other.r00"), b"continuation bytes").unwrap();
+        std::fs::write(dir.join("release.nfo"), b"notes").unwrap();
+
+        let exts = crate::smart::parse_ext_list("rar, r00, 7z, nfo");
+        let out = finalize_payload(
+            d.clone(),
+            "nzo-locked-cleanup".into(),
+            dir.clone(),
+            None,
+            None,
+            dir.join("job.nzb"),
+            String::new(),
+            "Some.Release.2024.1080p-GRP".into(),
+            0,
+            exts,
+            String::new(),
+            false,
+        );
+
+        assert!(out.needs_pw, "the 7z is locked and no password opens it");
+        for kept in ["release.7z", "other.rar", "other.r00"] {
+            assert!(
+                dir.join(kept).is_file(),
+                "{kept} is a locked job's archive volume and the cleanup list deleted it"
+            );
+        }
+        assert!(
+            !dir.join("release.nfo").exists(),
+            "the rest of the cleanup list must still apply to a locked job"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The control arm, and the one that keeps A6 doing its job: a

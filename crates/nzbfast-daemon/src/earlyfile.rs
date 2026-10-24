@@ -132,6 +132,98 @@ pub struct EarlyFile {
     /// spend by re-deriving, which is exactly what they did before the
     /// field - no old store gets worse.
     pub dest: Option<PathBuf>,
+    /// The DESTINATION copy's own mtime, read off the entry (never
+    /// through a link) the moment the commit rename landed - what lets
+    /// every later unlink prove the entry at `dest/name` is still the
+    /// copy this job made (Codex sweep F1, 24 Oct 2026).
+    ///
+    /// `dest` is the user's completed folder, so between publish and
+    /// settle anything may take the name: a re-grab, a hand copy, a
+    /// backup restore, a link into a library. The reconcile judged the
+    /// entry by LENGTH alone, so a same-length stranger read as "our
+    /// copy, unchanged" and the job's verified SOURCE was deleted; a
+    /// different-length one fell through to a blind `remove_file`, as did
+    /// every delete and cancel through [`early_unlink`]. See
+    /// `copy_at` for the judgement and its stated limits.
+    ///
+    /// The mtime and not `disk::file_object_id`: this record is
+    /// PERSISTED, and that id is run-local by its own contract (a remount
+    /// or a share can renumber it). Our copy's mtime is set by its last
+    /// write in `stage_copy`, a rename keeps it, and nothing that
+    /// legitimately follows (an *arr hardlink or import copy) moves it.
+    ///
+    /// `None` on a record written before this field existed. Those are
+    /// judged as they always were, by length - but through `lstat`, so a
+    /// link is never mistaken for the copy - which is all such a record
+    /// carries; no old store gets worse.
+    pub dest_mtime_ns: Option<u64>,
+}
+
+/// What sits at a recorded copy's destination path, judged against the
+/// record. Every unlink of a destination entry in this module asks this
+/// first, so none of them removes a name that has stopped being ours.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Held {
+    /// The entry is the copy this record published.
+    Ours,
+    /// Nothing there.
+    Gone,
+    /// Something else holds the name - a different file, a link, a
+    /// directory. Not this job's to trust or to remove.
+    Foreign,
+    /// The destination did not answer (sweep S7): no verdict either way.
+    Unreachable,
+}
+
+/// The modification time of `md` in nanoseconds since the unix epoch,
+/// 0 when the platform would not say. One spelling for both stamps.
+fn mtime_ns_of(md: &std::fs::Metadata) -> u64 {
+    md.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+/// Is the entry at `dst` still the copy that published `len` bytes with
+/// destination mtime `dest_mtime_ns`?
+///
+/// `symlink_metadata` and not `metadata`, for the reason the publish
+/// door's own guard gives: `remove_file` acts on the ENTRY, so the
+/// question has to be asked of the entry - a link to a same-length file
+/// passed the old length test and was then unlinked. Only a regular file
+/// can be ours; this job never creates anything else at the destination.
+///
+/// STATED LIMITS, both of the same shape as the mtime third's S16 note
+/// on [`EarlyFile`]. A stranger of the SAME length carrying the SAME
+/// nanosecond mtime reads as ours - which takes a tool that copies with
+/// preserved times from a file that already had our copy's stamp, or a
+/// coarse-tick volume (exFAT's 2 s) and a same-length replacement inside
+/// the publish's own tick. And the look is not the unlink: a replacement
+/// landing between this `lstat` and the `remove_file` after it is
+/// removed. That window is one syscall, against the minutes-to-hours
+/// between publish and settle that this closes; making it exclusive
+/// needs a rename-aside whose restore can itself clobber an arrival, or
+/// a no-replace rename std does not offer portably - so it is not built.
+pub(crate) fn copy_at(dst: &Path, len: u64, dest_mtime_ns: Option<u64>) -> Held {
+    match std::fs::symlink_metadata(dst) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Held::Gone,
+        Err(_) => Held::Unreachable,
+        Ok(md) if !md.file_type().is_file() || md.len() != len => Held::Foreign,
+        Ok(md) => match dest_mtime_ns {
+            Some(t) if mtime_ns_of(&md) != t => Held::Foreign,
+            _ => Held::Ours,
+        },
+    }
+}
+
+/// One early copy handed back by [`Daemon::early_take`] for
+/// [`early_unlink`]: where it is, and what proves it is still ours.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EarlyCopy {
+    pub path: PathBuf,
+    pub len: u64,
+    pub dest_mtime_ns: Option<u64>,
 }
 
 /// Files below this are not worth a round of I/O and a destination
@@ -157,13 +249,7 @@ pub fn stamp(p: &Path) -> Option<(u64, u64)> {
     if !md.is_file() {
         return None;
     }
-    let ns = md
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    Some((md.len(), ns))
+    Some((md.len(), mtime_ns_of(&md)))
 }
 
 /// Is this file plain payload - something the extractor and repair do
@@ -678,6 +764,35 @@ impl Daemon {
             warn!(target: "move", "early publish of {} failed: {e}", c.name);
             return Publish::Skipped;
         }
+        // The copy's own identity, read off the ENTRY now the rename has
+        // landed - what every later unlink of this name proves itself
+        // against (F1; see `EarlyFile::dest_mtime_ns`). Read before the
+        // harness window below so a stranger that takes the name inside
+        // it is caught by the take-backs that follow.
+        let dest_mtime_ns = match std::fs::symlink_metadata(&dst) {
+            Ok(md) if md.file_type().is_file() && md.len() == wrote => mtime_ns_of(&md),
+            _ => {
+                // Not what this rename just put there, or no answer. Our
+                // copy cannot be told from a stranger without the stamp,
+                // so nothing is removed and nothing goes on the record:
+                // the whole-job move meets the name like any occupied
+                // one and gives the file a "(2)" name.
+                warn!(
+                    target: "move",
+                    "early: could not read back {} at {} after publishing it - \
+                     leaving it; the whole-job move will carry the file",
+                    c.name,
+                    dest.display()
+                );
+                return Publish::Skipped;
+            }
+        };
+        // Takes back only what is still ours, for the two arms below.
+        let take_back = || {
+            if copy_at(&dst, wrote, Some(dest_mtime_ns)) == Held::Ours {
+                let _ = std::fs::remove_file(&dst);
+            }
+        };
         // The harness's window: the file is at the destination and on
         // no record.
         #[cfg(any(test, feature = "test-support"))]
@@ -697,7 +812,7 @@ impl Daemon {
             // is sound then: the record rides the same requeued Arc and
             // reconcile still validates it by stamp.)
             drop(g);
-            let _ = std::fs::remove_file(&dst);
+            take_back();
             return Publish::Stop;
         }
         g.early_published.push(EarlyFile {
@@ -706,6 +821,7 @@ impl Daemon {
             mtime_ns,
             nzf_id: c.nzf_id.clone(),
             dest: Some(dest.to_path_buf()),
+            dest_mtime_ns: Some(dest_mtime_ns),
         });
         drop(g);
         if !self.save_queue() {
@@ -719,7 +835,7 @@ impl Daemon {
             let mut g = job.lock_ok();
             g.early_published.pop();
             drop(g);
-            let _ = std::fs::remove_file(&dst);
+            take_back();
             warn!(
                 target: "move",
                 "early: queue store refused after publishing {} - took the \
@@ -864,7 +980,7 @@ impl Daemon {
         // records always did.
         let cur = self.move_dest_for(&out_dir, &cat);
         let total = early.len();
-        let (mut kept, mut dropped, mut lost) = (0usize, 0usize, 0usize);
+        let (mut kept, mut dropped, mut lost, mut foreign) = (0usize, 0usize, 0usize, 0usize);
         let mut deferred: Vec<EarlyFile> = Vec::new();
         for e in early {
             let Some(dir) = e.dest.clone().or_else(|| cur.clone()) else {
@@ -887,9 +1003,25 @@ impl Daemon {
                 (Some(_), None) => true,
                 (None, _) => false,
             };
+            // Asked ONCE per entry and before either arm: both arms end in
+            // an unlink - of the source when the copy is ours, of the
+            // copy when it is stale - and F1 was both of them acting on a
+            // name nobody had proved was still this job's copy.
+            let held = copy_at(&dst, e.len, e.dest_mtime_ns);
+            if held == Held::Foreign {
+                // Something else took the name since the publish - the
+                // user's, or another tool's. It is not ours to trust (the
+                // keep arm would delete the verified source on its word)
+                // and not ours to remove (the take-back would delete
+                // their file). Settled as re-sent: the source travels with
+                // the move, whose merge gives it a "(2)" name beside the
+                // stranger - the baseline meeting with an occupied name.
+                foreign += 1;
+                continue;
+            }
             if !repointed && stamp(&src) == Some((e.len, e.mtime_ns)) {
-                match std::fs::metadata(&dst) {
-                    Ok(md) if md.len() == e.len => {
+                match held {
+                    Held::Ours => {
                         // Published and unchanged: the destination copy
                         // IS the final file, so the source is what has
                         // to go.
@@ -902,17 +1034,13 @@ impl Daemon {
                         // duplicate at the destination is the outcome
                         // this must never produce.
                     }
-                    Ok(_) => {
-                        // Wrong length at the destination: not the copy
-                        // that was published. Take it back below.
-                    }
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    Held::Gone | Held::Foreign => {
                         // The copy is gone - the user moved or removed
                         // it. Settled: the move re-sends the source.
                         dropped += 1;
                         continue;
                     }
-                    Err(_) => {
+                    Held::Unreachable => {
                         // S7: the destination did not answer, which is
                         // not "not the same file" - it is "no verdict".
                         deferred.push(e);
@@ -920,14 +1048,29 @@ impl Daemon {
                     }
                 }
             }
-            match std::fs::remove_file(&dst) {
-                Ok(()) => dropped += 1,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => dropped += 1,
-                // S7 again: a take-back the volume refused has not
-                // happened, and discarding the record here is what left
-                // byte-identical copies for the retry's merge to "(2)".
-                Err(_) => deferred.push(e),
+            match held {
+                // Proven ours a moment ago; see `copy_at` for the one
+                // syscall between that look and this unlink.
+                Held::Ours => match std::fs::remove_file(&dst) {
+                    Ok(()) => dropped += 1,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => dropped += 1,
+                    // S7 again: a take-back the volume refused has not
+                    // happened, and discarding the record here is what
+                    // left byte-identical copies for the retry's merge to
+                    // "(2)".
+                    Err(_) => deferred.push(e),
+                },
+                Held::Gone | Held::Foreign => dropped += 1,
+                Held::Unreachable => deferred.push(e),
             }
+        }
+        if foreign > 0 {
+            warn!(
+                target: "move",
+                "early: {foreign} published file(s) were replaced at the \
+                 destination by something this job did not write - left \
+                 untouched; the job's own copies travel with the move"
+            );
         }
         if !deferred.is_empty() {
             // Back on the record for the next attempt. No publisher can
@@ -967,7 +1110,11 @@ impl Daemon {
     /// into a stalled network call. Path arithmetic under the lock, I/O
     /// after it - the same division `api/queue/payload.rs` already makes
     /// for `remove_job_files`.
-    pub fn early_take(&self, g: &mut Job) -> Vec<PathBuf> {
+    ///
+    /// Each path travels with the stamp that proves it (F1): a bare path
+    /// is a name, and the unlink half must only remove the name while it
+    /// still holds this job's copy.
+    pub fn early_take(&self, g: &mut Job) -> Vec<EarlyCopy> {
         if g.early_published.is_empty() {
             return Vec::new();
         }
@@ -980,7 +1127,11 @@ impl Daemon {
         let mut lost = 0usize;
         for e in early {
             match e.dest.or_else(|| derived.clone()) {
-                Some(dir) => out.push(dir.join(&e.name)),
+                Some(dir) => out.push(EarlyCopy {
+                    path: dir.join(&e.name),
+                    len: e.len,
+                    dest_mtime_ns: e.dest_mtime_ns,
+                }),
                 None => lost += 1,
             }
         }
@@ -1010,25 +1161,49 @@ impl Daemon {
 /// Best effort by construction: a copy the user has already moved, or a
 /// destination that has gone offline, is not something a delete can be
 /// held up for.
-pub fn early_unlink(paths: &[PathBuf]) {
-    if paths.is_empty() {
+///
+/// And never a name that has stopped being ours (Codex sweep F1): each
+/// entry is proved against its record by `copy_at` first, and one
+/// something else has taken since the publish - a re-grab, a hand copy,
+/// a link - is left where it is. The unlink was blind until 24 Oct 2026,
+/// so a cancel deleted whatever held the name.
+pub fn early_unlink(copies: &[EarlyCopy]) {
+    if copies.is_empty() {
         return;
     }
-    for p in paths {
-        let _ = std::fs::remove_file(p);
+    let mut foreign = 0usize;
+    for c in copies {
+        match copy_at(&c.path, c.len, c.dest_mtime_ns) {
+            Held::Ours => {
+                let _ = std::fs::remove_file(&c.path);
+            }
+            Held::Foreign => foreign += 1,
+            Held::Gone | Held::Unreachable => {}
+        }
     }
     // Only if it is now empty, and only ever the job's own folder -
     // `remove_dir` refuses a non-empty directory, which is exactly the
     // guard wanted here. Every distinct parent, not just the first's: a
     // destination repoint mid-download can leave one job's copies under
     // two roots, and each recorded its own (sweep S6).
-    let mut dirs: Vec<&Path> = paths.iter().filter_map(|p| p.parent()).collect();
+    let mut dirs: Vec<&Path> = copies.iter().filter_map(|c| c.path.parent()).collect();
     dirs.sort();
     dirs.dedup();
     for dir in dirs {
         let _ = std::fs::remove_dir(dir);
     }
-    info!(target: "move", "early: took back {} file(s)", paths.len());
+    if foreign > 0 {
+        warn!(
+            target: "move",
+            "early: {foreign} published file(s) were replaced at the destination \
+             by something this job did not write - left untouched"
+        );
+    }
+    info!(
+        target: "move",
+        "early: took back {} file(s)",
+        copies.len() - foreign
+    );
 }
 
 #[cfg(test)]

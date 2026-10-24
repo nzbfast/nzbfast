@@ -147,9 +147,18 @@ fn restore_crypto(
             true
         };
         for j in jobs {
+            // Both fields come off disk unchecked, so the end is CHECKED:
+            // a corrupt line that overflows it refetches rather than
+            // panicking (or, in release, wrapping into a small end).
+            // Bounded by `cipher_len`, a multiple of 16, the round-up
+            // below cannot overflow either.
+            let Some(end) = j.file_off.checked_add(j.len).filter(|&e| e <= cipher_len) else {
+                article_ok[j.article] = false;
+                continue;
+            };
             let lo = j.file_off & !15;
-            let hi = (j.file_off + j.len).next_multiple_of(16).min(cipher_len);
-            if hi <= lo || j.file_off + j.len > cipher_len {
+            let hi = end.next_multiple_of(16).min(cipher_len);
+            if hi <= lo {
                 article_ok[j.article] = false;
                 continue;
             }

@@ -2561,6 +2561,26 @@ fn every_door_still_flushes_a_fed_writer() {
         "flush_staged is the door the engine opens for every by-path reader"
     );
 
+    // `sync_plain` is a durability door too: the extractor's finish runs
+    // it over every output and then ONE `sync_barrier` through the last
+    // live handle, so a run it left staged was never fsynced and reached
+    // disk only at `Drop`, after the barrier, with its error swallowed
+    // (Gemini 14 Oct 2026 sweep M4).
+    let plain = dir.join("plain.bin");
+    let (w4, _s4) = FileWriter::create(&plain, big)
+        .unwrap()
+        .coalescing(true)
+        .fed();
+    w4.write_article_at(0, &art).unwrap();
+    assert!(w4.staged_bytes() > 0);
+    assert!(w4.sync_plain().unwrap(), "a live writer answers true");
+    assert_eq!(w4.staged_bytes(), 0, "sync_plain wrote the run first");
+    assert_eq!(
+        std::fs::read(&plain).unwrap()[..art.len()],
+        art[..],
+        "and the bytes it promised durable are on disk before the drop"
+    );
+
     let dropped = dir.join("drop.bin");
     {
         let (w3, _s3) = FileWriter::create(&dropped, big)

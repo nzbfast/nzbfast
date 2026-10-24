@@ -71,10 +71,13 @@ pub fn apply(profile: &Profile, sources: &[SourceFile]) -> Option<Split> {
         } else {
             start + each
         };
-        let name = format!("{}.{:03}", whole.rel, i + 1);
+        // `base` from the source's own `base`, not from `rel`: a source
+        // under a directory (`sub/movie.mkv`) would otherwise put the
+        // tree on the wire as `sub/movie.mkv.001`, which is the one
+        // thing `base` exists to keep off it (Gemini 14 Oct sweep M17).
         posted.push(SourceFile {
-            base: name.clone(),
-            rel: name,
+            base: format!("{}.{:03}", whole.base, i + 1),
+            rel: format!("{}.{:03}", whole.rel, i + 1),
             bytes: whole.bytes[start..end].to_vec(),
         });
     }
@@ -135,6 +138,23 @@ mod tests {
         let s = split(", split = 2");
         assert_eq!(s.posted[0].rel, "Feature.mkv.001");
         assert_eq!(s.posted[1].rel, "Feature.mkv.002");
+    }
+
+    /// Gemini 14 Oct sweep M17: a part's `base` is the SOURCE's base
+    /// with the number on it. It was formatted from `rel`, so a source
+    /// under a directory carried the tree onto the wire name.
+    #[test]
+    fn a_part_base_carries_no_directory() {
+        let p = Profile::parse(
+            "[layout]\nname = \"t\"\nseed = 2\n\n[source]\n\
+             files = [{ name = \"sub/Feature.mkv\", bytes = 1000, split = 2 }]\n",
+        )
+        .expect("profile parses");
+        let sources = crate::assemble::sources(&p, &mut Rng::for_profile(&p)).expect("sources");
+        let s = super::apply(&p, &sources).expect("the profile splits");
+        assert_eq!(s.posted[0].rel, "sub/Feature.mkv.001");
+        assert_eq!(s.posted[0].base, "Feature.mkv.001");
+        assert_eq!(s.posted[1].base, "Feature.mkv.002");
     }
 
     /// The two directions differ in exactly one thing: which side of

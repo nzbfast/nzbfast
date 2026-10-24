@@ -253,6 +253,7 @@ pub fn job_json(j: &Job) -> Value {
             "name": e.name, "len": e.len, "mtime_ns": e.mtime_ns,
             "nzf_id": e.nzf_id,
             "dest": e.dest.as_ref().map(|p| p.to_string_lossy()),
+            "dest_mtime_ns": e.dest_mtime_ns,
         })).collect::<Vec<_>>(),
         // §158 item 1: which cross-store move this copy belongs to. The
         // ONE field both stores write for the same nzo_id, and the only
@@ -568,6 +569,11 @@ pub fn job_from_json(v: &Value) -> Option<Job> {
                                 .get("dest")
                                 .and_then(Value::as_str)
                                 .map(std::path::PathBuf::from),
+                            // Absent on a record written before the copy's
+                            // own stamp was recorded (Codex sweep F1). None
+                            // reads as "judge by length", which is what
+                            // those records always were judged by.
+                            dest_mtime_ns: e.get("dest_mtime_ns").and_then(Value::as_u64),
                         })
                     })
                     .collect()

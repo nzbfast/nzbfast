@@ -511,11 +511,16 @@ pub struct Job {
     pub eat_volumes_ok: bool,
     /// The NZB's own file list is zip-shaped, spotted at enqueue. Warns
     /// in the queue before the download spends an hour arriving at a
-    /// format we cannot unpack. Name-based, so an obfuscated container
-    /// is invisible here and only [`Job::unpack_blocked_by`] catches it.
+    /// format we may not be able to unpack - written when no zip
+    /// unpacked; since 30 Jul 2026 store and deflate zips do, so it now
+    /// flags the exotic-codec case ahead of time rather than a certain
+    /// failure. Name-based, so an obfuscated container is invisible here
+    /// and only [`Job::unpack_blocked_by`] catches it.
     pub zip_packed: bool,
-    /// Name of an archive a COMPLETED job left packed because we have no
-    /// unpacker for it (today: any zip). Empty for a clean unpack.
+    /// Name of an archive a COMPLETED job left packed because it could
+    /// not be unpacked, empty for a clean unpack. Today that is a zip
+    /// that is damaged, encrypted with no working password, or uses a
+    /// method this build does not carry.
     ///
     /// Sidecars only - a `Subs/subs.zip` beside a feature that unpacked
     /// fine. A zip that IS the payload fails the job instead and reports
@@ -3115,9 +3120,9 @@ mod job_publish;
 pub use job_publish::DirClaim;
 pub use job_publish::choose_out_dir;
 pub(crate) use job_publish::publish_over_previous;
-pub use job_publish::recover_interrupted_publishes;
 pub use job_publish::refile_out_dir;
 pub(crate) use job_publish::same_dir;
+pub use job_publish::{recover_interrupted_publishes, recover_interrupted_publishes_at};
 
 #[cfg(test)]
 #[path = "job_tests.rs"]
@@ -3150,4 +3155,31 @@ mod job_finalize_marker_tests;
 pub struct Enqueued {
     pub nzo_id: String,
     pub durable: bool,
+}
+
+/// What an add carries beyond the arguments `enqueue_as` takes
+/// positionally, set on the row WHEN IT IS BUILT rather than patched on
+/// afterwards.
+///
+/// The NZBGet `append` handler used to copy its PPParameters onto the job
+/// by scanning the live queue once `enqueue` returned. An add that never
+/// queues - a pre-queue script REJECT (§129 4a), `dupe_action = "fail"`
+/// (§129 2d) - files straight to history inside `enqueue` and is not in
+/// the queue to be found, so its Failed record lost the parameters,
+/// including the `drone` tag the *arrs match a history item by (Codex
+/// 22 Oct sweep F4). Set at construction, they are on the row before it
+/// is published, filed, announced or offered to a worker, whichever of
+/// those happens.
+#[derive(Debug, Clone, Default)]
+pub struct AddExtras {
+    /// NZBGet PPParameters, as `Job::pp_params` stores them.
+    pub pp_params: Vec<(String, String)>,
+    /// `Job::failure_link` and its three companions, filled by
+    /// `Daemon::enqueue_fetched_with` from the fetch's X-DNZB-Failure
+    /// header. Empty / false / 0 for every other add, which is what a
+    /// row built without them always had.
+    pub failure_link: String,
+    pub failure_host: String,
+    pub failure_https: bool,
+    pub failure_depth: u8,
 }

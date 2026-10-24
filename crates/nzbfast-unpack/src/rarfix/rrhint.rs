@@ -141,6 +141,37 @@ pub(crate) struct RrPassStats {
     pub bytes_skipped: u64,
 }
 
+/// `volumes` grouped into sets, one entry per set, for the RR pass.
+///
+/// Keyed by release stem, EXCEPT a bare-numeric RAR volume
+/// (`movie.001`, `movie.002`, ...), which `release_stem` leaves whole -
+/// it only strips a digit tail after `.7z`/`.zip` - so each volume of
+/// such a set used to land in a group of its own (Gemini 14 Oct sweep
+/// M10). The group is the unit the password resolves over, so a damaged
+/// volume whose own crypt record no longer parses lost the password its
+/// intact siblings would have resolved, and every volume paid its own
+/// candidate harvest and key derivation. Those fold by
+/// [`super::numeric_vol_base`] behind the `Rar!` magic, in a namespace
+/// no release stem can collide with - the same key `packed_groups` and
+/// `stem_volume_set` use.
+pub(crate) fn rr_groups(volumes: &[PathBuf]) -> std::collections::BTreeMap<String, Vec<&PathBuf>> {
+    use nzbkit::extract::release_stem;
+    let mut by_stem: std::collections::BTreeMap<String, Vec<&PathBuf>> = Default::default();
+    for p in volumes {
+        let name = p
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
+        let key = match super::numeric_vol_base(&name) {
+            Some(base) if super::rar_magic(p) => format!("\u{0}num:{base}"),
+            _ => release_stem(&name).to_string(),
+        };
+        by_stem.entry(key).or_default().push(p);
+    }
+    by_stem
+}
+
 /// Run the RR pass over `volumes`, grouped by release stem with the
 /// password resolved per group (the per-group resolve is what the nested
 /// password-chain shape needs - see the 14 Aug note on
@@ -152,20 +183,7 @@ pub(crate) fn rr_repair_volumes(
     password: Option<&str>,
     hint: Option<&DamageHint>,
 ) -> RrPassStats {
-    let mut by_stem: std::collections::BTreeMap<String, Vec<&PathBuf>> = Default::default();
-    {
-        use nzbkit::extract::release_stem;
-        for p in volumes {
-            let stem = release_stem(
-                &p.file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_lowercase(),
-            )
-            .to_string();
-            by_stem.entry(stem).or_default().push(p);
-        }
-    }
+    let by_stem = rr_groups(volumes);
     let mut stats = RrPassStats::default();
     for group in by_stem.values() {
         let owned: Vec<PathBuf> = group.iter().map(|p| (*p).clone()).collect();

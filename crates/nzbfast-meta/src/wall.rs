@@ -274,9 +274,15 @@ pub fn tmdb_lookup(api_key: &str, kind: &Kind, title: &str, year: u32) -> Option
 /// Paced JSON GET. Every provider call in this file goes through a
 /// bucket - see `ratelimit` for why the numbers are what they are.
 ///
-/// And every one of them goes through project invariant 5 here, for
-/// the reason `identity::may_call_out` states: gating at the CLIENT
-/// means a new call site cannot forget it. `expected::maybe_refresh`
+/// And every call made through THIS function goes through project
+/// invariant 5 here, for the reason `identity::may_call_out` states:
+/// gating at the CLIENT means a new call site cannot forget it. The
+/// handful that build their own request (`tmdb_lookup`,
+/// `anilist_lookup`, `imdb_ratings_fetch`, `wikidata_filmography`,
+/// `wikidata::person_facts`) do not pass this check, and are held to
+/// the same rule one layer down instead: they all go out through
+/// `netfetch::shared_enrich_agent`, whose `EnrichResolver` refuses
+/// every non-loopback address while `may_call_out` says no. `expected::maybe_refresh`
 /// forgot for a day - it carried its own copy of the env read, spelled
 /// differently, and once `1dbcca3c2` moved its pick to the front of the
 /// confirm lane three unit tests started dialling api.tvmaze.com.

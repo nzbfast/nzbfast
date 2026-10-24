@@ -207,7 +207,12 @@ pub struct Performance {
     pub threads: Option<usize>,
     /// `None` is `nzbkit::mem::MemBudget::auto()`, on the same terms.
     pub memory_mb: Option<u64>,
-    /// The EXPERIMENTAL joint solve (`--fast`). Off, as the CLI has it.
+    /// Was the EXPERIMENTAL joint solve (`--fast`). The joint solve is
+    /// now the engine's default wherever it can run and the CLI dropped
+    /// `--fast` (d89e1027da), so this selects NOTHING: the runner no
+    /// longer publishes it, because publishing its `false` forced every
+    /// app job onto the slower solve (Gemini sweep H11). Kept in the
+    /// model only until both apps drop the toggle.
     pub fast_solver: bool,
     pub low_priority: bool,
     /// "Remember checksums of large files": the CLI's `--digest-cache`,

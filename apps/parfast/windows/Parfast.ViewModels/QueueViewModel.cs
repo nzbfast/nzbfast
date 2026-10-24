@@ -84,6 +84,7 @@ public sealed class QueueViewModel : Observable
     private readonly ICoreClient _core;
     private QueueSnapshot _snapshot = QueueSnapshot.Empty;
     private string? _pendingConfirmation;
+    private PostQueueAction? _awaitingConfirmation;
 
     public QueueViewModel(ICoreClient core)
     {
@@ -155,15 +156,47 @@ public sealed class QueueViewModel : Observable
 
     public void SetConcurrency(int n) => _core.SetConcurrency((uint)Math.Max(1, n));
 
+    /// <summary>
+    /// Chooses what the queue does when it drains. Sleep and shut down are NOT
+    /// armed here: they wait for <see cref="ConfirmPostAction"/>. They used to be
+    /// armed in the core first and confirmed afterwards, so a queue that drained
+    /// while the dialog was still open put the machine to sleep, or shut it down,
+    /// before anyone had said yes (Gemini sweep H12).
+    /// </summary>
     public void SetPostAction(PostQueueAction action)
     {
-        _core.SetPostAction(action);
-        PendingConfirmation = action switch
+        if (action is PostQueueAction.Sleep or PostQueueAction.Shutdown)
         {
-            PostQueueAction.Sleep => Strings.QueueFinishConfirmSleep,
-            PostQueueAction.Shutdown => Strings.QueueFinishConfirmShutdown,
-            _ => null,
-        };
+            _awaitingConfirmation = action;
+            PendingConfirmation = action == PostQueueAction.Sleep
+                ? Strings.QueueFinishConfirmSleep
+                : Strings.QueueFinishConfirmShutdown;
+            return;
+        }
+
+        _awaitingConfirmation = null;
+        _core.SetPostAction(action);
+        PendingConfirmation = null;
+    }
+
+    /// <summary>The user said yes: arm the sleep or shut down that was asked about.</summary>
+    public void ConfirmPostAction()
+    {
+        if (_awaitingConfirmation is { } action)
+        {
+            _awaitingConfirmation = null;
+            _core.SetPostAction(action);
+        }
+    }
+
+    /// <summary>
+    /// The user said no: nothing was armed, so nothing is sent, and whatever was
+    /// in force before stays. The picker is re-synced to it.
+    /// </summary>
+    public void CancelPostAction()
+    {
+        _awaitingConfirmation = null;
+        RaiseAll(nameof(PostAction));
     }
 
     private void TogglePause() => _core.SetQueuePaused(!Paused);

@@ -100,8 +100,10 @@ packaging/linux/make-packages.sh
 ```
 
 `make-packages.sh` runs on Linux only (it needs `dpkg-deb`, `rpmbuild`
-and `file`); CI builds these in `.github/workflows/release.yml`, job
-`packages`. It refuses to package a binary that is dynamically linked or
+and `file`); a release builds these in
+`.github/workflows/provenance-release.yml`, job `linux-packages`, around
+the binaries inside that run's attested linux tarballs (`--bin-amd64`,
+`--bin-arm64`). It refuses to package a binary that is dynamically linked or
 built for the other architecture, and it builds the service unit out of
 `packaging/systemd/nzbfast.service` rather than keeping a second copy -
 asserting every substitution, so an edit to the unit that this script

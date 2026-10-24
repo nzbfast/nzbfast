@@ -930,3 +930,49 @@ fn rrscan_one_repair() {
         elapsed.as_secs_f64() * 1000.0
     );
 }
+
+/// Gemini 14 Oct sweep M10: a bare-numeric RAR set (`movie.001`,
+/// `movie.002`, ...) is ONE group for the RR pass, not one group per
+/// volume. `release_stem` leaves `movie.001` whole, so the old grouping
+/// split the set into singletons and resolved the password per volume -
+/// which loses it for a damaged volume whose own crypt record no longer
+/// parses. A named set beside it keeps its own group, and a numeric file
+/// WITHOUT the RAR magic is not folded into anyone's.
+#[test]
+fn rr_groups_fold_a_numeric_rar_set_into_one_group() {
+    use super::rrhint::rr_groups;
+    let dir = temp_dir("numgroups");
+    let mut vols = Vec::new();
+    for name in [
+        "movie.001",
+        "movie.002",
+        "movie.003",
+        "other.part1.rar",
+        "other.part2.rar",
+    ] {
+        let p = dir.join(name);
+        std::fs::write(&p, b"Rar!\x1a\x07\x01\x00padding-padding").unwrap();
+        vols.push(p);
+    }
+    let plain = dir.join("notes.004");
+    std::fs::write(&plain, b"not an archive at all").unwrap();
+    vols.push(plain);
+
+    let groups = rr_groups(&vols);
+    let mut sizes: Vec<usize> = groups.values().map(|g| g.len()).collect();
+    sizes.sort();
+    assert_eq!(sizes, vec![1, 2, 3], "{groups:?}");
+    let movie = groups
+        .values()
+        .find(|g| g.len() == 3)
+        .expect("the numeric set is one group");
+    assert!(
+        movie.iter().all(|p| p
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("movie.")),
+        "{movie:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

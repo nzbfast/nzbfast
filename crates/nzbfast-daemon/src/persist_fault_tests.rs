@@ -679,3 +679,202 @@ fn a_retry_of_an_owed_record_publishes_the_retry_and_carries_nothing() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// What a crash leaves: the spool's bytes at this instant, copied into a
+/// fresh fixture directory so `restored` can boot over them while the
+/// live daemon is still mid-window.
+fn snapshot_spool(from: &Path, to: &Path) {
+    fn copy(a: &Path, b: &Path) {
+        std::fs::create_dir_all(b).unwrap();
+        for e in std::fs::read_dir(a).unwrap() {
+            let e = e.unwrap();
+            let dst = b.join(e.file_name());
+            if e.file_type().unwrap().is_dir() {
+                copy(&e.path(), &dst);
+            } else {
+                std::fs::copy(e.path(), &dst).unwrap();
+            }
+        }
+    }
+    copy(&from.join("spool"), &to.join("spool"));
+}
+
+/// 22 Oct 2026 codex read-only sweep, F2: a successful compaction retired
+/// EVERY non-transit `hist_owed` entry, not just the ones its snapshot
+/// paid. `HIST_IO` keeps appenders out of the gap between snapshot and
+/// rename, but not park's list moves, so a park whose prewrite was
+/// refused could file its record into history and land its carry while
+/// the compaction held the lock - and the compaction then retired the
+/// carry of a record the file it had just written does not hold. A
+/// queue save before park's own final append (which is queued behind
+/// the same lock) tombstoned the record's only durable row.
+///
+/// Driven through the real `park_gen` and the real compaction, each on
+/// its own thread with its own seam, and restored from the bytes on
+/// disk at the instant the queue save lands.
+#[test]
+fn a_compaction_cannot_retire_the_carry_of_a_park_that_landed_after_its_snapshot() {
+    use crate::storecut::{arm_cut, on_park_gap};
+    use std::sync::Barrier;
+    let dir = tmp("f2-compact");
+    let crash = tmp("f2-compact-crash");
+    let d = test_daemon(&dir);
+    let j = marked(&d, "nzo_f2c", "Finishing");
+    d.queue.lock_ok().push_back(j.clone());
+    assert!(d.save_queue());
+    j.lock_ok().state = JobState::Completed;
+
+    // Park, on its own thread: the prewrite is refused, and the seam
+    // holds it at the gap - out of the queue, carried, not yet in
+    // history. From there on nothing park writes reaches disk (the kill
+    // the window ends in).
+    let gap_open = Arc::new(Barrier::new(2));
+    let gap_release = Arc::new(Barrier::new(2));
+    let parker = {
+        let (d, j) = (d.clone(), j.clone());
+        let (open, release) = (gap_open.clone(), gap_release.clone());
+        std::thread::spawn(move || {
+            arm_store_cut(&[Store::HistoryAppend, Store::HistoryRewrite]);
+            on_park_gap(move |_| {
+                arm_cut(0);
+                open.wait();
+                release.wait();
+            });
+            d.park_gen(j, None);
+            disarm();
+        })
+    };
+    gap_open.wait();
+
+    // The compaction snapshots NOW, before park files the record.
+    let snapped = Arc::new(Barrier::new(2));
+    let publish = Arc::new(Barrier::new(2));
+    let published = Arc::new(Barrier::new(2));
+    let saved = Arc::new(Barrier::new(2));
+    crate::histstore::compact_barrier_arm(&d, snapped.clone(), Some(publish.clone()));
+    let compactor = {
+        let d = d.clone();
+        let (published, saved) = (published.clone(), saved.clone());
+        std::thread::spawn(move || {
+            assert!(d.history_compact_then(|| {
+                published.wait();
+                saved.wait();
+            }));
+        })
+    };
+    snapped.wait();
+
+    // Park files the record into history and lands its carry, then
+    // queues behind the compaction for its final append. No seam marks
+    // that point, so wait for the state itself.
+    gap_release.wait();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let landed = history_ids(&d).iter().any(|i| i == "nzo_f2c")
+            && d.hist_owed
+                .lock_ok()
+                .get("nzo_f2c")
+                .is_some_and(|o| !o.in_transit);
+        if landed {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "park never landed its carry"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    // The compaction publishes its older snapshot, and a queue save
+    // lands before park's final append can.
+    publish.wait();
+    published.wait();
+    assert!(d.save_queue(), "the racing save must land");
+    snapshot_spool(&dir, &crash);
+    saved.wait();
+    compactor.join().unwrap();
+    parker.join().unwrap();
+    crate::histstore::compact_barrier_disarm(&d);
+
+    assert_eq!(
+        restored(&crash, "nzo_f2c"),
+        Some(("Release.nzo_f2c".into(), "tv".into(), "Completed".into(), 1)),
+        "the compaction retired the carry of a record its snapshot did not hold, \
+         and the queue save tombstoned the record's only durable row"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::fs::remove_dir_all(&crash).unwrap();
+}
+
+/// F2's second shape: the record WAS in the compaction's snapshot, at an
+/// older state, and a later mutation of it was refused by history - so
+/// it was owed again while the compaction held the lock. The rewrite
+/// paid the old state, not the new one, and must not retire the new
+/// debt on the strength of the old line.
+#[test]
+fn a_compaction_cannot_retire_a_debt_newer_than_its_snapshot() {
+    use std::sync::Barrier;
+    let dir = tmp("f2-compact-gen");
+    let d = test_daemon(&dir);
+    let j = owed_in_history(&d, "nzo_f2g");
+
+    let snapped = Arc::new(Barrier::new(2));
+    let publish = Arc::new(Barrier::new(2));
+    crate::histstore::compact_barrier_arm(&d, snapped.clone(), Some(publish.clone()));
+    let compactor = {
+        let d = d.clone();
+        std::thread::spawn(move || assert!(d.history_compact()))
+    };
+    snapped.wait();
+    // Snapshot taken with the record Failed. It changes, and history
+    // refuses the change - the shape `history_publish`'s caller answers
+    // with `hist_owe`.
+    j.lock_ok().state = JobState::Completed;
+    d.hist_owe(&j);
+    publish.wait();
+    compactor.join().unwrap();
+    crate::histstore::compact_barrier_disarm(&d);
+
+    assert_eq!(
+        d.hist_owed.lock_ok().len(),
+        1,
+        "the debt registered after the snapshot was retired by it"
+    );
+    assert!(d.save_queue());
+    assert_eq!(
+        stored_state(&d, "nzo_f2g").as_deref(),
+        Some("Completed"),
+        "the queue store must carry the newer state the history file lacks"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The plain arm, no threads: an owed entry whose record the rewrite did
+/// not serialize - not in history, not dropped by the caller - is not
+/// paid by that rewrite, whatever `in_transit` says. (`queue_rows`
+/// decides separately whether such an entry is still worth carrying.)
+#[test]
+fn a_compaction_retires_only_what_its_snapshot_serialized() {
+    let dir = tmp("f2-compact-unit");
+    let d = test_daemon(&dir);
+    let paid = job(&d, "nzo_f2u1", "Completed");
+    d.history.lock_ok().push(paid.clone());
+    d.hist_owe(&paid);
+    let unpaid = job(&d, "nzo_f2u2", "Completed");
+    d.hist_owe(&unpaid);
+
+    assert!(d.history_compact());
+
+    let owed = d.hist_owed.lock_ok();
+    assert!(
+        !owed.contains_key("nzo_f2u1"),
+        "a record the rewrite wrote is paid"
+    );
+    assert!(
+        owed.get("nzo_f2u2")
+            .is_some_and(|o| Arc::ptr_eq(&o.job, &unpaid)),
+        "a record absent from the snapshot was retired by it"
+    );
+    drop(owed);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

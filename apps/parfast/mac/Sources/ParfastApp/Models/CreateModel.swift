@@ -105,16 +105,23 @@ final class CreateModel: ObservableObject {
 
     func applyDefaults(_ settings: CoreSettings) {
         blockMode = settings.create.block_allocation == .size ? .size : .count
-        blockSize = settings.create.block_size
-        blockCount = settings.create.block_count
+        // A 0 in the core's create defaults is "not set" (only the default
+        // MODE's figure is ever filled in), so it must not overwrite this
+        // model's working figure: it did, and switching the pane to the other
+        // mode then sent a 0 block size or a 0 recovery count to the planner
+        // (Gemini sweep M18.1).
+        if settings.create.block_size > 0 { blockSize = settings.create.block_size }
+        if settings.create.block_count > 0 { blockCount = settings.create.block_count }
         switch settings.create.recovery_allocation {
         case .percent: recoveryMode = .percent
         case .count: recoveryMode = .count
         case .size: recoveryMode = .size
         }
-        recoveryPercent = settings.create.recovery_percent
-        recoveryCount = settings.create.recovery_count
-        recoverySize = settings.create.recovery_size
+        if settings.create.recovery_percent > 0 {
+            recoveryPercent = settings.create.recovery_percent
+        }
+        if settings.create.recovery_count > 0 { recoveryCount = settings.create.recovery_count }
+        if settings.create.recovery_size > 0 { recoverySize = settings.create.recovery_size }
         stdNaming = settings.create.std_naming
         unicode = UnicodePolicy(rawValue: settings.create.unicode) ?? .auto
         overwrite = settings.create.overwrite

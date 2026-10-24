@@ -177,6 +177,45 @@ pub fn movie_name(p: &Parsed, style: &NameStyle) -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
+/// Put a hyphen tail back on a one-word name before the renamer drops it
+/// (GitHub #102). Returns true when it did.
+///
+/// The parser reads the text after the last hyphen as a release group
+/// ("Movie.2024.1080p.x264-FGT" -> "FGT"), and the renamer leaves groups
+/// out by default. That is right for a scene name, where the group is
+/// furniture behind a dotted or spaced body. It is wrong for a stem that
+/// is ONE word joined by a hyphen or two - `T3-rar-nzbfast` -
+/// where nothing marks the tail as a group, and a measured resolution is
+/// enough to make movie_name rename it: the reporter's job came out as
+/// `T3-rar [720p].mkv` and its `-nzbfast` tail was gone.
+///
+/// So the tail counts as part of the name when the body the group came
+/// off has no `.`, `_` or space and too few hyphens to be tokenised on
+/// them (the parser's own all-hyphen rule is three or more), and the
+/// parsed title IS that whole body. The equality guard keeps every name
+/// the parser cut further (an episode, a year, a quality token that took
+/// the boundary) out of reach, so this only touches the case where the
+/// title and the group are the two halves of one word. Renamer-only on
+/// purpose: the index and the dedupe key keep the parser's reading.
+pub fn keep_one_word_group(p: &mut Parsed, stem: &str) -> bool {
+    let Some(group) = p.group.clone() else {
+        return false;
+    };
+    let (body, Some(tail)) = split_group(stem.trim()) else {
+        return false;
+    };
+    if tail != group
+        || body.contains(['.', '_', ' '])
+        || body.matches('-').count() >= 3
+        || p.title != body
+    {
+        return false;
+    }
+    p.title = format!("{body}-{tail}");
+    p.group = None;
+    true
+}
+
 /// The unrecognised words of a release, filtered down to what is worth
 /// putting in a filename, or None if nothing is.
 ///

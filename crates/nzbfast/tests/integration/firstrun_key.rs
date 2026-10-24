@@ -625,6 +625,108 @@ fn a_wizard_answer_alone_is_still_a_first_run() {
     assert!(http(r2.port, "/api?mode=queue&output=json").contains("slots"));
 }
 
+/// `nzbfast import-sab` is the other command that runs before the daemon
+/// ever has: when the sabnzbd.ini names a `password_file` that exists, it
+/// records that path in settings.json. A fresh install migrated from
+/// SABnzbd must still be keyed - it is exactly the user who goes on to
+/// point Sonarr and Radarr at us. Driven through the real CLI so the test
+/// follows whatever the importer actually writes.
+#[test]
+fn an_import_sab_password_file_alone_is_still_a_first_run() {
+    let dir = scratch("import-sab-pwfile");
+    let pw = dir.join("passwords.txt");
+    std::fs::write(&pw, "secret\n").unwrap();
+    let ini = dir.join("sabnzbd.ini");
+    std::fs::write(
+        &ini,
+        format!(
+            "[misc]\npassword_file = {}\n[servers]\n[[news.example.invalid]]\n\
+             host = news.example.invalid\nport = 563\nssl = 1\nconnections = 8\nenable = 1\n",
+            pw.display()
+        ),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
+        .env("NZBFAST_NO_ENRICH", "1")
+        .arg("--config")
+        .arg(dir.join("config.json"))
+        .arg("import-sab")
+        .arg(&ini)
+        // `scratch` already wrote a server-less config.json; the import
+        // replaces it, which is what the user's first import does too.
+        .arg("--force")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "import-sab failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let saved = std::fs::read_to_string(dir.join("settings.json")).unwrap_or_default();
+    assert!(
+        saved.contains("password_file"),
+        "the importer no longer records password_file, so this test proves nothing: {saved:?}"
+    );
+
+    let r = serve(&dir, &[]);
+    assert!(
+        dir.join("apikey").exists(),
+        "no key minted on a fresh install after import-sab"
+    );
+    let anon = http(r.port, "/api?mode=queue&output=json");
+    assert!(
+        rejected(&anon),
+        "keyless request accepted on a fresh install after import-sab: {anon}"
+    );
+}
+
+/// `import-sab --arr` writes the Sonarr/Radarr preset into settings.json
+/// before the daemon has ever run (GitHub #102), with no passwords file
+/// in the ini at all - so it is the preset's own keys, and nothing else,
+/// that must still read as a first run.
+#[test]
+fn an_import_sab_arr_preset_alone_is_still_a_first_run() {
+    let dir = scratch("import-sab-arr");
+    let ini = dir.join("sabnzbd.ini");
+    std::fs::write(
+        &ini,
+        "[servers]\n[[news.example.invalid]]\nhost = news.example.invalid\nport = 563\n\
+         ssl = 1\nconnections = 8\nenable = 1\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
+        .env("NZBFAST_NO_ENRICH", "1")
+        .arg("--config")
+        .arg(dir.join("config.json"))
+        .arg("import-sab")
+        .arg(&ini)
+        .arg("--force")
+        .arg("--arr")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "import-sab --arr failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let saved = std::fs::read_to_string(dir.join("settings.json")).unwrap_or_default();
+    assert!(
+        saved.contains("auto_rename") && !saved.contains("password_file"),
+        "the fixture no longer isolates the preset: {saved:?}"
+    );
+
+    let r = serve(&dir, &[]);
+    assert!(
+        dir.join("apikey").exists(),
+        "no key minted on a fresh install after import-sab --arr"
+    );
+    let anon = http(r.port, "/api?mode=queue&output=json");
+    assert!(
+        rejected(&anon),
+        "keyless request accepted on a fresh install after import-sab --arr: {anon}"
+    );
+}
+
 /// (b, second marker) Same rule when the user never changed a dashboard
 /// setting but the install has run before: the spool is the evidence.
 #[test]

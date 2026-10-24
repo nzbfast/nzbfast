@@ -460,6 +460,16 @@ impl WarmPool {
                     self.stats.hits.fetch_add(1, Ordering::Relaxed);
                     return Some(candidate.conn);
                 }
+                Ok(Ok(_)) => {
+                    // Healthy, but a config change superseded it while
+                    // its DATE was out. QUIT rather than drop, like every
+                    // other exit here: a provider counting sessions
+                    // rather than FINs holds a dropped one against the
+                    // cap. It just answered, so the goodbye is one
+                    // round-trip, not the mute peer's 500 ms bound.
+                    self.stats.reaped.fetch_add(1, Ordering::Relaxed);
+                    candidate.conn.quit().await;
+                }
                 Err(_) => {
                     // A TIMEOUT is different in kind from a refusal, and
                     // the difference is what bounds this loop. An answer -
@@ -487,10 +497,10 @@ impl WarmPool {
                     return None;
                 }
                 _ => {
-                    // Answered, but not usably: a reaped socket, or a
-                    // session the config change superseded. That cost one
-                    // round-trip, so try the next one - a provider that
-                    // reaped one probably reaped several.
+                    // Answered, but not usably: a reaped socket (the
+                    // superseded-but-healthy case QUITs in the arm above).
+                    // That cost one round-trip, so try the next one - a
+                    // provider that reaped one probably reaped several.
                     self.stats.reaped.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -884,6 +894,12 @@ impl WarmPool {
                         self.stats.evicted.fetch_add(1, Ordering::Relaxed);
                         p.conn.quit().await;
                     }
+                }
+                Ok((_, p, true)) => {
+                    // Alive but superseded while it pinged (see `take`):
+                    // say goodbye rather than drop it on the cap.
+                    self.stats.reaped.fetch_add(1, Ordering::Relaxed);
+                    p.conn.quit().await;
                 }
                 _ => {
                     self.stats.reaped.fetch_add(1, Ordering::Relaxed);
@@ -2265,5 +2281,79 @@ mod tests {
         );
         assert_eq!(pool.stats.released.load(Ordering::Relaxed), 0);
         assert_eq!(live_settles(&live, 2).await, 2);
+    }
+
+    /// A provider that answers DATE and counts the QUITs it is sent.
+    /// `counting_provider` cannot tell a goodbye from a bare drop - both
+    /// close the socket - and that difference is what this measures.
+    fn quit_counting_provider() -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{BufRead, BufReader, Write as _};
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let quits = Arc::new(AtomicUsize::new(0));
+        let counter = quits.clone();
+        std::thread::spawn(move || {
+            while let Ok((mut s, _)) = listener.accept() {
+                let quits = counter.clone();
+                std::thread::spawn(move || {
+                    let _ = s.write_all(b"200 mock ready\r\n");
+                    let mut reader = BufReader::new(s.try_clone().expect("dup"));
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                        if line.to_ascii_uppercase().starts_with("QUIT") {
+                            quits.fetch_add(1, Ordering::SeqCst);
+                            let _ = s.write_all(b"205 bye\r\n");
+                            break;
+                        }
+                        if s.write_all(b"111 20260731000000\r\n").is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, quits)
+    }
+
+    /// Gemini 14 Oct sweep L4: a parked session whose DATE crossed a
+    /// generation bump (`clear` / `retain_servers` while it was out of
+    /// the map) answers fine and is superseded. Both `take` and the
+    /// keepalive `tick` used to DROP it, which a provider counting
+    /// sessions rather than FINs holds against the account cap until
+    /// its idle timeout - the occupancy every other exit in this module
+    /// QUITs to give back.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_superseded_session_says_goodbye() {
+        let (addr, quits) = quit_counting_provider();
+        let sc = bare_config(addr);
+        let pool = WarmPool::new(DEFAULT_MAX_IDLE, 8);
+
+        // `take`: parked, then the generation moves under it.
+        let (conn, _) = Connection::connect(&sc).await.unwrap();
+        pool.give(&sc, conn).await;
+        pool.generation.fetch_add(1, Ordering::AcqRel);
+        assert!(
+            pool.take(&sc).await.is_none(),
+            "superseded, never handed out"
+        );
+        assert_eq!(live_settles(&quits, 1).await, 1, "take dropped it unQUIT");
+
+        // `tick`: due a keepalive, and superseded while it pings.
+        let (conn, _) = Connection::connect(&sc).await.unwrap();
+        pool.give(&sc, conn).await;
+        for p in pool.idle.lock().await.values_mut().flatten() {
+            p.fresh_at -= KEEPALIVE_EVERY;
+        }
+        pool.generation.fetch_add(1, Ordering::AcqRel);
+        pool.tick().await;
+        assert_eq!(pool.idle_count().await, 0);
+        assert_eq!(live_settles(&quits, 2).await, 2, "tick dropped it unQUIT");
     }
 }

@@ -1527,6 +1527,229 @@ fn retry_reresolves_a_stale_baked_out_dir_to_the_current_download_folder() {
     });
 }
 
+/// Gemini 14 Oct 2026 sweep, H3, the retry half: a retry that has to
+/// REFILE is a fresh placement, so it asks the fresh-add claim and
+/// resolves its category through `cat_dir`.
+///
+/// The folder it would land on holds a file no record names - a result
+/// whose history row was cleared with its files kept - and the
+/// record-only claim read it as Free, aiming the re-download straight
+/// into it. And the category renames its subfolder (`cat_meta.dir`),
+/// which the refile used to ignore by re-deriving `<root>/<category>`.
+/// Run with and without the rename, so each half fails on its own.
+#[test]
+fn a_refiling_retry_climbs_past_an_unrecorded_folder_under_the_category_dir() {
+    refiling_retry_case("retry-refile-occupied", None);
+    refiling_retry_case("retry-refile-occupied-catdir", Some(("films", "hd")));
+}
+
+fn refiling_retry_case(tag: &str, sub: Option<(&str, &str)>) {
+    with_daemon(tag, |d| {
+        let root = crate::naming::out_dir(d);
+        let cat_dir = match sub {
+            None => root.join("movies"),
+            Some((a, b)) => {
+                d.cat_meta.lock_ok().insert(
+                    "movies".to_string(),
+                    CatMeta {
+                        dir: format!("{a}/{b}"),
+                        ..CatMeta::default()
+                    },
+                );
+                root.join(a).join(b)
+            }
+        };
+        let stranger = cat_dir.join("Some.Movie.2024");
+        std::fs::create_dir_all(&stranger).unwrap();
+        std::fs::write(stranger.join("Some.Movie.2024.mkv"), b"the user's copy").unwrap();
+        // Stale: the record's out_dir sits under no configured root, so
+        // the retry must refile it.
+        let gone = root.parent().unwrap().join("gone").join("Some.Movie.2024");
+        d.history.lock_ok().push(jv(
+            "SABnzbd_nzo_refile",
+            "Some.Movie.2024",
+            serde_json::json!({
+                "out_dir": gone.to_string_lossy(),
+                "category": "movies",
+                "state": "Failed",
+                "fail_message": "boom",
+            }),
+        ));
+        assert!(d.retry("SABnzbd_nzo_refile"), "retry accepted");
+        let q = d.queue.lock_ok();
+        let j = q
+            .iter()
+            .find(|j| j.lock_ok().nzo_id == "SABnzbd_nzo_refile")
+            .expect("re-queued")
+            .clone();
+        let g = j.lock_ok();
+        assert_eq!(
+            g.out_dir,
+            cat_dir.join("Some.Movie.2024.2"),
+            "the refile must land under the category's own folder and climb past \
+             the unrecorded one"
+        );
+        assert!(
+            g.replaces.is_none(),
+            "an unrecorded folder is never replaced"
+        );
+        assert_eq!(
+            std::fs::read(stranger.join("Some.Movie.2024.mkv")).unwrap(),
+            b"the user's copy"
+        );
+    });
+}
+
+/// Gemini 14 Oct 2026 sweep, H3, the recategorize half: moving a
+/// finished job into a category must not MERGE it into a folder that
+/// holds files no record names, and must honour the category's
+/// `cat_meta.dir`. A merged folder is the job's `out_dir` afterwards, so
+/// "Remove and delete files" on the row took the stranger's files too.
+/// Run with and without the rename, so each half fails on its own.
+#[test]
+fn a_recategorize_climbs_past_an_unrecorded_folder_under_the_category_dir() {
+    recategorize_case("recat-occupied", None);
+    recategorize_case("recat-occupied-catdir", Some("films"));
+}
+
+fn recategorize_case(tag: &str, sub: Option<&str>) {
+    with_daemon(tag, |d| {
+        let root = crate::naming::out_dir(d);
+        let cat_dir = match sub {
+            None => root.join("movies"),
+            Some(sub) => {
+                d.cat_meta.lock_ok().insert(
+                    "movies".to_string(),
+                    CatMeta {
+                        dir: sub.to_string(),
+                        ..CatMeta::default()
+                    },
+                );
+                root.join(sub)
+            }
+        };
+        let src = root.join("tv").join("Some.Job");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("payload.bin"), b"ours").unwrap();
+        let stranger = cat_dir.join("Some.Job");
+        std::fs::create_dir_all(&stranger).unwrap();
+        std::fs::write(stranger.join("keep.bin"), b"theirs").unwrap();
+        let job = jv(
+            "SABnzbd_nzo_recat_occ",
+            "Some.Job",
+            serde_json::json!({
+                "out_dir": src.to_string_lossy(),
+                "category": "tv",
+                "state": "Completed",
+            }),
+        );
+        d.history.lock_ok().push(job.clone());
+        let v = crate::history::history_change_cat(d, "SABnzbd_nzo_recat_occ", "movies");
+        let dest = cat_dir.join("Some.Job.2");
+        assert_eq!(job.lock_ok().out_dir, dest, "{v}");
+        assert!(dest.join("payload.bin").exists(), "{v}");
+        assert!(
+            !stranger.join("payload.bin").exists(),
+            "the payload was merged into a folder no record names"
+        );
+        assert_eq!(std::fs::read(stranger.join("keep.bin")).unwrap(), b"theirs");
+    });
+}
+
+/// Gemini 14 Oct 2026 sweep, M11: a replace interrupted between its two
+/// renames is put back at startup wherever the canonical directory
+/// lives, not only within one level of the download root.
+///
+/// Two places the root walk cannot reach: a category folder that nests
+/// (`cat_meta.dir = "films/hd"`, two levels down), and a write-through
+/// destination outside the root altogether. The replacing job's
+/// persisted `replaces` names each canonical directory; it is missing,
+/// and its previous payload sits beside it under the aside name.
+#[test]
+fn startup_restores_an_interrupted_replace_outside_the_root_walk() {
+    with_daemon("recover-deep", |d| {
+        let root = crate::naming::out_dir(d);
+        let elsewhere = root.parent().unwrap().join("library").join("movies");
+        let canons = [
+            root.join("films").join("hd").join("Deep.Movie"),
+            elsewhere.join("Far.Movie"),
+        ];
+        for (i, canon) in canons.iter().enumerate() {
+            let aside = canon.with_file_name(format!(
+                "{}{}4242",
+                canon.file_name().unwrap().to_string_lossy(),
+                crate::job::REPLACED_SUFFIX
+            ));
+            std::fs::create_dir_all(&aside).unwrap();
+            std::fs::write(aside.join("movie.mkv"), b"the previous result").unwrap();
+            d.queue.lock_ok().push_back(jv(
+                &format!("SABnzbd_nzo_deep{i}"),
+                "Deep.Movie",
+                serde_json::json!({
+                    "out_dir": canon.with_file_name("new.2").to_string_lossy(),
+                    "replaces": canon.to_string_lossy(),
+                }),
+            ));
+        }
+        d.save_queue();
+        let _d2 = restart(d);
+        for canon in &canons {
+            assert_eq!(
+                std::fs::read(canon.join("movie.mkv")).unwrap_or_default(),
+                b"the previous result",
+                "{} was not put back",
+                canon.display()
+            );
+        }
+    });
+}
+
+/// Gemini 14 Oct 2026 sweep, M12: a write-through job finalizes UNDER
+/// its move destination, so `out_umask` has to climb to that root - not
+/// to the download root, which the destination's directories never
+/// start with, so the climb stopped at once and `Show/Season NN` kept
+/// the process's default modes. The mover, which re-applies the modes
+/// with the destination root, never visits a write-through job.
+#[cfg(unix)]
+#[test]
+fn a_write_through_finalize_climbs_out_umask_to_the_destination_root() {
+    use std::os::unix::fs::PermissionsExt;
+    with_daemon("umask-write-through", |d| {
+        let lib = crate::naming::out_dir(d).parent().unwrap().join("library");
+        *d.move_completed.write_ok() = Some(lib.clone());
+        d.write_through.store(true, Ordering::Relaxed);
+        d.out_umask.store(0o002, Ordering::Relaxed);
+        let show = lib.join("tv").join("Some Show");
+        let season = show.join("Season 01");
+        std::fs::create_dir_all(&season).unwrap();
+        for p in [&lib.join("tv"), &show, &season] {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        crate::naming::finalize_names(
+            d,
+            &season,
+            &FinalizeJob {
+                name: "Some.Show.S01E01.1080p.WEB.h264-GRP",
+                cat: "tv",
+                tv_sort: false,
+                post_year: 2024,
+            },
+        );
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&season), 0o775, "the job's own directory");
+        assert_eq!(
+            mode(&show),
+            0o775,
+            "the directory between it and the destination root"
+        );
+        assert_eq!(
+            mode(&lib.join("tv")),
+            0o775,
+            "the category folder under the destination"
+        );
+    });
+}
+
 /// TODO 143: a scan pass publishing its connection must leave
 /// `index_migrated` SET.
 ///

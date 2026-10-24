@@ -1601,6 +1601,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// The LINE must read back as the name too, not just the name
+    /// through the resolver: the reader trims each line, so a trailing
+    /// space (any format) or a leading one (SFV, where the name leads)
+    /// was written and then verified as Missing by the same process
+    /// (Gemini sweep M1). Refused up front, and nothing is written.
+    #[test]
+    fn a_checksum_create_refuses_a_name_its_own_line_cannot_carry() {
+        for (tag, name, format, ext) in [
+            ("trail", "trailing.bin ", ChecksumFormat::Sha256, "sha256"),
+            ("lead-sfv", " leading.bin", ChecksumFormat::Sfv, "sfv"),
+        ] {
+            let d = tmp(&format!("cksum-line-{tag}"));
+            std::fs::write(d.join(name), vec![5u8; 256]).expect("fixture");
+            let out = d.join(format!("sums.{ext}"));
+            let s = Session::new(None);
+            let id = s.submit(JobSpec::ChecksumCreate {
+                checksum_create: ChecksumCreateSpec {
+                    sources: vec![Source {
+                        path: d.join(name),
+                        recursive: false,
+                    }],
+                    format,
+                    output: out.clone(),
+                    relative: true,
+                },
+            });
+            let q = until(&s, "the checksum create", |q| {
+                q.jobs.iter().any(|j| j.id == id && j.state.finished())
+            });
+            let job = q.jobs.iter().find(|j| j.id == id).expect("the job");
+            assert_eq!(job.state, JobState::Failed, "{tag}: {job:?}");
+            assert_eq!(
+                job.error.as_ref().map(|e| e.code.as_str()),
+                Some("unrepresentable_name"),
+                "{tag}: {job:?}"
+            );
+            assert!(
+                !out.exists(),
+                "{tag}: a manifest that reads back wrong was written"
+            );
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
     /// A checksum create hashes what it was POINTED AT.
     ///
     /// `expand_sources` applied par2cmdline's source rules to every
@@ -2233,6 +2277,31 @@ mod tests {
     /// the snapshot. Everything real: the engine creates, the engine
     /// verifies, and the numbers are the CLI's.
     fn verify_after(tag: &str, wreck: impl FnOnce(&Path)) -> JobSnapshot {
+        let (d, s) = built_set(tag);
+
+        wreck(&d);
+
+        let id = s.submit(JobSpec::Verify {
+            verify: VerifySpec {
+                par2: d.join("set.par2"),
+                extra_dirs: Vec::new(),
+                options: Default::default(),
+            },
+        });
+        until(&s, "the verify", |q| {
+            q.jobs
+                .iter()
+                .find(|j| j.id == id)
+                .is_some_and(|j| j.state.finished())
+        });
+        let snap = s.job(id).expect("the verify snapshot");
+        let _ = std::fs::remove_dir_all(&d);
+        snap
+    }
+
+    /// The three-member set [`verify_after`] works on, created through a
+    /// session, with that session handed back for the next job.
+    fn built_set(tag: &str) -> (PathBuf, Session) {
         use crate::job::{
             BlockSpec, CreateSpec, PathMode, RecoverySpec, UnicodePolicy, VolumeSpec,
         };
@@ -2276,25 +2345,70 @@ mod tests {
             q.jobs.iter().all(|j| j.state.finished())
         });
         assert_eq!(q.jobs[0].state, JobState::Done, "create: {:?}", q.jobs[0]);
+        (d, s)
+    }
 
-        wreck(&d);
-
-        let id = s.submit(JobSpec::Verify {
-            verify: VerifySpec {
-                par2: d.join("set.par2"),
-                extra_dirs: Vec::new(),
-                options: Default::default(),
-            },
-        });
-        until(&s, "the verify", |q| {
-            q.jobs
-                .iter()
-                .find(|j| j.id == id)
-                .is_some_and(|j| j.state.finished())
-        });
-        let snap = s.job(id).expect("the verify snapshot");
-        let _ = std::fs::remove_dir_all(&d);
-        snap
+    /// "Keep damaged copies" and "Delete the recovery files" are TWO
+    /// decisions, and a repair honours each on its own: the `<name>.1`
+    /// copy survives exactly when it was asked to, and the recovery
+    /// files go exactly when they were asked to. Until 14 Oct 2026
+    /// `keep_damaged` was read by nothing, so purge took the copy the
+    /// user had ticked to keep and an unticked box kept it anyway
+    /// (Gemini sweep H7). All four corners, each off a real repair.
+    #[test]
+    fn a_repair_keeps_the_damaged_copy_exactly_when_asked() {
+        for (purge, keep_damaged) in [(false, true), (false, false), (true, true), (true, false)] {
+            let tag = format!("keepdamaged-{purge}-{keep_damaged}");
+            let (d, s) = built_set(&tag);
+            // Same length, different bytes: a damaged member, not a
+            // missing one, so the engine backs it aside before writing.
+            let mut alpha = std::fs::read(d.join("alpha.bin")).expect("member");
+            for b in &mut alpha[1_000..1_400] {
+                *b ^= 0x5a;
+            }
+            std::fs::write(d.join("alpha.bin"), &alpha).expect("damage");
+            let id = s.submit(JobSpec::Repair {
+                repair: crate::job::RepairSpec {
+                    par2: d.join("set.par2"),
+                    extra_dirs: Vec::new(),
+                    options: Default::default(),
+                    purge,
+                    keep_damaged,
+                },
+            });
+            let q = until(&s, "the repair", |q| {
+                q.jobs
+                    .iter()
+                    .find(|j| j.id == id)
+                    .is_some_and(|j| j.state.finished())
+            });
+            let job = q.jobs.iter().find(|j| j.id == id).expect("the repair");
+            assert_eq!(job.state, JobState::Done, "{tag}: {job:?}");
+            assert_eq!(
+                d.join("alpha.bin.1").exists(),
+                keep_damaged,
+                "{tag}: the damaged copy"
+            );
+            assert_eq!(
+                d.join("set.par2").exists(),
+                !purge,
+                "{tag}: the recovery set's index"
+            );
+            assert!(d.join("alpha.bin").exists(), "{tag}: the repaired member");
+            // And the snapshot names the equivalent command (M18.5).
+            assert!(
+                job.command.starts_with("parfast r ") && job.command.contains("set.par2"),
+                "{tag}: {:?}",
+                job.command
+            );
+            assert_eq!(
+                job.command.contains(" -p "),
+                purge,
+                "{tag}: {:?}",
+                job.command
+            );
+            let _ = std::fs::remove_dir_all(&d);
+        }
     }
 
     /// THE INVARIANT BOTH CREATE-SIDE CAPABILITIES REST ON: the pane

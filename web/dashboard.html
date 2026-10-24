@@ -3695,7 +3695,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
      a posting; a spot is somebody publishing what they posted. -->
 <div class="card set" data-sg="organise" data-sk="spots">
   <h3 data-i18n="set.spot.title">Spotnet spots</h3>
-  <div class="row"><label data-i18n="set.spot.enabled">Scan spots<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.spot.enabled.hint">on by default. Spotnet is a public feed where people announce what they have posted and sign it with their own key. Each spot carries the real title and the NZB, so it names releases a header scan cannot see. It works with the built-in indexer off.</span></label>
+  <div class="row"><label data-i18n="set.spot.enabled">Scan spots<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.spot.enabled.hint">off by default, like indexing. Spotnet is a public feed where people announce what they have posted and sign it with their own key. Each spot carries the real title and the NZB, so it names releases a header scan cannot see. It works with the built-in indexer off.</span></label>
     <input type="checkbox" id="s_spot_enabled" onchange="setCfg('spot_enabled',this.checked?1:0)"></div>
   <div class="idxnote">
     <div data-i18n-html="set.spot.what"><b>What it finds:</b> around 170 to 200 new spots a day.
@@ -21372,7 +21372,7 @@ function roleWant(r){
 // not a recommendation.
 function roleDefs(){ return [
   {id:'arr', label:t('role.arr','Sonarr, Radarr or another app drives it'),
-   blurb:t('role.arr.blurb','Downloads arrive over the API and the results are handed to something else. These four make that handover behave the way those apps expect.'),
+   blurb:t('role.arr.blurb','Downloads arrive over the API and the results are handed to something else. These make that handover behave the way those apps expect, and leave each finished download for the app to name, file and clean up.'),
    recs:[
      {k:'dupe_action', id:'s_dupe_action', v:'fail',
       why:t('role.arr.dupe','Failing a duplicate straight into History is what Sonarr and Radarr expect: it lets them pick a different release themselves instead of waiting on a copy that is being held for them.')},
@@ -21383,9 +21383,21 @@ function roleDefs(){ return [
      {k:'index_enabled', id:'s_index_enabled', v:0,
       when:c=>!!c.index_enabled,
       why:t('role.arr.index','The built-in index feeds the wall, which is a browsing surface an app-driven install never opens. Switching it off stops the scanning and the disk it uses.')},
+     // GitHub #100: Spotnet scans with the index off, so switching the
+     // index off alone left an app-driven install scanning free.pt.
+     {k:'spot_enabled', id:'s_spot_enabled', v:0,
+      when:c=>!!c.spot_enabled,
+      why:t('role.arr.spots','Spotnet spots are scanned separately from the built-in index and keep running with it off. They feed the same wall, so switching them off stops that scanning too.')},
+     // GitHub #102: the three below are the "leave finished downloads
+     // alone" half. Each is the setting's own switch, nothing more.
+     {k:'auto_rename', id:'s_auto_rename', v:0,
+      why:t('role.arr.rename','Sonarr and Radarr rename what they import, and they read the release name to match a download to what they grabbed. Renaming it here first drops the source, codec and release group they look for.')},
+     {k:'delete_to_trash', id:'s_delete_to_trash', v:0,
+      why:t('role.arr.trash','Files removed from a finished download go to the Trash, and nobody empties the Trash on a machine an app drives. On a network share they pile up in a hidden folder on the share instead. Off, those deletes are permanent.')},
    ],
    links:[['categories',t('role.link.cats','Categories')],
           ['giveup',t('role.link.arr','Sonarr and Radarr instances')],
+          ['rename',t('role.link.rename','Auto-rename')],
           ['security',t('role.link.key','Your API key')]]},
   {id:'sab', label:t('role.sab','Moving from SABnzbd'), imp:'sab',
    blurb:t('role.sab.blurb','The move itself is one button: nzbfast reads the configuration already on this machine and brings over the servers, the categories and their folders, and the passwords file. Nothing you have here is replaced - servers already present are skipped.'),

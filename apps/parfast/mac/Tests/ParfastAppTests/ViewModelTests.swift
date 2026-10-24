@@ -130,6 +130,70 @@ final class ViewModelTests: XCTestCase {
         XCTAssertNotNil(app.verify.finishedRepair(in: app.queue))
     }
 
+    /// Settings' "verify, then repair" is acted on: an open of a repairable set
+    /// is followed by exactly one repair, and under "verify" by none (Gemini
+    /// sweep M18.2: the setting was stored and never read on this platform).
+    func testOpeningUnderVerifyThenRepairRepairsARepairableSet() {
+        for (action, repairs) in [(CoreSettings.OpenAction.verifyThenRepair, true),
+                                  (CoreSettings.OpenAction.verify, false)] {
+            let app = app()
+            app.settings.general.open_par2 = action
+            app.openPar2(MockScenario.damagedRepairable.par2Path)
+            waitFor("verify, \(action)") {
+                app.refresh()
+                return app.queue.jobs.first?.state.isFinished ?? false
+            }
+            if repairs {
+                waitFor("the automatic repair") {
+                    app.refresh()
+                    return app.verify.finishedRepair(in: app.queue) != nil
+                }
+                XCTAssertEqual(app.queue.jobs.filter { $0.kind == .repairSet }.count, 1)
+            } else {
+                app.refresh()
+                XCTAssertNil(app.verify.lastRepairJobId, "\(action)")
+                XCTAssertTrue(app.queue.jobs.allSatisfy { $0.kind == .verify }, "\(action)")
+            }
+        }
+    }
+
+    /// The "Delete .par2 files" and "Rename to match set" buttons are one-shot:
+    /// the repair they start carries the switch, the pane's own options do not
+    /// (Gemini sweep M18.3).
+    func testAOneShotRepairDoesNotStickInThePanesOptions() {
+        let app = app()
+        app.openPar2(MockScenario.damagedRepairable.par2Path)
+        waitFor("verify") {
+            app.refresh()
+            return app.verify.snapshot?.state.isFinished ?? false
+        }
+        app.verify.purge = false
+        app.verify.options.rename_only = false
+        app.startRepair(renameOnly: true, purge: true)
+        XCTAssertFalse(app.verify.purge)
+        XCTAssertFalse(app.verify.options.rename_only)
+    }
+
+    /// A 0 in the core's create defaults is "not set", and must not replace the
+    /// pane's working figure for the mode that is not the default (Gemini sweep
+    /// M18.1: it did, and the other mode then planned with a 0).
+    func testZeroCreateDefaultsLeaveTheWorkingFiguresAlone() {
+        let model = CreateModel()
+        let before = (model.blockSize, model.recoveryCount, model.recoverySize)
+        var settings = CoreSettings()
+        settings.create.block_size = 0
+        settings.create.recovery_count = 0
+        settings.create.recovery_size = 0
+        model.applyDefaults(settings)
+        XCTAssertEqual(model.blockSize, before.0)
+        XCTAssertEqual(model.recoveryCount, before.1)
+        XCTAssertEqual(model.recoverySize, before.2)
+        XCTAssertGreaterThan(model.blockSize, 0)
+        settings.create.block_size = 4096
+        model.applyDefaults(settings)
+        XCTAssertEqual(model.blockSize, 4096, "a figure that IS set still lands")
+    }
+
     func testStatusTextNamesTheBadBlockCount() {
         let model = VerifyModel()
         let file = SurveyFile(name: "a", size: 1, status: .damaged, blocks_ok: 6, blocks_total: 10)

@@ -170,6 +170,19 @@ that sweep's remaining four HTTP findings, done as one pass (see
     same one-outstanding-request admission as plain ones. `ssl-openssl`
     remains a stub.
 
+14. **`src/connection.rs` + `src/util/messages_queue.rs` - two small gaps
+    (14 Oct 2026 Gemini sweep, L8).** Patch 4's 30 s read/write deadlines
+    were applied to accepted TCP sockets only; a Unix-socket listener's
+    accepted streams got none. nzbfast serves over TCP and never builds a
+    Unix listener, so this was latent, but the rule is "every accepted
+    socket" and now holds. And `MessagesQueue::pop_timeout` computed the
+    time left after each wakeup and then passed the ORIGINAL `timeout` to
+    `wait_timeout` anyway, so a wakeup that found nothing restarted the
+    whole wait - `Server::recv_timeout`, which the daemon's HTTP loop polls,
+    could block for nearly twice its timeout. It now waits for what is
+    left. Test `util::messages_queue::tests::an_empty_wakeup_does_not_restart_the_timeout`
+    (707 ms against a 600 ms bound before, ~400 ms after).
+
 ## Admission control (patches 9-12)
 
 These four were reported as separate findings (2, 3, 4 and A5 of the 25 Jul

@@ -579,10 +579,6 @@ public enum S {
     public static func verifyProblemsCount(count: String) -> String { "\(count) problems" }
     /// verify.problems_one
     public static let verifyProblemsOne = "1 problem"
-    /// verify.row.exclude
-    public static let verifyRowExclude = "Exclude from repair"
-    /// verify.row.excluded
-    public static let verifyRowExcluded = "Excluded from repair"
     /// verify.row.rename
     public static let verifyRowRename = "Rename to the expected name"
     /// verify.scan.added

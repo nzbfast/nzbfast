@@ -25,6 +25,11 @@ final class VerifyModel: ObservableObject {
     @Published var keepDamaged = false
     @Published var filter: Filter = .all
     @Published var excluded: Set<String> = []
+    /// Set when the set was OPENED under Settings' "verify, then repair": the
+    /// verify that open started is followed by a repair if, and only if, it
+    /// finishes repairable. Cleared the moment that verify finishes either
+    /// way, so it fires at most once per open.
+    @Published var autoRepairPending = false
     @Published var selection: Set<String> = []
     @Published var sort: [KeyPathComparator<SurveyFile>] = [
         KeyPathComparator(\SurveyFile.name)
@@ -61,6 +66,7 @@ final class VerifyModel: ObservableObject {
     func setTarget(_ path: String) {
         par2Path = path
         excluded = []
+        autoRepairPending = false
         selection = []
         snapshot = nil
         jobId = nil

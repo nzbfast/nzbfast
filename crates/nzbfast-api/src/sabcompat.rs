@@ -2061,11 +2061,22 @@ fn jr_append(d: &Arc<Daemon>, params: &[Value], ua_hdr: &str) -> Value {
         // Legacy:   [NZBFilename, Category, Priority, AddToTop, Content].
         let strs: Vec<&str> = params.iter().filter_map(Value::as_str).collect();
         let name = strs.first().copied().unwrap_or("remote.nzb");
+        // A URL Content is taken wherever it sits, BEFORE the longest-
+        // string reading: that reading is tuned for a base64 body, which
+        // is always the longest string in the call, and a short NZB link
+        // is not - a v13+ DupeKey longer than the URL won, failed both
+        // the URL test and base64, and the add answered 0 (Gemini 14 Oct
+        // sweep M16). No base64 body can start with `http://` (`:` is
+        // not in the alphabet), and no Category or DupeKey does either.
         let content = strs
             .iter()
             .skip(1)
-            .max_by_key(|s| s.len())
             .copied()
+            .find(|s| {
+                let t = s.trim_start();
+                t.starts_with("http://") || t.starts_with("https://")
+            })
+            .or_else(|| strs.iter().skip(1).max_by_key(|s| s.len()).copied())
             .unwrap_or_default();
         let category = strs
             .iter()
@@ -2132,6 +2143,41 @@ fn jr_append(d: &Arc<Daemon>, params: &[Value], ua_hdr: &str) -> Value {
                 }
             })
             .unwrap_or_default();
+        // What the call asked for beyond the add itself, applied to the
+        // job it made. SHARED by the URL arm and the base64 arm: the URL
+        // arm used to return straight after its enqueue, so a URL add
+        // lost its PPParameters - the *arrs' `drone` tag included, which
+        // is the only key they match a queue item by - and its AddToTop
+        // (Gemini 14 Oct sweep M16).
+        //
+        // The PPParameters are NOT applied here any more: they ride into
+        // the add as `AddExtras` and are on the row when it is built. A
+        // scan of the live queue after the add cannot find a job that a
+        // pre-queue reject or `dupe_action = "fail"` filed straight to
+        // history, so that Failed record lost its `drone` tag - the one
+        // key an *arr matches a failed grab by (Codex 22 Oct sweep F4).
+        let extras = || AddExtras {
+            pp_params: pp.clone(),
+            ..AddExtras::default()
+        };
+        let after_enqueue = |nzo: &str| {
+            // AddToTop was parsed and discarded alongside
+            // AddPaused. Moving the job to the head of the
+            // queue is what the flag means; priority ordering
+            // still applies on top of it, as it does for any
+            // other job.
+            if add_to_top {
+                let mut q = d.queue.lock_ok();
+                if let Some(i) = q.iter().position(|j| j.lock_ok().nzo_id == nzo)
+                    && let Some(j) = q.remove(i)
+                {
+                    q.push_front(j);
+                }
+            }
+            if add_to_top {
+                d.save_queue();
+            }
+        };
         // NZBGet also accepts a URL as the Content and fetches it
         // itself; LunaSea's add-by-URL sends exactly that, with an
         // empty NZBFileName, so the base64-only reading below answered
@@ -2154,7 +2200,7 @@ fn jr_append(d: &Arc<Daemon>, params: &[Value], ua_hdr: &str) -> Value {
                         .map(str::to_string)
                         .or_else(|| name_from_fetch(&f, trimmed))
                         .unwrap_or_else(|| "download.nzb".to_string());
-                    match d.enqueue_fetched(
+                    match d.enqueue_fetched_with(
                         &f,
                         &jobname,
                         cat,
@@ -2164,8 +2210,12 @@ fn jr_append(d: &Arc<Daemon>, params: &[Value], ua_hdr: &str) -> Value {
                         0,
                         &api_origin(ua_hdr, "arr"),
                         DupeExempt::Nobody,
+                        extras(),
                     ) {
-                        Ok(Enqueued { nzo_id: nzo, .. }) => json!(nzo_int(&nzo)),
+                        Ok(Enqueued { nzo_id: nzo, .. }) => {
+                            after_enqueue(&nzo);
+                            json!(nzo_int(&nzo))
+                        }
                         Err(e) => {
                             // `fetch_url`'s errors are formatted "{url}:
                             // ..." and an NZB link routinely carries the
@@ -2195,7 +2245,8 @@ fn jr_append(d: &Arc<Daemon>, params: &[Value], ua_hdr: &str) -> Value {
         }
         match b64_decode(content).filter(|b| !b.is_empty()) {
             None => json!(0),
-            Some(bytes) => match d.enqueue(
+            Some(bytes) => match d.enqueue_as_with(
+                None,
                 &bytes,
                 name,
                 category,
@@ -2203,33 +2254,12 @@ fn jr_append(d: &Arc<Daemon>, params: &[Value], ua_hdr: &str) -> Value {
                 None,
                 None,
                 &api_origin(ua_hdr, "arr"),
-                false,
+                DupeExempt::Nobody,
+                None,
+                extras(),
             ) {
                 Ok(Enqueued { nzo_id: nzo, .. }) => {
-                    if !pp.is_empty() {
-                        for j in d.queue.lock_ok().iter() {
-                            let mut g = j.lock_ok();
-                            if g.nzo_id == nzo {
-                                g.pp_params = pp.clone();
-                            }
-                        }
-                    }
-                    // AddToTop was parsed and discarded alongside
-                    // AddPaused. Moving the job to the head of the
-                    // queue is what the flag means; priority ordering
-                    // still applies on top of it, as it does for any
-                    // other job.
-                    if add_to_top {
-                        let mut q = d.queue.lock_ok();
-                        if let Some(i) = q.iter().position(|j| j.lock_ok().nzo_id == nzo)
-                            && let Some(j) = q.remove(i)
-                        {
-                            q.push_front(j);
-                        }
-                    }
-                    if !pp.is_empty() || add_to_top {
-                        d.save_queue();
-                    }
+                    after_enqueue(&nzo);
                     json!(nzo_int(&nzo))
                 }
                 Err(e) => {
@@ -2309,6 +2339,23 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                     .partition(|j| ids.contains(&nzo_int(&j.lock_ok().nzo_id)));
                 ok = !hit.is_empty();
                 if cmd == "GroupMoveTop" {
+                    // A manual move to the top reasserts the user's
+                    // order, exactly as SAB's `switch` arm says: a
+                    // watchdog deferral sorts a job LAST whatever its
+                    // position (`pick_job`'s key), so without this the
+                    // move answered true and changed nothing (Gemini
+                    // 14 Oct sweep L6). The health verdict stays; only
+                    // §77's advisory sink is waived. Priority is NOT
+                    // promoted: NZBGet's own GroupMoveTop orders within
+                    // priority, and that is the contract this facade
+                    // speaks.
+                    for j in &hit {
+                        let mut g = j.lock_ok();
+                        g.deferred = false;
+                        if let Some(h) = g.health.as_mut() {
+                            h.waived = true;
+                        }
+                    }
                     hit.extend(rest);
                     *q = hit;
                 } else {
@@ -2596,7 +2643,7 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                         // files. Same take the REST history delete makes;
                         // this facade is the hand-copy that did not,
                         // exactly as it once was for `drop_spool`.
-                        let mut early_gone: Vec<std::path::PathBuf> = Vec::new();
+                        let mut early_gone: Vec<crate::earlyfile::EarlyCopy> = Vec::new();
                         for (_, j) in &removed {
                             let mut g = j.lock_ok();
                             early_gone.extend(d.early_take(&mut g));
@@ -2982,6 +3029,9 @@ pub fn handle_jsonrpc(
 
 #[cfg(test)]
 mod editqueue_param_tests;
+
+#[cfg(test)]
+mod append_url_tests;
 
 #[cfg(test)]
 mod tail_truth_tests;

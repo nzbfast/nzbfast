@@ -29,8 +29,18 @@ use super::*;
 /// was lost, but "likely" is not enough to delete a directory full of a
 /// user's media, so that one is reported and left alone.
 pub fn recover_interrupted_publishes(out_root: &std::path::Path) {
-    // Job directories live at out_root/<name> or out_root/<cat>/<name>,
-    // so one level down is enough; this is startup, not a deep walk.
+    // Most job directories live at out_root/<name> or
+    // out_root/<cat>/<name>, so one level down covers them; this is
+    // startup, not a deep walk. The rest - a nested `cat_meta.dir`, a
+    // write-through destination outside the download root - are found
+    // from the records instead, by `recover_interrupted_publishes_at`.
+    for dir in out_root_and_children(out_root) {
+        recover_in_dir(&dir);
+    }
+}
+
+/// The directories [`recover_interrupted_publishes`] sweeps.
+fn out_root_and_children(out_root: &std::path::Path) -> Vec<PathBuf> {
     let mut dirs = vec![out_root.to_path_buf()];
     if let Ok(rd) = std::fs::read_dir(out_root) {
         for e in rd.flatten() {
@@ -39,58 +49,101 @@ pub fn recover_interrupted_publishes(out_root: &std::path::Path) {
             }
         }
     }
-    for dir in dirs {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
+    dirs
+}
+
+/// The same repair, aimed by the RECORDS rather than by the download
+/// root's shape.
+///
+/// The one-level walk above cannot reach a canonical directory deeper
+/// than `out_root/<cat>/<name>` - a category whose `cat_meta.dir` nests
+/// (`tv/anime`) - or one outside the root altogether, which is where a
+/// TODO 317 write-through job publishes (its category's
+/// `move_completed` destination). And the walk runs before settings are
+/// restored, so it could not ask where those are even if it tried.
+/// What it CAN be told is which canonical directories the restored
+/// records are replacing: the replacing job's `replaces`, persisted on
+/// its record from the moment it was placed. A replace interrupted
+/// between its two renames leaves that path MISSING from the disk, and
+/// each such path's parent is swept with the rule above unless the root
+/// walk already covered it.
+/// Gemini 14 Oct 2026 sweep, M11.
+pub fn recover_interrupted_publishes_at(
+    out_root: &std::path::Path,
+    expected: impl IntoIterator<Item = PathBuf>,
+) {
+    let done = out_root_and_children(out_root);
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for p in expected {
+        if p.symlink_metadata().is_ok() {
+            continue;
+        }
+        let Some(parent) = p.parent() else {
             continue;
         };
-        for e in rd.flatten() {
-            let aside = e.path();
-            let Some(name) = aside.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            // Match the way the aside is BUILT: `<canonical>` + suffix +
-            // the parking process's pid, and nothing after it. A plain
-            // `find` accepted any name merely containing the suffix, so a
-            // user's own "Movie.nzbfast-replaced-Final" would be renamed
-            // to "Movie" over their heads - and, worse, the last
-            // occurrence is the one we split at, so a canonical name that
-            // itself ends in the suffix still resolves correctly.
-            let Some((stem, tail)) = name.rsplit_once(REPLACED_SUFFIX) else {
-                continue;
-            };
-            if stem.is_empty() || tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
-                continue;
-            }
-            if !aside.is_dir() {
-                continue;
-            }
-            let canon = dir.join(stem);
-            if canon.symlink_metadata().is_ok() {
-                info!(
-                    target: "replace",
-                    "{} and {} both exist - an interrupted replace left a spare \
-                     copy. Nothing is lost; delete whichever you do not want.",
-                    canon.display(),
-                    aside.display()
-                );
-                continue;
-            }
-            match std::fs::rename(&aside, &canon) {
-                Ok(()) => info!(
-                    target: "replace",
-                    "restored {} from {} - a replace was interrupted before the \
-                     new download took its place",
-                    canon.display(),
-                    aside.display()
-                ),
-                Err(err) => warn!(
-                    target: "replace",
-                    "could not restore {} from {}: {err} (the download is intact \
-                     under the second name)",
-                    canon.display(),
-                    aside.display()
-                ),
-            }
+        if parent.as_os_str().is_empty()
+            || done.iter().any(|d| d == parent)
+            || seen.iter().any(|d| d == parent)
+        {
+            continue;
+        }
+        seen.push(parent.to_path_buf());
+        recover_in_dir(parent);
+    }
+}
+
+/// Put back every interrupted replace's aside found directly in `dir`.
+fn recover_in_dir(dir: &std::path::Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let aside = e.path();
+        let Some(name) = aside.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Match the way the aside is BUILT: `<canonical>` + suffix +
+        // the parking process's pid, and nothing after it. A plain
+        // `find` accepted any name merely containing the suffix, so a
+        // user's own "Movie.nzbfast-replaced-Final" would be renamed
+        // to "Movie" over their heads - and, worse, the last
+        // occurrence is the one we split at, so a canonical name that
+        // itself ends in the suffix still resolves correctly.
+        let Some((stem, tail)) = name.rsplit_once(REPLACED_SUFFIX) else {
+            continue;
+        };
+        if stem.is_empty() || tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if !aside.is_dir() {
+            continue;
+        }
+        let canon = dir.join(stem);
+        if canon.symlink_metadata().is_ok() {
+            info!(
+                target: "replace",
+                "{} and {} both exist - an interrupted replace left a spare \
+                 copy. Nothing is lost; delete whichever you do not want.",
+                canon.display(),
+                aside.display()
+            );
+            continue;
+        }
+        match std::fs::rename(&aside, &canon) {
+            Ok(()) => info!(
+                target: "replace",
+                "restored {} from {} - a replace was interrupted before the \
+                 new download took its place",
+                canon.display(),
+                aside.display()
+            ),
+            Err(err) => warn!(
+                target: "replace",
+                "could not restore {} from {}: {err} (the download is intact \
+                 under the second name)",
+                canon.display(),
+                aside.display()
+            ),
         }
     }
 }

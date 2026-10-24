@@ -33,7 +33,8 @@
 //! publish) can only ever be told LESS than the truth, never more, and
 //! only for as long as the run is open. Every door that reads BYTES back
 //! - `read_at`, `open_read`, `try_open_read` - flushes first, and so do
-//! the durability doors (`sync`, `park`) and `Drop`. The readers OUTSIDE
+//! the durability doors (`sync`, `sync_plain`, `park`) and `Drop`.
+//! (`sync_plain` did not until the Gemini 14 Oct 2026 sweep, M4.) The readers OUTSIDE
 //! this module - settle's read-back, the native repair's PAR2 scan, the
 //! unpack step, which all open the output BY PATH - are served by
 //! `FileWriter::flush_staged`, which the engine calls over every writer

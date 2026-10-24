@@ -117,9 +117,13 @@ public sealed partial class QueuePage : UserControl
         Vm.PendingConfirmation = null;
         var keep = await Dialogs.ConfirmAsync(
             this, Strings.QueueWhenFinished, message, Strings.QueueWhenFinished, Strings.CommonCancel);
-        if (!keep)
+        if (keep)
         {
-            Vm.SetPostAction(PostQueueAction.None);
+            Vm.ConfirmPostAction();
+        }
+        else
+        {
+            Vm.CancelPostAction();
         }
     }
 

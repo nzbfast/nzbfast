@@ -29,7 +29,15 @@ impl Listener {
                 (Connection::from(conn), Some(addr))
             }),
             #[cfg(unix)]
-            Self::Unix(l) => l.accept().map(|(conn, _)| (Connection::from(conn), None)),
+            // nzbfast patch 14 (see VENDORING.md): the same deadlines patch 4
+            // gives a TCP socket. A Unix-socket peer can stall a read or a
+            // write exactly as a TCP one can, on the same worker pool.
+            Self::Unix(l) => l.accept().map(|(conn, _)| {
+                let t = Some(std::time::Duration::from_secs(30));
+                let _ = conn.set_read_timeout(t);
+                let _ = conn.set_write_timeout(t);
+                (Connection::from(conn), None)
+            }),
         }
     }
 

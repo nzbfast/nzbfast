@@ -680,3 +680,103 @@ fn exact_identity_keeps_non_ascii_titles_apart() {
         );
     });
 }
+
+/// Codex 22 Oct sweep F4, sibling: `enqueue_fetched` stamped the
+/// X-DNZB-Failure link onto the row a scan of the LIVE QUEUE found once
+/// the add returned. A URL add that `dupe_action = "fail"` files
+/// straight to history is not in the queue, so its Failed record lost
+/// the link (and its host, scheme and depth) that a Retry from history
+/// reports through. Now set as the row is built, so the queued add and
+/// the failed duplicate both carry it, and both keep it across a
+/// restart.
+#[test]
+fn a_fetched_add_failed_as_a_duplicate_keeps_its_failure_link() {
+    with_daemon("dupefail-link", |d| {
+        let fetched = |seg: &str, link: &str| crate::fetch::Fetched {
+            bytes: crate::testutil::one_file_nzb(seg).into_bytes(),
+            failure_link: link.to_string(),
+            host: "indexer.example".to_string(),
+            https: true,
+            category: String::new(),
+            addrs: Vec::new(),
+            filename: String::new(),
+        };
+        let add = |seg: &str, name: &str, link: &str| {
+            d.enqueue_fetched(
+                &fetched(seg, link),
+                name,
+                "",
+                -100,
+                None,
+                None,
+                2,
+                "test",
+                DupeExempt::Nobody,
+            )
+            .map(|e| e.nzo_id)
+        };
+        let link_of = |j: &Arc<Mutex<Job>>| {
+            let g = j.lock_ok();
+            (
+                g.failure_link.clone(),
+                g.failure_host.clone(),
+                g.failure_https,
+                g.failure_depth,
+            )
+        };
+        let want = |link: &str| (link.to_string(), "indexer.example".to_string(), true, 2u8);
+
+        // The queued case: the original, by URL.
+        let first = add(
+            "one",
+            "Show.S01E02.1080p.nzb",
+            "https://indexer.example/fail?id=1",
+        )
+        .expect("the original add");
+        let queued = d
+            .queue
+            .lock_ok()
+            .iter()
+            .find(|j| j.lock_ok().nzo_id == first)
+            .cloned()
+            .expect("the original is queued");
+        assert_eq!(link_of(&queued), want("https://indexer.example/fail?id=1"));
+
+        // The duplicate, filed straight to history as Failed.
+        *d.dupe_action.lock_ok() = "fail".into();
+        let dup = add(
+            "two",
+            "Show.S01E02.720p.nzb",
+            "https://indexer.example/fail?id=2",
+        )
+        .expect("a failed duplicate is still an accepted add");
+        let failed = d
+            .history
+            .lock_ok()
+            .iter()
+            .find(|j| j.lock_ok().nzo_id == dup)
+            .cloned()
+            .expect("filed to history");
+        assert_eq!(failed.lock_ok().state, JobState::Failed);
+        assert_eq!(link_of(&failed), want("https://indexer.example/fail?id=2"));
+
+        // ...and what a restart reads back off both stores.
+        let d2 = crate::testutil::restart(d);
+        let q = d2
+            .queue
+            .lock_ok()
+            .iter()
+            .find(|j| j.lock_ok().nzo_id == first)
+            .cloned()
+            .expect("still queued after restart");
+        assert_eq!(link_of(&q), want("https://indexer.example/fail?id=1"));
+        let h = d2
+            .history
+            .lock_ok()
+            .iter()
+            .find(|j| j.lock_ok().nzo_id == dup)
+            .cloned()
+            .expect("still in history after restart");
+        assert_eq!(link_of(&h), want("https://indexer.example/fail?id=2"));
+    });
+}

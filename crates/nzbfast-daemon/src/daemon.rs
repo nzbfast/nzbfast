@@ -2624,31 +2624,55 @@ impl Daemon {
         origin: &str,
         exempt: DupeExempt<'_>,
     ) -> Result<Enqueued> {
-        let mut e = self.enqueue_as(
-            None, &f.bytes, name, category, priority, pp, password, origin, exempt, None,
-        )?;
-        let mut stamped = false;
+        self.enqueue_fetched_with(
+            f,
+            name,
+            category,
+            priority,
+            pp,
+            password,
+            depth,
+            origin,
+            exempt,
+            AddExtras::default(),
+        )
+    }
+
+    /// [`Self::enqueue_fetched`] with [`AddExtras`] set on the row as it
+    /// is built (see [`Self::enqueue_as_with`]).
+    #[expect(clippy::too_many_arguments)]
+    pub fn enqueue_fetched_with(
+        &self,
+        f: &Fetched,
+        name: &str,
+        category: &str,
+        priority: i32,
+        pp: Option<i64>,
+        password: Option<&str>,
+        depth: u8,
+        origin: &str,
+        exempt: DupeExempt<'_>,
+        mut extras: AddExtras,
+    ) -> Result<Enqueued> {
+        // The failure link rides into the row as it is BUILT, so the
+        // record the add saves already carries it, whichever store that
+        // record lands in. It used to be stamped afterwards onto the row
+        // a scan of the live queue found, followed by a second save:
+        // a restart between the two saves lost the link and the depth
+        // (the job silently never reported, and a replacement chain
+        // restarted its allowance at 0), and an add filed straight to
+        // history as Failed (a pre-queue reject, `dupe_action = "fail"`)
+        // was never in the queue to be found and lost them outright
+        // (Codex 22 Oct sweep F4, sibling).
         if !f.failure_link.is_empty() {
-            // Just pushed, so it is at the back; scan anyway rather than
-            // assume - enqueue may re-order or park a duplicate.
-            let q = self.queue.lock_ok();
-            if let Some(job) = q.iter().find(|j| j.lock_ok().nzo_id == e.nzo_id) {
-                let mut j = job.lock_ok();
-                j.failure_link = f.failure_link.clone();
-                j.failure_host = f.host.clone();
-                j.failure_https = f.https;
-                j.failure_depth = depth;
-                stamped = true;
-            }
+            extras.failure_link = f.failure_link.clone();
+            extras.failure_host = f.host.clone();
+            extras.failure_https = f.https;
+            extras.failure_depth = depth;
         }
-        // enqueue saved the queue BEFORE this stamp existed. Without a
-        // second save, a restart in the window loses the link and the
-        // depth: the job silently never reports, and a replacement chain
-        // restarts its allowance at 0.
-        if stamped {
-            e.durable = self.save_queue();
-        }
-        Ok(e)
+        self.enqueue_as_with(
+            None, &f.bytes, name, category, priority, pp, password, origin, exempt, None, extras,
+        )
     }
 
     /// §129 4c: has this install EVER had a download? The dashboard's

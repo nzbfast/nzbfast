@@ -2945,3 +2945,48 @@ fn a_month_is_evidence_where_the_year_it_replaced_was() {
     assert!(!looks_like_release_name("Slam.TruePDF-September.2016.pdf"));
     assert!(!looks_like_release_name("Slam.TruePDF-September.2016"));
 }
+
+/// GitHub #102: a one-word job name with an *arr-style hyphen tag kept
+/// its tail as a "release group", and the default style (groups off)
+/// dropped it once a measured resolution armed the rename:
+/// "T3-rar-nzbfast" filed as "T3-rar [720p]". The renamer's fold puts
+/// the tail back, and leaves a real scene group exactly where it was.
+#[test]
+fn one_word_hyphen_tail_is_kept_by_the_renamer() {
+    let style = NameStyle {
+        resolution: true,
+        quality_brackets: true,
+        ..Default::default()
+    };
+    for (stem, want) in [
+        ("T3-rar-nzbfast", "T3-rar-nzbfast [720p]"),
+        ("T2-remux-nzbfast", "T2-remux-nzbfast [720p]"),
+    ] {
+        let mut q = p(stem);
+        assert_eq!(
+            q.group.as_deref(),
+            Some("nzbfast"),
+            "{stem}: the parse itself is unchanged"
+        );
+        assert!(keep_one_word_group(&mut q, stem), "{stem}");
+        assert_eq!(q.group, None);
+        // What naming.rs does for a name that claimed no resolution.
+        q.res = Some("720p".into());
+        assert_eq!(movie_name(&q, &style).as_deref(), Some(want), "{stem}");
+    }
+    // A scene name keeps its group as a group: the body is dotted.
+    for stem in [
+        "The.Matrix.1999.1080p.BluRay.x264-FGT",
+        "Show.Name.S01E02.720p.WEB-DL-GRP",
+        "the-flash-s01e01-720p-grp",
+    ] {
+        let mut q = p(stem);
+        let before = q.clone();
+        assert!(!keep_one_word_group(&mut q, stem), "{stem}");
+        assert_eq!(q.group, before.group, "{stem}");
+        assert_eq!(q.title, before.title, "{stem}");
+    }
+    // No tail at all: nothing to fold.
+    let mut q = p("T3rar");
+    assert!(!keep_one_word_group(&mut q, "T3rar"));
+}

@@ -165,9 +165,12 @@ carries `<file>.intoto.jsonl` beside it. The workflow builds the
 `nzbfast-<target>.tar.gz` binaries, the Linux tarballs, the Windows
 installer and portable zip, the macOS disk image and zip, and every
 update payload this manifest points at, so the payload a client is told
-to fetch is the attested build. Releases cut before the workflow gained
-those jobs (1.7.1 and earlier) cover the `nzbfast-<target>.tar.gz`
-binaries only.
+to fetch is the attested build. Releases after 1.8.0 also carry the
+.deb and .rpm packages, the Synology and QNAP packages, and the armv7,
+FreeBSD and Windows ARM64 betas from the same workflow; the Android APK
+is built elsewhere and has no attestation. Releases cut before the
+workflow gained those jobs (1.7.1 and earlier) cover the
+`nzbfast-<target>.tar.gz` binaries only.
 
 Work to make builds bit-for-bit repeatable is in progress and documented
 separately; we do not claim it until a released tag has been

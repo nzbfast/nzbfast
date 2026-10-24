@@ -48,8 +48,11 @@
 //!   string operation. Nothing beyond the baseline is used or detected
 //!   (`rep` string ops and the SSE2 unaligned 16-byte pair).
 //! - **AArch64**: the same ladder idea, but there is no string operation to
-//!   amortise, so the crossover sits at the width of the ladder itself
-//!   (`BULK_MIN` = 128) and the body above it is a 64-byte-per-iteration
+//!   amortise, so `fill`'s crossover sits at the width of the ladder itself
+//!   (`FILL_LADDER_MAX` = 128; the copies cross at a separately measured
+//!   `BULK_MIN` = 1,024, whose doc says why - this line called the ladder
+//!   bound `BULK_MIN` until the Gemini 14 Oct 2026 sweep) and the body
+//!   above it is a 64-byte-per-iteration
 //!   `stp`/`ldp` loop over NEON `q` registers. NEON is assumed and not
 //!   detected: it is mandatory in ARMv8-A and
 //!   `aarch64-unknown-linux-musl` carries `target_feature = "neon"`, so the
@@ -653,7 +656,9 @@ pub const FILL_LADDER_MAX: usize = 128;
 
 /// Fill `n` bytes at `dest` with `c`.
 ///
-/// Every length up to [`BULK_MIN`] is covered branch-free-per-byte by an
+/// Every length up to [`FILL_LADDER_MAX`] (not [`BULK_MIN`], which is
+/// the copies' crossover; this line named it until the Gemini 14 Oct 2026
+/// sweep) is covered branch-free-per-byte by an
 /// overlapping-store ladder (two stores per width, one from each end),
 /// exactly as the x86_64 `fill` does; past it the head is squared up to 16
 /// and [`store_blocks`] takes the body, with the last up-to-64 ragged bytes

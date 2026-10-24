@@ -317,6 +317,14 @@ public sealed class MockCore : ICoreClient
     {
         lock (_gate)
         {
+            // The core's `OpenAction` is an enum, and serde refuses a spelling it
+            // does not know, so the whole write fails. The mock refused nothing,
+            // which is how "verify_repair" passed every test here (H12).
+            if (settings.General.OpenPar2 is not (GeneralSettings.Verify or GeneralSettings.VerifyThenRepair))
+            {
+                return false;
+            }
+
             _settings = settings;
             _concurrency = Math.Max(1, settings.Concurrency);
             _postAction = settings.PostQueueAction;

@@ -62,6 +62,18 @@ impl Default for Bcj2Coder {
     }
 }
 
+/// nzbfast: how many of `buf_len` bytes may be produced when `remaining`
+/// are left, computed without narrowing `remaining` first. `remaining` is
+/// an archive-declared size and so is not bounded by the target's pointer
+/// width; the result never exceeds `buf_len`, so it always fits.
+fn clamp_to_remaining(buf_len: usize, remaining: u64) -> usize {
+    if buf_len as u64 > remaining {
+        remaining as usize
+    } else {
+        buf_len
+    }
+}
+
 /// Reader for BCJ2-filtered data with multiple input streams.
 pub struct Bcj2Reader<R> {
     base: Bcj2Coder,
@@ -101,9 +113,13 @@ impl<R> Bcj2Reader<R> {
 impl<R: Read> Read for Bcj2Reader<R> {
     fn read(&mut self, buf: &mut [u8]) -> crate::Result<usize> {
         let mut dest_buf = buf;
-        if dest_buf.len() > self.uncompressed_size as usize {
-            dest_buf = &mut dest_buf[..self.uncompressed_size as usize];
-        }
+        // nzbfast: compare in u64 and narrow only the figure already known
+        // to be below `buf.len()`. Upstream cast `uncompressed_size` to
+        // `usize` first, which on a 32-bit target is that size modulo 4 GiB:
+        // a stream over 4 GiB was clamped to its low word and, once the
+        // remainder hit an exact 4 GiB, read as EOF. README-nzbfast.md item 11.
+        let len = clamp_to_remaining(dest_buf.len(), self.uncompressed_size);
+        dest_buf = &mut dest_buf[..len];
         if dest_buf.is_empty() {
             return Ok(0);
         }
@@ -183,5 +199,25 @@ impl<R: Read> Read for Bcj2Reader<R> {
             }
         }
         Ok(result_size)
+    }
+}
+
+/// nzbfast: README-nzbfast.md item 11.
+#[cfg(test)]
+mod clamp_tests {
+    use super::clamp_to_remaining;
+
+    /// A remainder at or past 4 GiB must never clamp a read. On a 32-bit
+    /// target the upstream `remaining as usize` made `1 << 32` read as 0
+    /// (EOF) and `(1 << 32) + 7` as 7; this pins the u64 comparison on
+    /// every target, and is the case armv7-cross would fail without it.
+    #[test]
+    fn a_remainder_past_4_gib_does_not_clamp() {
+        assert_eq!(clamp_to_remaining(4096, 1 << 32), 4096);
+        assert_eq!(clamp_to_remaining(4096, (1 << 32) + 7), 4096);
+        assert_eq!(clamp_to_remaining(4096, u64::MAX), 4096);
+        assert_eq!(clamp_to_remaining(4096, 100), 100);
+        assert_eq!(clamp_to_remaining(4096, 0), 0);
+        assert_eq!(clamp_to_remaining(0, 1 << 40), 0);
     }
 }

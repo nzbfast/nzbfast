@@ -101,7 +101,7 @@ sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 # WINDOWS-ARM64 IS DELIBERATELY ABSENT FROM THIS LIST. The Windows on ARM
 # package ships as a clearly-labelled BETA asset on the release page
 # (nzbfast-X.Y.Z-windows-arm64-beta.zip and its -setup.exe, built by the
-# windows-arm64-beta job in .github/workflows/release.yml) and nowhere
+# windows-arm64-beta job in .github/workflows/provenance-release.yml) and nowhere
 # else, because nobody has yet run it on ARM64 hardware.
 #
 # Adding a key here is not a small step and is not easily undone. Every
@@ -165,7 +165,7 @@ sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 # THE FREEBSD TARBALL IS NOT IN THIS LIST EITHER, for the Windows-ARM64
 # reason exactly: nobody has run it on a real FreeBSD machine. It is
 # built and end-to-end smoke-tested inside a FreeBSD VM on every release
-# (the freebsd-beta job in .github/workflows/release.yml), which is more
+# (the freebsd-beta job in .github/workflows/provenance-release.yml), which is more
 # than the ARM64 build gets, and it is still not a NAS with real disks -
 # so it ships as `nzbfast-X.Y.Z-freebsd-x64-beta.tar.gz` on the release
 # page and nowhere else. The order is the same: a tester confirms it runs

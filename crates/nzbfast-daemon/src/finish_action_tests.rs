@@ -688,3 +688,132 @@ fn a_script_disarmed_mid_pass_does_not_run() {
         assert!(fired(d).is_empty(), "the script ran: {:?}", fired(d));
     });
 }
+
+/// What `settings.json` says the arm is - i.e. what the next start
+/// restores through `settings_restore`.
+fn persisted_action(d: &Arc<Daemon>) -> Option<FinishAction> {
+    crate::load_settings(&d.settings_path)
+        .get("queue_finished_action")
+        .and_then(Value::as_str)
+        .and_then(FinishAction::parse)
+}
+
+/// Long enough for a thread that is NOT waiting on the transaction to
+/// have finished a cancel or a claim many times over. Only the red arm
+/// (the pre-fix code) depends on it; on the fixed code the thread cannot
+/// finish while the transaction is held, however long this is.
+const NOT_BLOCKED_BY_NOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Codex sweep 22 Oct 2026, F3: an arm request has set Shutdown live and
+/// not yet saved it when the user presses cancel. Cancel used to bypass
+/// the setting's transaction, so it disarmed live and disk and answered
+/// success, and then the arm's save wrote Shutdown back: live off, disk
+/// armed, and the next start restored the arm the user had cancelled.
+///
+/// The test holds `apply_and_save`'s own transaction and does the arm's
+/// two halves inside it by hand, with the cancel racing between them.
+/// Cancel must wait for the transaction, so it lands AFTER the arm's
+/// save and live and disk agree on `none`.
+#[test]
+fn cancel_waits_for_an_arm_between_its_live_write_and_its_save() {
+    with_daemon("tx-cancel", |d| {
+        let tx = crate::settings::setting_tx("queue_finished_action");
+        let held = tx.lock_ok();
+        // The arm's live half, as `apply_setting` does it.
+        d.finish.set_action(FinishAction::Shutdown);
+        let d2 = d.clone();
+        let t = std::thread::spawn(move || cancel(&d2));
+        std::thread::sleep(NOT_BLOCKED_BY_NOW);
+        assert!(
+            !t.is_finished(),
+            "cancel completed inside an arm's transaction"
+        );
+        assert_eq!(
+            d.finish.action(),
+            FinishAction::Shutdown,
+            "cancel switched the live arm off inside another transaction"
+        );
+        // The arm's save, as `apply_and_save` does it, then its release.
+        assert!(save_settings(
+            &d.settings_path,
+            &[("queue_finished_action", json!("shutdown"))],
+        ));
+        drop(held);
+        let out = t.join().expect("cancel thread");
+        assert_eq!(out["disarmed"], json!(true));
+        assert_eq!(d.finish.action(), FinishAction::None, "live is off");
+        assert_eq!(
+            persisted_action(d),
+            Some(FinishAction::None),
+            "and the disk agrees, so a restart does not re-arm it"
+        );
+        assert!(fired(d).is_empty(), "nothing fired: {:?}", fired(d));
+    });
+}
+
+/// The inverse order, on the firing side: a countdown is due and the
+/// watcher reaches its claim while an arm request is inside the
+/// transaction changing the choice to Sleep. The claim and its persisted
+/// disarm used to run outside the transaction, so the stale Shutdown
+/// could be claimed and its late `none` written over the new arm's save
+/// (live Sleep, disk none). Now the claim waits, finds the generation
+/// moved, and fires nothing; live and disk both say Sleep.
+#[test]
+fn a_due_claim_waits_for_an_arm_mid_transaction_and_then_stands_down() {
+    with_daemon("tx-claim", |d| {
+        armed_and_drained(d, FinishAction::Shutdown);
+        tick(d);
+        assert!(d.finish.pending().is_some(), "countdown is up and due");
+
+        let tx = crate::settings::setting_tx("queue_finished_action");
+        let held = tx.lock_ok();
+        let d2 = d.clone();
+        let t = std::thread::spawn(move || tick(&d2));
+        std::thread::sleep(NOT_BLOCKED_BY_NOW);
+        assert!(
+            fired(d).is_empty(),
+            "the claim fired inside an arm's transaction: {:?}",
+            fired(d)
+        );
+        assert_eq!(
+            d.finish.action(),
+            FinishAction::Shutdown,
+            "the claim disarmed live inside another transaction"
+        );
+        // The arm's two halves: the user changes their mind to Sleep.
+        d.finish.set_action(FinishAction::Sleep);
+        assert!(save_settings(
+            &d.settings_path,
+            &[("queue_finished_action", json!("sleep"))],
+        ));
+        drop(held);
+        t.join().expect("tick thread");
+
+        assert!(fired(d).is_empty(), "the withdrawn shutdown ran");
+        assert_eq!(d.finish.action(), FinishAction::Sleep, "the new arm stands");
+        assert_eq!(
+            persisted_action(d),
+            Some(FinishAction::Sleep),
+            "and the disk agrees with it"
+        );
+    });
+}
+
+/// The control for the two above: an undisturbed claim still persists
+/// its disarm, so moving the save into `claim_durably` did not drop it.
+#[test]
+fn a_fired_one_shot_is_disarmed_on_disk_through_the_real_setter() {
+    with_daemon("tx-fire", |d| {
+        d.queue_idle_latch.store(true, Ordering::Relaxed);
+        d.finish.set_delay_secs(0);
+        crate::settings::apply_and_save(d, "queue_finished_action", "shutdown")
+            .expect("arm through the real setter");
+        assert_eq!(persisted_action(d), Some(FinishAction::Shutdown));
+        d.finish.note_drained();
+        tick(d);
+        tick(d);
+        assert_eq!(fired(d), vec![FinishAction::Shutdown]);
+        assert_eq!(d.finish.action(), FinishAction::None);
+        assert_eq!(persisted_action(d), Some(FinishAction::None));
+    });
+}

@@ -2140,8 +2140,13 @@ pub(super) fn holed_deferred_volumes(
 /// parity beyond what it already has to say it. A member absent, short
 /// or long is the shape that needs blocks.
 fn member_is_whole(out_dir: &Path, name: &str, length: u64) -> bool {
-    std::fs::metadata(out_dir.join(nzbkit::disk::sanitize_out_name(name)))
-        .is_ok_and(|m| m.is_file() && m.len() == length)
+    // `join_out_name`: a '/' in the sanitized name is not a separator
+    // inside a Windows `\\?\` verbatim `out_dir` (Gemini 14 Oct sweep L5).
+    std::fs::metadata(nzbkit::disk::join_out_name(
+        out_dir,
+        &nzbkit::disk::sanitize_out_name(name),
+    ))
+    .is_ok_and(|m| m.is_file() && m.len() == length)
 }
 
 #[cfg(test)]

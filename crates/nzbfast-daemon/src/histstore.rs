@@ -59,9 +59,47 @@ static HIST_IO: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// unkeyed seam pairs this test's compactor with a stranger's and the
 /// test's own `wait()` then never returns (the 15 Aug
 /// `daemon_park::PARK_GEN_BARRIER` wedge, same shape).
+///
+/// The optional SECOND barrier makes it two-stage, the shape the park
+/// seams use: the first says the snapshot is taken, the second holds the
+/// publish until the test has staged what must happen in between - a
+/// list move, which needs no `HIST_IO` and so does not simply queue
+/// behind the rename the way an append does (22 Oct 2026 sweep, F2).
+///
+/// A LIST of keyed arms, not one slot: with a single slot, two tests
+/// arming it in parallel evicted each other, and the evicted test's
+/// compactor ran straight past while its `wait()` never returned. Arm
+/// with [`compact_barrier_arm`], disarm with [`compact_barrier_disarm`].
 #[cfg(test)]
-pub(super) static COMPACT_BARRIER: std::sync::Mutex<Option<(String, Arc<std::sync::Barrier>)>> =
-    std::sync::Mutex::new(None);
+#[expect(clippy::type_complexity)]
+pub(super) static COMPACT_BARRIER: std::sync::Mutex<
+    Vec<(
+        String,
+        Arc<std::sync::Barrier>,
+        Option<Arc<std::sync::Barrier>>,
+    )>,
+> = std::sync::Mutex::new(Vec::new());
+
+/// Arm [`COMPACT_BARRIER`] for `d`'s compactions, replacing any arm of
+/// its own.
+#[cfg(test)]
+pub(crate) fn compact_barrier_arm(
+    d: &Daemon,
+    snapped: Arc<std::sync::Barrier>,
+    release: Option<Arc<std::sync::Barrier>>,
+) {
+    let key = d.spool.display().to_string();
+    let mut arms = COMPACT_BARRIER.lock_ok();
+    arms.retain(|(k, _, _)| *k != key);
+    arms.push((key, snapped, release));
+}
+
+/// Remove `d`'s arm of [`COMPACT_BARRIER`], leaving every other test's.
+#[cfg(test)]
+pub(crate) fn compact_barrier_disarm(d: &Daemon) {
+    let key = d.spool.display().to_string();
+    COMPACT_BARRIER.lock_ok().retain(|(k, _, _)| *k != key);
+}
 
 /// What a `_if_present` upsert actually did.
 ///
@@ -107,6 +145,28 @@ pub struct Owed {
     /// delete, which can only find the record in a live list, still
     /// stops the carry the ordinary way.
     pub in_transit: bool,
+    /// When this entry was registered, from `OWED_EPOCH`, stamped
+    /// under the `hist_owed` hold that inserts it. A compacting rewrite
+    /// reads the counter before it snapshots `self.history`, and retires
+    /// only entries stamped at or below that mark whose record its
+    /// snapshot actually serialized (or that it was asked to drop) - an
+    /// entry registered after the mark is a debt the snapshot cannot
+    /// have paid, however its record looks by the time the rename lands
+    /// (22 Oct 2026 codex read-only sweep, F2).
+    pub epoch: u64,
+}
+
+/// The stamp source for [`Owed::epoch`]. Process-global and only ever
+/// read or advanced under a `hist_owed` hold, so "stamped at or below a
+/// mark read under that lock" means "registered before the mark was
+/// read". Shared across daemons in one test process, which costs nothing:
+/// the stamps only need to be ordered, never dense.
+static OWED_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The next [`Owed::epoch`]. Call ONLY with `hist_owed` held - see
+/// [`OWED_EPOCH`].
+fn owed_stamp() -> u64 {
+    OWED_EPOCH.fetch_add(1, Ordering::SeqCst) + 1
 }
 
 /// Read a store's bytes, telling a MISSING store (`Ok(None)`, a fresh
@@ -298,11 +358,13 @@ impl Daemon {
     /// replaces the entry. Must not be called with `history` held.
     pub(crate) fn hist_owe(&self, job: &Arc<Mutex<Job>>) {
         let id = job.lock_ok().nzo_id.clone();
-        self.hist_owed.lock_ok().insert(
+        let mut owed = self.hist_owed.lock_ok();
+        owed.insert(
             id,
             Owed {
                 job: job.clone(),
                 in_transit: false,
+                epoch: owed_stamp(),
             },
         );
     }
@@ -339,6 +401,7 @@ impl Daemon {
                     Owed {
                         job: job.clone(),
                         in_transit: true,
+                        epoch: owed_stamp(),
                     },
                 );
             }
@@ -916,6 +979,20 @@ impl Daemon {
         self.history_rewrite_locked(&[], &[])
     }
 
+    /// [`Self::history_compact`] with `then` run before `HIST_IO` is
+    /// released - the test's stand-in for "the compaction has published
+    /// and every appender is still queued behind it", which is the
+    /// window a crash between a compaction and park's final append
+    /// leaves on disk. No production caller: the window is real, only
+    /// holding it open is not.
+    #[cfg(test)]
+    pub(crate) fn history_compact_then(&self, then: impl FnOnce()) -> bool {
+        let _g = HIST_IO.lock_ok();
+        let ok = self.history_rewrite_locked(&[], &[]);
+        then();
+        ok
+    }
+
     /// The rewrite itself, with [`HIST_IO`] ALREADY held, and with two
     /// knobs the plain compaction above does not need.
     ///
@@ -964,7 +1041,22 @@ impl Daemon {
             return false;
         }
         let doomed = |id: &str| drop_ids.iter().any(|d| d == id);
+        // Read BEFORE the snapshot below, under the lock every stamp is
+        // taken under: an owed entry stamped at or below it was registered
+        // before this snapshot began, so if its record is in the snapshot
+        // the line written is at least as new as the state that was owed.
+        // One stamped later (a park's carry landing in history after the
+        // snapshot, or a refused upsert of a record the snapshot already
+        // serialized at an older state) is NOT paid by this rewrite.
+        let owed_mark = {
+            let _owed = self.hist_owed.lock_ok();
+            OWED_EPOCH.load(Ordering::SeqCst)
+        };
         let mut snap_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // The records serialized, by identity: an id alone would let a
+        // NEWER record under the same id (a re-park after a retry) be
+        // retired on the strength of the old one's line.
+        let mut snap_jobs: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let lines: Vec<String> = self
             .history
             .lock_ok()
@@ -975,6 +1067,7 @@ impl Daemon {
                     return None;
                 }
                 snap_ids.insert(g.nzo_id.clone());
+                snap_jobs.insert(Arc::as_ptr(j) as usize);
                 Some(job_json(&g).to_string())
             })
             .collect();
@@ -1041,10 +1134,14 @@ impl Daemon {
             let spool = self.spool.display().to_string();
             let barrier = COMPACT_BARRIER
                 .lock_ok()
-                .clone()
-                .filter(|(k, _)| *k == spool);
-            if let Some((_, b)) = barrier {
+                .iter()
+                .find(|(k, _, _)| *k == spool)
+                .cloned();
+            if let Some((_, b, release)) = barrier {
                 b.wait();
+                if let Some(r) = release {
+                    r.wait();
+                }
             }
         }
         let ok = match crate::persist::write_atomic(&path, buf.as_bytes()) {
@@ -1056,7 +1153,23 @@ impl Daemon {
                 // TRANSIT: it is in neither live list, so this snapshot
                 // did not carry it, and the queue store's row is still
                 // its only durable copy (`Owed::in_transit`).
-                self.hist_owed.lock_ok().retain(|_, o| o.in_transit);
+                //
+                // And only what THIS snapshot paid. `HIST_IO` keeps the
+                // appenders out between snapshot and rename, but not the
+                // list moves: a park whose prewrite was refused can file
+                // its record into `self.history` and land its carry while
+                // this rewrite holds the lock, and retiring by "not in
+                // transit" alone then dropped the carry of a record the
+                // file just written does not hold - the next queue save
+                // tombstoned its only durable row (22 Oct 2026 codex
+                // read-only sweep, F2). So an entry is retired only if it
+                // was stamped before the snapshot and its record was in
+                // it, or the caller is dropping it.
+                self.hist_owed.lock_ok().retain(|id, o| {
+                    let paid = o.epoch <= owed_mark
+                        && (snap_jobs.contains(&(Arc::as_ptr(&o.job) as usize)) || doomed(id));
+                    o.in_transit || !paid
+                });
                 true
             }
             Err(e) => {
@@ -1848,7 +1961,7 @@ mod store_tests {
         // Hold the compaction open in the exact gap: snapshot taken,
         // replacement not yet renamed into place.
         let gate = Arc::new(std::sync::Barrier::new(2));
-        *super::COMPACT_BARRIER.lock_ok() = Some((d.spool.display().to_string(), gate.clone()));
+        super::compact_barrier_arm(&d, gate.clone(), None);
         let compactor = {
             let d = d.clone();
             std::thread::spawn(move || assert!(d.history_compact()))
@@ -1870,7 +1983,7 @@ mod store_tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         compactor.join().unwrap();
         appender.join().unwrap();
-        *super::COMPACT_BARRIER.lock_ok() = None;
+        super::compact_barrier_disarm(&d);
 
         let (rows, _) = d.history_replay();
         assert!(

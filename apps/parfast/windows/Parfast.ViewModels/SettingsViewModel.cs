@@ -76,10 +76,13 @@ public sealed class SettingsViewModel : Observable
 
     public bool VerifyThenRepair
     {
-        get => _settings.General.OpenPar2 == "verify_repair";
+        get => _settings.General.OpenPar2 == GeneralSettings.VerifyThenRepair;
         set => Update(_settings with
         {
-            General = _settings.General with { OpenPar2 = value ? "verify_repair" : "verify" },
+            General = _settings.General with
+            {
+                OpenPar2 = value ? GeneralSettings.VerifyThenRepair : GeneralSettings.Verify,
+            },
         });
     }
 
@@ -318,6 +321,26 @@ public sealed class SettingsViewModel : Observable
         });
     }
 
+    /// <summary>
+    /// The core's <c>log_level</c> for each row of the log-level picker, in
+    /// order: Quiet, Normal, Verbose, Debug. The value is <c>verbose - quiet</c>
+    /// (-2 is silence, 0 the default), so it is NOT the row index: the picker
+    /// used the index as the value, which showed the default 0 as Quiet and
+    /// wrote Verbose for Normal (Gemini sweep M18.4).
+    /// </summary>
+    public static readonly int[] LogLevelValues = [-2, 0, 1, 2];
+
+    /// <summary>The picker row for <see cref="LogLevel"/>: the nearest row at or below it.</summary>
+    public int LogLevelIndex
+    {
+        get
+        {
+            var index = Array.FindLastIndex(LogLevelValues, v => v <= LogLevel);
+            return index < 0 ? 0 : index;
+        }
+        set => LogLevel = LogLevelValues[Math.Clamp(value, 0, LogLevelValues.Length - 1)];
+    }
+
     /// <summary>Rereads from the core, for instance after another window changed something.</summary>
     public void Reload()
     {
@@ -350,8 +373,10 @@ public sealed class SettingsViewModel : Observable
             return;
         }
 
-        _settings = next;
-        _core.SetSettings(next);
+        // What the CORE holds, not what was asked for: a write it refused used
+        // to stay in `_settings`, so every later edit re-sent the bad value and
+        // failed with it (Gemini sweep H12).
+        _settings = _core.SetSettings(next) ? next : _core.GetSettings();
 
         // One empty-name notification rather than a name per property: a
         // settings page rebinds in a millisecond and the alternative is a

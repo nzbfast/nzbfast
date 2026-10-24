@@ -158,17 +158,11 @@ struct VerifyView: View {
                             .font(.system(size: 12))
                         VStack(alignment: .leading, spacing: 1) {
                             Text(file.name)
-                                .strikethrough(model.excluded.contains(file.name))
                                 .foregroundStyle(T.textPrimary)
                             if let foundAs = file.found_as {
                                 Text(S.verifyFileFoundAs(path: (foundAs as NSString).lastPathComponent))
                                     .font(.system(size: 10))
                                     .foregroundStyle(T.blockMisnamed)
-                            }
-                            if model.excluded.contains(file.name) {
-                                Text(S.verifyRowExcluded)
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(T.textTertiary)
                             }
                         }
                     }
@@ -232,14 +226,11 @@ struct VerifyView: View {
                     // Rename-only is an engine mode, not a file operation the
                     // app does behind the engine's back: setting it here and
                     // repairing is what MultiPar's rename button does too.
-                    model.options.rename_only = true
-                    app.startRepair()
+                    app.startRepair(renameOnly: true)
                 }
                 .disabled(!names.contains { name in
                     model.survey?.files.first { $0.name == name }?.status == .misnamed
                 })
-                Divider()
-                Button(S.verifyRowExclude) { model.toggleExcluded(names) }
             }
         }
     }
@@ -264,8 +255,7 @@ struct VerifyView: View {
                 Button(S.commonReveal) { app.reveal(model.survey?.folder ?? "") }
                 if job.result?.purged != true {
                     Button(S.verifySummaryPurge) {
-                        model.purge = true
-                        app.startRepair()
+                        app.startRepair(purge: true)
                     }
                 }
                 Toggle(S.commonLog, isOn: $app.logOpen)

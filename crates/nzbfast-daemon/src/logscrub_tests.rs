@@ -279,3 +279,38 @@ fn a_path_borne_credential_leaves_with_its_path_gone() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Gemini 14 Oct 2026 sweep, H4: three stored credentials the scrub
+/// never knew about. Each is masked in get_config and documented as
+/// never logged, so a line that echoes one anyway - a library's error
+/// Display, a header dumped on a failure - must not leave by this door.
+/// All three values are made up and only ever compared against made-up
+/// log lines.
+#[test]
+fn the_log_door_blanks_arr_list_and_scoreboard_credentials() {
+    let dir = scratch("h4");
+    let d = seeded(&dir);
+    *d.arr_instances.lock_ok() = vec![crate::giveup::ArrInstance {
+        name: "sonarr".into(),
+        kind: "sonarr".into(),
+        url: "http://127.0.0.1:8989".into(),
+        apikey: "ARRAPIKEY0123456".into(), // leakcheck-allow-synthetic
+        enabled: true,
+    }];
+    *d.lists.sources.lock_ok() = vec![
+        serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "mode": "account",
+            "token": "PLEXTOKEN0123456", // leakcheck-allow-synthetic
+        }))
+        .expect("a list source"),
+    ];
+    *d.scoreboard.key.lock_ok() = Some("SCOREKEY01234567".into()); // leakcheck-allow-synthetic
+    let s = LogScrub::new(&d);
+    for secret in ["ARRAPIKEY0123456", "PLEXTOKEN0123456", "SCOREKEY01234567"] {
+        let got = s.line(&format!("upstream said: bad credential {secret} (401)"));
+        assert!(!got.contains(secret), "{secret} left the log door: {got}");
+        assert!(got.contains("***"), "{got}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -426,6 +426,13 @@ pub fn finalize_names(d: &Daemon, out_dir: &std::path::Path, job: &FinalizeJob<'
     // the week this was designed.
     let cats = d.custom_categories.read_ok().clone();
     let mut p = nzbkit::categories::classify(name, &cats);
+    // GitHub #102: "T3-rar-nzbfast" is one word, not a title and a
+    // release group, and the default style drops groups - so the
+    // measured-resolution rename below filed it as "T3-rar [720p]".
+    // Only the renamer's copy of the parse changes; see the helper.
+    if auto_rename && !nzb_naming {
+        nzbkit::release::keep_one_word_group(&mut p, name);
+    }
     let mut base = nzbkit::categories::base_of(&p.kind, &cats);
     use nzbkit::categories::BaseBehavior as Base;
     // Wave-7 Axis A: `name` came from the .nzb, and settle has since
@@ -736,7 +743,18 @@ pub fn finalize_names(d: &Daemon, out_dir: &std::path::Path, job: &FinalizeJob<'
     let umask = d.out_umask.load(Ordering::Relaxed);
     if umask <= 0o777 {
         let final_dir = moved.as_deref().unwrap_or(out_dir);
-        let root = d.out_root.read_ok().clone();
+        // A TODO 317 write-through job finalizes UNDER its move
+        // destination and the mover never visits it, so this is the
+        // only pass its modes get - and the climb has to stop at THAT
+        // root, the one the mover would have used. Against the
+        // download root it stopped at once, because no destination
+        // path starts with it, and left `Show/Season NN` at the
+        // process default (Gemini 14 Oct 2026 sweep, M12).
+        let root = d
+            .move_dest_root(cat)
+            .map(|(r, _)| r)
+            .filter(|r| final_dir.starts_with(r))
+            .unwrap_or_else(|| d.out_root.read_ok().clone());
         crate::smart::apply_out_umask(final_dir, Some(&root), umask);
     }
     Finalized {

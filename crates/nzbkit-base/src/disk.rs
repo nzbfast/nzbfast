@@ -637,13 +637,15 @@ pub struct FileWriter {
     /// neither sees the other: measured 30 Aug 2026 as a 5-in-12 flake on
     /// the M4-14a fixture before this existed.
     ///
-    /// SHARDED by file offset rather than one gate per file, so ordinary
+    /// One mutex over a list of IN-FLIGHT spans, held only for the
+    /// bookkeeping and never across a pwrite (see [`ArticleGate`]); only a
+    /// span that OVERLAPS one in flight waits, on `article_cv`. So ordinary
     /// out-of-order arrival keeps its parallelism - the Windows write-lane
     /// pool exists precisely to write one file from several threads, and a
-    /// whole-file mutex would undo it. Two spans that OVERLAP share at
-    /// least one byte and therefore at least one grain, which is all the
-    /// exclusion this needs; aliasing distinct grains onto one mutex only
-    /// ever over-serializes, never under. The `intervals` mutex cannot
+    /// whole-file mutex held across the write would undo it. Until 2 Sep
+    /// 2026 this was sixteen offset-sharded mutexes held ACROSS the pwrite,
+    /// and this paragraph described them until the Gemini 14 Oct 2026
+    /// sweep (L9). The `intervals` mutex cannot
     /// play this role: `covered`/`contiguous_from_start` take it to answer
     /// the streaming server, and holding it across a pwrite would stall
     /// /stream on every write.
@@ -1348,8 +1350,8 @@ impl FileWriter {
     /// In a well-formed post every article owns a disjoint byte range, so
     /// this peeks the coverage map and, in the overwhelming majority of
     /// writes, finds nothing and falls straight through to `write_at`
-    /// unchanged - one uncontended shard lock, which the grain being
-    /// wider than an article keeps cheap.
+    /// unchanged - two short holds of the article gate's bookkeeping
+    /// lock, neither across the pwrite.
     ///
     /// The peek MUST be ordered against any OVERLAPPING span's pwrite,
     /// which is what `article_gate` buys: coverage is published by
@@ -1490,7 +1492,9 @@ impl FileWriter {
     /// [`FileWriter::write_article_at`] with no coalescing: register,
     /// peek, compare, write, strike. This is the whole of the behaviour
     /// before round 41, and it is still what a writer with the window
-    /// off (or with the prefix hash armed) does.
+    /// off does. (This also said "or with the prefix hash armed" until
+    /// the Gemini 14 Oct 2026 sweep, L9; arming the hash never clears the
+    /// window - the `stage` field's doc says why the two coexist.)
     fn write_article_direct(&self, offset: u64, data: &[u8]) -> io::Result<()> {
         let end = offset + data.len() as u64;
         let prior = self.gate_enter(offset, end);
@@ -2625,7 +2629,14 @@ impl FileWriter {
     /// is a silent no-op, so choosing one for the barrier would issue
     /// NO barrier at all. (Nothing is lost by skipping a parked writer:
     /// `park` synced it on the way down, with the full barrier.)
+    ///
+    /// It writes the open coalescing run out first, as [`Self::sync`]
+    /// does: an fsync over a file whose last run is still staged would
+    /// promise bytes that are not in the page cache yet, and the closing
+    /// barrier through another handle does not reach them (Gemini 14 Oct
+    /// 2026 sweep M4).
     pub fn sync_plain(&self) -> io::Result<bool> {
+        self.flush_stage()?;
         let g = self.file.read_ok();
         let Some(f) = g.as_ref() else {
             return Ok(false);

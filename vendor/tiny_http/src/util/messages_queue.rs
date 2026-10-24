@@ -136,7 +136,12 @@ where
                 None => (),
             }
             let now = Instant::now();
-            let (_queue, result) = self.has_item.wait_timeout(queue, timeout).unwrap();
+            // nzbfast patch 14 (see VENDORING.md): wait for what is LEFT of
+            // the timeout. Upstream passed the full `timeout` on every turn,
+            // so a wakeup that found nothing (a spurious one, or an item
+            // another popper took first) restarted the whole wait and the
+            // call could block for nearly twice what it was given.
+            let (_queue, result) = self.has_item.wait_timeout(queue, duration).unwrap();
             queue = _queue;
             let sleep_time = now.elapsed();
             duration = if duration > sleep_time {
@@ -191,6 +196,42 @@ mod tests {
             assert_eq!(q.pop(), Some(expect));
         }
         producer.join().unwrap();
+    }
+
+    /// nzbfast patch 14: a wakeup that finds nothing must not restart the
+    /// wait. One empty wakeup lands at 300 ms of a 400 ms timeout; the call
+    /// must still return at ~400 ms. NEGATIVE CONTROL, run: passing
+    /// `timeout` instead of `duration` to `wait_timeout` makes it ~700 ms.
+    /// The bound is 600 ms - 200 ms of slack over the right answer and
+    /// 100 ms under the wrong one - so a loaded box can at worst make the
+    /// fixed code look slow, never the defect look fixed.
+    #[test]
+    fn an_empty_wakeup_does_not_restart_the_timeout() {
+        let q = MessagesQueue::<usize>::with_capacity(4);
+        let waker = {
+            let q = q.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                // Take the lock so the wake lands while the popper waits,
+                // not before it has started.
+                let _held = q.queue.lock().unwrap();
+                q.has_item.notify_all();
+            })
+        };
+        let t0 = std::time::Instant::now();
+        assert_eq!(q.pop_timeout(Duration::from_millis(400)), None);
+        let took = t0.elapsed();
+        waker.join().unwrap();
+        assert!(
+            took >= Duration::from_millis(390),
+            "returned early: {:?}",
+            took
+        );
+        assert!(
+            took < Duration::from_millis(600),
+            "an empty wakeup restarted the wait: {:?} for a 400 ms timeout",
+            took
+        );
     }
 
     /// A control message must land even when the queue is full, or the accept

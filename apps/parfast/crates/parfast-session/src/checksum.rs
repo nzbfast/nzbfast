@@ -310,17 +310,47 @@ pub fn write_text_watched(
             ));
         }
         let d = digest_of(path, format)?;
-        let name = name.replace('\\', "/");
-        if format == ChecksumFormat::Sfv {
-            out.push_str(&format!("{name} {d}\n"));
-        } else {
-            // The binary-mode star, which is what `md5sum -c` expects
-            // back from a file `md5sum -b` wrote and what every tool
-            // accepts either way.
-            out.push_str(&format!("{d} *{name}\n"));
-        }
+        out.push_str(&line(name, &d, format));
     }
     Ok(out)
+}
+
+/// One written line, newline included. The ONE spelling: the writer
+/// uses it and [`name_as_read_back`] asks the reader about it.
+fn line(name: &str, digest: &str, format: ChecksumFormat) -> String {
+    let name = name.replace('\\', "/");
+    if format == ChecksumFormat::Sfv {
+        format!("{name} {digest}\n")
+    } else {
+        // The binary-mode star, which is what `md5sum -c` expects
+        // back from a file `md5sum -b` wrote and what every tool
+        // accepts either way.
+        format!("{digest} *{name}\n")
+    }
+}
+
+/// The name [`parse`] reads back from the line [`write_text`] writes for
+/// `name`, or `None` when that line does not read back as one entry.
+///
+/// The reader is forgiving on purpose - it trims each line and skips
+/// `;` / `#` comments, because hand-edited files in the field carry
+/// stray whitespace - so a name with a leading or trailing space, a
+/// leading `;` or `#` in an SFV, a line break, or (on unix) a backslash
+/// is written fine and read back as some OTHER name or none at all. The
+/// create asks this before it writes, so a file it cannot name honestly
+/// is refused up front instead of verifying as Missing (Gemini sweep M1).
+pub fn name_as_read_back(name: &str, format: ChecksumFormat) -> Option<String> {
+    let width = match format {
+        ChecksumFormat::Sfv => 8,
+        ChecksumFormat::Md5 => 32,
+        ChecksumFormat::Sha1 => 40,
+        ChecksumFormat::Sha256 => 64,
+    };
+    let parsed = parse(&line(name, &"0".repeat(width), format), Some(format)).ok()?;
+    match parsed.entries.as_slice() {
+        [only] if parsed.format == format => Some(only.name.clone()),
+        _ => None,
+    }
 }
 
 /// The file a checksum line's `name` refers to, relative to `base`, or
@@ -412,6 +442,50 @@ pub fn check(file: &ChecksumFile, base: &Path) -> std::io::Result<Vec<Row>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the writer writes, the reader reads back as the same name -
+    /// or the name is reported as one this format cannot carry.
+    #[test]
+    fn a_name_reads_back_as_itself_or_is_reported_unrepresentable() {
+        for f in [
+            ChecksumFormat::Sfv,
+            ChecksumFormat::Md5,
+            ChecksumFormat::Sha1,
+            ChecksumFormat::Sha256,
+        ] {
+            for ok in ["a.bin", "sub/a b.bin", "with  two spaces.bin"] {
+                assert_eq!(
+                    name_as_read_back(ok, f).as_deref(),
+                    Some(ok),
+                    "{f:?} {ok:?}"
+                );
+            }
+            for bad in ["trailing.bin ", "two\nlines.bin"] {
+                assert_ne!(
+                    name_as_read_back(bad, f).as_deref(),
+                    Some(bad),
+                    "{f:?} {bad:?}"
+                );
+            }
+        }
+        // The name LEADS an SFV line, so the line trim takes its leading
+        // space; in the digest-first formats the star shields it.
+        assert_ne!(
+            name_as_read_back(" leading.bin", ChecksumFormat::Sfv).as_deref(),
+            Some(" leading.bin")
+        );
+        assert_eq!(
+            name_as_read_back(" leading.bin", ChecksumFormat::Md5).as_deref(),
+            Some(" leading.bin")
+        );
+        // A comment marker leads an SFV line, and only an SFV line.
+        assert_eq!(name_as_read_back("#notes.txt", ChecksumFormat::Sfv), None);
+        assert_eq!(name_as_read_back(";x.bin", ChecksumFormat::Sfv), None);
+        assert_eq!(
+            name_as_read_back("#notes.txt", ChecksumFormat::Md5).as_deref(),
+            Some("#notes.txt")
+        );
+    }
 
     fn fixture(name: &str) -> String {
         let p = Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -1,15 +1,21 @@
-# Build the QNAP package (.qpkg) for a published release. This is the
-# workflow that ships it: dispatch it with the tag once the release page
-# is up, then scan and upload the artifact by hand, exactly as the
-# Synology .spk is done. Step 4c of the publish-release skill is the
-# checklist.
+# A SMOKE BUILD of the QNAP package (.qpkg). It does NOT build the
+# package a release ships, and its artifact must never be uploaded to a
+# release.
 #
-# It USED to be the on-demand path only, with release.yml building the
-# shipped package during the release run from a separate cross-build of
-# the same source. That was dropped on 16 Aug 2026: the two builds are
-# not the same bytes, and nothing on the release page published a
-# checksum for the ones inside the package. Measured on 1.1.3 - packaged
-# 72cad10c / 71d12ee9, released 9cc8c994 / a11ce1ac.
+# Since 23 Oct 2026 the shipped .qpkg is built, attested and attached by
+# provenance-release.yml's `linux-packages` job on the public repo, in the
+# same run as the linux tarballs whose binaries it carries (publish-release
+# step 2a). Before that, THIS workflow built the shipped package after
+# publish, from the published tarballs, and the release Mac uploaded it
+# by hand: a second builder for a published name, with no attestation.
+# The artifact is named `qnap-qpkg-smoke-*` so nothing that downloads by
+# the old name can pick it up.
+#
+# What it is still for: qbuild does not run on a maintainer's Mac, so
+# without this the only thing that exercises a packaging/qnap edit would
+# be a release. It runs on a pull request touching the packaging, and on
+# a dispatch (optionally AT a tag, to smoke that tag's packaging around
+# that tag's published binaries).
 #
 # WHY THIS IS A WORKFLOW AND NOT A LOCAL SCRIPT. The .qpkg is built by
 # QDK, QNAP's own kit, and qbuild does not run on macOS: it finishes by
@@ -19,17 +25,9 @@
 # the layout instead would mean shipping a format we had guessed at, to
 # run as root on somebody's NAS. So it is built where QDK works.
 #
-# The payload is not compiled here. make-qpkg.sh downloads the release's
-# own static musl linux binaries and checks them against SHA256SUMS.txt,
-# the same as the Synology .spk - the package ships the exact bits that
-# were released, and this runner needs no Rust at all.
-#
-# WHAT IT DOES NOT DO: upload. Release assets go up through
-# packaging/upload-release-assets.sh from a maintainer's machine, under
-# the release account, and only for files carrying a local scan stamp
-# (TODO 63f - nothing uploads while unscanned). This job leaves the
-# package as a workflow artifact and prints the two commands to finish
-# the job by hand.
+# The payload is not compiled here. make-qpkg.sh downloads a published
+# release's static musl linux binaries and checks them against
+# SHA256SUMS.txt, so this runner needs no Rust at all.
 #
 # BETA. Nobody on the team owns a QNAP. Everything here is verified by
 # taking the built package apart again and by the off-box install tests;
@@ -186,44 +184,21 @@ jobs:
       - name: No builder identity in the package
         run: python3 packaging/check-archive-identity.py dist/*.qpkg
 
-      # No identity leak scan here on purpose. That scanner is one of the
-      # few things .github ships without - it contains the private
-      # vocabulary it greps for, so publish-public.sh strips it - and a
-      # workflow step that shells out to a file the public repo does not
-      # have is a red check on somebody else's PR. It is not skipped, it
-      # is moved: nothing reaches a release without it, because
-      # upload-release-assets.sh refuses any asset whose current sha256
-      # has no scan stamp. The two commands below are in that order for
-      # that reason.
-
-      # A pull_request run resolves the SAME version (it has no tag input,
-      # so it packages the latest release) and so used to produce an
-      # artifact with the SAME name as the release dispatch's. Step 4c
-      # downloads by name, so a PR that touched packaging/qnap/** and
-      # finished between the dispatch and the download could substitute an
-      # unmerged installer into a release asset, silently - the scan gate
-      # certifies contents, not which run produced them. Naming PR
-      # artifacts apart makes that impossible: `-n qnap-qpkg-X.Y.Z` can
-      # only ever match a dispatch.
+      # `-smoke` in the name, and the PR number on a pull_request run, so
+      # no artifact of this workflow can be mistaken for a release asset.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: "qnap-qpkg-${{ env.VER }}${{ github.event_name == 'pull_request' && format('-pr{0}', github.event.number) || '' }}"
+          name: "qnap-qpkg-smoke-${{ env.VER }}${{ github.event_name == 'pull_request' && format('-pr{0}', github.event.number) || '' }}"
           path: dist/*.qpkg
           if-no-files-found: error
 
-      - name: How to finish the job
+      - name: This is a smoke build
         run: |
           f=$(ls dist/*.qpkg)
           cat <<EOF
-          Built $(basename "$f").
-
-          It is NOT uploaded. Download the artifact, then from the repo:
-
-            packaging/scan-release-assets.sh <path>/$(basename "$f")
-            packaging/upload-release-assets.sh $TAG <path>/$(basename "$f")
-
-          Do NOT add it to latest.json: the update manifest is signed and
-          carries an anti-rollback serial, and this package has never run
-          on real hardware. packaging/qnap/README.md has the checklist for
-          promoting it once a QNAP owner confirms it works.
+          Built $(basename "$f") as a SMOKE build. Do NOT upload it to a
+          release: a release gets its .qpkg built, attested and attached by
+          provenance-release.yml (publish-release step 2a), and
+          upload-release-assets.sh refuses a different file under an
+          attested name.
           EOF

@@ -110,6 +110,7 @@ final class AppModel: ObservableObject {
         guard let snapshot = try? core.queueSnapshot() else { return }
         queue = snapshot
         verify.apply(queue: snapshot)
+        autoRepairIfDue()
         create.apply(queue: snapshot)
         checksums.apply(queue: snapshot)
         noteCompletions(snapshot)
@@ -246,7 +247,24 @@ final class AppModel: ObservableObject {
     func openPar2(_ path: String) {
         mode = .verify
         verify.setTarget(path)
+        // Settings' "Opening a .par2: verify, then repair". The setting was
+        // stored and offered on this platform and acted on by nothing, so a
+        // Mac user who chose it got a verify and a Repair button (Gemini
+        // sweep M18.2). Windows has had it since chip D.
+        verify.autoRepairPending = settings.general.open_par2 == .verifyThenRepair
         startVerify()
+    }
+
+    /// The repair an open under "verify, then repair" owes, on the snapshot
+    /// in which its verify finishes. Once: the flag is cleared there whatever
+    /// the verdict, so a clean or unrepairable set is left exactly as a plain
+    /// verify leaves it.
+    private func autoRepairIfDue() {
+        guard verify.autoRepairPending,
+              let job = verify.snapshot, job.id == verify.jobId, job.kind == .verify,
+              job.state.isFinished else { return }
+        verify.autoRepairPending = false
+        if job.state == .done && verify.canRepair { startRepair() }
     }
 
     func openChecksumFile(_ path: String) {
@@ -280,11 +298,19 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func startRepair() {
+    /// `renameOnly` and `purge` are ONE-SHOT overrides for the buttons that
+    /// mean a particular kind of run ("Rename to match set", "Delete .par2
+    /// files"). They used to be written into the pane's own options before
+    /// the call and never put back, so every later repair in the session -
+    /// on this set or the next one opened - silently ran rename-only, or
+    /// deleted its recovery files (Gemini sweep M18.3).
+    func startRepair(renameOnly: Bool? = nil, purge: Bool? = nil) {
         guard let path = verify.par2Path else { return }
+        var options = verify.options
+        if let renameOnly { options.rename_only = renameOnly }
         let spec = RepairSpec(
-            par2: path, extra_dirs: verify.extraDirs, options: verify.options,
-            purge: verify.purge, keep_damaged: verify.keepDamaged,
+            par2: path, extra_dirs: verify.extraDirs, options: options,
+            purge: purge ?? verify.purge, keep_damaged: verify.keepDamaged,
             exclude: Array(verify.excluded))
         if let id = submit(.repairSet(spec)) {
             verify.jobId = id

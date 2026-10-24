@@ -51,9 +51,10 @@ pub fn physical_ram() -> Option<u64> {
 /// Physical memory the OS could hand out right now, in bytes: free pages
 /// plus the file cache it would reclaim first (Windows `ullAvailPhys`,
 /// which counts the standby list; Linux `MemAvailable`; macOS free,
-/// file-backed and purgeable pages, and only when opted in - see that arm).
-/// `None` where the OS offers no such figure (or macOS has not opted in),
-/// so a caller gating on it keeps its old behaviour there.
+/// file-backed and purgeable pages, always since 16 Sep 2026 - see that
+/// arm). `None` where the OS offers no such figure, so a caller gating on
+/// it keeps its old behaviour there. (This still said the macOS arm was
+/// opt-in until the Gemini 14 Oct 2026 sweep, L9.)
 ///
 /// It moves from one call to the next, which is the point for its caller:
 /// whether a MAPPING of a large payload can stay resident

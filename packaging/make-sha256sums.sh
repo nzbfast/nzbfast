@@ -26,10 +26,11 @@
 # carries its own signed sha256 per payload, which is the check that
 # matters there.
 #
-# NOT IN IT EITHER: the Synology `.spk` and the QNAP `.qpkg`. They are
-# built AFTER the release is published (publish-release section 4c) by
-# scripts that READ this file, so an entry for them here could only ever
-# be a hash of something that does not exist yet.
+# The Synology `.spk` and the QNAP `.qpkg` ARE in it since 23 Oct 2026.
+# They used to be built after the release was published, by scripts that
+# read this file, so they could not be listed; provenance-release.yml now
+# builds them in step 2a with everything else, and they arrive in the
+# dist directory before this runs.
 #
 # Order is the directory's, sorted - `sha256sum -c` does not care, and a
 # deterministic order keeps a re-run diffable against the last one.

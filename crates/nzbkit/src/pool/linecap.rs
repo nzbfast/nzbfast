@@ -732,7 +732,52 @@ pub fn fleet_step(
 /// sockets carry. It is the one comparison against an absolute rate in
 /// the probe, and it only ever proves that a line is fast. It never
 /// claims that one is slow.
+///
+/// It is the gate for a run that has a line anchor, typed or measured. A
+/// COLD run - no anchor at all - reads [`LINE_CAP_PROBE_COLD_MIN_BPS`]
+/// instead, for the reason given there.
 pub const LINE_CAP_PROBE_MIN_BPS: u64 = 250_000_000;
+
+/// The cold-start probe's gate on a run with NO line anchor at all, in
+/// bytes/s (400 Mbit). Still an achieved rate and still four times the
+/// 99 Mbit line §208 measured the cap winning on, so that regime never
+/// opens it.
+///
+/// **Why a cold run gets a lower gate** (24 Oct 2026, GitHub #103). A
+/// gate on the FLEET's rate is a gate on seed x per-socket carry, and a
+/// cold run's seed is [`LINE_CAP_DEFAULT_FLEET`]: at 2 Gbit the probe
+/// opened only for sockets carrying 80 Mbit or more. The reporter's
+/// providers carried ~33 Mbit a socket (`carry_bps: 4130236`) on 10
+/// Gbit fiber, so 25 sockets read ~800 Mbit, the probe never fired, and
+/// a fresh 1.8.0 install's first 52 GB job ran pinned at 25 for 566 s -
+/// against 308 s with the cap off, 293 s on 1.7.1 and 157 s for SABnzbd
+/// on 150 sockets. With no anchor nothing else can raise that fleet:
+/// the curve reads the fleet's own rate as the line, and the supply arm
+/// needs a line to compare against. A socket-bound fleet and a full
+/// line look identical at one fleet size, and only the probe's pay test
+/// tells them apart, so a cold run has to let it ask.
+///
+/// **What it lets in, priced.** A cold run on a FULL line between 400
+/// Mbit and 2 Gbit now meets the probe. On a flat reading it gets the
+/// first rung (25 -> 35) and stops, since a line the seed fills cannot
+/// pay. A REAL run can go one rung further: the seed's dwell ends while
+/// the 1 s half-life rate is still climbing, so the baseline reads low
+/// and the next rung looks paid. On the loopback rig a full 920 Mbit
+/// line read 710 Mbit on 25 sockets and 885 on 35, and walked to 50;
+/// the first ceiling bounds it there. §208 measured what extra sockets
+/// cost on a full line exactly: the drain tail grows by `added sockets
+/// x window x article size / line rate` (the §208 floor ladder, almost
+/// to the second at every rung), so 25 sockets
+/// x 4 x ~0.75 MB is ~0.6 s at 1 GbE and ~1.5 s at 400 Mbit, once per
+/// job, and only until the install has a line anchor. The rig measured
+/// none of it: 27.9 s on both arms, twice. The same rig's #103 shape
+/// (4 MB/s a socket, no line limit) went 48.0 s -> 30.7 s, and a 99
+/// Mbit line was untouched (35.7 s both arms, the probe never fired). ANY anchor, typed or measured, keeps
+/// [`LINE_CAP_PROBE_MIN_BPS`]: such a run has a line to compare
+/// against, so an install that knows its line is full (GH #62's
+/// line-bound fleets) is exactly as it was, and the supply arm is what
+/// grows the ones that are not.
+pub const LINE_CAP_PROBE_COLD_MIN_BPS: u64 = 50_000_000;
 
 /// How long a fleet holds before the probe reads what it bought, in ms.
 /// Added slots have to dial and the now-rate (1 s half-life) has to
@@ -808,6 +853,10 @@ fn probe_next(fleet: usize) -> usize {
 /// that is [`LINE_CAP_MAX_FLEET`], a rung §208 Round A measured as free
 /// at 99 Mbit.
 ///
+/// `anchored` is whether this run has a line anchor at all, typed or
+/// measured: it picks the gate, [`LINE_CAP_PROBE_MIN_BPS`] when it does
+/// and [`LINE_CAP_PROBE_COLD_MIN_BPS`] on a cold run.
+///
 /// `proven` bounds every step AFTER a rung has paid. It is
 /// [`supply_ceiling`] asked as if the anchor were measured, because a
 /// rung that paid IS a measurement: the line was seen to carry more
@@ -822,9 +871,10 @@ fn probe_next(fleet: usize) -> usize {
 ///
 /// Four properties keep it out of what §208 protects:
 ///
-/// * **It only fires on a line PROVEN fast**: the fleet must already be
-///   moving [`LINE_CAP_PROBE_MIN_BPS`], an achieved rate and so a lower
-///   bound on the line. A supply-bound 99 Mbit line never opens it.
+/// * **It only fires on a line PROVEN not slow**: the fleet must already
+///   be moving the gate ([`LINE_CAP_PROBE_MIN_BPS`] anchored,
+///   [`LINE_CAP_PROBE_COLD_MIN_BPS`] cold), an achieved rate and so a
+///   lower bound on the line. A supply-bound 99 Mbit line never opens it.
 /// * **It stops at the first rung that does not pay**, so a line that
 ///   the sockets already fill gets at most one rung of over-provisioning.
 /// * **It never shrinks the fleet** and never reads the anchor, so a
@@ -840,6 +890,7 @@ pub fn probe_step(
     dialling: usize,
     ceiling: usize,
     proven: usize,
+    anchored: bool,
 ) -> (usize, Probe) {
     if p.done || now_bps == 0 || dialling == 0 {
         return (fleet, p);
@@ -857,7 +908,11 @@ pub fn probe_step(
             },
         );
     }
-    if now.saturating_sub(p.since) < LINE_CAP_PROBE_SETTLE_MS || now_bps < LINE_CAP_PROBE_MIN_BPS {
+    let gate = match anchored {
+        true => LINE_CAP_PROBE_MIN_BPS,
+        false => LINE_CAP_PROBE_COLD_MIN_BPS,
+    };
+    if now.saturating_sub(p.since) < LINE_CAP_PROBE_SETTLE_MS || now_bps < gate {
         return (fleet, p);
     }
     if let Some((r0, d0)) = p.base {
@@ -1679,8 +1734,16 @@ impl Shared {
             // below `curve`.
             let want = {
                 let mut probe = lc.probe.lock_ok();
-                let (want, next) =
-                    probe_step(*probe, curve, now, now_bps, dialling, ceiling, proven);
+                let (want, next) = probe_step(
+                    *probe,
+                    curve,
+                    now,
+                    now_bps,
+                    dialling,
+                    ceiling,
+                    proven,
+                    lc.anchor_bps > 0,
+                );
                 *probe = next;
                 want
             };

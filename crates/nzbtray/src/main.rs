@@ -1583,15 +1583,22 @@ mod app {
             )),
             ID_DOWNLOADS => {
                 // Prefer the daemon's live out_dir (an attached daemon may
-                // download somewhere other than our default).
-                let dir = api_get(port, data_dir, "get_config", 1500)
-                    .and_then(|v| {
-                        v.pointer("/config/nzbfast/out_dir")
-                            .and_then(Value::as_str)
-                            .map(PathBuf::from)
-                    })
-                    .unwrap_or_else(|| APP.with(|a| a.borrow().as_ref().unwrap().out_dir.clone()));
+                // download somewhere other than our default) - but only a
+                // PROVEN daemon's: the string goes to create_dir_all and
+                // ShellExecuteW, and an unproven listener may be a port
+                // squatter (`probe_body::proven_out_dir`, sweep H6).
+                let ours = || APP.with(|a| a.borrow().as_ref().unwrap().out_dir.clone());
+                let proof = proof(port, data_dir);
+                let dir = proof
+                    .and_then(|_| api_get(port, data_dir, "get_config", 1500))
+                    .and_then(|v| crate::probe_body::proven_out_dir(Some(&v), proof))
+                    .map(PathBuf::from)
+                    .unwrap_or_else(ours);
                 let _ = std::fs::create_dir_all(&dir);
+                // `open` on anything but a folder launches or browses it;
+                // a name create_dir_all could not make a folder of falls
+                // back to ours rather than being shell-opened as a file.
+                let dir = if dir.is_dir() { dir } else { ours() };
                 open_url(&dir.to_string_lossy());
             }
             ID_PAUSE => {

@@ -1483,7 +1483,7 @@ pub fn apply_setting(
         // one on a block account, where the ceiling has to be consulted
         // whatever it says (see `altcand::AltSettings`).
         "alt_hold_count" => {
-            let n = (uint()? as u32).min(10);
+            let n = uint()?.min(10) as u32;
             d.alt.hold_count.store(n, Ordering::Relaxed);
             (true, json!(n))
         }
@@ -1498,7 +1498,7 @@ pub fn apply_setting(
             (true, json!(on))
         }
         "alt_max_copies" => {
-            let n = (uint()? as u32).clamp(1, 10);
+            let n = uint()?.clamp(1, 10) as u32;
             d.alt.max_copies.store(n, Ordering::Relaxed);
             (true, json!(n))
         }
@@ -1526,7 +1526,7 @@ pub fn apply_setting(
             (true, json!(n))
         }
         "heal_auto_max_jobs" => {
-            let n = (uint()? as u32).min(super::heal::MAX_HEAL_JOBS as u32);
+            let n = uint()?.min(super::heal::MAX_HEAL_JOBS as u64) as u32;
             d.heal_auto.max_jobs.store(n, Ordering::Relaxed);
             (true, json!(n))
         }
@@ -1800,7 +1800,13 @@ pub fn apply_setting(
 /// unconditional rather than resting on a reading of which arms
 /// `apply_setting` has, and every such name is refused a few lines later
 /// anyway.
-fn setting_tx(name: &str) -> Arc<Mutex<()>> {
+///
+/// `pub(crate)` for exactly one outside caller: `finish_action`, whose
+/// cancel and firing paths write `queue_finished_action` live AND on disk
+/// without going through [`apply_and_save`], and so have to join its
+/// transaction by hand (Codex sweep 22 Oct 2026, F3). Lock order there
+/// is the same as here: this mutex first, then the finish `ctl` lock.
+pub(crate) fn setting_tx(name: &str) -> Arc<Mutex<()>> {
     static TX: std::sync::OnceLock<Mutex<std::collections::HashMap<&'static str, Arc<Mutex<()>>>>> =
         std::sync::OnceLock::new();
     /// Not a settable name (it carries a NUL), so it can never collide

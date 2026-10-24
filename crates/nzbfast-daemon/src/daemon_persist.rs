@@ -375,6 +375,21 @@ impl Daemon {
         // it, which is the case that could still run.
         let (queued, history, split) = moveseq::reconcile_moves(queued, history);
         let (nq, nh) = (queued.len(), history.len());
+        // The top-of-function sweep only reaches the download root and
+        // one level under it. A replace interrupted anywhere else - a
+        // nested category folder, a write-through destination - is found
+        // through the canonical directory the replacing record names
+        // (M11). `replaces` only, not every `out_dir`: it is the one
+        // field that names a directory a publish parks, it is set on a
+        // handful of records at most, and this is the critical path to
+        // the API answering, so a long history must not cost a stat per
+        // row against a library that may sit on a slow share.
+        let expected: Vec<PathBuf> = queued
+            .iter()
+            .chain(history.iter())
+            .filter_map(|j| j.replaces.clone())
+            .collect();
+        crate::job::recover_interrupted_publishes_at(&crate::naming::out_dir(self), expected);
         for job in queued {
             self.register_cat(&job.category);
             self.queue.lock_ok().push_back(Arc::new(Mutex::new(job)));

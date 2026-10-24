@@ -112,7 +112,10 @@ pub(super) fn whole_file_md5_refutes_the_grid(
     let mut targets: Vec<(PathBuf, &nzbkit::par2::Par2File)> = Vec::new();
     for f in &set.files {
         let name = nzbkit::disk::sanitize_out_name(&f.name);
-        let path = out_dir.join(&name);
+        // `join_out_name`, never `Path::join`: the sanitized name is
+        // '/'-separated, and a '/' is not a separator inside a Windows
+        // `\\?\` verbatim path (Gemini 14 Oct sweep L5).
+        let path = nzbkit::disk::join_out_name(out_dir, &name);
         match std::fs::metadata(&path) {
             Ok(m) if m.is_file() && m.len() == f.length => {}
             _ => return false,

@@ -2087,7 +2087,18 @@ fn an_all_primary_fleet_is_untouched_by_the_queue_dry_edge() {
 /// whose rate is `rate(dialling)`, with every slot the probe asks for
 /// dialling at once. Returns the fleet after each tick.
 fn probe_run(seed: usize, secs: u64, ceiling: usize, rate: impl Fn(usize) -> u64) -> Vec<usize> {
-    probe_run_to(seed, secs, ceiling, ceiling, rate)
+    probe_run_to(seed, secs, ceiling, ceiling, true, rate)
+}
+
+/// [`probe_run`] on a COLD run: no line anchor at all, so the probe reads
+/// [`LINE_CAP_PROBE_COLD_MIN_BPS`] as its gate.
+fn probe_run_cold(
+    seed: usize,
+    secs: u64,
+    ceiling: usize,
+    rate: impl Fn(usize) -> u64,
+) -> Vec<usize> {
+    probe_run_to(seed, secs, ceiling, ceiling, false, rate)
 }
 
 /// [`probe_run`] with a separate `proven` ceiling for the steps after
@@ -2097,13 +2108,23 @@ fn probe_run_to(
     secs: u64,
     ceiling: usize,
     proven: usize,
+    anchored: bool,
     rate: impl Fn(usize) -> u64,
 ) -> Vec<usize> {
     let mut p = Probe::default();
     let mut fleet = seed;
     let mut seen = Vec::new();
     for t in 0..secs {
-        let (f, next) = probe_step(p, fleet, t * 1_000, rate(fleet), fleet, ceiling, proven);
+        let (f, next) = probe_step(
+            p,
+            fleet,
+            t * 1_000,
+            rate(fleet),
+            fleet,
+            ceiling,
+            proven,
+            anchored,
+        );
         assert!(f >= fleet, "the probe never shrinks a fleet");
         let bound = ceiling.max(proven).max(fleet);
         assert!(f <= bound, "{f} past ceiling {bound}");
@@ -2171,6 +2192,52 @@ fn the_probe_never_fires_on_a_slow_line() {
     }
 }
 
+/// GitHub #103, 24 Oct 2026: a COLD run on providers carrying ~33 Mbit
+/// a socket (`carry_bps: 4130236`) on 10 Gbit fiber. The seed reads ~825
+/// Mbit, which the anchored gate never lets the probe see, so a
+/// first job ran pinned at 25 for its whole length. The sockets ARE the
+/// limit, so every rung pays and the probe reaches the first ceiling.
+#[test]
+fn a_cold_probe_climbs_a_slow_per_socket_fleet_on_a_fast_line() {
+    let rate = |d: usize| mbit(33) * d as u64;
+    let warm = probe_run(LINE_CAP_DEFAULT_FLEET, 12, LINE_CAP_MAX_FLEET, rate);
+    assert!(
+        warm.iter().all(|&f| f == LINE_CAP_DEFAULT_FLEET),
+        "the anchored gate moved: {warm:?}"
+    );
+    let cold = probe_run_cold(LINE_CAP_DEFAULT_FLEET, 12, LINE_CAP_MAX_FLEET, rate);
+    assert_eq!(cold[2], 35, "{cold:?}");
+    assert_eq!(*cold.last().unwrap(), LINE_CAP_MAX_FLEET, "{cold:?}");
+}
+
+/// The cold gate still keeps §208's regime out: a 99 Mbit line, and
+/// anything under 400 Mbit, never opens it.
+#[test]
+fn a_cold_probe_never_fires_on_a_slow_line() {
+    for line in [mbit(99), mbit(250), mbit(390)] {
+        let seen = probe_run_cold(LINE_CAP_DEFAULT_FLEET, 60, LINE_CAP_MAX_FLEET, |_| line);
+        assert!(
+            seen.iter().all(|&f| f == LINE_CAP_DEFAULT_FLEET),
+            "{seen:?}"
+        );
+    }
+}
+
+/// The price `LINE_CAP_PROBE_COLD_MIN_BPS` names, on a FLAT reading: a
+/// cold run on a full line between 400 Mbit and 2 Gbit gets the first
+/// rung and no more, because a line the seed already fills cannot pay.
+/// Pinned at exactly one rung, so a pay rule that stopped refusing a
+/// full line fails here. (A real run's ramping baseline can buy one
+/// rung more, up to the first ceiling; the constant's doc measures it.)
+#[test]
+fn a_cold_probe_on_a_full_line_costs_one_rung() {
+    for line in [mbit(400), mbit(940), mbit(1_990)] {
+        let seen = probe_run_cold(LINE_CAP_DEFAULT_FLEET, 60, LINE_CAP_MAX_FLEET, |_| line);
+        assert_eq!(*seen.last().unwrap(), 35, "{line}: {seen:?}");
+        assert!(seen.iter().all(|&f| f <= 35), "{line}: {seen:?}");
+    }
+}
+
 /// No evidence is no move, and that includes the queue-dry tail, where
 /// the governor hands the arms `now_bps == 0`.
 #[test]
@@ -2184,13 +2251,41 @@ fn the_probe_waits_for_a_dwell_and_ignores_no_reading() {
         25,
         LINE_CAP_MAX_FLEET,
         LINE_CAP_MAX_FLEET,
+        true,
     );
     assert_eq!(f, 25);
-    let (f, p) = probe_step(p, 25, LINE_CAP_PROBE_SETTLE_MS - 1, mbit(5_000), 25, 50, 50);
+    let (f, p) = probe_step(
+        p,
+        25,
+        LINE_CAP_PROBE_SETTLE_MS - 1,
+        mbit(5_000),
+        25,
+        50,
+        50,
+        true,
+    );
     assert_eq!(f, 25, "inside the dwell");
-    let (f, q) = probe_step(p, 25, 10_000, 0, 25, LINE_CAP_MAX_FLEET, LINE_CAP_MAX_FLEET);
+    let (f, q) = probe_step(
+        p,
+        25,
+        10_000,
+        0,
+        25,
+        LINE_CAP_MAX_FLEET,
+        LINE_CAP_MAX_FLEET,
+        true,
+    );
     assert_eq!((f, q), (25, p), "a zero reading changes nothing");
-    let (f, _) = probe_step(p, 25, LINE_CAP_PROBE_SETTLE_MS, mbit(5_000), 25, 50, 50);
+    let (f, _) = probe_step(
+        p,
+        25,
+        LINE_CAP_PROBE_SETTLE_MS,
+        mbit(5_000),
+        25,
+        50,
+        50,
+        true,
+    );
     assert_eq!(f, 35);
 }
 
@@ -2198,12 +2293,12 @@ fn the_probe_waits_for_a_dwell_and_ignores_no_reading() {
 /// than being judged on time it never had.
 #[test]
 fn a_curve_raise_restarts_the_probes_dwell() {
-    let (_, p) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 50, 50);
-    let (f, p) = probe_step(p, 30, 1_900, mbit(5_000), 30, 50, 50);
+    let (_, p) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 50, 50, true);
+    let (f, p) = probe_step(p, 30, 1_900, mbit(5_000), 30, 50, 50, true);
     assert_eq!(f, 30);
-    let (f, _) = probe_step(p, 30, 2_100, mbit(5_000), 30, 50, 50);
+    let (f, _) = probe_step(p, 30, 2_100, mbit(5_000), 30, 50, 50, true);
     assert_eq!(f, 30, "30's dwell began at 1.9 s");
-    let (f, _) = probe_step(p, 30, 3_900, mbit(5_000), 30, 50, 50);
+    let (f, _) = probe_step(p, 30, 3_900, mbit(5_000), 30, 50, 50, true);
     assert_eq!(f, 45);
 }
 
@@ -2215,7 +2310,7 @@ fn a_rung_whose_slots_never_dialled_does_not_pay() {
     let mut fleet = 25;
     for t in 0..20u64 {
         // The account grants 25 and no more.
-        let (f, n) = probe_step(p, fleet, t * 1_000, mbit(4_500 + t * 10), 25, 50, 50);
+        let (f, n) = probe_step(p, fleet, t * 1_000, mbit(4_500 + t * 10), 25, 50, 50, true);
         p = n;
         fleet = f;
     }
@@ -2246,6 +2341,7 @@ fn a_probe_that_paid_walks_past_the_first_ceiling() {
         20,
         LINE_CAP_MAX_FLEET,
         LINE_CAP_SUPPLY_MAX_FLEET,
+        true,
         |d| mbit(120) * d as u64,
     );
     assert_eq!(*seen.last().unwrap(), LINE_CAP_SUPPLY_MAX_FLEET, "{seen:?}");
@@ -2260,10 +2356,10 @@ fn a_probe_that_paid_walks_past_the_first_ceiling() {
 /// however generous `proven` is.
 #[test]
 fn the_first_probe_step_never_uses_the_proven_ceiling() {
-    let (f, _) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 30, 100);
+    let (f, _) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 30, 100, true);
     assert_eq!(f, 25);
-    let (_, p) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 30, 100);
-    let (f, p) = probe_step(p, 25, 2_000, mbit(5_000), 25, 30, 100);
+    let (_, p) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 30, 100, true);
+    let (f, p) = probe_step(p, 25, 2_000, mbit(5_000), 25, 30, 100, true);
     assert_eq!(f, 30, "the unproven step stops at `ceiling`");
     assert!(!p.paid);
 }
@@ -2279,6 +2375,7 @@ fn a_proven_probe_still_stops_where_the_line_is_full() {
         30,
         LINE_CAP_MAX_FLEET,
         LINE_CAP_SUPPLY_MAX_FLEET,
+        true,
         |d| (mbit(150) * d as u64).min(line),
     );
     assert_eq!(*seen.last().unwrap(), 70, "{seen:?}");

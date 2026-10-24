@@ -58,7 +58,10 @@ public sealed class FileRow : Observable
 
     private bool _excluded;
 
-    /// <summary>Set by the row's context menu. Excluded rows are left out of a repair.</summary>
+    /// <summary>
+    /// Nothing sets this today: the session's RepairSpec has no exclusion field, so an
+    /// "Exclude from repair" row action would be a dead button and is not offered.
+    /// </summary>
     public bool Excluded
     {
         get => _excluded;

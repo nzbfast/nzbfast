@@ -844,6 +844,12 @@ enum Command {
         /// Overwrite an existing config file.
         #[arg(long)]
         force: bool,
+        /// Sonarr, Radarr or another app drives this install: also apply
+        /// the dashboard's setup preset for that (no renaming, no Trash,
+        /// no indexing or Spotnet scans, duplicates fail into History,
+        /// group-readable files). Settings you already saved are kept.
+        #[arg(long)]
+        arr: bool,
     },
     /// Upload files as yEnc posts to a test group and emit the matching
     /// NZB (ops tool; runbook: bench/nested-corpus/POSTING.md). Requires
@@ -1157,7 +1163,12 @@ async fn run() -> Result<()> {
             .await
         }
         cmd @ Command::Get { .. } => get_cmd(cmd, &cli.config, budget).await,
-        Command::ImportSab { ini, out, force } => {
+        Command::ImportSab {
+            ini,
+            out,
+            force,
+            arr,
+        } => {
             let ini = match ini {
                 Some(p) => p,
                 None => {
@@ -1184,7 +1195,7 @@ async fn run() -> Result<()> {
                     }
                 }
             };
-            import_sab::import(&ini, out.as_deref().unwrap_or(&cli.config), force)
+            import_sab::import(&ini, out.as_deref().unwrap_or(&cli.config), force, arr)
         }
         Command::BenchCpu { mb } => {
             bench_cpu(mb);

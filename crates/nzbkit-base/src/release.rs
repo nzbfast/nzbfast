@@ -2512,7 +2512,9 @@ use rescue::{reversed_rescue, rot13, rot13_rescue, volume_tail_cut};
 /// Formatting a [`Parsed`] back into text - badges, suffixes, file base
 /// names. Same ceiling. Re-exported so callers keep their paths.
 mod render;
-pub use render::{NameStyle, movie_name, quality_label, quality_suffix, sanitize_name};
+pub use render::{
+    NameStyle, keep_one_word_group, movie_name, quality_label, quality_suffix, sanitize_name,
+};
 
 /// Reading and writing dates. Same ceiling; same re-export.
 mod dates;

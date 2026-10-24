@@ -199,12 +199,16 @@ pub struct FileEntry {
     /// needs the decompressor. Only [`Method::Store`] is directly
     /// mappable.
     pub method: Method,
-    /// The data area is encrypted. True for RAR4 as well as RAR5, where
-    /// `crypt` is `None` and the parameters live in the header's salt
-    /// flag instead.
+    /// The data area is encrypted. True for RAR4 as well as RAR5, and
+    /// true even where `crypt` is `None` (a cipher older than RAR 3.0's
+    /// AES, which has no key schedule here).
     pub encrypted: bool,
-    /// Decryption parameters for an encrypted entry (RAR5 only; a RAR4
-    /// encrypted entry has `encrypted` set and no params).
+    /// Decryption parameters for an encrypted entry: [`EntryCrypt::Rar5`],
+    /// or [`EntryCrypt::Rar4`] carrying the header's `FHD_SALT` salt for
+    /// RAR 3.0+ AES. `None` for an unencrypted entry and for an older
+    /// RAR4 cipher, which `entry_blocker` reads as "hand to unrar". (This
+    /// said "RAR5 only" after the RAR4 arm landed, until the Gemini
+    /// 14 Oct 2026 sweep, L9.)
     pub crypt: Option<EntryCrypt>,
     /// The CRC32 this piece's header stores (RAR5 file flag 0x04, or the
     /// RAR4 file-header CRC), VERBATIM - the parser never normalises it.

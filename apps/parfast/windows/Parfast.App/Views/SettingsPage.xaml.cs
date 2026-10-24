@@ -9,14 +9,17 @@ namespace Parfast.App.Views;
 public sealed partial class SettingsPage : UserControl
 {
     /// <summary>
-    /// The log levels, in the order the core numbers them.
+    /// The log levels, row for row with <see cref="SettingsViewModel.LogLevelValues"/>.
     /// </summary>
     /// <remarks>
-    /// `advanced.log_level` is an INTEGER in the contract, not a word, and the
-    /// index into this array IS that integer. It read as a string until the
-    /// settings object was regrouped on 12 Sep 2026; the words stayed on screen
-    /// and the value underneath changed type, which is exactly the shape a
-    /// non-compiling project hides.
+    /// `advanced.log_level` is an INTEGER in the contract, not a word, and it is
+    /// `verbose - quiet` (-2, 0, 1, 2), NOT the index into this array: the page
+    /// used the index as the value until 14 Oct 2026, so the default 0 showed as
+    /// Quiet and Normal wrote Verbose (Gemini sweep M18.4). The view model owns
+    /// the mapping (<see cref="SettingsViewModel.LogLevelIndex"/>). It read as a
+    /// string until the settings object was regrouped on 12 Sep 2026; the words
+    /// stayed on screen and the value underneath changed type, which is exactly
+    /// the shape a non-compiling project hides.
     /// </remarks>
     private static readonly string[] LogLevels = ["Quiet", "Normal", "Verbose", "Debug"];
 
@@ -178,7 +181,7 @@ public sealed partial class SettingsPage : UserControl
                 : "File associations can only be set on Windows.";
 
             ShowCommandBox.IsChecked = Vm.ShowCommand;
-            LogLevelBox.SelectedIndex = Math.Clamp(Vm.LogLevel, 0, LogLevels.Length - 1);
+            LogLevelBox.SelectedIndex = Vm.LogLevelIndex;
         }
         finally
         {
@@ -304,7 +307,7 @@ public sealed partial class SettingsPage : UserControl
         Vm.ShowCommand = ShowCommandBox.IsChecked == true;
         if (LogLevelBox.SelectedIndex >= 0)
         {
-            Vm.LogLevel = LogLevelBox.SelectedIndex;
+            Vm.LogLevelIndex = LogLevelBox.SelectedIndex;
         }
     }
 

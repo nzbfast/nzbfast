@@ -1089,6 +1089,38 @@ fn journal_d_without_e_refetches() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Gemini 14 Oct sweep M8: a D fragment's `file_off + len` comes off
+/// disk unchecked, and a corrupt line that overflows it panicked the
+/// resume in an overflow-checked build (in release it wrapped into a
+/// small end that the bounds test happened to reject). It must simply
+/// refetch.
+#[test]
+fn journal_d_overflowing_its_end_refetches_without_panicking() {
+    let dir = tmpdir("d-overflow");
+    std::fs::write(dir.join("movie.mkv"), payload(64_000, 3)).unwrap();
+    let salt = [7u8; 16];
+    let keys = crate::rarcrypt::derive_keys("pw", &salt, 1).unwrap();
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let text = format!(
+        "nzbfast-journal v1 d41d8cd98f00b204e9800998ecf8427e\n\
+         S 0 100000 v.rar\n\
+         F 0 movie.mkv\n\
+         E {} 1 {} {} {} movie.mkv\n\
+         D 0 0:{}:5000:100 <a1@t>\n",
+        hex(&salt),
+        hex(&[9u8; 16]),
+        u64::MAX - 8,
+        hex(&crate::rarcrypt::make_check(&keys)),
+        u64::MAX - 15,
+    );
+    std::fs::write(dir.join(".nzbfast.journal"), text).unwrap();
+    let (_j, resume) = crate::journal::Journal::open(&dir, b"").unwrap();
+    assert!(resume.crypto_files.contains_key("movie.mkv"), "E parsed");
+    let restored = crate::journal::restore(&dir, &resume, Some("pw"));
+    assert!(restored.ids.is_empty(), "an overflowing D must refetch");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// `-hp` shape: encrypted headers AND encrypted data.
 #[test]
 fn encrypted_headers_volume_decrypts() {

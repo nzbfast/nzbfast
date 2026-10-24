@@ -858,15 +858,27 @@ fn pct(x: u64, y: u64) -> f64 {
 
 /// The set's base name: the output path without its `.par2` suffix,
 /// which is what every volume's name is built on.
+///
+/// The suffix in ANY case, as `parfast::create` strips it: the engine
+/// names `set.Par2`'s volumes `set.vol...par2`, and this used to answer
+/// `set.Par2` for it, so the preview drew volumes the create never wrote
+/// and the run's written-file report found none of its own files
+/// (Gemini sweep H9).
 pub fn base_name(output: &Path) -> String {
     let name = output
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    name.strip_suffix(".par2")
-        .or_else(|| name.strip_suffix(".PAR2"))
-        .unwrap_or(&name)
-        .to_string()
+    match name.len().checked_sub(5) {
+        Some(cut)
+            if name
+                .get(cut..)
+                .is_some_and(|tail| tail.eq_ignore_ascii_case(".par2")) =>
+        {
+            name[..cut].to_string()
+        }
+        _ => name,
+    }
 }
 
 /// The `parfast c` line that would do this. See [`round_trips`] in the
@@ -980,7 +992,7 @@ fn scaled(bytes: u64) -> Option<String> {
 
 /// Shell quoting for the copied line, and nothing more: a path with a
 /// space in it must survive a paste into a terminal.
-fn quote(s: &str) -> String {
+pub(crate) fn quote(s: &str) -> String {
     if !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_./=+,:@%".contains(&b))
@@ -1876,5 +1888,13 @@ mod tests {
         assert_eq!(base_name(Path::new("/abs/set.par2")), "set");
         assert_eq!(base_name(Path::new("/abs/set.part1.par2")), "set.part1");
         assert_eq!(base_name(Path::new("/abs/set")), "set");
+        // Any case, as the engine strips it.
+        assert_eq!(base_name(Path::new("/abs/set.PAR2")), "set");
+        assert_eq!(base_name(Path::new("/abs/set.Par2")), "set");
+        // A multi-byte name shorter-than-it-looks is not sliced mid-char.
+        assert_eq!(
+            base_name(Path::new("/abs/\u{e9}\u{20ac}\u{20ac}")),
+            "\u{e9}\u{20ac}\u{20ac}"
+        );
     }
 }
