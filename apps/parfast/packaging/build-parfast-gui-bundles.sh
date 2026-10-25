@@ -98,7 +98,12 @@ set -euo pipefail
 # one while this lived in packaging/; see the header for why it moved.
 cd "$(dirname "$0")/../../.."
 ROOT=$(pwd)
-[ -f packaging/PUBLIC_MANIFEST ] || {
+# The marker has to exist in the PUBLIC tree too: since 24 Oct 2026 the
+# release build runs from the public snapshot (provenance-parfast.yml),
+# which does not carry packaging/PUBLIC_MANIFEST - the first public run
+# refused here. Cargo.toml beside apps/parfast/Cargo.toml is the root of
+# this repository in both trees and nowhere else.
+[ -f Cargo.toml ] && [ -f apps/parfast/Cargo.toml ] || {
     echo "not at the repo root after cd - this script moved and its hop count is stale" >&2; exit 1; }
 
 # The GUI's NUMBER tracks the CLI's, which tracks nzbfast's (plan decision
