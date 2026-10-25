@@ -1,0 +1,479 @@
+# provenance-parfast: build, SBOM and attest every parfast release asset on
+# a GitHub-hosted runner, and attach it to the release.
+#
+# provenance-release.yml does this for nzbfast and gates itself to `v*`
+# tags on purpose. parfast ships two more releases from this repository -
+# the CLI (`parfast-vX.Y.Z`) and the desktop app (`parfast-gui-vX.Y.Z-
+# <stage>`) - and until 24 Oct 2026 both were built on the release Mac and
+# a Windows build box and uploaded by hand, so nothing on their release
+# pages could be traced to a build. This is the same answer for them, in a
+# file of its own: the two products share none of nzbfast's release
+# machinery (no installers-as-services, no updater, no manifest), and a
+# product test threaded through every job of the nzbfast workflow is the
+# shape packaging/build-parfast-bundles.sh's header argues against.
+#
+# EVERY JOB CALLS THE SAME BUNDLER THE RELEASE MAC DID, so the asset names
+# and layouts are the ones parfast already ships:
+#   CLI  packaging/build-parfast-bundles.sh - macos-universal on a macOS
+#        runner, linux-x64 / linux-arm64 / linux-armv7 / freebsd-x64 by
+#        cargo-zigbuild and windows-x64 by mingw on an ubuntu runner.
+#   APP  apps/parfast/packaging/build-parfast-gui-bundles.sh macos-universal
+#        on a macOS runner (the .dmg and the .zip); the Windows half is that
+#        script's build_win steps run natively on a Windows runner instead
+#        of over ssh (the cdylib, tools/build.ps1 -Publish -Installer, the
+#        Compress-Archive zip), because the bundler only knows how to reach
+#        a box by ssh.
+#
+# THE BUILD-HOST REMAP comes from a runner-local ~/.cargo/config.toml, NOT
+# a RUSTFLAGS env var. Cargo JOINS rustflags arrays across config files but
+# an env var REPLACES them, and .cargo/config.toml's windows-gnu section
+# carries `-C link-arg=-static`: RUSTFLAGS would build a CLI exe that needs
+# the mingw runtime beside it, and build-parfast-bundles.sh's own `strings`
+# check would refuse it for carrying /home/runner anyway. The app's Windows
+# job is msvc, which the project config does not touch, so it keeps the
+# bundler's own RUSTFLAGS line.
+#
+# TWO WAYS IN, as for nzbfast. A DISPATCH against a DRAFT release at the
+# tag is the normal path (publish-release step 5d): every job attaches to
+# the draft, which nobody sees until it is published. A `release:
+# published` event for a parfast tag with no attestation on it yet runs the
+# same jobs, so a release cut without the dispatch still gets provenance.
+# Uploads never --clobber.
+#
+# NO `github.repository` TERM IN THE JOB GUARDS, unlike provenance-release.yml:
+# the private repository never publishes a parfast release, so the release
+# arm cannot fire there, and a dispatch is a deliberate act wherever it is
+# made (the dry runs of this file are dispatches on the private repo). The
+# term would also be unreadable to tools/workflow_scan.py, which refuses a
+# repository comparison joined by `||` rather than guess what it decides.
+#
+# The SBOMs cover the RUST dependency graph (make-sbom.py), which for the
+# app is the parfast-ffi crate in the detached apps/parfast workspace
+# (`--workspace`); the app's Swift and .NET packages are not in them.
+
+name: provenance-parfast
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing parfast release tag (parfast-vX.Y.Z or parfast-gui-vX.Y.Z-<stage>) to build, attest and attach to"
+        required: true
+
+env:
+  TAG: ${{ inputs.tag || github.event.release.tag_name }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------ the CLI
+  cli-mac:
+    if: >-
+      ${{ (github.event_name == 'release'
+           && startsWith(github.event.release.tag_name, 'parfast-v')
+           && !contains(toJSON(github.event.release.assets.*.name), '.intoto.jsonl'))
+          || (github.event_name == 'workflow_dispatch' && startsWith(inputs.tag, 'parfast-v')) }}
+    permissions:
+      id-token: write       # Sigstore keyless signing (OIDC identity token)
+      attestations: write   # write the attestation to the GH attestations API
+      contents: write       # attach artifacts to the release
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - name: Verify the checkout and the attested source are both the tag
+        run: |
+          set -euo pipefail
+          want=$(git rev-parse "refs/tags/$TAG^{commit}")
+          [ "$want" = "$(git rev-parse HEAD)" ] || { echo "checkout is not tag $TAG" >&2; exit 1; }
+          [ "$want" = "$GITHUB_SHA" ] || {
+            echo "this run's ref is $GITHUB_SHA but tag $TAG is $want; re-dispatch with --ref $TAG" >&2; exit 1; }
+          VER=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/parfast/Cargo.toml | head -1)
+          [ "$TAG" = "parfast-v$VER" ] || { echo "tag $TAG is not crates/parfast's version $VER" >&2; exit 1; }
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+      - name: Runner path remap (joined with the project's rustflags, never replacing them)
+        run: |
+          mkdir -p ~/.cargo
+          printf '[build]\nrustflags = ["--remap-path-prefix=%s=/build"]\n' "$HOME" >> ~/.cargo/config.toml
+      - name: Build + package (packaging/build-parfast-bundles.sh)
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: packaging/build-parfast-bundles.sh dist macos-universal
+      - name: No builder identity in the archive
+        run: python3 packaging/check-archive-identity.py "dist/parfast-$VER-macos-universal.tar.gz"
+      - name: SBOM
+        run: |
+          python3 packaging/make-sbom.py --asset "dist/parfast-$VER-macos-universal.tar.gz" \
+            --target aarch64-apple-darwin --target x86_64-apple-darwin -p parfast
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: parfast-cli-mac
+          path: dist/*
+          if-no-files-found: error
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/parfast-${{ env.VER }}-macos-universal.tar.gz
+      - name: Stage the attestation bundle beside the asset
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: python3 packaging/stage-attestation.py "$BUNDLE" "dist/parfast-$VER-macos-universal.tar.gz"
+      - name: Attest SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/parfast-${{ env.VER }}-macos-universal.tar.gz
+          sbom-path: dist/parfast-${{ env.VER }}-macos-universal.tar.gz.spdx.json
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          t="dist/parfast-$VER-macos-universal.tar.gz"
+          gh release upload "$TAG" "$t" "$t.intoto.jsonl" "$t.spdx.json" --repo "$REPO"
+
+  cli-unix-and-windows:
+    if: >-
+      ${{ (github.event_name == 'release'
+           && startsWith(github.event.release.tag_name, 'parfast-v')
+           && !contains(toJSON(github.event.release.assets.*.name), '.intoto.jsonl'))
+          || (github.event_name == 'workflow_dispatch' && startsWith(inputs.tag, 'parfast-v')) }}
+    permissions:
+      id-token: write
+      attestations: write
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - name: Verify the checkout and the attested source are both the tag
+        run: |
+          set -euo pipefail
+          want=$(git rev-parse "refs/tags/$TAG^{commit}")
+          [ "$want" = "$(git rev-parse HEAD)" ] || { echo "checkout is not tag $TAG" >&2; exit 1; }
+          [ "$want" = "$GITHUB_SHA" ] || {
+            echo "this run's ref is $GITHUB_SHA but tag $TAG is $want; re-dispatch with --ref $TAG" >&2; exit 1; }
+          VER=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/parfast/Cargo.toml | head -1)
+          [ "$TAG" = "parfast-v$VER" ] || { echo "tag $TAG is not crates/parfast's version $VER" >&2; exit 1; }
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+      - name: Install zig + cargo-zigbuild, mingw and zip
+        run: |
+          python3 -m venv /tmp/zigvenv
+          /tmp/zigvenv/bin/pip install --quiet ziglang==0.16.0
+          printf '#!/bin/sh\nexec /tmp/zigvenv/bin/python -m ziglang "$@"\n' \
+            | sudo tee /usr/local/bin/zig >/dev/null
+          sudo chmod +x /usr/local/bin/zig
+          zig version
+          ver=0.23.0
+          sha=f0aa9cc8220a84788c6e4a9b6d80422f041659227b680fdef982d5a8ddffddb4
+          url="https://github.com/rust-cross/cargo-zigbuild/releases/download/v${ver}/cargo-zigbuild-x86_64-unknown-linux-musl.tar.xz"
+          zb=$(mktemp -d)
+          curl -fsSL -o "$zb/cargo-zigbuild.tar.xz" "$url"
+          (cd "$zb" && echo "$sha  cargo-zigbuild.tar.xz" | sha256sum -c -)
+          tar xf "$zb/cargo-zigbuild.tar.xz" -C "$zb" --strip-components=1
+          sudo mv "$zb/cargo-zigbuild" /usr/local/bin/
+          rm -rf "$zb"
+          # g++ as well as gcc: nzbkit-base builds the C++ yEnc decoder.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 zip >/dev/null
+          git diff --exit-code --stat   # the checkout is untouched
+      - name: Runner path remap (joined with the project's rustflags, never replacing them)
+        run: |
+          mkdir -p ~/.cargo
+          printf '[build]\nrustflags = ["--remap-path-prefix=%s=/build"]\n\n[target.x86_64-pc-windows-gnu]\nrustflags = ["--remap-path-prefix=%s=/build"]\n' \
+            "$HOME" "$HOME" >> ~/.cargo/config.toml
+      - name: Build + package (packaging/build-parfast-bundles.sh)
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: packaging/build-parfast-bundles.sh dist linux-x64 linux-arm64 linux-armv7 freebsd-x64 windows-x64
+      - name: The windows exe is static (no mingw runtime DLLs)
+        run: |
+          set -euo pipefail
+          if x86_64-w64-mingw32-objdump -p target/x86_64-pc-windows-gnu/release/parfast.exe \
+               | grep -iE 'DLL Name: (libgcc|libstdc|libwinpthread)'; then
+            echo "parfast.exe needs a mingw runtime DLL" >&2; exit 1
+          fi
+      - name: No builder identity in the archives
+        run: python3 packaging/check-archive-identity.py dist/parfast-"$VER"-*.tar.gz "dist/parfast-$VER-windows-x64.zip"
+      - name: SBOMs
+        run: |
+          set -euo pipefail
+          for a in linux-x64:x86_64-unknown-linux-musl linux-arm64:aarch64-unknown-linux-musl \
+                   linux-armv7:armv7-unknown-linux-musleabihf freebsd-x64:x86_64-unknown-freebsd; do
+            python3 packaging/make-sbom.py --asset "dist/parfast-$VER-${a%%:*}.tar.gz" --target "${a##*:}" -p parfast
+          done
+          python3 packaging/make-sbom.py --asset "dist/parfast-$VER-windows-x64.zip" \
+            --target x86_64-pc-windows-gnu -p parfast
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: parfast-cli-unix-windows
+          path: dist/*
+          if-no-files-found: error
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/parfast-${{ env.VER }}-linux-x64.tar.gz
+            dist/parfast-${{ env.VER }}-linux-arm64.tar.gz
+            dist/parfast-${{ env.VER }}-linux-armv7.tar.gz
+            dist/parfast-${{ env.VER }}-freebsd-x64.tar.gz
+            dist/parfast-${{ env.VER }}-windows-x64.zip
+      - name: Stage the attestation bundle beside each asset
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          python3 packaging/stage-attestation.py "$BUNDLE" \
+            "dist/parfast-$VER-linux-x64.tar.gz" "dist/parfast-$VER-linux-arm64.tar.gz" \
+            "dist/parfast-$VER-linux-armv7.tar.gz" "dist/parfast-$VER-freebsd-x64.tar.gz" \
+            "dist/parfast-$VER-windows-x64.zip"
+      - name: Attest SBOM (linux-x64)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/parfast-${{ env.VER }}-linux-x64.tar.gz
+          sbom-path: dist/parfast-${{ env.VER }}-linux-x64.tar.gz.spdx.json
+      - name: Attest SBOM (linux-arm64)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/parfast-${{ env.VER }}-linux-arm64.tar.gz
+          sbom-path: dist/parfast-${{ env.VER }}-linux-arm64.tar.gz.spdx.json
+      - name: Attest SBOM (linux-armv7)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/parfast-${{ env.VER }}-linux-armv7.tar.gz
+          sbom-path: dist/parfast-${{ env.VER }}-linux-armv7.tar.gz.spdx.json
+      - name: Attest SBOM (freebsd-x64)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/parfast-${{ env.VER }}-freebsd-x64.tar.gz
+          sbom-path: dist/parfast-${{ env.VER }}-freebsd-x64.tar.gz.spdx.json
+      - name: Attest SBOM (windows-x64)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/parfast-${{ env.VER }}-windows-x64.zip
+          sbom-path: dist/parfast-${{ env.VER }}-windows-x64.zip.spdx.json
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          files=()
+          for a in linux-x64.tar.gz linux-arm64.tar.gz linux-armv7.tar.gz freebsd-x64.tar.gz windows-x64.zip; do
+            t="dist/parfast-$VER-$a"
+            files+=("$t" "$t.intoto.jsonl" "$t.spdx.json")
+          done
+          gh release upload "$TAG" "${files[@]}" --repo "$REPO"
+
+  # ------------------------------------------------------ the desktop app
+  app-mac:
+    if: >-
+      ${{ (github.event_name == 'release'
+           && startsWith(github.event.release.tag_name, 'parfast-gui-v')
+           && !contains(toJSON(github.event.release.assets.*.name), '.intoto.jsonl'))
+          || (github.event_name == 'workflow_dispatch' && startsWith(inputs.tag, 'parfast-gui-v')) }}
+    permissions:
+      id-token: write
+      attestations: write
+      contents: write
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - name: Verify the checkout and the attested source are both the tag
+        run: |
+          set -euo pipefail
+          want=$(git rev-parse "refs/tags/$TAG^{commit}")
+          [ "$want" = "$(git rev-parse HEAD)" ] || { echo "checkout is not tag $TAG" >&2; exit 1; }
+          [ "$want" = "$GITHUB_SHA" ] || {
+            echo "this run's ref is $GITHUB_SHA but tag $TAG is $want; re-dispatch with --ref $TAG" >&2; exit 1; }
+          # The app's version is the bundler's: the CLI's x.y.z plus GUI_STAGE.
+          cli=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/parfast/Cargo.toml | head -1)
+          stage=$(sed -n 's/^GUI_STAGE=//p' apps/parfast/packaging/build-parfast-gui-bundles.sh | head -1)
+          VER="${cli%%-*}-$stage"
+          [ "$TAG" = "parfast-gui-v$VER" ] || { echo "tag $TAG is not the app's version $VER" >&2; exit 1; }
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+      - name: Runner path remap (joined with the project's rustflags, never replacing them)
+        run: |
+          mkdir -p ~/.cargo
+          printf '[build]\nrustflags = ["--remap-path-prefix=%s=/build"]\n' "$HOME" >> ~/.cargo/config.toml
+      - name: Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Build + package (apps/parfast/packaging/build-parfast-gui-bundles.sh)
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: apps/parfast/packaging/build-parfast-gui-bundles.sh dist macos-universal
+      - name: No builder identity in the zip
+        run: python3 packaging/check-archive-identity.py "dist/parfast-gui-$VER-macos-universal.zip"
+      - name: SBOMs
+        run: |
+          set -euo pipefail
+          for a in dmg zip; do
+            python3 packaging/make-sbom.py --asset "dist/parfast-gui-$VER-macos-universal.$a" \
+              --target aarch64-apple-darwin --target x86_64-apple-darwin -p parfast-ffi --workspace apps/parfast
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: parfast-app-mac
+          path: dist/*
+          if-no-files-found: error
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/parfast-gui-${{ env.VER }}-macos-universal.dmg
+            dist/parfast-gui-${{ env.VER }}-macos-universal.zip
+      - name: Stage the attestation bundle beside each asset
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          python3 packaging/stage-attestation.py "$BUNDLE" \
+            "dist/parfast-gui-$VER-macos-universal.dmg" "dist/parfast-gui-$VER-macos-universal.zip"
+      - name: Attest SBOM (dmg)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/parfast-gui-${{ env.VER }}-macos-universal.dmg
+          sbom-path: dist/parfast-gui-${{ env.VER }}-macos-universal.dmg.spdx.json
+      - name: Attest SBOM (zip)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/parfast-gui-${{ env.VER }}-macos-universal.zip
+          sbom-path: dist/parfast-gui-${{ env.VER }}-macos-universal.zip.spdx.json
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          files=()
+          for a in dmg zip; do
+            t="dist/parfast-gui-$VER-macos-universal.$a"
+            files+=("$t" "$t.intoto.jsonl" "$t.spdx.json")
+          done
+          gh release upload "$TAG" "${files[@]}" --repo "$REPO"
+
+  app-windows:
+    if: >-
+      ${{ (github.event_name == 'release'
+           && startsWith(github.event.release.tag_name, 'parfast-gui-v')
+           && !contains(toJSON(github.event.release.assets.*.name), '.intoto.jsonl'))
+          || (github.event_name == 'workflow_dispatch' && startsWith(inputs.tag, 'parfast-gui-v')) }}
+    permissions:
+      id-token: write
+      attestations: write
+      contents: write
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - name: Verify the checkout and the attested source are both the tag
+        run: |
+          set -euo pipefail
+          want=$(git rev-parse "refs/tags/$TAG^{commit}")
+          [ "$want" = "$(git rev-parse HEAD)" ] || { echo "checkout is not tag $TAG" >&2; exit 1; }
+          [ "$want" = "$GITHUB_SHA" ] || {
+            echo "this run's ref is $GITHUB_SHA but tag $TAG is $want; re-dispatch with --ref $TAG" >&2; exit 1; }
+          cli=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/parfast/Cargo.toml | head -1)
+          stage=$(sed -n 's/^GUI_STAGE=//p' apps/parfast/packaging/build-parfast-gui-bundles.sh | head -1)
+          VER="${cli%%-*}-$stage"
+          [ "$TAG" = "parfast-gui-v$VER" ] || { echo "tag $TAG is not the app's version $VER" >&2; exit 1; }
+          # The runner image ships python under one name or the other
+          # depending on the release; take whichever is there.
+          {
+            echo "VER=$VER"
+            echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)"
+            echo "PY=$(command -v python3 || command -v python)"
+          } >> "$GITHUB_ENV"
+      # build_win in build-parfast-gui-bundles.sh, step for step, run here
+      # instead of over ssh.
+      - name: Build the cdylib
+        shell: pwsh
+        run: |
+          $env:RUSTFLAGS = '--remap-path-prefix=' + $env:USERPROFILE + '=/build --remap-path-prefix=' + $env:GITHUB_WORKSPACE + '=/build'
+          $env:CFLAGS_x86_64_pc_windows_msvc = '/d1trimfile:' + $env:USERPROFILE + '\'
+          $env:CARGO_INCREMENTAL = '0'
+          cargo build --manifest-path apps\parfast\Cargo.toml --release --locked -p parfast-ffi
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+      - name: Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+      - name: Build, test, publish and package the app (tools/build.ps1)
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File apps\parfast\windows\tools\build.ps1 -Publish -Installer -Version $env:VER
+          if ($LASTEXITCODE -ne 0) { throw "build.ps1 failed" }
+      - name: Collect the zip and the installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Force -Path 'apps\parfast\windows\out\publish\*' -DestinationPath "dist\parfast-gui-$env:VER-windows-x64.zip"
+          Copy-Item "apps\parfast\windows\packaging\out\parfast-gui-$env:VER-windows-x64-setup.exe" dist\
+          Get-ChildItem dist
+      - name: No builder identity in the zip
+        run: '"$PY" packaging/check-archive-identity.py "dist/parfast-gui-$VER-windows-x64.zip"'
+      - name: SBOMs
+        run: |
+          set -euo pipefail
+          for a in windows-x64-setup.exe windows-x64.zip; do
+            "$PY" packaging/make-sbom.py --asset "dist/parfast-gui-$VER-$a" \
+              --target x86_64-pc-windows-msvc -p parfast-ffi --workspace apps/parfast
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: parfast-app-windows
+          path: dist/*
+          if-no-files-found: error
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/parfast-gui-${{ env.VER }}-windows-x64-setup.exe
+            dist/parfast-gui-${{ env.VER }}-windows-x64.zip
+      - name: Stage the attestation bundle beside each asset
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          "$PY" packaging/stage-attestation.py "$BUNDLE" \
+            "dist/parfast-gui-$VER-windows-x64-setup.exe" "dist/parfast-gui-$VER-windows-x64.zip"
+      - name: Attest SBOM (installer)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/parfast-gui-${{ env.VER }}-windows-x64-setup.exe
+          sbom-path: dist/parfast-gui-${{ env.VER }}-windows-x64-setup.exe.spdx.json
+      - name: Attest SBOM (zip)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/parfast-gui-${{ env.VER }}-windows-x64.zip
+          sbom-path: dist/parfast-gui-${{ env.VER }}-windows-x64.zip.spdx.json
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          files=()
+          for a in windows-x64-setup.exe windows-x64.zip; do
+            t="dist/parfast-gui-$VER-$a"
+            files+=("$t" "$t.intoto.jsonl" "$t.spdx.json")
+          done
+          gh release upload "$TAG" "${files[@]}" --repo "$REPO"

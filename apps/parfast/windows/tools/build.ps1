@@ -89,8 +89,14 @@ if ($Publish -or $Installer -or $Run) {
 
 if ($Installer) {
     Step "installer"
+    # The per-user install is what the build box has; a machine-wide one
+    # (Program Files) is what `choco install innosetup` gives a CI runner,
+    # which is where release builds are made since provenance-parfast.yml.
     $iscc = Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"
-    if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+    if (-not (Test-Path $iscc)) {
+        $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+    }
+    if (-not (Test-Path $iscc)) { throw "ISCC.exe not found (per-user or Program Files (x86))" }
 
     $stage = Join-Path $root "out\stage-gui"
     if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }

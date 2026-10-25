@@ -276,11 +276,19 @@ def sha256_file(path):
     return h.hexdigest()
 
 
-def generate(asset, targets, packages, out, root=ROOT, tree_text=None):
+def generate(asset, targets, packages, out, root=ROOT, tree_text=None, workspace=None):
+    # `workspace` is the cargo workspace the packages live in: `cargo tree`
+    # runs there and its Cargo.lock supplies the checksums. It defaults to
+    # the repository root; the parfast desktop app's crates are a DETACHED
+    # workspace (apps/parfast), which the root manifest never names. Path
+    # dependencies are still judged against `root`, the repository, so a
+    # crate the app reaches by ../../crates is recorded, and one outside
+    # the repository is still refused.
+    ws = workspace or root
     if not os.path.isfile(asset):
         raise Refusal("no asset at %s - an SBOM describes a file that exists" % asset)
     if tree_text is None:
-        tree_text = cargo_tree(targets, packages, root)
+        tree_text = cargo_tree(targets, packages, ws)
     pkgs, edges, roots = parse_tree(tree_text, root)
     want = set(packages)
     got = {k[0] for k in roots}
@@ -288,7 +296,7 @@ def generate(asset, targets, packages, out, root=ROOT, tree_text=None):
         raise Refusal("cargo tree did not root at %s (got %s)" % (sorted(want - got), sorted(got)))
     epoch = int(os.environ.get("SOURCE_DATE_EPOCH") or 0)
     doc = build_doc(os.path.basename(asset), sha256_file(asset), targets,
-                    pkgs, edges, roots, lock_checksums(root), epoch)
+                    pkgs, edges, roots, lock_checksums(ws), epoch)
     faults = check_doc(doc)
     if faults:
         raise Refusal("generated SBOM fails its own checks: " + "; ".join(faults))
@@ -370,6 +378,7 @@ def main():
     ap.add_argument("--target", action="append", default=[])
     ap.add_argument("-p", "--package", action="append", default=[])
     ap.add_argument("--out")
+    ap.add_argument("--workspace", help="cargo workspace dir, relative to the repository (default: the root)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
@@ -378,7 +387,8 @@ def main():
         ap.error("--asset, --target and at least one -p are required")
     out = a.out or a.asset + ".spdx.json"
     try:
-        doc = generate(a.asset, a.target, a.package, out)
+        ws = os.path.join(ROOT, a.workspace) if a.workspace else None
+        doc = generate(a.asset, a.target, a.package, out, workspace=ws)
     except Refusal as e:
         print("make-sbom: REFUSING - %s" % e, file=sys.stderr)
         return 2
