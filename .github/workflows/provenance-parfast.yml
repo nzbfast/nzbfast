@@ -312,10 +312,36 @@ jobs:
           printf '[build]\nrustflags = ["--remap-path-prefix=%s=/build"]\n' "$HOME" >> ~/.cargo/config.toml
       - name: Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      # make-app.sh's private-string check reads packaging/private-patterns.txt,
+      # which is deliberately NOT in the public tree (publishing it would
+      # publish what it protects). It arrives here as the PRIVATE_PATTERNS
+      # Actions secret, exactly as provenance-release.yml's macos job takes
+      # it, and a missing secret refuses rather than skips. The first public
+      # run of this job (parfast-gui-v1.9.0-beta.4) failed exactly that way;
+      # the private dry runs could not see it, the file being in that checkout.
+      - name: Private-strings list for the bundle check
+        env:
+          PRIVATE_PATTERNS: ${{ secrets.PRIVATE_PATTERNS }}
+        run: |
+          set -euo pipefail
+          if [ -f packaging/private-patterns.txt ]; then
+            echo "packaging/private-patterns.txt is in the checkout - using it"
+            exit 0
+          fi
+          if [ -z "$PRIVATE_PATTERNS" ]; then
+            echo "::error::PRIVATE_PATTERNS secret is not set on this repo; make-app.sh cannot check the bundle for private strings"
+            exit 1
+          fi
+          printf '%s\n' "$PRIVATE_PATTERNS" > packaging/private-patterns.txt
+          echo "wrote the list from the secret ($(grep -cv '^[[:space:]]*\(#\|$\)' packaging/private-patterns.txt) patterns)"
       - name: Build + package (apps/parfast/packaging/build-parfast-gui-bundles.sh)
         env:
           CARGO_INCREMENTAL: "0"
         run: apps/parfast/packaging/build-parfast-gui-bundles.sh dist macos-universal
+      # Never let the list outlive the step that needed it, whatever happened.
+      - name: Remove the private-strings list
+        if: ${{ always() && github.repository == 'nzbfast/nzbfast' }}
+        run: rm -f packaging/private-patterns.txt
       - name: No builder identity in the zip
         run: python3 packaging/check-archive-identity.py "dist/parfast-gui-$VER-macos-universal.zip"
       - name: SBOMs
