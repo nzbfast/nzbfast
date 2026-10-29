@@ -540,7 +540,7 @@ jobs:
 
       # Before anything is signed: the run's own copy, so a failure in a
       # later step still leaves the build inspectable.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nzbfast-linux-${{ matrix.arch }}
           path: dist/*
@@ -729,7 +729,7 @@ jobs:
           "$PY" packaging/make-sbom.py --asset "dist/nzbfast-updater-$VER-windows-x64.exe.gz" \
             --target x86_64-pc-windows-gnu -p nzbfast
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nzbfast-windows-x64
           path: dist/*
@@ -967,7 +967,7 @@ jobs:
           python3 packaging/make-sbom.py --asset "dist/nzbfast-updater-$VER-macos-x64.gz" \
             --target x86_64-apple-darwin -p nzbfast
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nzbfast-macos
           path: dist/*
@@ -1123,14 +1123,14 @@ jobs:
       # job's own artifact shares that prefix.
       - name: Linux x64 tarball from this run
         if: needs.linux.result == 'success'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nzbfast-linux-x64
           path: ${{ runner.temp }}/payload
 
       - name: Linux arm64 tarball from this run
         if: needs.linux.result == 'success'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nzbfast-linux-arm64
           path: ${{ runner.temp }}/payload
@@ -1238,7 +1238,7 @@ jobs:
           sb "dist/nzbfast-${VER}-noarch.spk" "${x[@]}" "${a[@]}"
           sb "dist/nzbfast-${VER}-qnap-beta.qpkg" "${x[@]}" "${a[@]}"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nzbfast-linux-packages
           path: dist/*
@@ -1413,7 +1413,7 @@ jobs:
           python3 packaging/make-sbom.py --asset "dist/nzbfast-$VER-linux-armv7-beta.tar.gz" \
             --target armv7-unknown-linux-musleabihf -p nzbfast
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nzbfast-linux-armv7-beta
           path: dist/*
@@ -1512,7 +1512,7 @@ jobs:
           echo "VER=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/nzbfast/Cargo.toml | head -1)" >> "$GITHUB_ENV"
 
       - name: Build, smoke-test and package inside a FreeBSD VM
-        uses: vmactions/freebsd-vm@f0552d3b69211736abd97f02ff3d4674c56b73b1 # v1.5.5
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           # The oldest FreeBSD still publishing releases: FreeBSD binaries
           # run forward, not back (packaging/freebsd/README.md).
@@ -1572,7 +1572,7 @@ jobs:
           python3 packaging/make-sbom.py --asset "dist/nzbfast-$VER-freebsd-x64-beta.tar.gz" \
             --target x86_64-unknown-freebsd -p nzbfast
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nzbfast-freebsd-beta
           path: dist/*
@@ -1722,7 +1722,7 @@ jobs:
             "$PY" packaging/make-sbom.py --asset "$f" --target aarch64-pc-windows-msvc -p nzbfast -p nzbtray
           done
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nzbfast-windows-arm64-beta
           path: dist/*
@@ -1870,7 +1870,7 @@ jobs:
       # arm64 layers run under emulation (the Dockerfile apt-gets packages).
       - name: Set up QEMU (arm64)
         if: steps.latest.outputs.go == 'true'
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           platforms: arm64
 

@@ -2562,7 +2562,7 @@ jobs:
       # re-recorded from.
       - name: upload the sample series
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: soak-report
           path: soak-report.json
@@ -3719,7 +3719,7 @@ jobs:
       # fixture and how - which is the whole point of keeping a report.
       - name: upload the scorecard
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: robustness-report
           path: robustness-report.md
