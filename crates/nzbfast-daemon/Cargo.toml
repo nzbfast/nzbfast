@@ -114,7 +114,7 @@ nzbfast-unpack = { path = "../nzbfast-unpack", features = ["test-support"] }
 # Seed-harvest migration tests open the daemon's closed index directly to
 # model a pre-manifest database. Same version/features nzbkit's index
 # tests already compile, so it adds no production dependency.
-rusqlite = { version = "0.40.1", features = ["hooks"] }
+rusqlite = { version = "0.41.0", features = ["hooks"] }
 # The 7z ENCODER, for the ONE thing a daemon test cannot fake: a
 # genuinely password-protected archive. `job_finalize`'s A6 rollback
 # (N1) turns on what the unlock ladder answers about the payload it just

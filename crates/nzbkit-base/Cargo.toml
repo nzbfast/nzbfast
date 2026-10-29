@@ -68,7 +68,7 @@ aws-lc-rs = "1.17"
 # pooled readers got a query budget, and `index/deadline.rs` is
 # production code. The dep is optional, so this widens the feature set of
 # `indexer` builds only - a slim build still has no rusqlite at all.
-rusqlite = { version = "0.40.1", features = [
+rusqlite = { version = "0.41.0", features = [
     "bundled",
     "functions",
     "hooks",
@@ -265,7 +265,7 @@ test-support = ["digest-cache"]
 [dev-dependencies]
 # nzbkit's own, minus what only the facade's modules and its examples
 # reach (tracing-subscriber, rcgen).
-rusqlite = { version = "0.40.1", features = ["hooks"] }
+rusqlite = { version = "0.41.0", features = ["hooks"] }
 # 7z fixtures are written in-process by `nameprobe`'s tests (the writer
 # needs the encoder half; release builds keep it off).
 sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd", "compress"] }
