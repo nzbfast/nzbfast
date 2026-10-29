@@ -11,8 +11,6 @@ import Foundation
 public enum S {
     /// app.name
     public static let appName = "parfast"
-    /// app.stage
-    public static let appStage = "Beta"
     /// app.tagline
     public static let appTagline = "PAR2 create, verify and repair"
     /// checksums.create
@@ -253,6 +251,10 @@ public enum S {
     public static let errorNoSources = "Add at least one file or folder first."
     /// error.output_exists
     public static let errorOutputExists = "A file with that name is already there. Turn on overwrite, or pick another name."
+    /// error.password_required
+    public static let errorPasswordRequired = "This posting set was interrupted. Enter its password again to run it."
+    /// error.rar_failed
+    public static func errorRarFailed(reason: String) -> String { "The archive could not be written: \(reason)" }
     /// error.read_failed
     public static func errorReadFailed(path: String) -> String { "\(path) could not be read." }
     /// error.title
@@ -265,6 +267,8 @@ public enum S {
     public static let jobKindChecksums = "Checksums"
     /// job.kind.create
     public static let jobKindCreate = "Create"
+    /// job.kind.posting_set
+    public static let jobKindPostingSet = "Posting set"
     /// job.kind.repair
     public static let jobKindRepair = "Repair"
     /// job.kind.verify
@@ -283,6 +287,8 @@ public enum S {
     public static let modeChecksums = "Checksums"
     /// mode.create
     public static let modeCreate = "Create"
+    /// mode.posting
+    public static let modePosting = "Posting set"
     /// mode.queue
     public static let modeQueue = "Queue"
     /// mode.verify
@@ -311,6 +317,90 @@ public enum S {
     public static let phaseSolving = "Solving"
     /// phase.writing
     public static let phaseWriting = "Writing"
+    /// posting.action.create
+    public static let postingActionCreate = "Create posting set"
+    /// posting.cancel_note
+    public static let postingCancelNote = "A stopped or failed posting set removes every file it wrote, so there is nothing to clean up."
+    /// posting.compression.best
+    public static let postingCompressionBest = "Best"
+    /// posting.compression.fast
+    public static let postingCompressionFast = "Fast"
+    /// posting.compression.fastest
+    public static let postingCompressionFastest = "Fastest"
+    /// posting.compression.good
+    public static let postingCompressionGood = "Good"
+    /// posting.compression.normal
+    public static let postingCompressionNormal = "Normal"
+    /// posting.compression.note
+    public static let postingCompressionNote = "Video and archives barely compress, so storing is the usual choice for a post."
+    /// posting.compression.store
+    public static let postingCompressionStore = "Store (no compression)"
+    /// posting.compression.title
+    public static let postingCompressionTitle = "Compression"
+    /// posting.empty_body
+    public static let postingEmptyBody = "Add files or a folder. They are packed into a RAR archive with a PAR2 set beside it."
+    /// posting.empty_title
+    public static let postingEmptyTitle = "Add the files to post"
+    /// posting.intro
+    public static let postingIntro = "Packs files into a RAR 5 archive and writes a PAR2 set over it, ready to post."
+    /// posting.name
+    public static let postingName = "Archive name"
+    /// posting.name_tip
+    public static func postingNameTip(name: String) -> String { "Written as \(name).rar, or \(name).part1.rar onward when split, with \(name).par2 beside it." }
+    /// posting.output.par2
+    public static let postingOutputPar2 = "PAR2 set"
+    /// posting.output.rar
+    public static let postingOutputRar = "RAR archive"
+    /// posting.output.title
+    public static let postingOutputTitle = "Files written"
+    /// posting.output_folder
+    public static let postingOutputFolder = "Output folder"
+    /// posting.overwrite
+    public static let postingOverwrite = "Replace an earlier set with the same name"
+    /// posting.overwrite_tip
+    public static let postingOverwriteTip = "Removes every file of the earlier set first, so no stale volume is left beside the new ones."
+    /// posting.par2.title
+    public static let postingPar2Title = "PAR2 recovery"
+    /// posting.password.encrypt_headers
+    public static let postingPasswordEncryptHeaders = "Encrypt file names too"
+    /// posting.password.placeholder
+    public static let postingPasswordPlaceholder = "No password"
+    /// posting.password.title
+    public static let postingPasswordTitle = "Password"
+    /// posting.recovery_record
+    public static let postingRecoveryRecord = "RAR recovery record"
+    /// posting.recovery_record_value
+    public static func postingRecoveryRecordValue(percent: String) -> String { "\(percent) of the archive" }
+    /// posting.route.expect_one_pass
+    public static let postingRouteExpectOnePass = "One pass: the archive is hashed into its PAR2 set as it is written."
+    /// posting.route.expect_two_pass
+    public static let postingRouteExpectTwoPass = "Two passes: the archive is written first, then its PAR2 set."
+    /// posting.route.one_pass
+    public static let postingRouteOnePass = "Done in one pass. The archive was never read back."
+    /// posting.route.title
+    public static let postingRouteTitle = "Route"
+    /// posting.route.two_pass_because
+    public static func postingRouteTwoPassBecause(reason: String) -> String { "Done in two passes, because \(reason)." }
+    /// posting.solid
+    public static let postingSolid = "Solid archive"
+    /// posting.solid_tip
+    public static let postingSolidTip = "Compresses the files as one run. Smaller for many small files, slower to extract one."
+    /// posting.title
+    public static let postingTitle = "Create a posting set"
+    /// posting.volumes.count
+    public static let postingVolumesCount = "Split into a number of volumes"
+    /// posting.volumes.count_label
+    public static let postingVolumesCountLabel = "Number of volumes"
+    /// posting.volumes.min_size
+    public static let postingVolumesMinSize = "A volume is at least 64 KiB."
+    /// posting.volumes.none
+    public static let postingVolumesNone = "One archive"
+    /// posting.volumes.size
+    public static let postingVolumesSize = "Split by size"
+    /// posting.volumes.size_label
+    public static let postingVolumesSizeLabel = "Volume size"
+    /// posting.volumes.title
+    public static let postingVolumesTitle = "Volumes"
     /// progress.background
     public static let progressBackground = "Run in the background"
     /// progress.background_tip

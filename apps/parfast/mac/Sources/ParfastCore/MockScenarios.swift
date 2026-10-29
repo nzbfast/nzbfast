@@ -237,6 +237,13 @@ extension MockScenario {
             comment: "Made with parfast")
     }
 
+    /// A posting set's sources: one film and its small sidecar, the shape a
+    /// post usually has.
+    public static func postingSources(folder: String = "\(mockRoot)/posting") -> [SourceItem] {
+        [SourceItem(path: "\(folder)/Holiday.Film.2026.mkv"),
+         SourceItem(path: "\(folder)/Holiday.Film.2026.nfo")]
+    }
+
     /// Sizes the mock reports for the long create's synthetic sources, so the
     /// preview has real arithmetic to do without touching the disk.
     public static func mockSize(forPath path: String) -> Int64? {
@@ -247,6 +254,8 @@ extension MockScenario {
             return hit.0.size
         }
         if name.hasPrefix("source.part") { return 314_572_800 }
+        if name.hasSuffix(".mkv") { return 4_294_967_296 }
+        if name.hasSuffix(".nfo") { return 6_144 }
         return 52_428_800
     }
 }

@@ -296,10 +296,13 @@ public sealed class CreateViewModel : Observable
         set { if (Set(ref _recoveryPercent, Math.Clamp(value, 0, 1000))) { Recompute(); } }
     }
 
+    /// Clamped at 32768, the create's own ceiling
+    /// (par2gen::check_recovery_count). DUPLICATED in the mac app's
+    /// CreateView recovery-count field and in CreatePage.xaml's RecCountBox.
     public int RecoveryCount
     {
         get => _recoveryCount;
-        set { if (Set(ref _recoveryCount, Math.Clamp(value, 0, 65535))) { Recompute(); } }
+        set { if (Set(ref _recoveryCount, Math.Clamp(value, 0, 32768))) { Recompute(); } }
     }
 
     public long RecoverySize

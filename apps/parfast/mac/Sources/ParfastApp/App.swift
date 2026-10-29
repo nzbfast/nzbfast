@@ -120,7 +120,7 @@ struct ParfastSwiftUIApp: App {
             .keyboardShortcut("n")
         }
         CommandMenu(S.modeQueue) {
-            ForEach(AppModel.Mode.allCases) { mode in
+            ForEach(app.availableModes) { mode in
                 Button(mode.title) { app.mode = mode }
             }
             Divider()

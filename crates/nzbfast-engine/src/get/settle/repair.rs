@@ -1740,11 +1740,23 @@ pub(super) async fn run_set_repair(
                 // names the DISK and must be quoted, and an ordinary
                 // failure is left to the arms below to word, which is
                 // what this site has always done (TODO §249 item 1).
-                all_good = match crate::rarfix::try_rar_rr_repair_hinted_why(
-                    out_dir,
-                    password,
-                    Some(&hint),
-                ) {
+                //
+                // Off the scheduler core and under the job's cancel (issue
+                // 115). The rung is minutes of synchronous reading per set,
+                // and it ran straight on this task's runtime worker while
+                // holding the heavy-CPU permit - the H11 shape the unpack
+                // tail was moved off in Aug - with no way for a delete to
+                // reach it. One volume whose repair never returned held a
+                // job in Repairing for 14 hours, and every other job's
+                // repair and unpack tail waited behind the permit.
+                all_good = match crate::lanegate::off_worker(|| {
+                    crate::rarfix::try_rar_rr_repair_hinted_why(
+                        out_dir,
+                        password,
+                        Some(&hint),
+                        cancel,
+                    )
+                }) {
                     Ok(()) => true,
                     Err(why) => {
                         if let Some(why) = why {

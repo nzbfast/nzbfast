@@ -38,6 +38,9 @@ public enum JobKind: String, LenientRawEnum, CaseIterable {
     case repairSet = "repair"
     case checksumCreate = "checksum_create"
     case checksumVerify = "checksum_verify"
+    /// ADDED 25 Oct 2026 (plan B1): a RAR 5 archive or volume set plus a
+    /// PAR2 set over it, as one job.
+    case postingSet = "posting_set"
     public static var unknownFallback: JobKind { .verify }
 }
 
@@ -423,6 +426,235 @@ public struct ChecksumVerifySpec: Codable, Hashable {
     public init(file: String) { self.file = file }
 }
 
+// MARK: - Posting set (plan B1, API.md `posting_set`, ADDED 25 Oct 2026)
+
+/// How a posting set's RAR is split: `{"split":"none"}`, `{"split":"size",
+/// "size":N}` (the volume FILE size, rar's `-v`) or `{"split":"count",
+/// "count":N}` (about that many volumes).
+public enum RarVolumes: Codable, Hashable {
+    case none
+    case size(Int64)
+    case count(Int)
+
+    private enum Key: String, CodingKey { case split, size, count }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Key.self)
+        switch try c.decodeIfPresent(String.self, forKey: .split) ?? "none" {
+        case "size": self = .size(try c.decode(Int64.self, forKey: .size))
+        case "count": self = .count(try c.decode(Int.self, forKey: .count))
+        default: self = .none
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: Key.self)
+        switch self {
+        case .none: try c.encode("none", forKey: .split)
+        case .size(let n):
+            try c.encode("size", forKey: .split)
+            try c.encode(n, forKey: .size)
+        case .count(let n):
+            try c.encode("count", forKey: .split)
+            try c.encode(n, forKey: .count)
+        }
+    }
+}
+
+/// A RAR password: a string on the way IN, and `{"withheld":true}` on every
+/// way back (snapshots, the persisted queue). Its `description` never carries
+/// the bytes, so a stray `print` or string interpolation cannot leak one into
+/// a log.
+public enum RarPassword: Codable, Hashable, CustomStringConvertible, CustomDebugStringConvertible {
+    case given(String)
+    case withheld
+
+    private enum Key: String, CodingKey { case withheld }
+
+    public init(from decoder: Decoder) throws {
+        if let s = try? decoder.singleValueContainer().decode(String.self) {
+            self = .given(s)
+        } else {
+            self = .withheld
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        switch self {
+        case .given(let s):
+            var c = encoder.singleValueContainer()
+            try c.encode(s)
+        case .withheld:
+            var c = encoder.container(keyedBy: Key.self)
+            try c.encode(true, forKey: .withheld)
+        }
+    }
+
+    public var description: String { "RarPassword(withheld)" }
+    public var debugDescription: String { description }
+}
+
+/// The RAR half. Every default is the posting default: stored, not solid, no
+/// password, no recovery record. `encrypt_headers` is only read when there is
+/// a password, and is ON there by the core's own default.
+public struct RarOptions: Codable, Hashable {
+    public var volumes: RarVolumes
+    /// 0 is store; 1 to 5 compress, fastest to smallest.
+    public var compression: Int
+    public var solid: Bool
+    public var password: RarPassword?
+    public var encrypt_headers: Bool
+    public var recovery_percent: Int
+
+    public init(volumes: RarVolumes = .none, compression: Int = 0, solid: Bool = false,
+                password: RarPassword? = nil, encrypt_headers: Bool = true,
+                recovery_percent: Int = 0) {
+        self.volumes = volumes
+        self.compression = compression
+        self.solid = solid
+        self.password = password
+        self.encrypt_headers = encrypt_headers
+        self.recovery_percent = recovery_percent
+    }
+
+    /// The route the core will take, by the rule API.md states: ONE archive,
+    /// stored, no RAR recovery record is one pass; anything else is two. The
+    /// screen shows this before the job and the core's `result.posting.route`
+    /// after it, and the second is the one that is true.
+    public var expectsOnePass: Bool {
+        volumes == .none && compression == 0 && recovery_percent == 0
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case volumes, compression, solid, password, encrypt_headers, recovery_percent
+    }
+
+    /// Every key is optional on the wire, with the core's serde defaults (a
+    /// recorded spec carries only what was asked), so a missing one decodes to
+    /// the posting default rather than refusing the whole snapshot.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        volumes = try c.decodeIfPresent(RarVolumes.self, forKey: .volumes) ?? .none
+        compression = try c.decodeIfPresent(Int.self, forKey: .compression) ?? 0
+        solid = try c.decodeIfPresent(Bool.self, forKey: .solid) ?? false
+        password = try c.decodeIfPresent(RarPassword.self, forKey: .password)
+        encrypt_headers = try c.decodeIfPresent(Bool.self, forKey: .encrypt_headers) ?? true
+        recovery_percent = try c.decodeIfPresent(Int.self, forKey: .recovery_percent) ?? 0
+    }
+}
+
+/// The PAR2 half. Every field left nil takes the Settings pane's Create
+/// default in the core, exactly as a fresh Create pane would.
+public struct PostingPar2: Codable, Hashable {
+    public var block: BlockChoice?
+    public var recovery: RecoveryChoice?
+    public var volumes: VolumeScheme?
+    public var first_recovery_block: Int
+    public var comment: String
+    public var std_naming: Bool?
+
+    public init(block: BlockChoice? = nil, recovery: RecoveryChoice? = nil,
+                volumes: VolumeScheme? = nil, first_recovery_block: Int = 0,
+                comment: String = "", std_naming: Bool? = nil) {
+        self.block = block
+        self.recovery = recovery
+        self.volumes = volumes
+        self.first_recovery_block = first_recovery_block
+        self.comment = comment
+        self.std_naming = std_naming
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case block, recovery, volumes, first_recovery_block, comment, std_naming
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        block = try c.decodeIfPresent(BlockChoice.self, forKey: .block)
+        recovery = try c.decodeIfPresent(RecoveryChoice.self, forKey: .recovery)
+        volumes = try c.decodeIfPresent(VolumeScheme.self, forKey: .volumes)
+        first_recovery_block = try c.decodeIfPresent(Int.self, forKey: .first_recovery_block) ?? 0
+        comment = try c.decodeIfPresent(String.self, forKey: .comment) ?? ""
+        std_naming = try c.decodeIfPresent(Bool.self, forKey: .std_naming)
+    }
+}
+
+public struct PostingSetSpec: Codable, Hashable {
+    public var sources: [SourceItem]
+    public var path_mode: PathMode
+    public var base_path: String?
+    public var output_dir: String
+    /// One path component: `<name>.rar` or `<name>.partN.rar`, and
+    /// `<name>.par2` beside it.
+    public var name: String
+    public var rar: RarOptions
+    public var par2: PostingPar2
+    public var overwrite: Bool
+    public var perf: PerfSpec
+
+    public init(sources: [SourceItem] = [], path_mode: PathMode = .basename,
+                base_path: String? = nil, output_dir: String = "", name: String = "",
+                rar: RarOptions = RarOptions(), par2: PostingPar2 = PostingPar2(),
+                overwrite: Bool = false, perf: PerfSpec = PerfSpec()) {
+        self.sources = sources
+        self.path_mode = path_mode
+        self.base_path = base_path
+        self.output_dir = output_dir
+        self.name = name
+        self.rar = rar
+        self.par2 = par2
+        self.overwrite = overwrite
+        self.perf = perf
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sources, path_mode, base_path, output_dir, name, rar, par2, overwrite, perf
+    }
+
+    /// Only `output_dir` and `name` are required (API.md); the rest take the
+    /// core's defaults.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sources = try c.decodeIfPresent([SourceItem].self, forKey: .sources) ?? []
+        path_mode = try c.decodeIfPresent(PathMode.self, forKey: .path_mode) ?? .basename
+        base_path = try c.decodeIfPresent(String.self, forKey: .base_path)
+        output_dir = try c.decode(String.self, forKey: .output_dir)
+        name = try c.decode(String.self, forKey: .name)
+        rar = try c.decodeIfPresent(RarOptions.self, forKey: .rar) ?? RarOptions()
+        par2 = try c.decodeIfPresent(PostingPar2.self, forKey: .par2) ?? PostingPar2()
+        overwrite = try c.decodeIfPresent(Bool.self, forKey: .overwrite) ?? false
+        perf = try c.decodeIfPresent(PerfSpec.self, forKey: .perf) ?? PerfSpec()
+    }
+}
+
+/// `result.posting`: the route a posting set took and its two halves' files.
+public struct PostingResult: Codable, Hashable {
+    public enum Route: String, LenientRawEnum {
+        case onePass = "one_pass"
+        case twoPass = "two_pass"
+        public static var unknownFallback: Route { .twoPass }
+    }
+
+    public var route: Route
+    /// Why a set took two passes, in a sentence a host can show. Absent for
+    /// one pass.
+    public var route_reason: String?
+    public var rar: [WrittenFile]
+    public var par2: [WrittenFile]
+    public var source_bytes: Int64
+    public var source_files: Int
+
+    public init(route: Route, route_reason: String? = nil, rar: [WrittenFile] = [],
+                par2: [WrittenFile] = [], source_bytes: Int64 = 0, source_files: Int = 0) {
+        self.route = route
+        self.route_reason = route_reason
+        self.rar = rar
+        self.par2 = par2
+        self.source_bytes = source_bytes
+        self.source_files = source_files
+    }
+}
+
 /// The tagged union `pf_job_submit` takes. Encoded exactly as 4.5 shows it:
 /// a `kind` plus ONE payload key named for that kind.
 public enum JobSpec: Codable, Hashable {
@@ -431,12 +663,14 @@ public enum JobSpec: Codable, Hashable {
     case repairSet(RepairSpec)
     case checksumCreate(ChecksumCreateSpec)
     case checksumVerify(ChecksumVerifySpec)
+    case postingSet(PostingSetSpec)
 
     private enum Key: String, CodingKey {
         case kind, create, verify
         case repairSet = "repair"
         case checksumCreate = "checksum_create"
         case checksumVerify = "checksum_verify"
+        case postingSet = "posting_set"
     }
 
     public var kind: JobKind {
@@ -446,6 +680,7 @@ public enum JobSpec: Codable, Hashable {
         case .repairSet: return .repairSet
         case .checksumCreate: return .checksumCreate
         case .checksumVerify: return .checksumVerify
+        case .postingSet: return .postingSet
         }
     }
 
@@ -459,6 +694,8 @@ public enum JobSpec: Codable, Hashable {
             self = .checksumCreate(try c.decode(ChecksumCreateSpec.self, forKey: .checksumCreate))
         case .checksumVerify:
             self = .checksumVerify(try c.decode(ChecksumVerifySpec.self, forKey: .checksumVerify))
+        case .postingSet:
+            self = .postingSet(try c.decode(PostingSetSpec.self, forKey: .postingSet))
         }
     }
 
@@ -471,6 +708,7 @@ public enum JobSpec: Codable, Hashable {
         case .repairSet(let s): try c.encode(s, forKey: .repairSet)
         case .checksumCreate(let s): try c.encode(s, forKey: .checksumCreate)
         case .checksumVerify(let s): try c.encode(s, forKey: .checksumVerify)
+        case .postingSet(let s): try c.encode(s, forKey: .postingSet)
         }
     }
 }
@@ -640,13 +878,18 @@ public struct JobResult: Codable, Hashable {
     /// have returned. The CLI's dialect is the one thing a script user already
     /// knows, so hiding it makes the GUI unreproducible from a terminal.
     public var exit_code: Int?
+    /// ADDED 25 Oct 2026: a posting set's route and its two halves' files.
+    /// Absent for every other kind.
+    public var posting: PostingResult?
 
     public init(repaired_files: Int? = nil, purged: Bool? = nil,
-                written: [WrittenFile]? = nil, checksum: ChecksumResult? = nil) {
+                written: [WrittenFile]? = nil, checksum: ChecksumResult? = nil,
+                posting: PostingResult? = nil) {
         self.repaired_files = repaired_files
         self.purged = purged
         self.written = written
         self.checksum = checksum
+        self.posting = posting
     }
 }
 
@@ -835,13 +1078,24 @@ public struct Capabilities: Codable, Hashable {
     public var pause_in_fold: Bool = false
     public var cancel_in_fold: Bool = false
     public var progress_in_fold: Bool = false
+    /// ADDED 25 Oct 2026: `{"kind":"posting_set"}` is accepted. OPTIONAL
+    /// rather than defaulted, so a core that predates it decodes as nil and
+    /// the posting-set pane stays hidden: that core would refuse the job.
+    public var posting_set: Bool?
+    /// Informational (API.md): `result.posting.route` reports what each job
+    /// actually did, and nothing is gated on this.
+    public var posting_one_pass: Bool?
+
+    /// The one question the app asks of the pair above.
+    public var hasPostingSet: Bool { posting_set == true }
 
     public init(version: String, engine: String, cpu: String, kernel: String,
                 std_naming: Bool, unicode_policy: Bool, data_skipping: Bool,
                 fast_solver: Bool, pause: Bool, low_priority: Bool,
                 comment: Bool = false, volume_limit_explicit: Bool = false,
                 pause_in_fold: Bool = false, cancel_in_fold: Bool = false,
-                progress_in_fold: Bool = false) {
+                progress_in_fold: Bool = false,
+                posting_set: Bool? = nil, posting_one_pass: Bool? = nil) {
         self.version = version
         self.engine = engine
         self.cpu = cpu
@@ -857,6 +1111,8 @@ public struct Capabilities: Codable, Hashable {
         self.pause_in_fold = pause_in_fold
         self.cancel_in_fold = cancel_in_fold
         self.progress_in_fold = progress_in_fold
+        self.posting_set = posting_set
+        self.posting_one_pass = posting_one_pass
     }
 }
 

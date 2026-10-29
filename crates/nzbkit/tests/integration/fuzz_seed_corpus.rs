@@ -16,11 +16,13 @@
 //! is allowed to go inert, which is exactly why the real WinRAR output is
 //! kept beside it.
 
+#[cfg(feature = "rar")]
 use rars::recovery::stream::{MemorySource, scan_inline_recovery_chunks};
 
 /// One seed, and the entry point it has to keep reaching.
 const SEEDS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fuzz/seeds/rar_recovery_scan");
 
+#[cfg(feature = "rar")]
 fn seed(name: &str) -> Vec<u8> {
     let path = std::path::Path::new(SEEDS).join(name);
     std::fs::read(&path).unwrap_or_else(|e| panic!("seed {name} is missing: {e}"))
@@ -31,6 +33,7 @@ fn seed(name: &str) -> Vec<u8> {
 /// payload that no longer matches its declared CRC32 is dropped before the
 /// planner ever sees it - the seed would be carrying the fuzzer only as far
 /// as the checksum.
+#[cfg(feature = "rar")]
 #[test]
 fn the_rev5_seeds_still_parse_and_still_verify() {
     for name in ["multivol_rev.part1.rev", "multivol_rev.part2.rev"] {
@@ -52,6 +55,7 @@ fn the_rev5_seeds_still_parse_and_still_verify() {
 /// The `{RB}` inline scanner is behind a CRC64 over the whole chunk, which is
 /// the gate the corpus exists to get past. A seed that stopped yielding a
 /// chunk would leave the plan arithmetic unreached.
+#[cfg(feature = "rar")]
 #[test]
 fn the_inline_recovery_seeds_still_yield_a_crc_valid_chunk() {
     for name in ["with_recovery.rar", "with_all_services.rar"] {
@@ -68,6 +72,7 @@ fn the_inline_recovery_seeds_still_yield_a_crc_valid_chunk() {
 /// The legacy RAR 2/3 leg, added with the bounded protect-record repair. Each
 /// of these has to still present a record for the target to reach
 /// `repair_protect_to_path` at all.
+#[cfg(feature = "rar")]
 #[test]
 fn the_legacy_protect_record_seeds_still_present_a_record() {
     for name in [

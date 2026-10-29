@@ -506,7 +506,7 @@ pub fn timed_pause(d: &Arc<Daemon>, mins: u64, graceful: bool) {
     // Raise the flag and invalidate any pending auto-resume in one step
     // (see `set_paused_cancel_timer`); `arm_pause_timer` below re-arms
     // its own deadline under the same lock for the mins > 0 case.
-    let was_paused = set_paused_cancel_timer(d, true);
+    let was_paused = take_pause_cancel_timer(d);
     // Every caller of this is a person or a client acting for one - the
     // scheduler pauses through `apply_action`, which claims the pause
     // for itself.
@@ -695,9 +695,34 @@ fn pause_timer(weak: &std::sync::Weak<Daemon>, stop: crate::RunStop) {
 /// the ring lock and then offers the event to the webhook dispatcher,
 /// and no other lock may be held across either.
 pub fn set_paused_cancel_timer(d: &Daemon, paused: bool) -> bool {
+    set_paused_inner(d, paused, false)
+}
+
+/// [`set_paused_cancel_timer`] for a DELIBERATE pause - a person, a
+/// client acting for one, or the schedule - which also takes the pause
+/// away from offline, in the same `pause_until` hold that
+/// [`Daemon::set_offline`] decides its transition under.
+///
+/// Going offline from a running queue claims the pause
+/// (`paused_by_offline`) so that coming back online can resume it. A
+/// pause decided AFTER that is a later instruction about the same
+/// queue, and left with the claim still standing, coming online read
+/// the pause as its own and resumed it - a manual pause undone, and a
+/// scheduled off window downloading (27 Oct 2026 sweep F3). The
+/// shutdown wind-down does NOT come through here: it is not a decision
+/// about the queue, and the claim it would drop is what the next run
+/// restores.
+pub fn take_pause_cancel_timer(d: &Daemon) -> bool {
+    set_paused_inner(d, true, true)
+}
+
+fn set_paused_inner(d: &Daemon, paused: bool, revoke_offline: bool) -> bool {
     let was = {
         let mut until = d.pause_until.lock_ok();
         let was = d.paused.swap(paused, Ordering::Relaxed);
+        if revoke_offline {
+            d.paused_by_offline.store(false, Ordering::Relaxed);
+        }
         *until = None;
         was
     };
@@ -1230,6 +1255,91 @@ mod pause_timer_tests {
         assert!(
             d.pause_until.lock_ok().is_none(),
             "and it leaves no deadline behind for `pause_int` to report"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 27 Oct 2026 sweep F3: a pause decided AFTER going offline belongs
+    /// to whoever decided it, and coming back online leaves it standing.
+    ///
+    /// Going offline from a running queue claims the pause so that coming
+    /// online can resume it. A later manual, timed or scheduled pause left
+    /// that claim in place, so the online edge read the pause as its own
+    /// and resumed it - and dropped a timed pause's deadline on the way.
+    /// The two controls are the intended behaviour the fix must keep:
+    /// an offline-only pause still auto-resumes, and a pause taken BEFORE
+    /// going offline still survives it.
+    #[test]
+    fn a_pause_taken_while_offline_survives_coming_back_online() {
+        let _serial = one_pause_timer_test_at_a_time();
+        // `set_offline` spawns its pool wind-down onto the runtime.
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _rt = rt.enter();
+        let dir = scratch("offlinepause");
+        let fresh = |tag: &str| {
+            let sub = dir.join(tag);
+            std::fs::create_dir_all(&sub).expect("sub dir");
+            crate::testutil::test_daemon(&sub)
+        };
+        let paused = |d: &Arc<Daemon>| d.paused.load(Ordering::Relaxed);
+
+        let d = fresh("manual");
+        d.set_offline(true);
+        timed_pause(&d, 0, true);
+        d.set_offline(false);
+        assert!(
+            paused(&d),
+            "online undid a manual pause taken while offline"
+        );
+
+        let d = fresh("schedule");
+        d.set_offline(true);
+        crate::sched::apply_action(&d, crate::sched::SchedAction::Pause);
+        d.set_offline(false);
+        assert!(
+            paused(&d),
+            "online undid a scheduled pause taken while offline"
+        );
+
+        let d = fresh("timed");
+        d.set_offline(true);
+        timed_pause(&d, 60, true);
+        d.set_offline(false);
+        assert!(paused(&d), "online undid a timed pause taken while offline");
+        assert!(
+            d.pause_until.lock_ok().is_some(),
+            "online dropped the timed pause's deadline, so it would never lift"
+        );
+        set_paused_cancel_timer(&d, false);
+        wait_for_workers(0, "cancelling the timed pause");
+
+        // Controls.
+        let d = fresh("offlineonly");
+        d.set_offline(true);
+        assert!(paused(&d), "going offline pauses");
+        d.set_offline(false);
+        assert!(!paused(&d), "an offline-only pause must still auto-resume");
+
+        let d = fresh("before");
+        timed_pause(&d, 0, true);
+        d.set_offline(true);
+        d.set_offline(false);
+        assert!(paused(&d), "a pause from before the outage must survive it");
+
+        // And across a restart: what is written down is the revoked claim.
+        let d = fresh("restart");
+        d.set_offline(true);
+        timed_pause(&d, 0, true);
+        persist_pause(&d);
+        let saved = crate::load_settings(&d.settings_path);
+        let back = fresh("restart-back");
+        restore_pause(&back, &saved);
+        assert!(back.offline.load(Ordering::Relaxed), "offline was restored");
+        back.set_offline(false);
+        assert!(
+            paused(&back),
+            "after a restart, online undid a pause taken while offline"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

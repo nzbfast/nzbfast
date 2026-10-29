@@ -2776,6 +2776,7 @@
  "toast.promote.unknown": "Diese Datei gehört nicht mehr zu diesem Download.",
  "toast.pvfail": "Diese Datei lässt sich hier nicht öffnen.",
  "toast.pwfail": "Passwort konnte nicht gesetzt werden.",
+ "toast.pwlayer": "Das Passwort hat das Archiv geöffnet, aber darin liegt ein weiteres gesperrtes Archiv - geben Sie dessen Passwort ein.",
  "toast.pwsaved": "Passwort gespeichert.",
  "toast.pwunlocked": "Entpackt - das Passwort hat funktioniert.",
  "toast.pwwrong": "Dieses Passwort hat das Archiv nicht geöffnet - die heruntergeladenen Dateien sind unverändert, versuchen Sie ein anderes.",

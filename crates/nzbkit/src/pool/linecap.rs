@@ -785,6 +785,14 @@ pub const LINE_CAP_PROBE_COLD_MIN_BPS: u64 = 50_000_000;
 /// [`LINE_CAP_PROBE_PAY_PCT`] leaves room for the other 25%.
 pub const LINE_CAP_PROBE_SETTLE_MS: u64 = 2_000;
 
+/// The longest the cold-start probe waits for a rung's sockets to come
+/// up before judging it on the ones that did, in ms. Slots dial
+/// `ramp_delay` (150 ms) apart, so a 25-socket rung is up in ~4 s and a
+/// 50-socket one in ~8 s; 10 s covers the largest step the probe takes
+/// and still leaves a rung that a provider holds short of its count
+/// judged rather than left waiting for sockets that will not come.
+pub const LINE_CAP_PROBE_MAX_DWELL_MS: u64 = 10_000;
+
 /// What the probe asks of the sockets it added, in percent: each added
 /// socket must carry at least this share of what the sockets already
 /// dialling carried on average. A line that is already full gives
@@ -819,7 +827,7 @@ pub struct Probe {
     fleet: usize,
     /// When that dwell began, ms on the pool clock.
     since: u64,
-    /// `(rate, dialling)` read at the end of the previous rung's dwell.
+    /// `(rate, connected)` read at the end of the previous rung's dwell.
     /// None = no baseline yet.
     base: Option<(u64, usize)>,
     /// A rung failed to pay, or the ceiling was reached. Latched.
@@ -888,6 +896,7 @@ pub fn probe_step(
     now: u64,
     now_bps: u64,
     dialling: usize,
+    connected: usize,
     ceiling: usize,
     proven: usize,
     anchored: bool,
@@ -908,22 +917,37 @@ pub fn probe_step(
             },
         );
     }
+    // A rung is judged once it is UP - every admitted worker holds a
+    // session - as well as dwelt (GitHub #103, 25 Oct 2026). Slots dial
+    // `ramp_delay` apart, so a fifteen-socket rung is still connecting
+    // two seconds after the raise, and a rate read then cannot show what
+    // it buys: the reporter's 35 -> 50 rung had 28 of 50 up at the 2 s
+    // judgement and latched as unpaid, then carried ~5 MB/s a socket for
+    // the rest of the job. LINE_CAP_PROBE_MAX_DWELL_MS bounds the wait,
+    // so an account that never grants the last few sockets is still
+    // judged, on what did come up.
+    let waited = now.saturating_sub(p.since);
+    let settled = connected >= dialling || waited >= LINE_CAP_PROBE_MAX_DWELL_MS;
     let gate = match anchored {
         true => LINE_CAP_PROBE_MIN_BPS,
         false => LINE_CAP_PROBE_COLD_MIN_BPS,
     };
-    if now.saturating_sub(p.since) < LINE_CAP_PROBE_SETTLE_MS || now_bps < gate {
+    if waited < LINE_CAP_PROBE_SETTLE_MS || !settled || now_bps < gate {
         return (fleet, p);
     }
     if let Some((r0, d0)) = p.base {
         // The added sockets' marginal carry against the average carry
         // of the rung below: (r - r0) / (d - d0) >= PAY% x r0 / d0,
-        // cross-multiplied. Sockets that never came up (an account
-        // that grants no more, a slot above the spawn) add no
-        // dialling, and they cannot pay.
-        let pays = dialling > d0
+        // cross-multiplied. Counted in sockets that HOLD A SESSION, not
+        // workers admitted: an admitted worker still dialling carries
+        // nothing yet, and dividing by it read a rung that was still
+        // connecting as one that did not pay (GitHub #103: 28 of 50 up
+        // at the judgement, the same rung paying 2 s later). Sockets
+        // that never came up (an account that grants no more, a slot
+        // above the spawn) add nothing here, and they cannot pay.
+        let pays = connected > d0
             && (now_bps.saturating_sub(r0) as u128) * (d0 as u128) * 100
-                >= (r0 as u128) * ((dialling - d0) as u128) * (LINE_CAP_PROBE_PAY_PCT as u128);
+                >= (r0 as u128) * ((connected - d0) as u128) * (LINE_CAP_PROBE_PAY_PCT as u128);
         if !pays {
             return (fleet, Probe { done: true, ..p });
         }
@@ -945,11 +969,157 @@ pub fn probe_step(
         Probe {
             fleet: next,
             since: now,
-            base: Some((now_bps, dialling)),
+            base: Some((now_bps, connected)),
             done: false,
             paid,
         },
     )
+}
+
+/// How far below its best since a raise the fleet's rate has to sit for
+/// that raise to be called a mistake, in percent ([`Regret`]). 30, i.e.
+/// under 70% of the best: the same margin TODO 202's saturation gate was
+/// moved to on measurement, because a shaped line's 1 s now-rate cannot
+/// hold within 10% of its peak on jitter alone (`NZBFAST_RACE_SAT_PCT`'s
+/// note in get/fleet_knobs.rs). The reporter's line fell to ~63%.
+pub const LINE_CAP_REGRET_PCT: u64 = 30;
+
+/// How long after a raise the [`Regret`] check keeps watching, in ms.
+/// The reporter's line in GitHub #103 took ~8 s after its 70 -> 100
+/// raise to fall from ~340 to ~215 MB/s, and a rung can take up to
+/// [`LINE_CAP_PROBE_MAX_DWELL_MS`] to come up before that starts.
+pub const LINE_CAP_REGRET_WINDOW_MS: u64 = 30_000;
+
+/// The step-back check: one raise the fleet regretted, undone
+/// (25 Oct 2026, GitHub #103). Default is "watching nothing".
+///
+/// **What it fixes.** Every arm of the governor only ever RAISES within a
+/// run - [`fleet_step`] carries the hysteresis and the probe latches at
+/// its first unpaid rung - so a raise that made the line WORSE stayed for
+/// the rest of the job. The reporter's second 1.9.0 job walked 45 -> 70
+/// -> 100 on a measured 1.4 Gbit anchor; nine more sockets on the far
+/// provider then cut the near one from ~6 to ~1.5 MB/s a socket and the
+/// TOTAL from ~340 to ~215 MB/s, on a 10 Gbit line SABnzbd fills to ~345
+/// with the same socket counts. Not a client bottleneck (a loopback rig
+/// growing a slow server from 25 to 100 sockets never starved the fast
+/// one), so the line itself is where it fills, and the one thing the
+/// governor can do about a full path is stop pushing it.
+///
+/// **The rule.** A raise records the fleet it came from and the rate the
+/// fleet was moving at that moment, and from then on the BEST rate it
+/// reads (a raise usually lands while the rung below is still ramping,
+/// its slots dialling `ramp_delay` apart, so the moment of the raise
+/// undersells what that fleet could do - measured on the rig below,
+/// 0.39 MB/s at the raise against 1.03 MB/s three seconds later). Once
+/// the new rung is up and dwelt -
+/// the probe's own test, every admitted worker holding a session and
+/// [`LINE_CAP_PROBE_SETTLE_MS`] gone, or [`LINE_CAP_PROBE_MAX_DWELL_MS`]
+/// - and until [`LINE_CAP_REGRET_WINDOW_MS`] after the raise, a rate
+/// [`LINE_CAP_REGRET_PCT`]% or more below that best is a strike, any other
+/// reading clears the strikes, and [`LINE_CAP_RAISE_TICKS`] strikes in a
+/// row step the fleet back to where it came from and hold it there for
+/// the run. One step, never a walk down: it undoes one decision the
+/// governor made, it never sizes a fleet below what an arm asked for
+/// before that decision.
+///
+/// `now_bps == 0` is no evidence, as it is for every arm: queue-dry and
+/// the tail sag for reasons that have nothing to do with the line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Regret {
+    /// The fleet before the raise being watched; 0 = nothing watched.
+    from: usize,
+    /// The fleet the raise went to.
+    to: usize,
+    /// When it was raised, ms on the pool clock.
+    at: u64,
+    /// The best rate read since the raise, starting from the one at the
+    /// raise itself, B/s.
+    before: u64,
+    /// Consecutive settled readings under the line.
+    strikes: u32,
+    /// Stepped back: the fleet may not grow past this for the run.
+    /// 0 = no ceiling.
+    hold: usize,
+}
+
+/// One tick of the step-back check ([`Regret`]). `cap` is the fleet in
+/// force when this tick began and `want` what the arms asked for this
+/// tick; returns the fleet to run at and the next state. Pure, like
+/// [`probe_step`], which it runs after. `dialling` and `connected` are
+/// the probe's two readings. `evidence` is false when the client, not
+/// the line, is what limits this reading (a full holds ledger, a
+/// capacity refusal).
+pub fn regret_step(
+    r: Regret,
+    cap: usize,
+    want: usize,
+    now: u64,
+    now_bps: u64,
+    dialling: usize,
+    connected: usize,
+    evidence: bool,
+) -> (usize, Regret) {
+    let want = match r.hold {
+        0 => want,
+        h => want.min(h),
+    };
+    if want > cap {
+        // A raise: watch it, against the rate the fleet moved before it.
+        return (
+            want,
+            Regret {
+                from: cap,
+                to: want,
+                at: now,
+                before: now_bps,
+                strikes: 0,
+                ..r
+            },
+        );
+    }
+    if r.from == 0 || r.to != cap || r.before == 0 || now_bps == 0 {
+        return (want, r);
+    }
+    // A reading the CLIENT limited is no evidence about the line: a full
+    // holds ledger or a capacity refusal sags the rate with the line
+    // untouched, and stepping back over it would undo a raise for the
+    // wrong reason. It neither strikes nor clears.
+    if !evidence {
+        return (want, r);
+    }
+    let waited = now.saturating_sub(r.at);
+    if waited > LINE_CAP_REGRET_WINDOW_MS {
+        return (want, Regret { from: 0, ..r });
+    }
+    let r = Regret {
+        before: r.before.max(now_bps),
+        ..r
+    };
+    let settled = waited >= LINE_CAP_PROBE_SETTLE_MS
+        && (connected >= dialling || waited >= LINE_CAP_PROBE_MAX_DWELL_MS);
+    if !settled {
+        return (want, r);
+    }
+    let worse = (now_bps as u128) * 100 < (r.before as u128) * (100 - LINE_CAP_REGRET_PCT) as u128;
+    match (worse, r.strikes + 1 >= LINE_CAP_RAISE_TICKS) {
+        (false, _) => (want, Regret { strikes: 0, ..r }),
+        (true, false) => (
+            want,
+            Regret {
+                strikes: r.strikes + 1,
+                ..r
+            },
+        ),
+        (true, true) => (
+            r.from,
+            Regret {
+                from: 0,
+                strikes: 0,
+                hold: r.from,
+                ..r
+            },
+        ),
+    }
 }
 
 /// How many spawned slots the I/O shard layout should be sized for
@@ -1222,6 +1392,7 @@ pub(super) struct LineCap {
     /// The cold-start probe ([`probe_step`]). Behind a mutex, which is
     /// never contended: the tick's CAS lets one caller a second in.
     probe: std::sync::Mutex<Probe>,
+    regret: std::sync::Mutex<Regret>,
 }
 
 impl LineCap {
@@ -1315,6 +1486,7 @@ impl LineCap {
             sheds: AtomicU64::new(0),
             raises: AtomicU64::new(0),
             probe: std::sync::Mutex::new(Probe::default()),
+            regret: std::sync::Mutex::new(Regret::default()),
         }
     }
 }
@@ -1587,6 +1759,14 @@ impl Shared {
                 self.sat.now_rate(now).unwrap_or(0.0).max(0.0) as u64
             };
             let dialling = self.workers_dialling();
+            // Sessions actually established across the fleet, which the
+            // cold-start probe waits on before judging a rung (`dialling`
+            // counts admitted workers, including ones still connecting).
+            let connected: usize = self
+                .sessions
+                .iter()
+                .map(|s| s.load(Ordering::Relaxed))
+                .sum();
             // TODO 275 item 1 part 2: bank the carry this tick just
             // measured, so the NEXT job can seed from it rather than
             // re-walking this climb from the curve's assumption. Same
@@ -1740,6 +1920,7 @@ impl Shared {
                     now,
                     now_bps,
                     dialling,
+                    connected,
                     ceiling,
                     proven,
                     lc.anchor_bps > 0,
@@ -1747,10 +1928,42 @@ impl Shared {
                 *probe = next;
                 want
             };
+            // The step-back check, only where a fleet can be lowered at
+            // all: a run with no line anchor never sheds (`allow_shed`
+            // below), and there the probe's own pay test is the judge.
+            let (want, stepped) = match lc.anchor_bps > 0 {
+                false => (want, None),
+                true => {
+                    let mut regret = lc.regret.lock_ok();
+                    let before = *regret;
+                    let (w, next) = regret_step(
+                        *regret,
+                        cap,
+                        want,
+                        now,
+                        now_bps,
+                        dialling,
+                        connected,
+                        holds_ok && !refused,
+                    );
+                    *regret = next;
+                    (w, (next.hold != before.hold).then_some(before.before))
+                }
+            };
+            if let Some(before) = stepped {
+                info!(
+                    "line cap: fleet {cap} -> {want} (stepped back: the fleet moved {:.0} Mbit \
+                     before the raise to {cap} and {:.0} Mbit after it; held at {want} for this run)",
+                    before as f64 * 8.0 / 1e6,
+                    now_bps as f64 * 8.0 / 1e6,
+                );
+            }
             let probed = want > curve;
             if want != cap {
                 lc.cur.store(want, Ordering::Relaxed);
-                lc.raises.fetch_add(1, Ordering::Relaxed);
+                if want > cap {
+                    lc.raises.fetch_add(1, Ordering::Relaxed);
+                }
                 // TODO 312 item 3: the gauge follows the cap in FORCE,
                 // not the seed. Published HERE and not below the shed
                 // loop, because the shed's own early return
@@ -1776,46 +1989,48 @@ impl Shared {
                 // fleet guard parses the SEED line's head positionally
                 // and this line not at all, and the head of this one
                 // still opens exactly as it did.
-                info!(
-                    "line cap: fleet {cap} -> {want} ({:.0} Mbit line seen; seed fleet {}; \
+                if want > cap {
+                    info!(
+                        "line cap: fleet {cap} -> {want} ({:.0} Mbit line seen; seed fleet {}; \
                      {} anchor{}{})",
-                    line as f64 * 8.0 / 1e6,
-                    lc.cap,
-                    if lc.anchor_measured {
-                        "measured"
-                    } else {
-                        "typed"
-                    },
-                    // TODO 275 item 7: say when the raise is running
-                    // under the SECOND ceiling, and say what bounded it.
-                    // A reader diagnosing this regime needs to know
-                    // whether 100 or the account's own grant is the
-                    // number in the way, because only one of the two is
-                    // theirs to change. Silent at the first ceiling, so
-                    // every install that is not in this regime keeps the
-                    // line it had.
-                    // A probe raise past the first ceiling ran under
-                    // `proven`, so that is the number in the way.
-                    match if probed && want > LINE_CAP_MAX_FLEET {
-                        proven
-                    } else {
-                        ceiling
-                    } {
-                        c if c <= LINE_CAP_MAX_FLEET => String::new(),
-                        c => format!("; ceiling {c} of the account's {}", lc.grant),
-                    },
-                    // The cold-start probe made this raise, not the
-                    // curve: say what the fleet was moving when it did.
-                    // Kept inside the parenthetical, after everything
-                    // the bench drivers' regexes read.
-                    match probed {
-                        false => String::new(),
-                        true => format!(
-                            "; probe at {:.0} Mbit on {dialling} sockets",
-                            now_bps as f64 * 8.0 / 1e6
-                        ),
-                    },
-                );
+                        line as f64 * 8.0 / 1e6,
+                        lc.cap,
+                        if lc.anchor_measured {
+                            "measured"
+                        } else {
+                            "typed"
+                        },
+                        // TODO 275 item 7: say when the raise is running
+                        // under the SECOND ceiling, and say what bounded it.
+                        // A reader diagnosing this regime needs to know
+                        // whether 100 or the account's own grant is the
+                        // number in the way, because only one of the two is
+                        // theirs to change. Silent at the first ceiling, so
+                        // every install that is not in this regime keeps the
+                        // line it had.
+                        // A probe raise past the first ceiling ran under
+                        // `proven`, so that is the number in the way.
+                        match if probed && want > LINE_CAP_MAX_FLEET {
+                            proven
+                        } else {
+                            ceiling
+                        } {
+                            c if c <= LINE_CAP_MAX_FLEET => String::new(),
+                            c => format!("; ceiling {c} of the account's {}", lc.grant),
+                        },
+                        // The cold-start probe made this raise, not the
+                        // curve: say what the fleet was moving when it did.
+                        // Kept inside the parenthetical, after everything
+                        // the bench drivers' regexes read.
+                        match probed {
+                            false => String::new(),
+                            true => format!(
+                                "; probe at {:.0} Mbit on {dialling} sockets",
+                                now_bps as f64 * 8.0 / 1e6
+                            ),
+                        },
+                    );
+                }
                 cap = want;
             }
         }

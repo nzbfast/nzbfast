@@ -1175,21 +1175,48 @@ let keyEpoch = 0;
 // TODO 19 (public request #4): the dashboard session's CSRF token, out
 // of the readable companion cookie the daemon sets beside the HttpOnly
 // session. Its presence is also how this page knows a session exists.
-// Same function, same reasoning and same port-prefix match as
-// dashboard.html - see the copy there for why it is read per call.
+// Same function and same reasoning as dashboard.html - see the copy
+// there for why it is read per call, and why it reads only the EXACT
+// cookie name this daemon stamped in rather than any port's.
 function csrfToken(){
   try{
-    const m = document.cookie.match(/(?:^|;\s*)nzbfast_csrf_\d+=([^;]*)/);
-    return m ? decodeURIComponent(m[1]) : '';
+    const want=/** @type {string} */('__NZBFAST_CSRF_COOKIE__');
+    if(!/^nzbfast_csrf_\d+$/.test(want)) return '';
+    for(const part of document.cookie.split(';')){
+      const eq=part.indexOf('=');
+      if(eq>0 && part.slice(0,eq).trim()===want)
+        return decodeURIComponent(part.slice(eq+1).trim());
+    }
+    return '';
   }catch(_){ return ''; }
 }
+// The token of a session this daemon has already refused. A daemon
+// restart (or a session aged out on the daemon's side) leaves both
+// cookies in the browser while the session behind them is gone, and the
+// daemon answers that with an ordinary key refusal that clears nothing.
+// Because a token suppresses the key, the page went on sending the dead
+// token even after the right key was typed into the modal, and the modal
+// came straight back. So a refusal of a call that carried a token marks
+// THAT token lapsed (sessionLapsed below), and the key travels from then
+// on. Signing in again sets a new token, which is live by construction.
+let lapsedCsrf = '';
 // The daemon requires `X-CSRF-Token` on every cookie-authenticated call
 // and the key is not sent at all when a session is in force - see the
 // session block in `handle_api`.
 function authHeaders(sent, oneShot){
   const tok = oneShot ? '' : csrfToken();
-  if(tok) return {'X-CSRF-Token': tok};
+  if(tok && tok !== lapsedCsrf) return {'X-CSRF-Token': tok};
   return sent ? {'X-Api-Key': sent} : {};
+}
+// Called on an auth refusal with the headers the refused call carried:
+// true when they held a session token not already known to be lapsed.
+// That token is now marked, and the call is worth one retry under the
+// key before anybody is asked for anything.
+function sessionLapsed(h){
+  const tok = h && h['X-CSRF-Token'];
+  if(!tok || tok === lapsedCsrf) return false;
+  lapsedCsrf = tok;
+  return true;
 }
 // With a session in force the key is not written to localStorage: that
 // stored credential is the leak TODO 19 is about. A key stored before
@@ -1491,10 +1518,10 @@ async function api(mode, extra, authKey){
   // (keeps it out of proxy logs / history / Referer). The /m3u handoff
   // and the .nzb download fetch with the header too and hand the file
   // over as a blob download (m3uHandoff / dlRelNzb, §61d).
+  const hdrs = authHeaders(sent, authKey != null);
   let r;
   try {
-    r = await fetch(`/api?mode=${mode}${extra||''}`,
-      {headers: authHeaders(sent, authKey != null)});
+    r = await fetch(`/api?mode=${mode}${extra||''}`, {headers: hdrs});
   } catch(e){ return fetchFail(); }
   // A non-JSON body (a reverse proxy's 502 page, a truncated answer)
   // used to reject here and vanish the same way.
@@ -1505,7 +1532,9 @@ async function api(mode, extra, authKey){
     // The key moved on while this was in flight, or the dashboard tab
     // re-paired into the shared localStorage: retry under what the
     // browser holds now before asking anyone for a key they have
-    // already given once.
+    // already given once. A dead session's token goes first: its
+    // refusal says nothing about the key.
+    if (sessionLapsed(hdrs)) return api(mode, extra);
     if (keyEpoch !== epoch && key !== sent) return api(mode, extra);
     const stored = localStorage.nzbfastKey || '';
     if (stored && stored !== sent && stored !== key){ adoptKey(stored); return api(mode, extra); }
@@ -4117,16 +4146,18 @@ async function apiPost(mode, body){
     return {status:false, error:'API Key Required'};
   const sent = key;
   const epoch = keyEpoch;
+  const hdrs = authHeaders(sent, false);
   let r;
   try {
     r=await fetch(`/api?mode=${mode}`,
-      {method:'POST', body:JSON.stringify(body), headers: authHeaders(sent, false)});
+      {method:'POST', body:JSON.stringify(body), headers: hdrs});
   } catch(e){ return fetchFail(); }
   let j;
   try { j=await r.json(); }
   catch(e){ return {status:false, error:'HTTP '+r.status}; }
   if(authFail(j)){
     // Same stale-refusal rules as api().
+    if (sessionLapsed(hdrs)) return apiPost(mode, body);
     if (keyEpoch !== epoch && key !== sent) return apiPost(mode, body);
     const stored = localStorage.nzbfastKey || '';
     if (stored && stored !== sent && stored !== key){ adoptKey(stored); return apiPost(mode, body); }

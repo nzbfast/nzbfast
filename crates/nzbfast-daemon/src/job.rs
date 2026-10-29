@@ -3182,4 +3182,11 @@ pub struct AddExtras {
     pub failure_host: String,
     pub failure_https: bool,
     pub failure_depth: u8,
+    /// Build the row per-job PAUSED whatever its priority. `-2` already
+    /// means that, but it also means "priority Normal", so a caller that
+    /// has to restore a paused row at High (Undo) cannot say both through
+    /// the priority alone. Setting the flag after the add returned left
+    /// the row published unpaused across the add's synchronous save, and
+    /// the runner could start it in there (27 Oct 2026 sweep F2).
+    pub paused: bool,
 }

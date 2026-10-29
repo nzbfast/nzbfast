@@ -2776,6 +2776,7 @@
  "toast.promote.unknown": "Bu dosya artık bu indirmenin parçası değil.",
  "toast.pvfail": "Bu dosya burada açılamadı.",
  "toast.pwfail": "Parola ayarlanamadı.",
+ "toast.pwlayer": "Parola arşivi açtı, ancak içinde kilitli başka bir arşiv var - onun parolasını girin.",
  "toast.pwsaved": "Parola kaydedildi.",
  "toast.pwunlocked": "Çıkarıldı - parola işe yaradı.",
  "toast.pwwrong": "Bu parola arşivi açmadı - indirilen dosyalar olduğu gibi duruyor, başka bir parola deneyin.",

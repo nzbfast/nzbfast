@@ -2825,6 +2825,7 @@
  "toast.promote.unknown": "Tento soubor už není součástí tohoto stahování.",
  "toast.pvfail": "Tento soubor tu nešlo otevřít.",
  "toast.pwfail": "Nepodařilo se nastavit heslo.",
+ "toast.pwlayer": "Heslo archiv otevřelo, ale uvnitř je další zamčený archiv - zadejte heslo k němu.",
  "toast.pwsaved": "Heslo uloženo.",
  "toast.pwunlocked": "Rozbaleno - heslo fungovalo.",
  "toast.pwwrong": "Toto heslo archiv neotevřelo - stažené soubory zůstaly nedotčené, zkuste jiné.",

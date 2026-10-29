@@ -347,7 +347,14 @@ pub fn apply_action(d: &Arc<Daemon>, a: SchedAction) {
             // "pause for 60 minutes" at 21:30 un-paused the queue at
             // 22:30, inside a 22:00 scheduled off window.
             let pause = a == SchedAction::Pause;
-            set_paused_cancel_timer(d, pause);
+            if pause {
+                // Takes the pause from offline too: an off window that
+                // starts while offline must still hold once the
+                // connection comes back.
+                take_pause_cancel_timer(d);
+            } else {
+                set_paused_cancel_timer(d, false);
+            }
             // Claim it, so the header can say who decided and until when
             // instead of showing the same word a deliberate pause gets.
             *d.pause_source.lock_ok() = "schedule";

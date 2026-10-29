@@ -3249,7 +3249,7 @@ mod archiver_tests;
 // The ONE place this crate's tests build RAR fixtures through the
 // ENGINE's writer, named by shape (cutover plan P3). The hand-built
 // byte fixtures everything else uses are `fixtures` above.
-#[cfg(test)]
+#[cfg(all(test, feature = "rar"))]
 mod rarfixtures;
 
 #[cfg(test)]

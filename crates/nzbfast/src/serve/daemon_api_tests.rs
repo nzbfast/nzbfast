@@ -950,7 +950,8 @@ fn a_recategorize_stops_the_prefetch_it_re_pointed() {
         task: rt.spawn(async {}),
         borrowed: false,
     });
-    super::api::queue::requeue_category(&d, &job, "Some.Release", "tv").expect("recategorize");
+    super::api::queue::requeue_category(&d, &job, super::api::queue::Refile::Cat("tv"))
+        .expect("recategorize");
     assert!(
         !other.load(std::sync::atomic::Ordering::Relaxed),
         "the re-point stopped a prefetch that was serving a different job"
@@ -959,7 +960,8 @@ fn a_recategorize_stops_the_prefetch_it_re_pointed() {
     // The prefetch serving THIS job is stopped.
     d.sidecar.lock_ok().as_mut().unwrap().nzo_id = "nzo-recatpoke-1".into();
     d.sidecar.lock_ok().as_mut().unwrap().cancelled = cancelled.clone();
-    super::api::queue::requeue_category(&d, &job, "Some.Release", "films").expect("recategorize");
+    super::api::queue::requeue_category(&d, &job, super::api::queue::Refile::Cat("films"))
+        .expect("recategorize");
     assert!(
         cancelled.load(std::sync::atomic::Ordering::Relaxed),
         "the prefetch went on filling a directory the record had left"

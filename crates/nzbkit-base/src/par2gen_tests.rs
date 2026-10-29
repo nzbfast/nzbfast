@@ -406,6 +406,34 @@ fn a_set_of_only_empty_members_refuses_to_pretend_it_has_parity() {
     assert!(set.files.iter().all(|f| f.length == 0));
 }
 
+/// The recovery ceiling is ONE predicate, and the create refuses through
+/// it: 32,768 slices is legal, 32,769 is not, and the create's refusal
+/// carries the predicate's own words. A preview pane asks the same
+/// function before laying out any volume, so the two cannot disagree.
+#[test]
+fn the_recovery_ceiling_is_one_predicate_the_create_refuses_through() {
+    assert!(check_recovery_count(0).is_ok());
+    assert!(check_recovery_count(MAX_INPUT_SLICES as u64).is_ok());
+    let over = check_recovery_count(MAX_INPUT_SLICES as u64 + 1).unwrap_err();
+    assert!(check_recovery_count(u64::MAX).is_err());
+
+    // The refusal is the shape check's, before any slice is computed or
+    // any byte written, so it costs nothing to reach at a 4-byte source.
+    let t = Tmp::new("recovceil");
+    let members = vec![t.write("a.bin", b"test")];
+    let err = create_into_exact(
+        &t.0,
+        &members,
+        "set",
+        Some(1 << 20),
+        MAX_INPUT_SLICES + 1,
+        CreatePlan::ENGINE,
+    )
+    .unwrap_err();
+    assert_eq!(format!("{err}"), format!("{over}"));
+    assert!(!t.0.join("set.par2").exists(), "nothing written");
+}
+
 /// `R_e = Σ_i g_i^e · D_i` written out the way the spec states it: no
 /// batching, no threads, no tables, one scalar [`crate::gf16::mul`] per
 /// word. Deliberately a SECOND implementation rather than a rearranged

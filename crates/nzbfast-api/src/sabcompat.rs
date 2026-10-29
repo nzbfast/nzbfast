@@ -2407,18 +2407,18 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                 // the record saying movies while the job downloaded
                 // into the old tv directory - and relabelled active
                 // jobs the SAB side refuses.
-                let targets: Vec<(Arc<Mutex<Job>>, String, String)> = d
+                let targets: Vec<(Arc<Mutex<Job>>, String)> = d
                     .queue
                     .lock_ok()
                     .iter()
                     .filter_map(|j| {
                         let g = j.lock_ok();
                         (ids.contains(&nzo_int(&g.nzo_id)) && g.state == JobState::Queued)
-                            .then(|| (j.clone(), g.name.clone(), g.category.clone()))
+                            .then(|| (j.clone(), g.category.clone()))
                     })
                     .collect();
                 let mut fences = Vec::new();
-                for (job, name, current) in targets {
+                for (job, current) in targets {
                     if current == cat {
                         ok = true; // already there: don't re-derive
                         continue;
@@ -2427,7 +2427,11 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                     // that actually landed - matching the SAB
                     // precedent (unregistered ids must not grow the
                     // persisted category list).
-                    if let Ok(f) = super::api::queue::requeue_category(d, &job, &name, &cat) {
+                    if let Ok(f) = super::api::queue::requeue_category(
+                        d,
+                        &job,
+                        super::api::queue::Refile::Cat(&cat),
+                    ) {
                         fences.push(f);
                         ok = true;
                     }

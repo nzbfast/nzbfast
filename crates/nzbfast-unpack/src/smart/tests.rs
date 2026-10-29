@@ -1949,6 +1949,58 @@ fn a_locked_zip_is_detected_and_the_password_unpacks_it() {
     }
 }
 
+/// Codex sweep F5 (27 Oct 2026): a password that opens an OUTER locked
+/// container must not answer `Ok` over an inner one still locked. The
+/// API cleared `password_required` on that `Ok`, and the completed tail
+/// read it as "nothing locked" and ran the ordinary cleanup, which
+/// deletes the inner archive - the only copy of the payload - when the
+/// cleanup list names its extension.
+#[test]
+fn an_unlock_that_exposes_another_lock_is_not_an_unlock() {
+    use nzbkit::zip::fixtures::{Encrypt, Spec, zip_of};
+    let payload: Vec<u8> = (0..40_000u32).map(|i| (i * 11 + 5) as u8).collect();
+    let locked = |pw: &'static str, name: &str, body: &[u8]| {
+        zip_of(&[Spec {
+            encrypt: Some(Encrypt::ZipCrypto { password: pw }),
+            ..Spec::deflated(name, body)
+        }])
+    };
+
+    // Two passwords: A opens the outer layer only.
+    let d = scratch("nestedlock-two");
+    let inner = locked("pwB", "movie.mkv", &payload);
+    std::fs::write(d.join("outer.zip"), locked("pwA", "inner.zip", &inner)).unwrap();
+    assert_eq!(
+        crate::unlockpw::unlock(&d, "pwA"),
+        Err(None),
+        "a layer opened over a lock still in place is not an unlock"
+    );
+    assert!(
+        d.join("inner.zip").exists(),
+        "the opened layer is published"
+    );
+    assert_eq!(
+        crate::unlockpw::encrypted_archive(&d)
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
+        Some("inner.zip".to_string()),
+        "the lock left is the inner one, and it is still reported"
+    );
+    assert_eq!(
+        crate::unlockpw::unlock(&d, "pwB"),
+        Ok(()),
+        "the next password opens what is left"
+    );
+    assert_eq!(std::fs::read(d.join("movie.mkv")).unwrap(), payload);
+
+    // One password on both layers: the same call opens both.
+    let d = scratch("nestedlock-one");
+    let inner = locked("pwA", "movie.mkv", &payload);
+    std::fs::write(d.join("outer.zip"), locked("pwA", "inner.zip", &inner)).unwrap();
+    assert_eq!(crate::unlockpw::unlock(&d, "pwA"), Ok(()));
+    assert_eq!(std::fs::read(d.join("movie.mkv")).unwrap(), payload);
+    assert!(crate::unlockpw::encrypted_archive(&d).is_none());
+}
+
 /// H2 (29 Aug 2026 sweep): a destination INSIDE the source is refused
 /// before anything is created or moved.
 ///

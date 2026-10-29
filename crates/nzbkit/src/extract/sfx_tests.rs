@@ -205,6 +205,7 @@ fn a_deep_stub_or_a_non_sfx_name_lands_on_disk_intact() {
 /// every read by the stub's length. The member comes out byte-exact and
 /// the `.exe` never touches disk - before this the volume demoted whole
 /// for the disk post-pass's SFX arm to carve.
+#[cfg(feature = "rar")]
 #[test]
 fn a_compressed_rar_sfx_chases_in_stream() {
     let data = noisy(120_000, 9);
@@ -221,6 +222,7 @@ fn a_compressed_rar_sfx_chases_in_stream() {
 /// `.exe` on disk byte for byte, stub included - the disk post-pass's
 /// SFX arm carves that, and it is the route every compressed SFX took
 /// before the chase learned the offset.
+#[cfg(feature = "rar")]
 #[test]
 fn a_compressed_rar_sfx_demotes_to_the_whole_exe_with_the_chase_off() {
     let data = noisy(120_000, 9);
@@ -260,6 +262,7 @@ fn a_compressed_rar_sfx_demotes_to_the_whole_exe_with_the_chase_off() {
 /// stub, so its demote is an ordinary one and the unrar ladder must still
 /// claim it. Marking a demote whose volumes ARE that ladder's input would
 /// leave a job with loose volumes and no payload.
+#[cfg(feature = "rar")]
 #[test]
 fn the_same_bytes_under_a_non_sfx_name_demote_unmarked() {
     let data = noisy(120_000, 9);

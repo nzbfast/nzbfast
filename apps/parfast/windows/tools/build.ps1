@@ -82,6 +82,14 @@ if ($Publish -or $Installer -or $Run) {
     Write-Host "size             $((Get-Item $exe).Length) bytes (exe)"
     Write-Host "files            $((Get-ChildItem $out -Recurse -File).Count)"
 
+    # rarkit's MIT notice (the posting set's RAR writer), beside the exe, so
+    # the zip (this directory, compressed) and the installer (staged from
+    # it) both carry it. REFUSE rather than skip, for the LICENSE reason
+    # below: a release without it is out of licence, not merely untidy.
+    $notices = Join-Path $root "..\THIRD-PARTY-NOTICES.txt"
+    if (-not (Test-Path $notices)) { throw "$notices is not there - the app ships rarkit's MIT notice" }
+    Copy-Item $notices (Join-Path $out "THIRD-PARTY-NOTICES.txt") -Force
+
     # MOTW-stamped executables hang headless (MACHINES.md): SmartScreen has no
     # desktop to ask on. Anything that came off the network carries the mark.
     Get-ChildItem $out -Recurse -File | Unblock-File

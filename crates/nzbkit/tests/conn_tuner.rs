@@ -172,6 +172,7 @@ async fn transient_dip_does_not_fake_a_knee() {
             // boundaries land in real time.
             dip_at_conns: 8,
             dip_to_bps: 3 * MB,
+            ..Throttle::default()
         },
         16,
         0,

@@ -95,6 +95,23 @@ public sealed record JobResult
 
     /// <summary>The exit code the equivalent parfast line would have returned.</summary>
     [JsonPropertyName("exit_code")] public int? ExitCode { get; init; }
+
+    /// <summary>A posting set's route and its two halves' files. Null for every other kind.</summary>
+    [JsonPropertyName("posting")] public PostingResult? Posting { get; init; }
+}
+
+/// <summary>result.posting: which route a posting set took and what each half wrote.</summary>
+public sealed record PostingResult
+{
+    [JsonPropertyName("route")] public PostingRoute Route { get; init; }
+
+    /// <summary>Why two passes, as a sentence a host can show. Empty on the one-pass route.</summary>
+    [JsonPropertyName("route_reason")] public string RouteReason { get; init; } = string.Empty;
+
+    [JsonPropertyName("rar")] public IReadOnlyList<WrittenFile> Rar { get; init; } = [];
+    [JsonPropertyName("par2")] public IReadOnlyList<WrittenFile> Par2 { get; init; } = [];
+    [JsonPropertyName("source_bytes")] public long SourceBytes { get; init; }
+    [JsonPropertyName("source_files")] public int SourceFiles { get; init; }
 }
 
 public sealed record SurveyFile

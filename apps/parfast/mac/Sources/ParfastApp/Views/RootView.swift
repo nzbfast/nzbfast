@@ -64,7 +64,7 @@ struct RootView: View {
     private var sidebar: some View {
         List(selection: $app.mode) {
             Section {
-                ForEach(AppModel.Mode.allCases) { mode in
+                ForEach(app.availableModes) { mode in
                     Label {
                         HStack {
                             Text(mode.title)
@@ -97,13 +97,12 @@ struct RootView: View {
                 Text(S.appTagline)
                     .font(.system(size: 10))
                     .foregroundStyle(T.textTertiary)
-                // The stage, then the ENGINE's version - which is what
-                // capabilities.version is, and it is further along than this
-                // app. Without the stage beside it the footer reads as the
-                // app's own version, and at 1.6.0 that is a bare release
-                // number on a beta app (it was "beta" on an alpha one
-                // before; the gap moved, it did not close).
-                Text("\(S.appStage) \u{00B7} \(app.capabilities.version)")
+                // The ENGINE's version, which is what capabilities.version
+                // is. Through the betas a stage word stood before it, because
+                // a bare release number on a beta app said the wrong thing;
+                // the app left beta at 1.9.0 and its number is the engine's,
+                // so the number alone is now the truth.
+                Text(app.capabilities.version)
                     .font(.system(size: 10))
                     .monospacedDigit()
                     .foregroundStyle(T.textTertiary)
@@ -143,6 +142,7 @@ struct RootView: View {
                 switch app.mode {
                 case .verify: VerifyView(model: app.verify)
                 case .create: CreateView(model: app.create)
+                case .posting: PostingView(model: app.posting)
                 case .checksums: ChecksumsView(model: app.checksums)
                 case .queue: QueueView()
                 }
@@ -162,6 +162,7 @@ struct RootView: View {
         switch app.mode {
         case .verify: return app.verify.snapshot?.log_tail ?? []
         case .create: return app.create.snapshot?.log_tail ?? []
+        case .posting: return app.posting.snapshot?.log_tail ?? []
         case .checksums: return app.checksums.snapshot?.log_tail ?? []
         case .queue:
             return app.queue.jobs.last(where: { $0.state == .running })?.log_tail
@@ -172,6 +173,11 @@ struct RootView: View {
     private var logCommand: String? {
         switch app.mode {
         case .create: return app.create.preview?.command
+        case .posting:
+            // The PAR2 half's line, which the core fills for a two-pass set.
+            // A one-pass set has no CLI equivalent yet and says nothing.
+            let command = app.posting.snapshot?.command ?? ""
+            return command.isEmpty ? nil : command
         case .verify:
             // The core's own line for the job on screen, which says `r` and
             // carries the repair's switches when that job is a repair. The
@@ -217,6 +223,13 @@ struct RootView: View {
                     Label(S.createActionCreate, systemImage: "plus.square.on.square")
                 }
                 .disabled(app.create.sources.isEmpty)
+            case .posting:
+                Button {
+                    app.startPosting()
+                } label: {
+                    Label(S.postingActionCreate, systemImage: "shippingbox")
+                }
+                .disabled(!app.posting.canSubmit)
             case .checksums:
                 Button {
                     app.checksums.subMode == .create
@@ -245,6 +258,10 @@ struct RootView: View {
             ? app.mode.title
             : S.createSourcesFooter(files: Fmt.fileCount(app.create.sources.count),
                                     size: Fmt.bytes(app.create.totalBytes))
+        case .posting: return app.posting.sources.isEmpty
+            ? app.mode.title
+            : S.createSourcesFooter(files: Fmt.fileCount(app.posting.sources.count),
+                                    size: Fmt.bytes(app.posting.totalBytes))
         case .checksums, .queue: return app.mode.title
         }
     }

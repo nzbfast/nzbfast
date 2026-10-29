@@ -468,16 +468,25 @@ fn emit_started(d: &Daemon, j: &Job) {
 /// could ever wind the fetch down afterwards, since
 /// `insurance_yields_to_arrivals` finds the active fetch by
 /// `g.insurance`), the row can be promoted or unpaused (it is
-/// `pick_job`'s business now), or already banked. The caller answers
+/// `pick_job`'s business now), or already banked. An ordinary pick is
+/// re-judged on the two things `pick_job` filtered it on: a per-job
+/// pause accepted in the gap answers `status:true` and the queue shows
+/// Paused, yet nothing would wind it down afterwards (the suspension
+/// path only signals Downloading rows, and this one is still Queued),
+/// so without the re-read it went on to download anyway. Insurance rows
+/// are paused by design and keep their own arm. The caller answers
 /// Ended, not Nothing, so another row can run.
 fn start_gap_refusal(j: &Job, insurance: bool) -> bool {
     j.relocating > 0
         || j.tombstone
-        || (insurance
-            && (!j.insurance
+        || if insurance {
+            !j.insurance
                 || j.fetched
                 || j.state != JobState::Queued
-                || crate::insurance::insure_refusal(j).is_some()))
+                || crate::insurance::insure_refusal(j).is_some()
+        } else {
+            j.paused || j.state != JobState::Queued
+        }
 }
 
 /// What this start does with the job that is already on the wire.

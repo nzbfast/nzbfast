@@ -255,8 +255,13 @@ fn serve_with_hooks(dir: &Path, hooks: bool, budget_secs: Option<u64>) -> Daemon
         if let Some(secs) = budget_secs {
             cmd.env("NZBFAST_INDEX_READ_BUDGET_SECS", secs.to_string());
         }
+        // The daemon mints an API key on a genuinely first run, and a
+        // settings.json holding only `index_enabled` IS one since that key
+        // joined bootstrap's SETUP_ANSWER_KEYS (import-sab --arr). This
+        // suite drives the daemon keyless on purpose, so it takes the same
+        // deliberate opt-out an operator would.
         cmd.env("NZBFAST_NO_ENRICH", "1")
-            .env_remove("NZBFAST_OPEN")
+            .env("NZBFAST_OPEN", "1")
             .arg("--config")
             .arg(dir.join("config.json"))
             .arg("serve")

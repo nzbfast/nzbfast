@@ -189,7 +189,9 @@ struct ProgressSheet: View {
     /// the maintainer notes.
     private var canPause: Bool {
         guard app.capabilities.pause else { return false }
-        if job.kind == .create && !app.capabilities.pause_in_fold {
+        // A posting set's PAR2 half IS a create, so the same capability
+        // speaks for it.
+        if (job.kind == .create || job.kind == .postingSet) && !app.capabilities.pause_in_fold {
             return job.state == .queued
         }
         return true

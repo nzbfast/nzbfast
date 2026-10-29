@@ -10,7 +10,7 @@ description = "Speed-focused NZB downloader"
 workspace = true
 
 [dependencies]
-nzbkit = { path = "../nzbkit", default-features = false }
+nzbkit = { path = "../nzbkit", default-features = false, features = ["rar"] }
 # The bottom layer, cut out by step 2 of
 # research/PLAN-NZBFAST-CRATE-SPLIT-2026-09-01.md. Its 30 modules are
 # re-imported under their old names in main.rs and lib.rs

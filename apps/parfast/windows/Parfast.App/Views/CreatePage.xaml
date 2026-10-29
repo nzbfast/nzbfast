@@ -168,7 +168,7 @@
                                 </Grid>
                                 <RadioButton x:Name="RecByCount" GroupName="recovery" Checked="OnRecoveryModeChanged" />
                                 <NumberBox x:Name="RecCountBox" Margin="28,0,0,0"
-                                           Minimum="0" Maximum="65535" SpinButtonPlacementMode="Compact"
+                                           Minimum="0" Maximum="32768" SpinButtonPlacementMode="Compact"
                                            ValueChanged="OnRecoveryCountChanged" />
                                 <RadioButton x:Name="RecBySize" GroupName="recovery" Checked="OnRecoveryModeChanged" />
                                 <TextBox x:Name="RecSizeBox" Margin="28,0,0,0" LostFocus="OnRecoverySizeCommitted" />

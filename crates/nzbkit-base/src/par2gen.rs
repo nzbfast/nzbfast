@@ -87,7 +87,11 @@ mod scan;
 /// everything before the admission gate - split out on 17 Sep 2026 for
 /// the 500-line ceiling on `create_body`.
 mod shape;
+/// A one-member create fed its bytes as they are produced - the one-pass
+/// PAR2 half of a posting set. See its module doc for why one member.
+pub mod stream;
 mod stripe_first;
+pub use stream::StreamCreate;
 /// The batch volume writer and the critical-block backfill - split out
 /// on 9 Sep 2026 for the 500-line function ceiling.
 mod volwrite;
@@ -1352,6 +1356,30 @@ pub fn spec_exponent_end(
         .checked_add(exact_recovery.unwrap_or(0))
         .filter(|&n| n > 65535)
         .map(|last| (first_exponent, last))
+}
+
+/// `Err` when a set of `n_recovery` recovery slices is more than the
+/// create will write, with the message the create refuses it under.
+///
+/// Every recovery slice needs its own exponent against the same coprime
+/// sequence the input slices walk, so the input limit
+/// ([`MAX_INPUT_SLICES`]) is the practical ceiling here too.
+///
+/// `pub`, and the ONLY place the rule is stated, for the reason
+/// [`spec_exponent_end`] is: `shape::resolve` refuses a create through
+/// it, and `parfast_session::planner::preview` asks it BEFORE it lays out
+/// a single volume. The preview once resolved 32,769 slices into a full
+/// file list with no warning and the create then refused the set; a
+/// percentage or a recovery SIZE can resolve far higher than that, and
+/// laying those out first is an unbounded list built on a UI thread.
+pub fn check_recovery_count(n_recovery: u64) -> Result<(), Par2GenError> {
+    if n_recovery > MAX_INPUT_SLICES as u64 {
+        return Err(Par2GenError::Other(format!(
+            "{n_recovery} recovery slices exceeds the PAR2 limit of {MAX_INPUT_SLICES} \
+             - lower the redundancy or raise the block size"
+        )));
+    }
+    Ok(())
 }
 
 /// The balanced packet-checksum seals for one recovery batch, or None

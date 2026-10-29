@@ -125,12 +125,20 @@ pub(crate) fn pause_park(since: Option<Instant>) {
 }
 
 /// The worker parked waiting for a volume to be registered by routing.
+#[cfg_attr(
+    all(not(feature = "rar"), not(test)),
+    expect(dead_code, reason = "read only by the RAR chase worker")
+)]
 pub(crate) fn vol_park(since: Option<Instant>) {
     park(&VOL_PARKS, &VOL_NS, since);
 }
 
 /// One chase worker ran for this long, engine call to engine return -
 /// the denominator every park total above is a fraction of.
+#[cfg_attr(
+    all(not(feature = "rar"), not(test)),
+    expect(dead_code, reason = "read only by the RAR chase worker")
+)]
 pub(crate) fn worker_ran(since: Option<Instant>) {
     if let Some(t) = since {
         WORKERS.fetch_add(1, Relaxed);

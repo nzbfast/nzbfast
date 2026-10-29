@@ -11,6 +11,9 @@ public enum Mode
     Checksums,
     Queue,
     Settings,
+
+    /// <summary>Create a posting set. Reachable only while the core reports posting_set.</summary>
+    Posting,
 }
 
 /// <summary>What the shell asks its host to do. The host is the only Windows-aware part.</summary>
@@ -110,6 +113,7 @@ public sealed class ShellViewModel : Observable, IDisposable
         Verify = new VerifyViewModel(core);
         Create = new CreateViewModel(core, stat);
         Checksums = new ChecksumsViewModel(core, stat);
+        Posting = new PostingSetViewModel(core, stat);
         Queue = new QueueViewModel(core);
         Settings = new SettingsViewModel(core, integration);
         Progress = new ProgressViewModel(core);
@@ -147,6 +151,8 @@ public sealed class ShellViewModel : Observable, IDisposable
 
     public ChecksumsViewModel Checksums { get; }
 
+    public PostingSetViewModel Posting { get; }
+
     public QueueViewModel Queue { get; }
 
     public SettingsViewModel Settings { get; }
@@ -169,10 +175,17 @@ public sealed class ShellViewModel : Observable, IDisposable
         get => _mode;
         set
         {
+            // The posting-set screen does not exist for an engine without the RAR
+            // half, so it cannot be selected either, not even from code.
+            if (value == Mode.Posting && !Posting.IsAvailable)
+            {
+                return;
+            }
+
             if (Set(ref _mode, value))
             {
                 RaiseAll(nameof(IsVerify), nameof(IsCreate), nameof(IsChecksums), nameof(IsQueue),
-                    nameof(IsSettings), nameof(LogVisible));
+                    nameof(IsSettings), nameof(IsPosting), nameof(LogVisible));
                 RevealCommand.Refresh();
             }
         }
@@ -188,6 +201,11 @@ public sealed class ShellViewModel : Observable, IDisposable
 
     public bool IsSettings => _mode == Mode.Settings;
 
+    public bool IsPosting => _mode == Mode.Posting;
+
+    /// <summary>Whether the window shows the posting-set entry at all.</summary>
+    public bool ShowPosting => Posting.IsAvailable;
+
     /// <summary>The log drawer, which is shared by every mode (plan section 5.2).</summary>
     public bool LogOpen
     {
@@ -195,7 +213,7 @@ public sealed class ShellViewModel : Observable, IDisposable
         private set;
     }
 
-    public bool LogVisible => LogOpen && _mode is Mode.Verify or Mode.Create or Mode.Checksums;
+    public bool LogVisible => LogOpen && _mode is Mode.Verify or Mode.Create or Mode.Checksums or Mode.Posting;
 
     public IReadOnlyList<string> Log
     {
@@ -236,6 +254,7 @@ public sealed class ShellViewModel : Observable, IDisposable
             {
                 Mode.Create => JobCommand(Create.JobId),
                 Mode.Checksums => JobCommand(Checksums.JobId),
+                Mode.Posting => JobCommand(Posting.JobId),
                 _ => JobCommand(Verify.JobId),
             };
 
@@ -244,9 +263,12 @@ public sealed class ShellViewModel : Observable, IDisposable
                 return running;
             }
 
+            // A posting set has no line until the core has one: its command is the
+            // PAR2 half's, which names volumes that only exist once the RAR half ran.
             return _mode switch
             {
                 Mode.Create => Create.CommandText,
+                Mode.Posting => string.Empty,
                 _ => Verify.CommandText,
             };
         }
@@ -322,6 +344,20 @@ public sealed class ShellViewModel : Observable, IDisposable
     /// <summary>A file handed in on the command line, by the association or the shell verb.</summary>
     public void OpenFromCommandLine(string path) => Drop([path]);
 
+    /// <summary>Starts a posting set and shows the sheet. Add to queue starts it without one.</summary>
+    public void StartPosting(bool showProgress)
+    {
+        var id = Posting.Start();
+        if (showProgress && id >= 0)
+        {
+            Progress.Open(id);
+        }
+        else if (id >= 0)
+        {
+            Mode = Mode.Queue;
+        }
+    }
+
     /// <summary>Starts a create and shows the sheet. Add to queue starts it without one.</summary>
     public void StartCreate(bool showProgress)
     {
@@ -358,6 +394,7 @@ public sealed class ShellViewModel : Observable, IDisposable
         CarryOutDuePostAction(snapshot);
         Verify.Apply(snapshot, _mapCells);
         Checksums.Apply(snapshot);
+        Posting.Apply(snapshot);
         Progress.Apply(snapshot);
         RaiseAll(nameof(Log), nameof(CommandText));
     }
@@ -471,6 +508,7 @@ public sealed class ShellViewModel : Observable, IDisposable
         Mode.Verify => string.IsNullOrEmpty(Verify.Folder) ? null : Verify.Folder,
         Mode.Create => string.IsNullOrEmpty(Create.Output) ? null : Create.Output,
         Mode.Checksums => Checksums.ChecksumFile,
+        Mode.Posting => string.IsNullOrEmpty(Posting.OutputDir) ? null : Posting.OutputDir,
         _ => null,
     };
 
@@ -513,6 +551,22 @@ public sealed class ShellViewModel : Observable, IDisposable
         Create.StdNaming = create.StdNaming;
         Create.Unicode = create.Unicode;
         Create.Overwrite = create.Overwrite;
+
+        // The posting set's PAR2 half takes the same Create defaults, as the core
+        // does for a field left out (API.md, posting_set). Block count and recovery
+        // only: its RAR half has posting defaults of its own and none from Settings.
+        Posting.BlockCount = create.BlockCount;
+        Posting.RecoveryMode = Create.RecoveryMode;
+        Posting.RecoveryPercent = create.RecoveryPercent;
+        if (create.RecoveryCount > 0)
+        {
+            Posting.RecoveryCount = create.RecoveryCount;
+        }
+
+        if (create.RecoverySize > 0)
+        {
+            Posting.RecoverySize = create.RecoverySize;
+        }
         Verify.Options.Purge = s.General.PurgeAfterRepair;
         Verify.Options.KeepDamaged = s.General.KeepDamagedCopies;
         Verify.Options.FastSolver = s.Performance.FastSolver;

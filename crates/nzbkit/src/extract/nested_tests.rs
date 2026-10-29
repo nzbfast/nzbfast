@@ -898,6 +898,7 @@ fn nested_depth_cap_materializes() {
 /// chase worker reaches its extractor through `self_weak`, which only
 /// an Arc-owned root has - `top_level_chase_gate_off_materializes`
 /// builds it the same way).
+#[cfg(feature = "rar")]
 #[test]
 fn nested_store_raise_is_revoked_by_a_compressed_archive_at_the_same_level() {
     let payload_bytes = noisy(20_000, 7);
@@ -1185,6 +1186,7 @@ fn nested_mixed_payload_every_level() {
 /// payload keeps streaming below the chase. Store-level siblings,
 /// the chased sibling, and the deepest payload all land byte-exact;
 /// no archive at any level materializes.
+#[cfg(feature = "rar")]
 #[test]
 fn nested_mixed_payload_chase_at_depth() {
     let docs: Vec<Vec<u8>> = (0..4u8)
@@ -1318,6 +1320,7 @@ fn nested_many_siblings_wide() {
 /// inner at the same scale reports alongside: its frontier retention
 /// charges the same budget and stays bounded by it, not by the
 /// archive size.
+#[cfg(feature = "rar")]
 #[test]
 fn nested_depth_holds_peak_bounded() {
     let data = payload(8 << 20, 0x55);

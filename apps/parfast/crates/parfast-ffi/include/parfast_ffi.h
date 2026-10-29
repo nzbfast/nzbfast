@@ -119,7 +119,8 @@ char *pf_queue_snapshot(struct pf_session *s);
 /**
  * Cancel a job. A queued job stops at once; a running one at its next
  * honouring point - see `parfast_session::runner` for what each kind
- * can actually reach.
+ * can actually reach. A cancelled posting set removes every file it
+ * wrote, archive and PAR2 set alike.
  *
  * # Safety
  * `s` is a live session.
@@ -131,7 +132,9 @@ int32_t pf_job_cancel(struct pf_session *s, int64_t id);
  * create runs on. `pf_capabilities.pause_in_fold` is what a host reads
  * before offering the button on a repair, and it has been true since
  * 12 Sep 2026 - with one stated exception, the solve, which is seconds
- * on a structured repair. See that key's comment.
+ * on a structured repair. See that key's comment. A posting set parks
+ * while its archive is being written (between two pieces of output)
+ * and, in its PAR2 half, wherever a create parks.
  *
  * # Safety
  * `s` is a live session.

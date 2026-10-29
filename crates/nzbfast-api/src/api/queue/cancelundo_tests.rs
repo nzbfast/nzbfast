@@ -101,6 +101,62 @@ fn an_undone_cancel_gives_the_download_back_with_its_nzb() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 27 Oct 2026 sweep F2: an undone paused row is never runnable, not
+/// even for a moment.
+///
+/// The test above reads the row once the undo has RETURNED, and it was
+/// green while the restore published the row unpaused and set the flag
+/// afterwards. In between, the add saves the queue synchronously, and the
+/// runner could pick and start the row there - after which the bare flag
+/// write stopped nothing. Holding the queue-write lock parks the undo in
+/// exactly that window (published, saving), which is where this asks the
+/// picker. High priority on purpose: `-2` would have been paused by the
+/// add even before the fix.
+#[test]
+fn an_undone_paused_row_is_never_pickable_while_the_undo_saves() {
+    let dir = tmp("pausewin");
+    let d = test_daemon(&dir);
+    let e = d
+        .enqueue(NZB, "Paused.Window.nzb", "", 1, None, None, "test", false)
+        .expect("enqueue");
+    d.queue.lock_ok()[0].lock_ok().paused = true;
+    let j = payload::delete_arm(&d, &params(&[("name", "delete")]), "delete", &e.nzo_id);
+    let token = j["undo"]["token"].as_str().expect("token").to_string();
+
+    let save_gate = Daemon::hold_queue_writes();
+    let undo = {
+        let d = d.clone();
+        std::thread::spawn(move || payload::undelete_arm(&d, &token))
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while d.queue.lock_ok().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the undo never published the row"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        !undo.is_finished(),
+        "the undo returned without saving, so this never looked inside the window"
+    );
+    assert!(
+        d.pick_job(false).is_none(),
+        "a paused row was runnable while its undo was still saving"
+    );
+    drop(save_gate);
+    let back = undo.join().expect("undo thread");
+    assert_eq!(back["status"], serde_json::json!(true), "the undo: {back}");
+    let q = d.queue.lock_ok();
+    let g = q[0].lock_ok();
+    assert!(g.paused, "a paused row came back running");
+    assert_eq!(g.priority, 1, "the priority was lost");
+
+    drop(g);
+    drop(q);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A token is spent ONCE. The toast can be clicked twice (it is a
 /// `role="button"` with a keyboard path as well as a click), and the
 /// second press must refuse rather than add the release a second time -

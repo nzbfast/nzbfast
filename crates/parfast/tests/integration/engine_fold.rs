@@ -20,6 +20,7 @@
 //! module leaves `scratch` and `arg` with no caller there - which
 //! `-D warnings` refuses.
 
+use crate::inproc::in_process;
 use crate::scratch::scratch;
 
 fn arg(s: &str) -> String {
@@ -49,6 +50,7 @@ fn arg(s: &str) -> String {
 fn an_engine_fold_before_the_survey_is_an_exit_code_not_a_panic() {
     use std::os::unix::fs::PermissionsExt;
 
+    let parfast = in_process();
     let dir = scratch("engine-fold");
     let data = dir.join("payload.bin");
     // Not all one byte: a compressible constant run is not what a real
@@ -59,16 +61,12 @@ fn an_engine_fold_before_the_survey_is_an_exit_code_not_a_panic() {
     std::fs::write(&data, &payload).expect("payload");
 
     let set = dir.join("set.par2");
-    let code = parfast::run_with(
-        "parfast",
-        &[
-            arg("c"),
-            arg("-r20"),
-            arg(&set.to_string_lossy()),
-            arg(&data.to_string_lossy()),
-        ],
-        &mut parfast::out::Sink::buffered(),
-    );
+    let (code, _, _) = parfast.run(&[
+        arg("c"),
+        arg("-r20"),
+        arg(&set.to_string_lossy()),
+        arg(&data.to_string_lossy()),
+    ]);
     assert_eq!(code, 0, "fixture create failed");
 
     // Damage the payload so a repair is genuinely attempted...
@@ -96,13 +94,7 @@ fn an_engine_fold_before_the_survey_is_an_exit_code_not_a_panic() {
         return;
     }
 
-    let mut sink = parfast::out::Sink::buffered();
-    let code = parfast::run_with(
-        "parfast",
-        &[arg("r"), arg(&set.to_string_lossy())],
-        &mut sink,
-    );
-    let (_out, err) = sink.take();
+    let (code, _out, err) = parfast.run(&[arg("r"), arg(&set.to_string_lossy())]);
     assert_eq!(
         code, 5,
         "an engine fold is EXIT_REPAIR_FAILED, not an abort; stderr: {err}"

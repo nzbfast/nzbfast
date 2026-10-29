@@ -2825,6 +2825,7 @@
  "toast.promote.unknown": "Ta datoteka više nije dio ovog preuzimanja.",
  "toast.pvfail": "Ovu datoteku nije bilo moguće otvoriti ovdje.",
  "toast.pwfail": "Postavljanje lozinke nije uspjelo.",
+ "toast.pwlayer": "Lozinka je otvorila arhivu, ali u njoj je još jedna zaključana arhiva - unesite lozinku za nju.",
  "toast.pwsaved": "Lozinka spremljena.",
  "toast.pwunlocked": "Raspakirano - lozinka je upalila.",
  "toast.pwwrong": "Ta lozinka nije otvorila arhivu - preuzete datoteke su netaknute, pokušajte drugu.",

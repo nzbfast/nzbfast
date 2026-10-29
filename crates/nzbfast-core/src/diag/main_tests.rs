@@ -2071,6 +2071,7 @@ fn a_successful_unlock_clears_the_bomb_reason_too() {
         "password did not unlock the archive",
     )));
     assert!(super::unlock_answers("password required to unpack"));
+    assert!(super::unlock_answers(super::UNLOCK_LAYER_LEFT));
     // And a verdict the unlock did NOT answer keeps its say.
     assert!(!super::unlock_answers(
         "download incomplete: 1 file(s) with missing segments"

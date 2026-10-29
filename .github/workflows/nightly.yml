@@ -2691,13 +2691,19 @@ jobs:
           echo "free after:  $(df -h --output=avail / | tail -1)"
       # zig supplies the musl cross-toolchain (Ubuntu packages none for
       # armv7, and rapidyenc is C++ so musl-gcc alone would not do);
-      # qemu-user-static plus binfmt is what lets the test binaries -
+      # qemu-user plus its binfmt registration is what lets the test binaries -
       # and the daemon processes some of them spawn - actually execute.
       - name: cross + emulation toolchain
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-user-static binfmt-support
+          # qemu-user, not qemu-user-static: QEMU 10 folded the static build
+          # into qemu-user (Ubuntu 26.04, which ubuntu-latest became in Oct
+          # 2026), left `qemu-user-static` only as a virtual name apt will not
+          # install, and dropped the `-static` binary names. qemu-user-binfmt
+          # does the registration binfmt-support used to. Both packages and
+          # the plain /usr/bin/qemu-<arch> names exist on 24.04 too.
+          sudo apt-get install -y -qq qemu-user qemu-user-binfmt
           # A venv, not `pip install --user`: Ubuntu 24.04 marks its
           # system Python externally-managed (PEP 668) and refuses. Same
           # recipe and same pins as release.yml's `packages` job - see
@@ -2852,7 +2858,7 @@ jobs:
           echo "$out" | grep -q "ELF 32-bit"
           echo "$out" | grep -q "ARM"
           echo "$out" | grep -q "statically linked"
-          qemu-arm-static target/armv7-unknown-linux-musleabihf/release/nzbfast --version
+          qemu-arm target/armv7-unknown-linux-musleabihf/release/nzbfast --version
       # The memory ladder is a shipped feature and every cap under the
       # budget is a `usize`. Print it rather than assume it: this is the
       # one place a truncation between the budget and its caps shows.
@@ -2862,15 +2868,15 @@ jobs:
           cargo zigbuild --release --locked -p nzbkit --example memprobe \
             --target armv7-unknown-linux-musleabihf
           probe=target/armv7-unknown-linux-musleabihf/release/examples/memprobe
-          qemu-arm-static "$probe"
+          qemu-arm "$probe"
           # An over-large --mem-limit must CLAMP, never wrap. A wrapped
           # budget prints a resolved total unrelated to both the request
           # and the ceiling, so pin the ceiling exactly.
-          qemu-arm-static "$probe" 8G | tee ladder.txt
+          qemu-arm "$probe" 8G | tee ladder.txt
           grep -q "resolved budget: 1.00 GB" ladder.txt
       - name: unit suites under qemu
         env:
-          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUNNER: /usr/bin/qemu-arm-static
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUNNER: /usr/bin/qemu-arm
           # This step shells out to a bare `cargo test --no-run`, so
           # there is no cargo-zigbuild wrapper here and the linker has to
           # be named. link-self-contained=no is the other half: without
@@ -3011,14 +3017,20 @@ jobs:
       - name: toolchain
         run: rustc -vV && rustup target list --installed
       # Same recipe as `armv7-cross`, retargeted: zig supplies the musl
-      # cross-toolchain (rapidyenc is C++), qemu-user-static executes the
+      # cross-toolchain (rapidyenc is C++), qemu-user executes the
       # test binary. The shims exist because nextest shells out to a bare
       # `cargo test --no-run` that never sees cargo-zigbuild.
       - name: cross + emulation toolchain
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-user-static binfmt-support
+          # qemu-user, not qemu-user-static: QEMU 10 folded the static build
+          # into qemu-user (Ubuntu 26.04, which ubuntu-latest became in Oct
+          # 2026), left `qemu-user-static` only as a virtual name apt will not
+          # install, and dropped the `-static` binary names. qemu-user-binfmt
+          # does the registration binfmt-support used to. Both packages and
+          # the plain /usr/bin/qemu-<arch> names exist on 24.04 too.
+          sudo apt-get install -y -qq qemu-user qemu-user-binfmt
           python3 -m venv /tmp/zigvenv
           /tmp/zigvenv/bin/pip install --quiet ziglang==0.16.0
           printf '#!/bin/sh\nexec /tmp/zigvenv/bin/python -m ziglang "$@"\n' \
@@ -3180,8 +3192,8 @@ jobs:
             echo "$out" | grep -q "aarch64"
             echo "$out" | grep -q "statically linked"
           done
-          qemu-aarch64-static target/aarch64-unknown-linux-musl/release/parfast -V
-          qemu-aarch64-static target/aarch64-unknown-linux-musl/release/nzbfast --version
+          qemu-aarch64 target/aarch64-unknown-linux-musl/release/parfast -V
+          qemu-aarch64 target/aarch64-unknown-linux-musl/release/nzbfast --version
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ always() && steps.cache.outputs.cache-hit != 'true' }}
         with:
@@ -3193,7 +3205,7 @@ jobs:
       - name: gf16 and par2repair suites under qemu, Cortex-A72 model (no sha3)
         env:
           QEMU_CPU: cortex-a72
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUNNER: /usr/bin/qemu-aarch64-static
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUNNER: /usr/bin/qemu-aarch64
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: /home/runner/zigshim/zig-cc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-C link-self-contained=no"
           # The same profile pins `armv7-cross` documents at length: the

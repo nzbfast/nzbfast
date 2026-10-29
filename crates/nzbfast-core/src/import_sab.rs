@@ -308,9 +308,63 @@ fn edit_settings(
     }
 }
 
+/// `--arr` on an install that already has a config, without `--force`
+/// (GitHub #102 follow-up): apply ONLY the preset. The config at
+/// `out_path` - its server list above all - is not read or written,
+/// because a re-import replaces every server wholesale and drops what
+/// was edited on them since (a `block_account` flag, say, which a
+/// sabnzbd.ini has no way to carry). The ini is still the command's
+/// argument and is still read, for the one thing taken from it here:
+/// `password_file`, which, like the preset, only ever fills in a value
+/// the user has not saved, so it behaves the same as on a full import.
+/// No server, enabled or not, is required of the ini on this path.
+fn apply_arr_preset_only(ini: &str, out_path: &Path) -> Result<()> {
+    let shown = std::fs::canonicalize(out_path).unwrap_or_else(|_| out_path.to_path_buf());
+    adopt_password_file(ini, out_path);
+    adopt_arr_preset(out_path);
+    println!(
+        "{} already exists: applied the Sonarr/Radarr preset only and left its servers as they are",
+        shown.display()
+    );
+    println!(
+        "  pass --force to re-import the servers from the ini as well (that replaces the server list)"
+    );
+    println!("  a running nzbfast picks up the preset when you restart it");
+    Ok(())
+}
+
 pub fn import(ini_path: &Path, out_path: &Path, force: bool, arr: bool) -> Result<()> {
     let text = std::fs::read_to_string(ini_path)
         .with_context(|| format!("reading {}", ini_path.display()))?;
+    // Never write JSON at a `.ini` path, and `--force` does NOT lift
+    // this one. `Config::load` picks its parser from exactly this
+    // predicate, so a JSON body here would be fed to the SABnzbd ini
+    // parser and come back NoServers - and the file overwritten is the
+    // user's live sabnzbd.ini, which is very often the same file this
+    // import is READING. Breaking both installs at once is not something
+    // a flag named "overwrite the destination" asks for.
+    //
+    // `setup::write_servers` has carried this guard since it was written;
+    // this sibling writer did not, and `--force` reached it.
+    if out_path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("ini"))
+    {
+        anyhow::bail!(
+            "{} is a SABnzbd ini, which nzbfast reads but cannot write - \
+             point --out at a JSON config such as config.local.json",
+            out_path.display()
+        );
+    }
+    if out_path.exists() && !force {
+        if arr {
+            return apply_arr_preset_only(&text, out_path);
+        }
+        anyhow::bail!(
+            "{} already exists - pass --force to overwrite",
+            out_path.display()
+        );
+    }
     let mut servers = parse_servers(&text);
     let skipped = servers.len();
     servers.retain(|s| s.enable && !s.host.is_empty());
@@ -361,32 +415,6 @@ pub fn import(ini_path: &Path, out_path: &Path, force: bool, arr: bool) -> Resul
         })
         .collect();
 
-    // Never write JSON at a `.ini` path, and `--force` does NOT lift
-    // this one. `Config::load` picks its parser from exactly this
-    // predicate, so a JSON body here would be fed to the SABnzbd ini
-    // parser and come back NoServers - and the file overwritten is the
-    // user's live sabnzbd.ini, which is very often the same file this
-    // import is READING. Breaking both installs at once is not something
-    // a flag named "overwrite the destination" asks for.
-    //
-    // `setup::write_servers` has carried this guard since it was written;
-    // this sibling writer did not, and `--force` reached it.
-    if out_path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("ini"))
-    {
-        anyhow::bail!(
-            "{} is a SABnzbd ini, which nzbfast reads but cannot write - \
-             point --out at a JSON config such as config.local.json",
-            out_path.display()
-        );
-    }
-    if out_path.exists() && !force {
-        anyhow::bail!(
-            "{} already exists - pass --force to overwrite",
-            out_path.display()
-        );
-    }
     // Replace `servers` in place rather than the whole document. --force used
     // to mean "write a file containing nothing but servers", which was
     // survivable while the default target was a cwd-relative
@@ -785,6 +813,58 @@ enable = 1
         assert_eq!(got["auto_rename"], true, "a saved value was overridden");
         assert_eq!(got["out_umask"], "022", "a saved value was overridden");
         assert_eq!(got["delete_to_trash"], false, "the rest still filled in");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GitHub #102 follow-up: `--arr` on an install that already has a
+    /// config, without `--force`, applies ONLY the preset. The config's
+    /// bytes - its servers, and a flag on one that no sabnzbd.ini can
+    /// carry - are untouched, saved settings are kept, and an ini with no
+    /// usable server is no obstacle since none is imported. Without
+    /// `--arr` the refusal stands and writes nothing at all.
+    #[test]
+    fn import_arr_on_an_existing_config_applies_only_the_preset() {
+        let dir =
+            std::env::temp_dir().join(format!("nzbfast-impsab-arr-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ini = dir.join("sabnzbd.ini");
+        std::fs::write(&ini, INI).unwrap();
+        let out = dir.join("config.json");
+        let cfg = br#"{"servers":[{"host":"edited.example","port":563,"tls":true,"connections":20,"level":2,"block_account":true}],"tmdb_key":"k"}"#;
+        std::fs::write(&out, cfg).unwrap();
+        let settings = dir.join("settings.json");
+
+        let err = import(&ini, &out, false, false).unwrap_err().to_string();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            cfg,
+            "a refusal wrote the config"
+        );
+        assert!(!settings.exists(), "a refusal wrote settings");
+
+        std::fs::write(&settings, r#"{"auto_rename":true,"port":7000}"#).unwrap();
+        import(&ini, &out, false, true).unwrap();
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            cfg,
+            "the preset-only path touched the config"
+        );
+        let got: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        for (k, v) in ARR_PRESET {
+            if *k != "auto_rename" {
+                assert_eq!(got[*k], v.json(), "{k}");
+            }
+        }
+        assert_eq!(got["auto_rename"], true, "a saved value was overridden");
+        assert_eq!(got["port"], 7000, "an unrelated setting was lost");
+
+        // No enabled server in the ini: still fine, none is imported.
+        std::fs::write(&ini, "[misc]\nport = 8080\n").unwrap();
+        import(&ini, &out, false, true).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), cfg);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

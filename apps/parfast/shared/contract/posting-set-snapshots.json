@@ -1,0 +1,690 @@
+{
+ "_about": "Real snapshots of two posting-set jobs over one 1 GiB file, recorded from the parfast-session core with the posting_set example's CAPTURE mode on 25 Oct 2026 and thinned to one frame per sentence or tenth of the bar. For the app mocks to play back, so a mock cannot show more than the contract carries. Paths are rewritten to /abs/...; elapsed_ms is the recording run's own clock on a loaded 32-core Mac. Contract: apps/parfast/crates/parfast-ffi/API.md, posting_set.",
+ "one_pass": {
+  "spec": {
+   "kind": "posting_set",
+   "posting_set": {
+    "sources": [
+     {
+      "path": "/abs/src/film.mkv"
+     }
+    ],
+    "output_dir": "/abs/out",
+    "name": "Movie.2026"
+   }
+  },
+  "snapshots": [
+   {
+    "added_at": "2026-10-25T17:08:18Z",
+    "elapsed_ms": 0,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [],
+    "low_priority": false,
+    "phase": "scanning",
+    "phase_text": "",
+    "progress": 0.0,
+    "state": "queued"
+   },
+   {
+    "added_at": "2026-10-25T17:08:18Z",
+    "elapsed_ms": 7,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [],
+    "low_priority": false,
+    "phase": "scanning",
+    "phase_text": "",
+    "progress": 0.0,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:18Z",
+    "elapsed_ms": 130,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [],
+    "low_priority": false,
+    "phase": "scanning",
+    "phase_text": "Reading the source files - 6%",
+    "progress": 0.00625,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:18Z",
+    "elapsed_ms": 159,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [],
+    "low_priority": false,
+    "phase": "scanning",
+    "phase_text": "Reading the source files - 100%",
+    "progress": 0.1,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:18Z",
+    "elapsed_ms": 166,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [],
+    "low_priority": false,
+    "phase": "writing",
+    "phase_text": "Writing the archive and its recovery set - 2%",
+    "progress": 0.117431640625,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:18Z",
+    "elapsed_ms": 200,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [],
+    "low_priority": false,
+    "phase": "writing",
+    "phase_text": "Writing the archive and its recovery set - 10%",
+    "progress": 0.185498046875,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:18Z",
+    "elapsed_ms": 444,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [],
+    "low_priority": false,
+    "phase": "writing",
+    "phase_text": "Writing the archive and its recovery set - 30%",
+    "progress": 0.35566406250000004,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:18Z",
+    "elapsed_ms": 572,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [],
+    "low_priority": false,
+    "phase": "writing",
+    "phase_text": "Writing the archive and its recovery set - 40%",
+    "progress": 0.44033203125,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:18Z",
+    "elapsed_ms": 729,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [],
+    "low_priority": false,
+    "phase": "writing",
+    "phase_text": "Writing the archive and its recovery set - 50%",
+    "progress": 0.525,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:18Z",
+    "elapsed_ms": 858,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [],
+    "low_priority": false,
+    "phase": "writing",
+    "phase_text": "Writing the archive and its recovery set - 60%",
+    "progress": 0.610498046875,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:18Z",
+    "elapsed_ms": 1123,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [],
+    "low_priority": false,
+    "phase": "writing",
+    "phase_text": "Writing the archive and its recovery set - 80%",
+    "progress": 0.7806640625,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:18Z",
+    "elapsed_ms": 1430,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [
+     "Wrote Movie.2026.rar (1073741896 bytes) and hashed it as it went"
+    ],
+    "low_priority": false,
+    "phase": "writing",
+    "phase_text": "Writing the recovery volumes",
+    "progress": 0.95,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:18Z",
+    "elapsed_ms": 1581,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [
+     "Wrote Movie.2026.rar (1073741896 bytes) and hashed it as it went"
+    ],
+    "low_priority": false,
+    "phase": "finishing",
+    "phase_text": "Writing the recovery volumes",
+    "progress": 1.0,
+    "result": {
+     "exit_code": 0,
+     "posting": {
+      "par2": [
+       {
+        "name": "Movie.2026.par2",
+        "size": 40348
+       },
+       {
+        "name": "Movie.2026.vol000+01.par2",
+        "size": 577848
+       },
+       {
+        "name": "Movie.2026.vol001+02.par2",
+        "size": 1155616
+       },
+       {
+        "name": "Movie.2026.vol003+04.par2",
+        "size": 2270884
+       },
+       {
+        "name": "Movie.2026.vol007+08.par2",
+        "size": 4461152
+       },
+       {
+        "name": "Movie.2026.vol015+16.par2",
+        "size": 8801420
+       },
+       {
+        "name": "Movie.2026.vol031+32.par2",
+        "size": 17441688
+       },
+       {
+        "name": "Movie.2026.vol063+37.par2",
+        "size": 20129188
+       }
+      ],
+      "rar": [
+       {
+        "name": "Movie.2026.rar",
+        "size": 1073741896
+       }
+      ],
+      "route": "one_pass",
+      "source_bytes": 1073741824,
+      "source_files": 1
+     },
+     "purged": false,
+     "repaired_files": 0,
+     "written": [
+      {
+       "name": "Movie.2026.rar",
+       "size": 1073741896
+      },
+      {
+       "name": "Movie.2026.par2",
+       "size": 40348
+      },
+      {
+       "name": "Movie.2026.vol000+01.par2",
+       "size": 577848
+      },
+      {
+       "name": "Movie.2026.vol001+02.par2",
+       "size": 1155616
+      },
+      {
+       "name": "Movie.2026.vol003+04.par2",
+       "size": 2270884
+      },
+      {
+       "name": "Movie.2026.vol007+08.par2",
+       "size": 4461152
+      },
+      {
+       "name": "Movie.2026.vol015+16.par2",
+       "size": 8801420
+      },
+      {
+       "name": "Movie.2026.vol031+32.par2",
+       "size": 17441688
+      },
+      {
+       "name": "Movie.2026.vol063+37.par2",
+       "size": 20129188
+      }
+     ]
+    },
+    "state": "done"
+   }
+  ]
+ },
+ "two_pass_volumes": {
+  "spec": {
+   "kind": "posting_set",
+   "posting_set": {
+    "sources": [
+     {
+      "path": "/abs/src/film.mkv"
+     }
+    ],
+    "output_dir": "/abs/out",
+    "name": "Movie.2026",
+    "rar": {
+     "volumes": {
+      "split": "size",
+      "size": 104857600
+     }
+    }
+   }
+  },
+  "snapshots": [
+   {
+    "added_at": "2026-10-25T17:08:19Z",
+    "elapsed_ms": 0,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [],
+    "low_priority": false,
+    "phase": "scanning",
+    "phase_text": "",
+    "progress": 0.0,
+    "state": "queued"
+   },
+   {
+    "added_at": "2026-10-25T17:08:19Z",
+    "elapsed_ms": 7,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [
+     "Two passes: a volume set's PAR2 recovery data can only be computed once every volume is written (PAR2 orders its files by an id that hashes each file's length)"
+    ],
+    "low_priority": false,
+    "phase": "writing",
+    "phase_text": "Writing the archive - 4%",
+    "progress": 0.018017578125,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:19Z",
+    "elapsed_ms": 48,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [
+     "Two passes: a volume set's PAR2 recovery data can only be computed once every volume is written (PAR2 orders its files by an id that hashes each file's length)"
+    ],
+    "low_priority": false,
+    "phase": "writing",
+    "phase_text": "Writing the archive - 30%",
+    "progress": 0.1353514723945409,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:19Z",
+    "elapsed_ms": 112,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [
+     "Two passes: a volume set's PAR2 recovery data can only be computed once every volume is written (PAR2 orders its files by an id that hashes each file's length)"
+    ],
+    "low_priority": false,
+    "phase": "writing",
+    "phase_text": "Writing the archive - 70%",
+    "progress": 0.31508767982013525,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:19Z",
+    "elapsed_ms": 225,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [
+     "Two passes: a volume set's PAR2 recovery data can only be computed once every volume is written (PAR2 orders its files by an id that hashes each file's length)"
+    ],
+    "low_priority": false,
+    "phase": "writing",
+    "phase_text": "Writing the archive - 100%",
+    "progress": 0.45,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:19Z",
+    "command": "parfast c -b2000 -r5 /abs/out/Movie.2026.par2 /abs/out/Movie.2026.part01.rar /abs/out/Movie.2026.part02.rar /abs/out/Movie.2026.part03.rar /abs/out/Movie.2026.part04.rar /abs/out/Movie.2026.part05.rar /abs/out/Movie.2026.part06.rar /abs/out/Movie.2026.part07.rar /abs/out/Movie.2026.part08.rar /abs/out/Movie.2026.part09.rar /abs/out/Movie.2026.part10.rar /abs/out/Movie.2026.part11.rar",
+    "elapsed_ms": 232,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [
+     "Two passes: a volume set's PAR2 recovery data can only be computed once every volume is written (PAR2 orders its files by an id that hashes each file's length)",
+     "Block size: 537732",
+     "Source file count: 11",
+     "Source block count: 1997",
+     "Recovery block count: 100",
+     "Recovery file count: 7",
+     "",
+     "Opening: Movie.2026.part01.rar",
+     "Opening: Movie.2026.part02.rar",
+     "Opening: Movie.2026.part03.rar",
+     "Opening: Movie.2026.part04.rar",
+     "Opening: Movie.2026.part05.rar",
+     "Opening: Movie.2026.part06.rar",
+     "Opening: Movie.2026.part07.rar",
+     "Opening: Movie.2026.part08.rar",
+     "Opening: Movie.2026.part09.rar",
+     "Opening: Movie.2026.part10.rar",
+     "Opening: Movie.2026.part11.rar"
+    ],
+    "low_priority": false,
+    "phase": "hashing",
+    "phase_text": "Hashing the source files - 2%",
+    "progress": 0.4621469423656991,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:19Z",
+    "command": "parfast c -b2000 -r5 /abs/out/Movie.2026.par2 /abs/out/Movie.2026.part01.rar /abs/out/Movie.2026.part02.rar /abs/out/Movie.2026.part03.rar /abs/out/Movie.2026.part04.rar /abs/out/Movie.2026.part05.rar /abs/out/Movie.2026.part06.rar /abs/out/Movie.2026.part07.rar /abs/out/Movie.2026.part08.rar /abs/out/Movie.2026.part09.rar /abs/out/Movie.2026.part10.rar /abs/out/Movie.2026.part11.rar",
+    "elapsed_ms": 296,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [
+     "Two passes: a volume set's PAR2 recovery data can only be computed once every volume is written (PAR2 orders its files by an id that hashes each file's length)",
+     "Block size: 537732",
+     "Source file count: 11",
+     "Source block count: 1997",
+     "Recovery block count: 100",
+     "Recovery file count: 7",
+     "",
+     "Opening: Movie.2026.part01.rar",
+     "Opening: Movie.2026.part02.rar",
+     "Opening: Movie.2026.part03.rar",
+     "Opening: Movie.2026.part04.rar",
+     "Opening: Movie.2026.part05.rar",
+     "Opening: Movie.2026.part06.rar",
+     "Opening: Movie.2026.part07.rar",
+     "Opening: Movie.2026.part08.rar",
+     "Opening: Movie.2026.part09.rar",
+     "Opening: Movie.2026.part10.rar",
+     "Opening: Movie.2026.part11.rar"
+    ],
+    "low_priority": false,
+    "phase": "hashing",
+    "phase_text": "Hashing the source files - 30%",
+    "progress": 0.6008205660487825,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:19Z",
+    "command": "parfast c -b2000 -r5 /abs/out/Movie.2026.par2 /abs/out/Movie.2026.part01.rar /abs/out/Movie.2026.part02.rar /abs/out/Movie.2026.part03.rar /abs/out/Movie.2026.part04.rar /abs/out/Movie.2026.part05.rar /abs/out/Movie.2026.part06.rar /abs/out/Movie.2026.part07.rar /abs/out/Movie.2026.part08.rar /abs/out/Movie.2026.part09.rar /abs/out/Movie.2026.part10.rar /abs/out/Movie.2026.part11.rar",
+    "elapsed_ms": 473,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [
+     "Two passes: a volume set's PAR2 recovery data can only be computed once every volume is written (PAR2 orders its files by an id that hashes each file's length)",
+     "Block size: 537732",
+     "Source file count: 11",
+     "Source block count: 1997",
+     "Recovery block count: 100",
+     "Recovery file count: 7",
+     "",
+     "Opening: Movie.2026.part01.rar",
+     "Opening: Movie.2026.part02.rar",
+     "Opening: Movie.2026.part03.rar",
+     "Opening: Movie.2026.part04.rar",
+     "Opening: Movie.2026.part05.rar",
+     "Opening: Movie.2026.part06.rar",
+     "Opening: Movie.2026.part07.rar",
+     "Opening: Movie.2026.part08.rar",
+     "Opening: Movie.2026.part09.rar",
+     "Opening: Movie.2026.part10.rar",
+     "Opening: Movie.2026.part11.rar"
+    ],
+    "low_priority": false,
+    "phase": "solving",
+    "phase_text": "Building the recovery blocks - 75%",
+    "progress": 0.9430664076744314,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:19Z",
+    "command": "parfast c -b2000 -r5 /abs/out/Movie.2026.par2 /abs/out/Movie.2026.part01.rar /abs/out/Movie.2026.part02.rar /abs/out/Movie.2026.part03.rar /abs/out/Movie.2026.part04.rar /abs/out/Movie.2026.part05.rar /abs/out/Movie.2026.part06.rar /abs/out/Movie.2026.part07.rar /abs/out/Movie.2026.part08.rar /abs/out/Movie.2026.part09.rar /abs/out/Movie.2026.part10.rar /abs/out/Movie.2026.part11.rar",
+    "elapsed_ms": 520,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [
+     "Two passes: a volume set's PAR2 recovery data can only be computed once every volume is written (PAR2 orders its files by an id that hashes each file's length)",
+     "Block size: 537732",
+     "Source file count: 11",
+     "Source block count: 1997",
+     "Recovery block count: 100",
+     "Recovery file count: 7",
+     "",
+     "Opening: Movie.2026.part01.rar",
+     "Opening: Movie.2026.part02.rar",
+     "Opening: Movie.2026.part03.rar",
+     "Opening: Movie.2026.part04.rar",
+     "Opening: Movie.2026.part05.rar",
+     "Opening: Movie.2026.part06.rar",
+     "Opening: Movie.2026.part07.rar",
+     "Opening: Movie.2026.part08.rar",
+     "Opening: Movie.2026.part09.rar",
+     "Opening: Movie.2026.part10.rar",
+     "Opening: Movie.2026.part11.rar"
+    ],
+    "low_priority": false,
+    "phase": "solving",
+    "phase_text": "Building the recovery blocks - 100%",
+    "progress": 0.9450000000000001,
+    "state": "running"
+   },
+   {
+    "added_at": "2026-10-25T17:08:19Z",
+    "command": "parfast c -b2000 -r5 /abs/out/Movie.2026.par2 /abs/out/Movie.2026.part01.rar /abs/out/Movie.2026.part02.rar /abs/out/Movie.2026.part03.rar /abs/out/Movie.2026.part04.rar /abs/out/Movie.2026.part05.rar /abs/out/Movie.2026.part06.rar /abs/out/Movie.2026.part07.rar /abs/out/Movie.2026.part08.rar /abs/out/Movie.2026.part09.rar /abs/out/Movie.2026.part10.rar /abs/out/Movie.2026.part11.rar",
+    "elapsed_ms": 528,
+    "id": 1,
+    "kind": "posting_set",
+    "log_tail": [
+     "Two passes: a volume set's PAR2 recovery data can only be computed once every volume is written (PAR2 orders its files by an id that hashes each file's length)",
+     "Block size: 537732",
+     "Source file count: 11",
+     "Source block count: 1997",
+     "Recovery block count: 100",
+     "Recovery file count: 7",
+     "",
+     "Opening: Movie.2026.part01.rar",
+     "Opening: Movie.2026.part02.rar",
+     "Opening: Movie.2026.part03.rar",
+     "Opening: Movie.2026.part04.rar",
+     "Opening: Movie.2026.part05.rar",
+     "Opening: Movie.2026.part06.rar",
+     "Opening: Movie.2026.part07.rar",
+     "Opening: Movie.2026.part08.rar",
+     "Opening: Movie.2026.part09.rar",
+     "Opening: Movie.2026.part10.rar",
+     "Opening: Movie.2026.part11.rar",
+     "Wrote 53773200 bytes to disk",
+     "Writing recovery packets",
+     "Writing verification packets",
+     "Done"
+    ],
+    "low_priority": false,
+    "phase": "finishing",
+    "phase_text": "Writing the recovery volumes - 100%",
+    "progress": 1.0,
+    "result": {
+     "exit_code": 0,
+     "posting": {
+      "par2": [
+       {
+        "name": "Movie.2026.par2",
+        "size": 42736
+       },
+       {
+        "name": "Movie.2026.vol000+01.par2",
+        "size": 580536
+       },
+       {
+        "name": "Movie.2026.vol001+02.par2",
+        "size": 1160992
+       },
+       {
+        "name": "Movie.2026.vol003+04.par2",
+        "size": 2279248
+       },
+       {
+        "name": "Movie.2026.vol007+08.par2",
+        "size": 4473104
+       },
+       {
+        "name": "Movie.2026.vol015+16.par2",
+        "size": 8818160
+       },
+       {
+        "name": "Movie.2026.vol031+32.par2",
+        "size": 17465616
+       },
+       {
+        "name": "Movie.2026.vol063+37.par2",
+        "size": 20154616
+       }
+      ],
+      "rar": [
+       {
+        "name": "Movie.2026.part01.rar",
+        "size": 104857600
+       },
+       {
+        "name": "Movie.2026.part02.rar",
+        "size": 104857600
+       },
+       {
+        "name": "Movie.2026.part03.rar",
+        "size": 104857600
+       },
+       {
+        "name": "Movie.2026.part04.rar",
+        "size": 104857600
+       },
+       {
+        "name": "Movie.2026.part05.rar",
+        "size": 104857600
+       },
+       {
+        "name": "Movie.2026.part06.rar",
+        "size": 104857600
+       },
+       {
+        "name": "Movie.2026.part07.rar",
+        "size": 104857600
+       },
+       {
+        "name": "Movie.2026.part08.rar",
+        "size": 104857600
+       },
+       {
+        "name": "Movie.2026.part09.rar",
+        "size": 104857600
+       },
+       {
+        "name": "Movie.2026.part10.rar",
+        "size": 104857600
+       },
+       {
+        "name": "Movie.2026.part11.rar",
+        "size": 25166615
+       }
+      ],
+      "route": "two_pass",
+      "route_reason": "a volume set's PAR2 recovery data can only be computed once every volume is written (PAR2 orders its files by an id that hashes each file's length)",
+      "source_bytes": 1073741824,
+      "source_files": 1
+     },
+     "purged": false,
+     "repaired_files": 0,
+     "written": [
+      {
+       "name": "Movie.2026.part01.rar",
+       "size": 104857600
+      },
+      {
+       "name": "Movie.2026.part02.rar",
+       "size": 104857600
+      },
+      {
+       "name": "Movie.2026.part03.rar",
+       "size": 104857600
+      },
+      {
+       "name": "Movie.2026.part04.rar",
+       "size": 104857600
+      },
+      {
+       "name": "Movie.2026.part05.rar",
+       "size": 104857600
+      },
+      {
+       "name": "Movie.2026.part06.rar",
+       "size": 104857600
+      },
+      {
+       "name": "Movie.2026.part07.rar",
+       "size": 104857600
+      },
+      {
+       "name": "Movie.2026.part08.rar",
+       "size": 104857600
+      },
+      {
+       "name": "Movie.2026.part09.rar",
+       "size": 104857600
+      },
+      {
+       "name": "Movie.2026.part10.rar",
+       "size": 104857600
+      },
+      {
+       "name": "Movie.2026.part11.rar",
+       "size": 25166615
+      },
+      {
+       "name": "Movie.2026.par2",
+       "size": 42736
+      },
+      {
+       "name": "Movie.2026.vol000+01.par2",
+       "size": 580536
+      },
+      {
+       "name": "Movie.2026.vol001+02.par2",
+       "size": 1160992
+      },
+      {
+       "name": "Movie.2026.vol003+04.par2",
+       "size": 2279248
+      },
+      {
+       "name": "Movie.2026.vol007+08.par2",
+       "size": 4473104
+      },
+      {
+       "name": "Movie.2026.vol015+16.par2",
+       "size": 8818160
+      },
+      {
+       "name": "Movie.2026.vol031+32.par2",
+       "size": 17465616
+      },
+      {
+       "name": "Movie.2026.vol063+37.par2",
+       "size": 20154616
+      }
+     ]
+    },
+    "state": "done"
+   }
+  ]
+ }
+}

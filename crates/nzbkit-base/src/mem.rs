@@ -1312,6 +1312,7 @@ impl MemBudget {
     /// pipeline (chase extraction decodes while later volumes arrive), so
     /// this deliberately shares the budget rather than assuming the cache
     /// tiers have drained.
+    #[cfg(feature = "rar")]
     pub fn rar_execution_policy(&self) -> rars::Rar50ExecutionPolicy {
         let mut policy = rars::Rar50ExecutionPolicy::from_working_memory(
             (self.total / 4).clamp(96 << 20, 6 << 30),
@@ -1338,6 +1339,7 @@ impl MemBudget {
     /// narrows to a single block in flight rather than failing, so a small
     /// allowance costs wall time and no bytes. The ceiling is where the
     /// stock defaults already sat, so a large budget changes nothing.
+    #[cfg(feature = "rar")]
     pub fn rar_write_policy(&self) -> rars::Rar50WritePolicy {
         rars::Rar50WritePolicy::from_working_memory((self.total / 4).clamp(64 << 20, 4 << 30))
     }
@@ -1460,6 +1462,7 @@ fn physical_cores() -> Option<usize> {
 /// is exactly the host that cannot afford the reserve. Past it the
 /// decode fails with an error that names this knob rather than aborting
 /// the process on a failed allocation.
+#[cfg(feature = "rar")]
 fn rar_window_limit() -> u64 {
     (process_budget().total / 4).clamp(64 << 20, 1 << 30)
 }
@@ -1473,6 +1476,7 @@ fn rar_window_limit() -> u64 {
 /// The window limit in particular is a header field an untrusted
 /// archive chooses, so a reader built without it inherits the vendored
 /// crate's own 1 GiB default and allocates outside the budget.
+#[cfg(feature = "rar")]
 pub fn rar_read_options(password: Option<&[u8]>) -> rars::ArchiveReadOptions<'_> {
     rars::ArchiveReadOptions::with_optional_password(password)
         .with_rar50_execution_policy(process_budget().rar_execution_policy())
@@ -2742,6 +2746,7 @@ inactive_file 78807040
     /// this pins the relationship the target actually needs rather than the
     /// arithmetic: whatever `max_total` is here, the allowance fits inside
     /// it and the tree it admits fits inside the allowance.
+    #[cfg(feature = "rar")]
     #[test]
     fn rar_write_policy_fits_inside_the_budget_it_came_from() {
         for total in [
@@ -2796,6 +2801,7 @@ inactive_file 78807040
     /// NEGATIVE CONTROL, run: drop the `.with_rar50_max_window` line and
     /// `rar_read_options` leaves `rar50_max_window` as `None`, failing
     /// the first assertion.
+    #[cfg(feature = "rar")]
     #[test]
     fn the_rar_window_ceiling_follows_the_budget_and_never_exceeds_the_default() {
         const CRATE_DEFAULT: u64 = 1 << 30;
@@ -2834,6 +2840,7 @@ inactive_file 78807040
     /// small host must stay on bounded modes, a big one must be allowed
     /// past rars' built-in 256 MiB flat cap, and more budget never yields a
     /// strictly smaller allowance.
+    #[cfg(feature = "rar")]
     #[test]
     fn rar_execution_policy_scales_with_budget() {
         // A 256 MiB total budget must not admit a ~245 MiB flat plan: the

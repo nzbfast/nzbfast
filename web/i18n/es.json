@@ -2776,6 +2776,7 @@
  "toast.promote.unknown": "Ese archivo ya no forma parte de esta descarga.",
  "toast.pvfail": "No se ha podido abrir este archivo aquí.",
  "toast.pwfail": "No se pudo establecer la contraseña.",
+ "toast.pwlayer": "La contraseña abrió el archivo, pero dentro hay otro archivo bloqueado - introduce la contraseña de ese.",
  "toast.pwsaved": "Contraseña guardada.",
  "toast.pwunlocked": "Desempaquetado - la contraseña funcionó.",
  "toast.pwwrong": "Esa contraseña no abrió el archivo - los ficheros descargados están intactos, prueba otra.",

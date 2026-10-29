@@ -407,7 +407,7 @@ fn m_change_cat(
             // Already there: don't re-derive, or the job's own
             // directory reads as taken and the name climbs .2.
             Some((_, _, current)) if current == cat => json!({"status": true}),
-            Some((job, name, _)) => match requeue_category(d, &job, &name, &cat) {
+            Some((job, _, _)) => match requeue_category(d, &job, Refile::Cat(&cat)) {
                 Err(e) => {
                     return Some(json!({
                         "status": false,
@@ -790,6 +790,7 @@ fn m_set_password(
                             // be reported as, to a user who had just
                             // typed the right one. See
                             // [`crate::unlockpw::unlock`].
+                            let locked_before = crate::unlockpw::encrypted_archive(&out_dir);
                             let unlocked = crate::unlockpw::unlock(&out_dir, &pw);
                             if unlocked.is_ok() {
                                 let post_year = match post_year_of(&nzb) {
@@ -853,11 +854,21 @@ fn m_set_password(
                                     d2.mover_enqueue(&job2);
                                 }
                             } else {
+                                // The password may have opened a layer
+                                // and exposed another lock inside it
+                                // (Codex sweep F5): that is not "wrong",
+                                // and saying so would send the user back
+                                // to the password that just worked.
+                                let locked_now = crate::unlockpw::encrypted_archive(&out_dir);
+                                let fallback =
+                                    if locked_now.is_some() && locked_now != locked_before {
+                                        crate::diag::UNLOCK_LAYER_LEFT
+                                    } else {
+                                        "password did not unlock the archive"
+                                    };
                                 let mut j = job2.lock_ok();
-                                j.fail_message = crate::diag::unpack_failure(
-                                    unlocked.err().flatten(),
-                                    "password did not unlock the archive",
-                                );
+                                j.fail_message =
+                                    crate::diag::unpack_failure(unlocked.err().flatten(), fallback);
                                 drop(j);
                                 // Only the Reason line: the record is
                                 // already parked as password_required
@@ -2044,13 +2055,24 @@ pub(crate) fn dispatch(
 /// returns and a job started in that second gap would carry the old
 /// label into `job.started` beside the new-name-derived directory. See
 /// [`Job::relocating`] for what the fence is and who honours it.
+///
+/// Codex sweep F2 (27 Oct 2026): ONE relocation per job at a time. The
+/// fence keeps the runner out but never kept a second editor out, and
+/// `add_lock` covers only the publish, so two renames (or a rename and a
+/// recategorize) on two HTTP workers could interleave: persisted name A
+/// beside directory B, or B skipping the move because A's directory did
+/// not exist yet and A then moving the progress somewhere no record
+/// names. A job whose fence is already up is refused, and the half of
+/// the label this call does NOT change is read here, under the lock,
+/// rather than taken from a snapshot the caller made before it - a
+/// rename that landed in between used to have its name re-derived away,
+/// and a recategorize its category written back over.
 #[must_use = "the relocation fence lifts when this guard drops - bind it \
               if the transaction continues past this call"]
 pub fn requeue_category(
     d: &Arc<Daemon>,
     job: &Arc<Mutex<Job>>,
-    name: &str,
-    cat: &str,
+    change: Refile<'_>,
 ) -> Result<Relocation, &'static str> {
     // Test hook: hold the window between the caller's Queued snapshot
     // and the publish below open, so the suite can start the job inside
@@ -2062,7 +2084,22 @@ pub fn requeue_category(
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
     let _publish = d.add_lock.lock_ok();
-    let (dir, _) = refile_out_dir(&d.out_root.read_ok().clone(), cat, name, &|p| {
+    // The live label, read under `add_lock`. A relocation already in
+    // flight is refused here and again below: the job lock cannot be
+    // held across `refile_out_dir`, because `dir_claim` locks every job.
+    let (live, name, cat) = {
+        let g = job.lock_ok();
+        if g.relocating > 0 {
+            return Err(RELOCATION_BUSY);
+        }
+        let live = (g.name.clone(), g.category.clone());
+        let (name, cat) = match change {
+            Refile::Name(n) => (n.to_string(), g.category.clone()),
+            Refile::Cat(c) => (g.name.clone(), c.to_string()),
+        };
+        (live, name, cat)
+    };
+    let (dir, _) = refile_out_dir(&d.out_root.read_ok().clone(), &cat, &name, &|p| {
         d.dir_claim(p)
     });
     // The publish and the fence are ONE job-lock critical section, and
@@ -2078,7 +2115,13 @@ pub fn requeue_category(
         if g.state != JobState::Queued {
             return Err("job already started");
         }
-        let old_cat = std::mem::replace(&mut g.category, cat.to_string());
+        // Nothing else relabels a queued job without a fence, but a
+        // relocation that started and finished while the directory was
+        // being derived is still caught here rather than written over.
+        if g.relocating > 0 || (&g.name, &g.category) != (&live.0, &live.1) {
+            return Err(RELOCATION_BUSY);
+        }
+        let old_cat = std::mem::replace(&mut g.category, cat.clone());
         let old_dir = std::mem::replace(&mut g.out_dir, dir.clone());
         g.relocating += 1;
         (
@@ -2091,7 +2134,7 @@ pub fn requeue_category(
             old_dir,
         )
     };
-    d.register_cat(cat);
+    d.register_cat(&cat);
     // A queued job can be RUNNING in the prefetch sidecar, against the
     // directory this call has just re-pointed away from. Every further
     // byte it fetches lands in a folder the record has left, and its
@@ -2156,6 +2199,22 @@ pub fn requeue_category(
     }
     Ok(fence)
 }
+
+/// Which half of a queued job's label [`requeue_category`] changes. The
+/// other half is read from the live record under the lock, never from a
+/// caller's earlier snapshot.
+#[derive(Clone, Copy, Debug)]
+pub enum Refile<'a> {
+    /// A rename: the new name, under the job's current category.
+    Name(&'a str),
+    /// A recategorize: the new category, under the job's current name.
+    Cat(&'a str),
+}
+
+/// The refusal for a job another relocation is already moving, or whose
+/// label changed while this one was deciding where it goes.
+pub const RELOCATION_BUSY: &str =
+    "this job is being renamed or re-filed by another request - try again";
 
 /// The relocation fence for one job, lifted when this drops.
 ///

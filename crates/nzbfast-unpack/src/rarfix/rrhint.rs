@@ -139,6 +139,160 @@ pub(crate) struct RrPassStats {
     pub bytes_scanned: u64,
     /// On-disk bytes of every volume the hint let us skip.
     pub bytes_skipped: u64,
+    /// Why the pass ended before its last volume, if it did.
+    pub stopped: Option<RrStopped>,
+}
+
+/// Why an RR pass ended early - issue 115.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RrStopped {
+    /// A volume carried a record that could not repair it. The pass's
+    /// verdict is already "could not save the set" whatever the volumes
+    /// after it do, so reading them only spends the time.
+    Unrepairable,
+    /// The owner cancelled (the job was deleted).
+    Cancelled,
+    /// One volume ran past [`volume_deadline`] and the pass walked away
+    /// from it.
+    Wedged,
+}
+
+/// The owner's "stop now" for the RR pass: the job's
+/// [`SideCancel`](crate::streamhub::SideCancel) in the daemon, never set on
+/// the CLI and in tests.
+pub(crate) type RrCancel<'a> = Option<&'a crate::streamhub::SideCancel>;
+
+/// How long one volume's RR repair may run before the pass stops waiting
+/// for it: five minutes plus a second per MiB, so a 117 MB volume gets
+/// about seven minutes and a 4 GiB one a little over an hour.
+///
+/// The repair reads the volume about twice and writes it once, which on
+/// the slowest storage this runs on (a NAS share, a USB disk) is well under
+/// a second per MiB - the bound is there for a repair that has STOPPED,
+/// not one that is slow. Issue 115 is the case it exists for: a volume's
+/// repair that never returned held the job in Repairing for 14 hours, and
+/// with it the heavy-CPU permit every other job's repair and unpack tail
+/// waits on.
+pub(crate) fn volume_deadline(len: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(300 + len / (1 << 20))
+}
+
+/// How often a wait on the volume worker looks up to check the cancel and
+/// the deadline. Well inside a user's patience after a delete; one wakeup
+/// a quarter-second for the length of a repair costs nothing.
+const RR_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The thread one group's volumes are repaired on, so the pass can WALK
+/// AWAY from a volume that does not come back (issue 115).
+///
+/// The repair is synchronous library code with no cancel of its own, and a
+/// thread blocked inside it cannot be interrupted - so the only way to stop
+/// waiting is not to be the thread doing the work. The pass hands volumes
+/// over one at a time and waits with a timeout; on a cancel or a deadline
+/// it raises `walked_away` and leaves. The worker is then detached: if the
+/// repair ever returns, `rr_repair_volume_in` sees the flag before it
+/// publishes and deletes its temp instead, and the next send fails so the
+/// thread exits. If it never returns it stays parked until the process
+/// does, which is what the alternative already cost - a job, a permit and
+/// a queue behind it - minus the job, the permit and the queue.
+///
+/// ONE thread per group rather than per volume because the group shares one
+/// parse session (one RAR 5 key derivation per set, see
+/// `rr_repair_volume_in`), and the session borrows the password, so both
+/// have to live on the thread that uses them. The group's password is
+/// RESOLVED there too, because resolving opens the volumes - and an open
+/// that never returns is exactly what the pass must be able to leave. The
+/// caller's log subscriber and span go with it, so the worker's lines land
+/// where the pass's do.
+pub(crate) struct VolumeWorker {
+    jobs: std::sync::mpsc::Sender<PathBuf>,
+    done: std::sync::mpsc::Receiver<std::result::Result<RrRepair, String>>,
+    walked_away: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+pub(crate) enum VolumeWait {
+    Done(std::result::Result<RrRepair, String>),
+    Cancelled,
+    Wedged,
+}
+
+impl VolumeWorker {
+    pub(crate) fn start(
+        dir: PathBuf,
+        group: Vec<PathBuf>,
+        password: Option<String>,
+    ) -> std::io::Result<Self> {
+        let (jobs, job_rx) = std::sync::mpsc::channel::<PathBuf>();
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let walked_away = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gone = walked_away.clone();
+        let dispatch = tracing::dispatcher::get_default(|d| d.clone());
+        let span = tracing::Span::current();
+        std::thread::Builder::new()
+            .name("rr-repair".into())
+            .spawn(move || {
+                tracing::dispatcher::with_default(&dispatch, || {
+                    let _entered = span.enter();
+                    let group_pw = crate::rarfix::passwords::resolve_rar_group_password(
+                        &dir,
+                        &group,
+                        password.as_deref(),
+                    );
+                    let pw = group_pw.as_deref().or(password.as_deref());
+                    let mut session = rars::ReadSession::new(
+                        rars::ArchiveReadOptions::with_optional_password(pw.map(str::as_bytes)),
+                    );
+                    for path in job_rx {
+                        let out = rr_repair_volume_in(&mut session, &path, pw, Some(&gone))
+                            .map_err(|e| e.to_string());
+                        if done_tx.send(out).is_err() {
+                            return;
+                        }
+                    }
+                })
+            })?;
+        Ok(VolumeWorker {
+            jobs,
+            done,
+            walked_away,
+        })
+    }
+
+    /// Repair `path` on the worker and wait for it - or for `cancel`, or
+    /// for `deadline`, whichever comes first.
+    pub(crate) fn repair(
+        &self,
+        path: &Path,
+        cancel: RrCancel<'_>,
+        deadline: std::time::Duration,
+    ) -> VolumeWait {
+        use std::sync::mpsc::RecvTimeoutError;
+        if self.jobs.send(path.to_path_buf()).is_err() {
+            return VolumeWait::Done(Err("the repair worker is gone".into()));
+        }
+        let started = std::time::Instant::now();
+        loop {
+            match self.done.recv_timeout(RR_POLL) {
+                Ok(out) => return VolumeWait::Done(out),
+                // The worker died (a panic inside the repair): report it as
+                // this volume's failure, not as a hang.
+                Err(RecvTimeoutError::Disconnected) => {
+                    return VolumeWait::Done(Err("the repair worker stopped".into()));
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            let stop = if cancel.is_some_and(|c| c.is_cancelled()) {
+                VolumeWait::Cancelled
+            } else if started.elapsed() >= deadline {
+                VolumeWait::Wedged
+            } else {
+                continue;
+            };
+            self.walked_away
+                .store(true, std::sync::atomic::Ordering::Release);
+            return stop;
+        }
+    }
 }
 
 /// `volumes` grouped into sets, one entry per set, for the RR pass.
@@ -177,24 +331,46 @@ pub(crate) fn rr_groups(volumes: &[PathBuf]) -> std::collections::BTreeMap<Strin
 /// password-chain shape needs - see the 14 Aug note on
 /// [`try_rar_rr_repair`](super::try_rar_rr_repair)). With a hint,
 /// volumes it proves intact are skipped and counted in `skipped`.
+///
+/// The pass ENDS EARLY, with the reason in `stopped`, on three things
+/// (issue 115): the first volume whose record could not repair it - both
+/// callers read any hard failure as "could not save the set", so every
+/// volume after it was read for nothing, on a set that by this rung is
+/// usually far past saving - a `cancel`, and a volume that outlives
+/// [`volume_deadline`]. Each volume is repaired on a [`VolumeWorker`], so
+/// the last two hold even when the repair itself never returns.
 pub(crate) fn rr_repair_volumes(
     dir: &Path,
     volumes: &[PathBuf],
     password: Option<&str>,
     hint: Option<&DamageHint>,
+    cancel: RrCancel<'_>,
 ) -> RrPassStats {
     let by_stem = rr_groups(volumes);
     let mut stats = RrPassStats::default();
-    for group in by_stem.values() {
+    'groups: for group in by_stem.values() {
+        if cancel.is_some_and(|c| c.is_cancelled()) {
+            stats.stopped = Some(RrStopped::Cancelled);
+            break;
+        }
         let owned: Vec<PathBuf> = group.iter().map(|p| (*p).clone()).collect();
-        let group_pw = crate::rarfix::passwords::resolve_rar_group_password(dir, &owned, password);
-        let pw = group_pw.as_deref().or(password);
-        // One parse session per GROUP: the group is one set under one
-        // password, so its RAR 5 key derives once here rather than once
-        // per volume (see `rr_repair_volume_in`).
-        let mut session = rars::ReadSession::new(rars::ArchiveReadOptions::with_optional_password(
-            pw.map(str::as_bytes),
-        ));
+        // One worker, and so one password resolve and one parse session,
+        // per GROUP: the group is one set under one password, so its RAR 5
+        // key derives once there rather than once per volume (see
+        // `rr_repair_volume_in`).
+        let worker = match VolumeWorker::start(
+            dir.to_path_buf(),
+            owned,
+            password.map(str::to_owned),
+        ) {
+            Ok(worker) => worker,
+            Err(e) => {
+                warn!(target: "repair", "✘ recovery-record repair could not start a worker: {e}");
+                stats.hard_failures += 1;
+                stats.stopped = Some(RrStopped::Unrepairable);
+                break;
+            }
+        };
         for path in group {
             let name = path
                 .file_name()
@@ -220,27 +396,51 @@ pub(crate) fn rr_repair_volumes(
                 Some(Verdict::Unknown) | None => {}
             }
             stats.bytes_scanned += len;
-            match rr_repair_volume_in(&mut session, path, pw) {
-                Ok(RrRepair::Rebuilt) => {
+            let deadline = volume_deadline(len);
+            match worker.repair(path, cancel, deadline) {
+                VolumeWait::Done(Ok(RrRepair::Rebuilt)) => {
                     info!(target: "repair", "✔ {name} - rewritten from recovery record");
                     stats.rewritten += 1;
                 }
-                Ok(RrRepair::PrefixIntact) => {
+                VolumeWait::Done(Ok(RrRepair::PrefixIntact)) => {
                     // Not counted as rewritten: the record proved the
                     // prefix intact, the original was kept untouched.
                     info!(target: "repair", "{name} - recovery record shows the protected prefix intact");
                     stats.intact += 1;
                 }
-                Ok(RrRepair::NoRecord) => {
+                VolumeWait::Done(Ok(RrRepair::NoRecord)) => {
                     info!(target: "repair", "{name} - no recovery record");
                     stats.no_record += 1;
                 }
-                Err(e) => {
+                VolumeWait::Done(Err(e)) => {
                     warn!(target: "repair", "✘ {name} - {e}");
                     stats.hard_failures += 1;
+                    stats.stopped = Some(RrStopped::Unrepairable);
+                    break 'groups;
+                }
+                VolumeWait::Cancelled => {
+                    info!(target: "repair", "{name} - recovery-record repair cancelled");
+                    stats.stopped = Some(RrStopped::Cancelled);
+                    break 'groups;
+                }
+                VolumeWait::Wedged => {
+                    warn!(
+                        target: "repair",
+                        "✘ {name} - recovery-record repair made no answer in {} s; giving up on it",
+                        deadline.as_secs()
+                    );
+                    stats.hard_failures += 1;
+                    stats.stopped = Some(RrStopped::Wedged);
+                    break 'groups;
                 }
             }
         }
+    }
+    if stats.stopped == Some(RrStopped::Unrepairable) {
+        info!(
+            target: "repair",
+            "stopped the recovery-record pass at the first volume it could not repair"
+        );
     }
     stats
 }
@@ -262,7 +462,7 @@ pub(crate) fn try_rar_rr_repair_hinted(
     password: Option<&str>,
     hint: Option<&DamageHint>,
 ) -> bool {
-    try_rar_rr_repair_hinted_why(dir, password, hint).is_ok()
+    try_rar_rr_repair_hinted_why(dir, password, hint, None).is_ok()
 }
 
 /// `try_rar_rr_repair_hinted` that also carries OUT the ladder's own
@@ -290,10 +490,14 @@ pub(crate) fn try_rar_rr_repair_hinted(
 /// the hint can be wrong, and a volume it wrongly vouched for is exactly
 /// what that pass repairs, so its answer is the later and
 /// better-informed one.
+///
+/// `cancel` is the owning job's handle where there is one (the daemon's
+/// settle repair); a cancelled pass refuses here, before any extraction.
 pub fn try_rar_rr_repair_hinted_why(
     dir: &Path,
     password: Option<&str>,
     hint: Option<&DamageHint>,
+    cancel: Option<&crate::streamhub::SideCancel>,
 ) -> std::result::Result<(), Option<String>> {
     let volumes = match collect_rar_volumes(dir) {
         Ok(volumes) if !volumes.is_empty() => volumes,
@@ -310,7 +514,11 @@ pub fn try_rar_rr_repair_hinted_why(
             ""
         }
     );
-    let stats = rr_repair_volumes(dir, &volumes, password, hint);
+    let stats = rr_repair_volumes(dir, &volumes, password, hint, cancel);
+    if stats.stopped == Some(RrStopped::Cancelled) {
+        // Not "could not save the set": nobody asked it to any more.
+        return Err(None);
+    }
     if !stats.skipped.is_empty() {
         info!(
             target: "repair",
@@ -382,8 +590,11 @@ pub fn try_rar_rr_repair_hinted_why(
          skipped volume(s) too",
         stats.skipped.len()
     );
-    let second = rr_repair_volumes(dir, &stats.skipped, password, None);
-    if (second.rewritten == 0 && second.intact == 0) || second.hard_failures > 0 {
+    let second = rr_repair_volumes(dir, &stats.skipped, password, None, cancel);
+    if (second.rewritten == 0 && second.intact == 0)
+        || second.hard_failures > 0
+        || second.stopped == Some(RrStopped::Cancelled)
+    {
         warn!(target: "repair", "recovery-record repair could not save the set");
         return Err(None);
     }

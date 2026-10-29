@@ -16,7 +16,7 @@ workspace = true
 # module into meta, engine or bin is a refusal there); the absence of a
 # dependency line here is what holds it from the cargo side.
 [dependencies]
-nzbkit = { path = "../nzbkit", default-features = false }
+nzbkit = { path = "../nzbkit", default-features = false, features = ["rar"] }
 nzbfast-core = { path = "../nzbfast-core" }
 # `parallel` turns on rars' multithreaded RAR5 block decode (unrar-parity
 # extraction wall speed; members >=16MB fan symbol decode across 4

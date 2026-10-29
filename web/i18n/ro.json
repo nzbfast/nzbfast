@@ -2776,6 +2776,7 @@
  "toast.promote.unknown": "Acest fișier nu mai face parte din această descărcare.",
  "toast.pvfail": "Fișierul nu a putut fi deschis aici.",
  "toast.pwfail": "Setarea parolei a eșuat.",
+ "toast.pwlayer": "Parola a deschis arhiva, dar în ea se află o altă arhivă blocată - introduceți parola pentru aceasta.",
  "toast.pwsaved": "Parolă salvată.",
  "toast.pwunlocked": "Despachetat - parola a funcționat.",
  "toast.pwwrong": "Această parolă nu a deschis arhiva - fișierele descărcate sunt neatinse, încercați alta.",

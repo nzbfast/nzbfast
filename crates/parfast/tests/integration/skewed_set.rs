@@ -18,6 +18,7 @@
 //! parfast fixture in this tree is exactly that.
 use std::path::PathBuf;
 
+use crate::inproc::{InProcess, in_process};
 use crate::scratch::{Scratch, scratch};
 
 const BLOCK: usize = 65_536;
@@ -32,13 +33,6 @@ fn noise(len: usize, seed: u32) -> Vec<u8> {
         .collect()
 }
 
-fn run(args: &[String]) -> (u8, String, String) {
-    let mut sink = parfast::out::Sink::buffered();
-    let code = parfast::run_with("parfast", args, &mut sink);
-    let (out, err) = sink.take();
-    (code, out, err)
-}
-
 fn arg(s: &str) -> String {
     s.to_string()
 }
@@ -47,7 +41,7 @@ fn arg(s: &str) -> String {
 /// set path and the dominant member's path: the guard OWNS the tree
 /// those two paths point into, so a caller that dropped it here would
 /// be handed two paths to a directory that had just been removed.
-fn skewed_set(tag: &str) -> (Scratch, PathBuf, PathBuf) {
+fn skewed_set(parfast: &InProcess, tag: &str) -> (Scratch, PathBuf, PathBuf) {
     let dir = scratch(tag);
     let big = dir.join("feature.mkv");
     std::fs::write(&big, noise(BLOCK * DOMINANT_BLOCKS, 1)).expect("payload");
@@ -60,7 +54,7 @@ fn skewed_set(tag: &str) -> (Scratch, PathBuf, PathBuf) {
         std::fs::write(&side, noise(BLOCK, 0x100 + i as u32)).expect("sidecar");
         args.push(arg(&side.to_string_lossy()));
     }
-    let (code, _, err) = run(&args);
+    let (code, _, err) = parfast.run(&args);
     assert_eq!(code, 0, "fixture create failed: {err}");
     (dir, set, big)
 }
@@ -69,7 +63,8 @@ fn skewed_set(tag: &str) -> (Scratch, PathBuf, PathBuf) {
 /// the same way - clean, and then with the dominant member holed.
 #[test]
 fn the_outer_width_changes_no_line_of_a_skewed_verify() {
-    let (_dir, set, big) = skewed_set("skewed-set");
+    let parfast = in_process();
+    let (_dir, set, big) = skewed_set(&parfast, "skewed-set");
     let widths = ["", "-T1", "-T21", "-T3"];
     let mut clean: Vec<(u8, String)> = Vec::new();
     for w in widths {
@@ -78,7 +73,7 @@ fn the_outer_width_changes_no_line_of_a_skewed_verify() {
             args.push(arg(w));
         }
         args.push(arg(&set.to_string_lossy()));
-        let (code, out, err) = run(&args);
+        let (code, out, err) = parfast.run(&args);
         assert_eq!(code, 0, "clean verify at {w:?} failed: {err}");
         clean.push((code, out));
     }
@@ -104,7 +99,7 @@ fn the_outer_width_changes_no_line_of_a_skewed_verify() {
             args.push(arg(w));
         }
         args.push(arg(&set.to_string_lossy()));
-        let (code, out, _) = run(&args);
+        let (code, out, _) = parfast.run(&args);
         damaged.push((code, out));
     }
     assert_ne!(damaged[0].0, 0, "a holed member is not a clean verify");
@@ -114,7 +109,7 @@ fn the_outer_width_changes_no_line_of_a_skewed_verify() {
 
     // The other tier, on its own copy of the same shape, in this same
     // test: see that function's note on why it is not a test of its own.
-    the_slow_tier_agrees_at_every_outer_width("skewed-set-slow");
+    the_slow_tier_agrees_at_every_outer_width(&parfast, "skewed-set-slow");
 }
 
 /// The SAME shape under `--slow`, where the tier is the FileDesc
@@ -137,8 +132,12 @@ fn the_outer_width_changes_no_line_of_a_skewed_verify() {
 /// target's tests as threads in one process - nextest's per-test process
 /// hides that, which is exactly why it must not be written that way here.
 /// Called from the test above, after it finishes with the default tier.
-fn the_slow_tier_agrees_at_every_outer_width(dir_tag: &str) {
-    let (_dir, set, big) = skewed_set(dir_tag);
+/// (Since 27 Oct 2026 every in-process test here also holds
+/// `crate::inproc`'s lock, which is what keeps the OTHER modules' runs
+/// out of this one; folding the two tiers into one test is what keeps
+/// this test's own runs in order.)
+fn the_slow_tier_agrees_at_every_outer_width(parfast: &InProcess, dir_tag: &str) {
+    let (_dir, set, big) = skewed_set(parfast, dir_tag);
     let widths = ["", "-T1", "-T21", "-T3"];
     let slow = |w: &str, set: &PathBuf| {
         let mut args = vec![arg("v"), arg("--slow")];
@@ -146,7 +145,7 @@ fn the_slow_tier_agrees_at_every_outer_width(dir_tag: &str) {
             args.push(arg(w));
         }
         args.push(arg(&set.to_string_lossy()));
-        let (code, out, err) = run(&args);
+        let (code, out, err) = parfast.run(&args);
         (code, out, err)
     };
     let clean: Vec<(u8, String)> = widths

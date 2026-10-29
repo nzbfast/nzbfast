@@ -205,7 +205,9 @@ fn a_policy_path_is_resolved_to_what_the_kernel_sees() {
 
 #[test]
 fn bwrap_argv_for_a_tool_is_the_policy_word_for_word() {
-    let a: Vec<String> = linux::bwrap_args(&tool_policy("/jobs/x"))
+    // A tool under a system prefix: the `/usr` bind already shows it,
+    // so no bind of its own.
+    let a: Vec<String> = linux::bwrap_args(Path::new("/usr/bin/par2"), &tool_policy("/jobs/x"))
         .iter()
         .map(|s| s.to_string_lossy().into_owned())
         .collect();
@@ -245,10 +247,13 @@ fn bwrap_argv_for_a_tool_is_the_policy_word_for_word() {
 
 #[test]
 fn bwrap_argv_for_a_script_keeps_the_network_and_the_whole_tree_readable() {
-    let a: Vec<String> = linux::bwrap_args(&Policy::script(vec![PathBuf::from("/downloads")]))
-        .iter()
-        .map(|s| s.to_string_lossy().into_owned())
-        .collect();
+    let a: Vec<String> = linux::bwrap_args(
+        Path::new("/srv/hooks/notify.sh"),
+        &Policy::script(vec![PathBuf::from("/downloads")]),
+    )
+    .iter()
+    .map(|s| s.to_string_lossy().into_owned())
+    .collect();
     assert_eq!(
         a,
         vec![
@@ -272,6 +277,61 @@ fn bwrap_argv_for_a_script_keeps_the_network_and_the_whole_tree_readable() {
     // A script may background a transcode and exit; `--die-with-parent`
     // would kill it when the daemon stops.
     assert!(!a.iter().any(|s| s == "--die-with-parent"));
+}
+
+/// A tool OUTSIDE the system prefixes - a par2 the user built into
+/// `$HOME`, or the CI runner's pinned reference at `~/par2ref/par2` - is
+/// bound read-only as a FILE, after the private /tmp, and its directory
+/// is not. Before this bind the strict child could not see the program
+/// at all, and bwrap's own `execvp` answered ENOENT, which the repair
+/// path reads as par2 having run and failed: three `stream_repair`
+/// integration tests went red on the first `ubuntu-26.04` runners
+/// (Oct 2026), the first image on which the bwrap probe succeeds.
+#[test]
+fn bwrap_binds_a_tool_outside_the_system_prefixes_as_a_file() {
+    let a: Vec<String> = linux::bwrap_args(
+        Path::new("/home/runner/par2ref/par2"),
+        &tool_policy("/jobs/x"),
+    )
+    .iter()
+    .map(|s| s.to_string_lossy().into_owned())
+    .collect();
+    let at = |s: &str| a.iter().position(|x| x == s);
+    let bind = a
+        .windows(3)
+        .position(|w| {
+            w == [
+                "--ro-bind-try",
+                "/home/runner/par2ref/par2",
+                "/home/runner/par2ref/par2",
+            ]
+        })
+        .expect("the tool's own file is bound");
+    assert!(
+        bind > at("/tmp").expect("the private /tmp"),
+        "the tool bind must come after the tmpfs, or a tool under /tmp is hidden: {a:?}"
+    );
+    assert!(
+        !a.iter()
+            .any(|s| s == "/home/runner/par2ref" || s == "/home/runner"),
+        "never its directory - a tool at ~/par2 would hand the child all of $HOME: {a:?}"
+    );
+
+    // Under /tmp it is bound too: the private tmpfs would hide it.
+    let a = linux::bwrap_args(Path::new("/tmp/t/par2"), &tool_policy("/jobs/x"));
+    assert!(a.iter().any(|s| s == "/tmp/t/par2"), "{a:?}");
+    // Under the job directory it is not: the writable bind shows it.
+    let a = linux::bwrap_args(
+        &PathBuf::from(spelled("/jobs/x")).join("par2"),
+        &tool_policy("/jobs/x"),
+    );
+    assert_eq!(
+        a.iter()
+            .filter(|s| s.to_string_lossy().ends_with("par2"))
+            .count(),
+        0,
+        "{a:?}"
+    );
 }
 
 #[test]
@@ -747,6 +807,51 @@ fn a_confined_child_writes_inside_the_policy_and_not_outside_it() {
     if cfg!(target_os = "macos") {
         assert!(!st.success(), "sandbox-exec must refuse the write itself");
     }
+}
+
+/// End to end: a tool that lives OUTSIDE the system prefixes and
+/// outside the job directory still RUNS confined. The argv pin above
+/// says the bind is there; this says the kernel honours it - and under
+/// /tmp, which is exactly where bwrap's strict arm lays a private tmpfs.
+/// Skipped where no mechanism is available.
+#[test]
+#[cfg(unix)]
+fn a_confined_tool_outside_the_system_prefixes_still_runs() {
+    if detect().mechanism == Mechanism::None {
+        eprintln!("no confinement on this box ({}) - skipped", detect().detail);
+        return;
+    }
+    let dir = crate::testscratch::ScratchDir::attach(
+        &std::env::temp_dir().join(format!("nzbfast-sandbox-tool-{}", std::process::id())),
+    );
+    let tools = dir.join("tools");
+    let job = dir.join("job");
+    std::fs::create_dir_all(&tools).expect("tools dir");
+    std::fs::create_dir_all(&job).expect("job dir");
+    // A SCRIPT, not a copy of /bin/sh: macOS kills a copied platform
+    // binary at exec (SIGKILL, code signing) even unconfined. The
+    // interpreter it names lives under the system prefixes; what the
+    // sandbox has to show is the tool's own file, which is the point.
+    let tool = tools.join("tool.sh");
+    std::fs::write(
+        &tool,
+        format!("#!/bin/sh\necho ok > '{}'\n", job.join("ran.txt").display()),
+    )
+    .expect("write the tool");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    let st = command(&tool, &Policy::tool("test", &job))
+        .status()
+        .expect("the wrapper starts");
+    assert!(
+        st.success() && job.join("ran.txt").is_file(),
+        "a tool outside the system prefixes must still run confined ({} via {}): exit {st}",
+        tool.display(),
+        detect().mechanism.as_str()
+    );
 }
 
 /// A real, confined `unrar` still extracts a real fixture into the job

@@ -22,6 +22,10 @@ mod digest_cache;
 /// whole-file one answer the same on an honest set, by exit code, stdout
 /// and repaired bytes.
 mod fast_check;
+/// The one door to `parfast::run_with` here, and the lock every
+/// in-process test holds for its whole length: `run_with` sets process
+/// globals, and `cargo test` runs this target in one process.
+mod inproc;
 /// The named `.par2` is junk and its volumes are not: the set the
 /// reference repairs off the siblings and parfast used to decline, and
 /// the two-set directory the rescue must not reach across.

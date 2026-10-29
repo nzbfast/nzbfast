@@ -472,6 +472,30 @@ impl Daemon {
             let rows = self.queue_rows();
             return self.queue_publish_locked(&rows);
         }
+        // The row must still be the LIVE BACK of the queue, checked under
+        // the IO lock. The add publishes the job and drops `add_lock`
+        // before it gets here, so a remover (an NZBGet GroupFinalDelete,
+        // a SAB delete) can take it out of the queue and finish its own
+        // full save in between. That save had nothing to tombstone - the
+        // id was never published - so appending the row after it put a
+        // deleted job back in the store, and a restart before the next
+        // full save brought it back as Queued (Codex sweep F1, 27 Oct
+        // 2026). Two adds whose row saves ran in reverse order fail the
+        // same check and stop persisting B before A. Either way the full
+        // publish is the honest statement about disk. A removal AFTER
+        // this check runs its own full save, which waits on this lock
+        // and then tombstones the id this append published. The queue
+        // lock is taken and dropped here, never held into `queue_rows`,
+        // which takes `hist_owed` first.
+        let at_back = self
+            .queue
+            .lock_ok()
+            .back()
+            .is_some_and(|b| Arc::ptr_eq(b, job));
+        if !at_back {
+            let rows = self.queue_rows();
+            return self.queue_publish_locked(&rows);
+        }
         let (id, line) = {
             let g = job.lock_ok();
             (g.nzo_id.clone(), job_json(&g).to_string())
@@ -1722,8 +1746,11 @@ mod queue_store_tests {
         let fresh = row(&d, "c");
         d.queue.lock_ok().push_front(fresh.clone());
         assert!(d.save_queue_row(&fresh));
-        // The append could only say "at the back", and did.
-        assert_eq!(ids(&stored_queue(&d)), ["a", "b", "c"]);
+        // An append could only say "at the back". Since the live-back
+        // check (Codex sweep F1) a row that is not there takes the full
+        // publish instead, so the store is right on return rather than
+        // at the next full save.
+        assert_eq!(ids(&stored_queue(&d)), ["c", "a", "b"]);
         assert!(d.save_queue());
         assert_eq!(ids(&stored_queue(&d)), ["c", "a", "b"]);
         let d2 = test_daemon(&dir);
@@ -1735,6 +1762,69 @@ mod queue_store_tests {
             .map(|j| j.lock_ok().nzo_id.clone())
             .collect();
         assert_eq!(back, ["c", "a", "b"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Codex sweep F1 (27 Oct 2026): the add publishes its job, drops
+    /// `add_lock`, and only then saves the row. A delete landing in that
+    /// gap removes the job and runs a full save with nothing to
+    /// tombstone, because the id was never published. The late append
+    /// used to put the deleted job back in the store, and a restart
+    /// before the next full save restored it as Queued. Called in the
+    /// losing order, sequentially, so no barrier is needed.
+    #[test]
+    fn a_row_save_after_its_job_was_deleted_does_not_resurrect_it() {
+        let dir = tmp("rowdel");
+        let d = test_daemon(&dir);
+        d.queue.lock_ok().push_back(row(&d, "a"));
+        assert!(d.save_queue());
+        // The add publishes `c`...
+        let late = row(&d, "c");
+        d.queue.lock_ok().push_back(late.clone());
+        // ...a delete takes it out and saves, before the add's row save.
+        d.queue.lock_ok().retain(|j| !Arc::ptr_eq(j, &late));
+        late.lock_ok().tombstone = true;
+        assert!(d.save_queue());
+        // The add's row save finally runs.
+        assert!(d.save_queue_row(&late));
+        assert_eq!(ids(&stored_queue(&d)), ["a"]);
+        let d2 = test_daemon(&dir);
+        d2.load_queue();
+        let back: Vec<String> = d2
+            .queue
+            .lock_ok()
+            .iter()
+            .map(|j| j.lock_ok().nzo_id.clone())
+            .collect();
+        assert_eq!(back, ["a"], "a deleted job came back after a restart");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The ordering half of F1: two adds publish A then B, and their row
+    /// saves run B first. Each appended at the back of the STORE, so it
+    /// persisted B, A while the live queue said A, B.
+    #[test]
+    fn two_row_saves_in_reverse_order_persist_the_live_order() {
+        let dir = tmp("rowrev");
+        let d = test_daemon(&dir);
+        d.queue.lock_ok().push_back(row(&d, "z"));
+        assert!(d.save_queue());
+        let a = row(&d, "a");
+        let b = row(&d, "b");
+        d.queue.lock_ok().push_back(a.clone());
+        d.queue.lock_ok().push_back(b.clone());
+        assert!(d.save_queue_row(&b));
+        assert!(d.save_queue_row(&a));
+        assert_eq!(ids(&stored_queue(&d)), ["z", "a", "b"]);
+        let d2 = test_daemon(&dir);
+        d2.load_queue();
+        let back: Vec<String> = d2
+            .queue
+            .lock_ok()
+            .iter()
+            .map(|j| j.lock_ok().nzo_id.clone())
+            .collect();
+        assert_eq!(back, ["z", "a", "b"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

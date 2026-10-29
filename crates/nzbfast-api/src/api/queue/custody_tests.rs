@@ -141,7 +141,7 @@ fn a_recategorize_with_no_sidecar_moves_the_partial_files() {
         "the shape under test is the one with no sidecar live"
     );
 
-    requeue_category(&d, &job, "Repointed.Release", "movies").expect("recategorize");
+    requeue_category(&d, &job, Refile::Cat("movies")).expect("recategorize");
     let now = job.lock_ok().out_dir.clone();
     assert_ne!(now, old, "the whole point of the call is a new directory");
     assert!(
@@ -186,7 +186,7 @@ fn a_refused_save_rolls_the_recategorize_back_whole() {
     d.queue.lock_ok().push_back(job.clone());
 
     arm_store_cut(&[Store::Queue]);
-    let fence = requeue_category(&d, &job, "Rolled.Release", "movies").expect("recategorize");
+    let fence = requeue_category(&d, &job, Refile::Cat("movies")).expect("recategorize");
     let newdir = job.lock_ok().out_dir.clone();
     assert_ne!(newdir, old, "the transaction re-pointed the record");
     assert!(
@@ -398,5 +398,94 @@ fn recovery_leaves_every_durable_rows_nzb_in_place() {
         );
     }
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Codex sweep F2 (27 Oct 2026): a second relocation of a job whose
+/// fence is already up is REFUSED, by either door, and leaves the first
+/// transaction's record alone. Before, both went through: two renames on
+/// two HTTP workers could persist name A beside directory B, or strand
+/// the partial download in a directory no record named. The bound fence
+/// stands in for the in-flight window, so no threads are needed.
+#[test]
+fn a_second_relocation_while_one_is_in_flight_is_refused() {
+    let dir = tmp("recatbusy");
+    let d = test_daemon(&dir);
+    let job = Arc::new(Mutex::new(
+        job_from_json(&serde_json::json!({
+            "nzo_id": "nzo-recat-3",
+            "name": "Busy.Release",
+            "nzb_path": "/tmp/x.nzb",
+            "out_dir": crate::naming::out_dir(&d).join("Busy.Release").to_string_lossy(),
+            "state": "Queued",
+        }))
+        .expect("job"),
+    ));
+    d.queue.lock_ok().push_back(job.clone());
+
+    let first = requeue_category(&d, &job, Refile::Cat("movies")).expect("first recategorize");
+    let (cat, out) = {
+        let g = job.lock_ok();
+        (g.category.clone(), g.out_dir.clone())
+    };
+    assert_eq!(
+        requeue_category(&d, &job, Refile::Cat("tv")).err(),
+        Some(RELOCATION_BUSY),
+        "a recategorize overlapping another must be refused"
+    );
+    assert_eq!(
+        requeue_category(&d, &job, Refile::Name("Other.Name")).err(),
+        Some(RELOCATION_BUSY),
+        "a rename overlapping a recategorize must be refused"
+    );
+    {
+        let g = job.lock_ok();
+        assert_eq!(
+            (&g.category, &g.out_dir, &g.name),
+            (&cat, &out, &"Busy.Release".to_string()),
+            "a refused relocation touched the record"
+        );
+        assert_eq!(g.relocating, 1, "a refused relocation moved the fence");
+    }
+    drop(first);
+    let _again = requeue_category(&d, &job, Refile::Cat("tv")).expect("retry after the fence");
+    assert_eq!(job.lock_ok().category, "tv");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The other half of F2: the label half a call does NOT change is read
+/// from the live record, so a rename that landed first is not
+/// re-derived away by a recategorize that snapshotted the old name, and
+/// the rename keeps the category a recategorize just set.
+#[test]
+fn a_relocation_keeps_the_label_half_it_does_not_change() {
+    let dir = tmp("recatlive");
+    let d = test_daemon(&dir);
+    let job = Arc::new(Mutex::new(
+        job_from_json(&serde_json::json!({
+            "nzo_id": "nzo-recat-4",
+            "name": "Old.Name",
+            "nzb_path": "/tmp/x.nzb",
+            "out_dir": crate::naming::out_dir(&d).join("Old.Name").to_string_lossy(),
+            "state": "Queued",
+        }))
+        .expect("job"),
+    ));
+    d.queue.lock_ok().push_back(job.clone());
+    // A rename lands (name written under its fence, as rename_queued does)...
+    {
+        let _f = requeue_category(&d, &job, Refile::Name("New.Name")).expect("rename");
+        job.lock_ok().name = "New.Name".into();
+    }
+    // ...then a recategorize: its directory comes from the NEW name.
+    drop(requeue_category(&d, &job, Refile::Cat("movies")).expect("recategorize"));
+    let g = job.lock_ok();
+    assert_eq!(g.category, "movies");
+    assert_eq!(
+        g.out_dir.file_name().and_then(|n| n.to_str()),
+        Some("New.Name"),
+        "the recategorize re-derived the directory from a stale name"
+    );
+    drop(g);
     let _ = std::fs::remove_dir_all(&dir);
 }

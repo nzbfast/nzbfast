@@ -292,8 +292,15 @@ fn clean_set_reads_no_damage_and_names_its_files() {
 /// The verify pass's retention sink sees exactly the blocks the CRC
 /// proved, in file order, at their global logs: the damaged block is
 /// dropped, the tail is kept at its declared length.
+///
+/// The census lock is held for the whole case: this asks `admit` for the
+/// DEFAULT policy, and the census and control tests force it off under
+/// that same process-wide lock, so a reader that skipped it took their
+/// forced-off budget in a one-process `cargo test` run and panicked on
+/// the `expect` below (27 Oct 2026 sweep T1).
 #[test]
 fn the_verify_pass_retains_the_blocks_it_proves() {
+    let _policy = crate::par2repair::census::testing::record();
     let dir = tmpdir("retain-verify");
     let data = payload(200, 11); // 4 slices, 8-byte tail
     let meta = meta_for("a.bin", &data, BS);

@@ -26,7 +26,7 @@ public sealed class MockCore : ICoreClient
     private const int TickMs = 50;
 
     private readonly object _gate = new();
-    private readonly Dictionary<long, MockJob> _jobs = [];
+    private readonly Dictionary<long, IMockJob> _jobs = [];
     private readonly List<long> _order = [];
     private readonly Timer _timer;
     private long _nextId = 1;
@@ -99,6 +99,10 @@ public sealed class MockCore : ICoreClient
         CancelInFold = true,
         ProgressInFold = true,
         LowPriority = false,
+        // posting_set landed 25 Oct 2026 on the frosty-saha branch, with the
+        // one-pass route for a single stored archive.
+        PostingSet = true,
+        PostingOnePass = true,
     };
 
     public long Submit(JobSpec spec)
@@ -115,7 +119,9 @@ public sealed class MockCore : ICoreClient
                 _ => MockScenarios.Clean,
             };
 
-            var job = new MockJob(id, spec, set, DateTimeOffset.UtcNow);
+            IMockJob job = spec.Kind == JobKind.PostingSet
+                ? new MockPostingJob(id, spec, DateTimeOffset.UtcNow)
+                : new MockJob(id, spec, set, DateTimeOffset.UtcNow);
             _jobs[id] = job;
             _order.Add(id);
             PumpLocked();
@@ -410,7 +416,7 @@ public sealed class MockCore : ICoreClient
     /// work today, and it would deadlock the day a handler hands the poll to
     /// another thread and waits. Firing outside costs nothing and cannot.
     /// </remarks>
-    private bool Mutate(long id, Action<MockJob> change)
+    private bool Mutate(long id, Action<IMockJob> change)
     {
         lock (_gate)
         {
@@ -499,8 +505,38 @@ public sealed class MockCore : ICoreClient
     }
 }
 
+/// <summary>
+/// What MockCore asks of a simulated job. Two shapes implement it: the scripted
+/// <see cref="MockJob"/> and the recorded <see cref="MockPostingJob"/>.
+/// Every member is touched only under MockCore's lock.
+/// </summary>
+internal interface IMockJob
+{
+    JobState State { get; }
+
+    bool LowPriority { get; set; }
+
+    bool RunNext { get; set; }
+
+    bool PausedByQueue { get; }
+
+    void Start();
+
+    void Pause();
+
+    void PauseForQueue();
+
+    void Resume();
+
+    void Cancel();
+
+    bool Advance(double ms);
+
+    JobSnapshot ToSnapshot();
+}
+
 /// <summary>One simulated job. Every member is touched only under MockCore's lock.</summary>
-internal sealed class MockJob(long id, JobSpec spec, MockSet set, DateTimeOffset addedAt)
+internal sealed class MockJob(long id, JobSpec spec, MockSet set, DateTimeOffset addedAt) : IMockJob
 {
     private readonly List<string> _log = [];
     private double _elapsedMs;

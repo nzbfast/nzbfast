@@ -159,8 +159,13 @@ fn seed_index(dir: &Path, stems: &[&str]) {
 fn serve(dir: &Path) -> Daemon {
     harness::serve_blocking(dir, |port| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        // The daemon mints an API key on a genuinely first run, and a
+        // settings.json holding only `index_enabled` IS one since that key
+        // joined bootstrap's SETUP_ANSWER_KEYS (import-sab --arr). This
+        // suite drives the daemon keyless on purpose, so it takes the same
+        // deliberate opt-out an operator would.
         cmd.env("NZBFAST_NO_ENRICH", "1")
-            .env_remove("NZBFAST_OPEN")
+            .env("NZBFAST_OPEN", "1")
             .arg("--config")
             .arg(dir.join("config.json"))
             .arg("serve")

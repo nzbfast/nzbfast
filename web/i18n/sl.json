@@ -2874,6 +2874,7 @@
  "toast.promote.unknown": "Ta datoteka ni več del tega prenosa.",
  "toast.pvfail": "Te datoteke ni bilo mogoče odpreti tukaj.",
  "toast.pwfail": "Gesla ni bilo mogoče nastaviti.",
+ "toast.pwlayer": "Geslo je odprlo arhiv, a v njem je še en zaklenjen arhiv - vnesite geslo zanj.",
  "toast.pwsaved": "Geslo shranjeno.",
  "toast.pwunlocked": "Razpakirano - geslo je delovalo.",
  "toast.pwwrong": "To geslo ni odprlo arhiva - prenesene datoteke so nedotaknjene, poskusite drugo.",

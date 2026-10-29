@@ -4879,24 +4879,61 @@ const PC = ['--id0','--id1','--id2','--id3','--id4','--id5'].map(v=>getComputedS
 //
 // Read per call rather than latched: a sign-out in another tab, or an
 // expiry, clears the cookie, and a page holding a stale token would keep
-// sending it instead of falling back to the key. The name carries the
-// daemon's PORT (two daemons on one host would otherwise share a cookie),
-// which behind a reverse proxy is not the port in `location`, so the
-// match is on the prefix.
+// sending it instead of falling back to the key.
+//
+// The name carries the daemon's PORT, because cookies are scoped by host
+// and path and NOT by port: two daemons on one hostname each set their
+// own `nzbfast_csrf_<port>` at Path=/, and this browser sends both to
+// both. So the page reads ONLY the one name the daemon that served it
+// stamped in (webasset.rs, `ShellKey::csrf_cookie`, from the same
+// `d.port` its own session lookup uses). It used to take the FIRST
+// cookie matching the prefix, which could be the OTHER daemon's: the
+// page then sent a token this daemon never issued, and because a token
+// suppresses the key in authHeaders below, every call was refused even
+// with a valid key in hand. Not derived from `location.port` either -
+// behind a reverse proxy that is the proxy's port, not the daemon's. A
+// page served without the stamp (opened from disk) finds no valid name
+// and falls back to the key. web/csrf_cookie_test.js pins all of this.
 function csrfToken(){
   try{
-    const m = document.cookie.match(/(?:^|;\s*)nzbfast_csrf_\d+=([^;]*)/);
-    return m ? decodeURIComponent(m[1]) : '';
+    const want=/** @type {string} */('__NZBFAST_CSRF_COOKIE__');
+    if(!/^nzbfast_csrf_\d+$/.test(want)) return '';
+    for(const part of document.cookie.split(';')){
+      const eq=part.indexOf('=');
+      if(eq>0 && part.slice(0,eq).trim()===want)
+        return decodeURIComponent(part.slice(eq+1).trim());
+    }
+    return '';
   }catch(_){ return ''; }
 }
+// The token of a session this daemon has already refused. A daemon
+// restart (or a session aged out on the daemon's side) leaves both
+// cookies in the browser while the session behind them is gone, and the
+// daemon answers that with an ordinary key refusal that clears nothing.
+// Because a token suppresses the key, the page went on sending the dead
+// token even after the right key was typed into the modal, and the modal
+// came straight back. So a refusal of a call that carried a token marks
+// THAT token lapsed (sessionLapsed below), and the key travels from then
+// on. Signing in again sets a new token, which is live by construction.
+let lapsedCsrf = '';
 // The auth headers for a raw fetch: the session's CSRF token when one
 // exists, otherwise the key. `oneShot` is an explicit credential the
 // caller is asking a question ABOUT (the key modal's probe, the apikey
 // bootstrap) and always wins.
 function authHeaders(sent, oneShot){
   const tok = oneShot ? '' : csrfToken();
-  if(tok) return {'X-CSRF-Token': tok};
+  if(tok && tok !== lapsedCsrf) return {'X-CSRF-Token': tok};
   return sent ? {'X-Api-Key': sent} : {};
+}
+// Called on an auth refusal with the headers the refused call carried:
+// true when they held a session token not already known to be lapsed.
+// That token is now marked, and the call is worth one retry under the
+// key before anybody is asked for anything.
+function sessionLapsed(h){
+  const tok = h && h['X-CSRF-Token'];
+  if(!tok || tok === lapsedCsrf) return false;
+  lapsedCsrf = tok;
+  return true;
 }
 let key = localStorage.nzbfastKey || '';
 // Every adoption of a different key goes through here, and every one of
@@ -5563,15 +5600,18 @@ async function api(mode, extra, authKey, post){
   // `X-CSRF-Token` is REQUIRED by the daemon on every cookie-authenticated
   // call, mutating or not - see the session block in `handle_api` for why
   // the rule is not narrowed to a list of modes.
+  const hdrs = authHeaders(sent, authKey != null);
   let r;
   try {
     r = await fetch(`/api?mode=${mode}${extra||''}`,
-      {method: post?'POST':'GET', headers: authHeaders(sent, authKey != null)});
+      {method: post?'POST':'GET', headers: hdrs});
   } catch(e) { return fetchFail(); }
   const j = await readJson(r);
   // authKey set = an explicit one-shot credential (the apikey bootstrap):
   // never prompt for it, surface the error instead.
   if (authFail(j) && authKey == null){
+    // A dead session's token was refused: retry under the key first.
+    if (sessionLapsed(hdrs)) return api(mode, extra, undefined, post);
     // A rotation started in this page after this request went out: the
     // refusal is about the key it carried, and the replacement is
     // already on its way. Wait for it rather than putting a modal in
@@ -13196,6 +13236,12 @@ async function watchUnlock(id){
       toast(t('toast.pwwrong','That password did not open the archive - the downloaded files are untouched, try another.'), true);
       return;
     }
+    // diag::UNLOCK_LAYER_LEFT: the password worked on the outer layer
+    // and the archive it exposed is locked too. Not "wrong".
+    if(s.fail_message==='the password opened the archive, but another archive inside it needs a password'){
+      toast(t('toast.pwlayer','That password opened the archive, but another locked archive was inside it - enter the password for that one.'), true);
+      return;
+    }
     if(!s.password_required){
       toast(t('toast.pwunlocked','Unpacked - the password worked.'));
       tick();
@@ -17662,9 +17708,9 @@ async function apiPost(mode, body, authKey){
   const sent = authKey != null ? authKey : key;
   const epoch = keyEpoch;
   // TODO 19: same credential choice api() makes, for the same reasons.
+  const hdrs = authHeaders(sent, authKey != null);
   const r=await fetch(`/api?mode=${mode}`,
-    {method:'POST', body:JSON.stringify(body),
-     headers: authHeaders(sent, authKey != null)});
+    {method:'POST', body:JSON.stringify(body), headers: hdrs});
   const j=await readJson(r);
   // Never prompt for a one-shot credential: surface the error instead,
   // exactly as `api` does.
@@ -17672,6 +17718,7 @@ async function apiPost(mode, body, authKey){
     // Same stale-refusal rules as api(): a rotation in flight, a key
     // that moved on, or a sibling tab that already re-paired all mean
     // "retry", not "ask".
+    if (sessionLapsed(hdrs)) return apiPost(mode, body);
     if (keyRotating) await keyRotating;
     if (keyEpoch !== epoch && key !== sent) return apiPost(mode, body);
     const stored = localStorage.nzbfastKey || '';

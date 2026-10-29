@@ -2776,6 +2776,7 @@
  "toast.promote.unknown": "Esse arquivo não faz mais parte deste download.",
  "toast.pvfail": "Não foi possível abrir este ficheiro aqui.",
  "toast.pwfail": "Falha ao definir a senha.",
+ "toast.pwlayer": "A senha abriu o arquivo compactado, mas dentro dele há outro bloqueado - digite a senha desse.",
  "toast.pwsaved": "Senha salva.",
  "toast.pwunlocked": "Desempacotado - a senha funcionou.",
  "toast.pwwrong": "Essa senha não abriu o arquivo compactado - os arquivos baixados estão intactos, tente outra.",

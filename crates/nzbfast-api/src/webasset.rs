@@ -144,6 +144,20 @@ struct ShellKey {
     /// it already makes, so switching the login on there reveals its
     /// own pill without a reload.
     web_login: bool,
+    /// The exact name of this daemon's readable CSRF cookie,
+    /// `nzbfast_csrf_<port>`, from the same `d.port` the session lookup
+    /// in http.rs uses (`websession::csrf_cookie`, the one source).
+    ///
+    /// Cookies are scoped by host and path, not by port, so two daemons
+    /// on one hostname each see the OTHER's cookie too. The pages used
+    /// to take the first `nzbfast_csrf_*` they found, which could be the
+    /// neighbour's token: sent instead of the key, it was refused (bug
+    /// F4, 27 Oct 2026). Stamped rather than derived from
+    /// `location.port` in the page, because behind a reverse proxy that
+    /// is the proxy's port. A key field and not a constant because the
+    /// cache is a process static: two daemons in one process (the test
+    /// suites run several) must not share a page built for the other.
+    csrf_cookie: String,
 }
 
 impl ShellKey {
@@ -163,6 +177,7 @@ impl ShellKey {
             spots: d.spot_enabled.load(Ordering::Relaxed),
             indexers: d.enabled_indexers(),
             web_login: nzbfast_daemon::websession::login_on(d),
+            csrf_cookie: nzbfast_daemon::websession::csrf_cookie(d.port),
         }
     }
 
@@ -185,6 +200,7 @@ impl ShellKey {
             .replace("__NZBFAST_INDEXERS__", &self.indexers.to_string())
             .replace("__NZBFAST_WEBLOGIN__", bit(self.web_login))
             .replace("__NZBFAST_LOCALE__", &self.locale)
+            .replace("__NZBFAST_CSRF_COOKIE__", &self.csrf_cookie)
     }
 }
 
@@ -429,6 +445,7 @@ mod tests {
             spots: true,
             indexers: 2,
             web_login: true,
+            csrf_cookie: nzbfast_daemon::websession::csrf_cookie(6789),
         }
     }
 
@@ -444,9 +461,9 @@ mod tests {
     fn every_shell_substitution_is_a_key_field() {
         // The tokens, sound and sign-out placeholders are substituted
         // from compiled-in files, so they are constant for the life of
-        // the binary and need no key field; the other five are
+        // the binary and need no key field; the other six are
         // `ShellKey`'s state fields.
-        const KEYED: [&str; 8] = [
+        const KEYED: [&str; 9] = [
             "__NZBFAST_UI_TOKENS__",
             "__NZBFAST_UI_SOUND__",
             "__NZBFAST_UI_SIGNOUT__",
@@ -455,6 +472,7 @@ mod tests {
             "__NZBFAST_INDEXERS__",
             "__NZBFAST_LOCALE__",
             "__NZBFAST_WEBLOGIN__",
+            "__NZBFAST_CSRF_COOKIE__",
         ];
         #[cfg_attr(not(feature = "indexer"), expect(unused_mut))]
         let mut pages: Vec<(&str, &str)> = vec![("dashboard", DASHBOARD_HTML)];
@@ -517,6 +535,13 @@ mod tests {
                     ..key(Shell::Dashboard)
                 },
             ),
+            (
+                "csrf_cookie",
+                ShellKey {
+                    csrf_cookie: nzbfast_daemon::websession::csrf_cookie(6790),
+                    ..key(Shell::Dashboard)
+                },
+            ),
         ];
         for (name, v) in variants {
             assert_ne!(v.render(), rendered, "{name} does not change the page");
@@ -573,6 +598,61 @@ mod tests {
             });
         }
         assert!(SHELL_CACHE.lock_ok().len() <= SHELL_CACHE_MAX);
+    }
+
+    /// Bug F4: each daemon's pages name ITS OWN CSRF cookie, exactly,
+    /// and nothing else.
+    ///
+    /// Two daemons on one hostname share every `Path=/` cookie, so a
+    /// page that took the first `nzbfast_csrf_*` it saw could send the
+    /// neighbour's token and be refused with a valid key in hand. The
+    /// fix stamps the exact name in here; this pins that both shells get
+    /// it, that two ports get two names (and so two cache entries), and
+    /// that the prefix match is gone from both pages. The browser half -
+    /// which cookie the page then actually reads - is
+    /// web/csrf_cookie_test.js.
+    #[test]
+    fn each_shell_names_only_its_own_csrf_cookie() {
+        #[cfg_attr(not(feature = "indexer"), expect(unused_mut))]
+        let mut pages = vec![Shell::Dashboard];
+        #[cfg(feature = "indexer")]
+        pages.push(Shell::Wall);
+        for page in pages {
+            for port in [6789u16, 6790, 443] {
+                let k = ShellKey {
+                    csrf_cookie: nzbfast_daemon::websession::csrf_cookie(port),
+                    ..key(page)
+                };
+                let body = k.render();
+                let want = format!("('nzbfast_csrf_{port}')");
+                assert_eq!(
+                    body.matches(&want).count(),
+                    1,
+                    "port {port}: the page must carry its own cookie name once"
+                );
+                for other in [6789u16, 6790, 443].into_iter().filter(|&p| p != port) {
+                    assert!(
+                        !body.contains(&format!("nzbfast_csrf_{other}")),
+                        "port {port}: the page names port {other}'s cookie"
+                    );
+                }
+                assert!(
+                    !body.contains(r"nzbfast_csrf_\d+="),
+                    "the first-match prefix read is back"
+                );
+            }
+        }
+        // Two ports, two cache entries: a page built for one daemon is
+        // never handed to the other in the same process.
+        let a = shell_page(ShellKey {
+            csrf_cookie: nzbfast_daemon::websession::csrf_cookie(16789),
+            ..key(Shell::Dashboard)
+        });
+        let b = shell_page(ShellKey {
+            csrf_cookie: nzbfast_daemon::websession::csrf_cookie(16790),
+            ..key(Shell::Dashboard)
+        });
+        assert_ne!(a.etag, b.etag, "two daemons shared one cached page");
     }
 
     /// What is cached is what goes on the wire: the stored member

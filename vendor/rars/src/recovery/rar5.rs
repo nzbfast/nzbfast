@@ -2244,6 +2244,17 @@ fn read_fold_overlap_override() -> &'static std::sync::atomic::AtomicUsize {
     &OVERRIDE
 }
 
+/// The window length at which the overlapped arm's fold worker panics, 0 for
+/// never - the one way a test can kill that thread mid-repair, which no input
+/// can. A LENGTH rather than a flag so a concurrent test folding any other
+/// window is untouched.
+#[cfg(test)]
+fn fold_worker_panics_override() -> &'static std::sync::atomic::AtomicUsize {
+    use std::sync::atomic::AtomicUsize;
+    static PANICS_AT: AtomicUsize = AtomicUsize::new(0);
+    &PANICS_AT
+}
+
 /// Runs `body` with the read/fold split forced on or off, so a test reaches
 /// BOTH arms without building a repair large enough to clear the gate - which
 /// no unit test can afford. Serialised against itself; the gate chooses an
@@ -3096,31 +3107,56 @@ where
         std::thread::scope(|scope| -> Result<()> {
             let (job_tx, job_rx) = mpsc::channel::<Job>();
             let (back_tx, back_rx) = mpsc::channel::<Back>();
-            let worker_back = back_tx.clone();
+            // The worker holds the ONLY sender, so the moment it is gone every
+            // `back_rx.recv()` below answers `Err` instead of waiting. This used
+            // to be a clone, with the original alive on this thread for the
+            // whole scope: a worker that died mid-fold left the main thread
+            // parked in `recv` forever, at no CPU, on a sender only it held -
+            // and since `thread::scope` joins on exit, nothing above could
+            // ever notice. (nzbfast issue 115: an unrepairable job stuck in
+            // Repairing for 14 hours inside the RR pass.)
+            let worker_back = back_tx;
             scope.spawn(move || {
-                let mut rows: Option<Vec<Vec<u8>>> = None;
-                while let Ok(job) = job_rx.recv() {
-                    let reply = match job {
-                        Job::Rows(taken) => {
-                            rows = Some(taken);
-                            continue;
-                        }
-                        Job::Fold(window, len, tables) => {
-                            if let Some(rows) = rows.as_mut() {
-                                fold_source_into(rows, &tables, &window[..len]);
+                // And a panic ENDS the worker rather than escaping the scope:
+                // `thread::scope` re-raises a spawned thread's panic in the
+                // caller, which would turn one bad repair into an unwind
+                // through the host's post-processing. Caught, the worker just
+                // stops, `worker_back` drops with it, and the main thread
+                // fails the repair with `BadRecoveryChunk` like any other
+                // stranded stripe.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    let mut rows: Option<Vec<Vec<u8>>> = None;
+                    while let Ok(job) = job_rx.recv() {
+                        let reply = match job {
+                            Job::Rows(taken) => {
+                                rows = Some(taken);
+                                continue;
                             }
-                            Back::Spare(window, tables)
+                            Job::Fold(window, len, tables) => {
+                                #[cfg(test)]
+                                if fold_worker_panics_override()
+                                    .load(std::sync::atomic::Ordering::Relaxed)
+                                    == len
+                                {
+                                    panic!("injected fold-worker panic");
+                                }
+                                if let Some(rows) = rows.as_mut() {
+                                    fold_source_into(rows, &tables, &window[..len]);
+                                }
+                                Back::Spare(window, tables)
+                            }
+                            // `rows` is always present here: the main thread
+                            // sends `Rows` at the head of every stripe and
+                            // `Flush` only at its tail. An empty send would
+                            // strand it, so send whatever is held rather than
+                            // panicking on a worker.
+                            Job::Flush => Back::Rows(rows.take().unwrap_or_default()),
+                        };
+                        if worker_back.send(reply).is_err() {
+                            return;
                         }
-                        // `rows` is always present here: the main thread sends
-                        // `Rows` at the head of every stripe and `Flush` only
-                        // at its tail. An empty send would strand it, so send
-                        // whatever is held rather than panicking on a worker.
-                        Job::Flush => Back::Rows(rows.take().unwrap_or_default()),
-                    };
-                    if worker_back.send(reply).is_err() {
-                        return;
                     }
-                }
+                }));
             });
 
             let mut spare: Vec<(Vec<u8>, Vec<Option<Gf16MulTable>>)> = (0..2)
@@ -4994,6 +5030,55 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn rar5_striped_repair_fails_rather_than_hangs_when_its_fold_worker_dies() {
+        // nzbfast issue 115. The overlapped arm's main thread waits on the
+        // fold worker's replies; it used to hold a sender of that channel
+        // itself, so a worker that died left the wait with nothing to end it
+        // and the repair parked forever at no CPU. Kill the worker at its
+        // first window and the repair must come back with an error - on a
+        // thread of its own with `recv_timeout`, because a regression here is
+        // a hang, and a hang must fail this test rather than the suite.
+        const STRIPE: usize = 18; // no other test folds an 18-byte window
+        let shard_len = 250usize;
+        let shards: Vec<Vec<u8>> = (0..5)
+            .map(|i| (0..shard_len).map(|b| (i * 97 + b * 31 + 5) as u8).collect())
+            .collect();
+        let refs: Vec<&[u8]> = shards.iter().map(Vec::as_slice).collect();
+        let parity = encode_parity_shards(&refs, 2).unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let damaged = [1usize];
+            let rows = [0usize];
+            let plan = StripeRepairPlan::new(shards.len(), 2, shard_len, &damaged, &rows).unwrap();
+            let result = super::with_read_fold_overlap(true, || {
+                super::fold_worker_panics_override()
+                    .store(STRIPE, std::sync::atomic::Ordering::Relaxed);
+                let result = repair_shards_striped(
+                    &plan,
+                    STRIPE,
+                    |index, offset, buf| {
+                        buf.copy_from_slice(&shards[index][offset..offset + buf.len()]);
+                        Ok(())
+                    },
+                    |slot, offset, buf| {
+                        buf.copy_from_slice(&parity[rows[slot]][offset..offset + buf.len()]);
+                        Ok(())
+                    },
+                    |_, _, _| Ok(()),
+                );
+                super::fold_worker_panics_override()
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                result
+            });
+            let _ = done_tx.send(result.is_err());
+        });
+        let failed = done_rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the repair hung on a dead fold worker instead of failing");
+        assert!(failed, "a repair whose fold never ran must not report success");
     }
 
     #[test]

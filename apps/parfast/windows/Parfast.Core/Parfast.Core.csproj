@@ -8,4 +8,14 @@
     <TargetFramework>net8.0</TargetFramework>
     <RootNamespace>Parfast.Core</RootNamespace>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- The posting set's RECORDED snapshots, real frames from the core, which
+         MockPostingJob plays back. Embedded rather than copied beside the
+         assembly so the mock cannot run without them and the tests need no
+         path to the shared tree; linked from the shared folder so the mac app
+         and this one replay the same bytes. -->
+    <EmbeddedResource Include="..\..\shared\contract\posting-set-snapshots.json"
+                      LogicalName="Parfast.Core.Mock.posting-set-snapshots.json"
+                      Link="Mock\posting-set-snapshots.json" />
+  </ItemGroup>
 </Project>

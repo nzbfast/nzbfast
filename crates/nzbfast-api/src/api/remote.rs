@@ -207,7 +207,6 @@ pub(crate) fn rename_queued(
     if newname.is_empty() {
         return Err("empty name");
     }
-    let cat = job.lock_ok().category.clone();
     // Review finding F-06: the fence is BOUND, so it covers the label write too.
     // The directory swap and the move behind it are fenced by
     // `requeue_category` itself, but this door publishes a second thing
@@ -217,7 +216,7 @@ pub(crate) fn rename_queued(
     // OLD name beside the directory derived from the new one - the two
     // halves of one rename, disagreeing, in the record the user reads.
     // Non-queued jobs are already refused inside.
-    let fence = queue::requeue_category(d, job, &newname, &cat)?;
+    let fence = queue::requeue_category(d, job, queue::Refile::Name(&newname))?;
     // Test hook: hold exactly that second window open - the directory
     // is published and the label has not caught up yet - so the suite
     // can let the runner at the job inside it. It is two statements
@@ -292,21 +291,31 @@ pub(crate) fn rename_arm(
         .collect();
     let mut fences = Vec::new();
     let mut renamed: Vec<(Arc<Mutex<Job>>, String, Option<String>)> = Vec::new();
+    let mut refused: Option<&'static str> = None;
     for j in &targets {
         let (old_name, old_pw) = {
             let g = j.lock_ok();
             (g.name.clone(), g.password.clone())
         };
-        if let Ok(fence) = rename_queued(d, j, newname) {
-            if let Some(pw) = pw {
-                j.lock_ok().password = Some(pw.to_string());
+        match rename_queued(d, j, newname) {
+            Ok(fence) => {
+                if let Some(pw) = pw {
+                    j.lock_ok().password = Some(pw.to_string());
+                }
+                fences.push(fence);
+                renamed.push((j.clone(), old_name, old_pw));
             }
-            fences.push(fence);
-            renamed.push((j.clone(), old_name, old_pw));
+            Err(e) => refused = Some(e),
         }
     }
     if fences.is_empty() {
-        return json!({"status": false});
+        // Say why when there is a reason to say: a rename refused
+        // because another request is moving the job is worth a retry,
+        // and a bare false read as "no such job".
+        return match refused {
+            Some(e) => json!({"status": false, "error": e}),
+            None => json!({"status": false}),
+        };
     }
     // Saved with every fence still held, and its verdict checked: a
     // refused store rolls the whole edit back - label, password, record

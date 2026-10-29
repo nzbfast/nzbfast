@@ -707,6 +707,16 @@ pub fn preview(spec: &CreateSpec) -> Result<PlanPreview, PlanError> {
     let (block_size, block_count, _raised) = grid(&o, &lengths);
     let recovery = parfast::create::recovery_blocks(&o, block_count, block_size);
     let largest = lengths.iter().copied().max().unwrap_or(0);
+    // A RECOVERY COUNT THE CREATE WOULD REFUSE is found HERE, before any
+    // volume is laid out, and through the create's own predicate. The
+    // pane once laid out 32,769 slices as eighteen confident files with
+    // no warning, and the create then refused the set; a percentage or a
+    // recovery SIZE resolves far past that (a size is bytes over the
+    // block size, so a large ask at a small block is millions of slices),
+    // and the layout below builds one entry per volume on the host's UI
+    // thread. So a refused count lays out the index alone and says why,
+    // which is bounded whatever was asked. See `layout_recovery`.
+    let refused = recovery_refusal(recovery);
 
     let base = base_name(&spec.output);
     // The plan is `parfast::create::create_plan`'s and nothing is added
@@ -735,7 +745,7 @@ pub fn preview(spec: &CreateSpec) -> Result<PlanPreview, PlanError> {
             .collect::<Vec<_>>(),
         &base,
         block_size,
-        recovery as usize,
+        layout_recovery(recovery, refused.as_deref()),
         plan,
         Some(spec.comment.as_str()),
     );
@@ -779,6 +789,11 @@ pub fn preview(spec: &CreateSpec) -> Result<PlanPreview, PlanError> {
     }
     if recovery == 0 {
         warnings.push("no recovery blocks: this set can verify but never repair".to_string());
+    }
+    if let Some(why) = refused {
+        warnings.push(format!(
+            "the create will refuse this set, so no recovery files are listed: {why}"
+        ));
     }
     // A SET THE CREATE WOULD REFUSE, said in the pane rather than discovered
     // when the job fails. PAR2's exponents stop at 65535 and
@@ -845,6 +860,30 @@ pub fn preview(spec: &CreateSpec) -> Result<PlanPreview, PlanError> {
 /// with that message rather than assume every field value is writable.
 pub fn capabilities_comment() -> bool {
     true
+}
+
+/// Why the create would refuse `recovery` recovery blocks, or `None`
+/// when it would write them. The predicate is the engine's
+/// (`par2gen::check_recovery_count`, which the create's own shape check
+/// calls), never a second copy of the ceiling here.
+fn recovery_refusal(recovery: u64) -> Option<String> {
+    nzbkit::par2gen::check_recovery_count(recovery)
+        .err()
+        .map(|e| e.to_string())
+}
+
+/// The recovery count the preview LAYS OUT: the resolved count when the
+/// create would write it, and zero (the index alone) when it would not.
+///
+/// This is the seam that keeps the layout bounded. Every count it can
+/// return is at most the creator's ceiling, so the volume list built
+/// from it is at most that many entries however large the request
+/// resolved - a recovery size of `u64::MAX` bytes included.
+fn layout_recovery(recovery: u64, refused: Option<&str>) -> usize {
+    match refused {
+        Some(_) => 0,
+        None => usize::try_from(recovery).unwrap_or(0),
+    }
 }
 
 /// `x / y` as a percentage, with the only division-by-zero this file
@@ -1499,6 +1538,166 @@ mod tests {
             "{:?}",
             exact.warnings
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Every volume scheme the Create pane can ask for, so a refusal is
+    /// checked under each one rather than under the default alone.
+    fn every_volume_scheme() -> Vec<VolumeSpec> {
+        let mib = 1u64 << 20;
+        vec![
+            VolumeSpec::None,
+            VolumeSpec::Pow2,
+            VolumeSpec::Uniform {
+                files: None,
+                blocks_per_file: None,
+                file_size: None,
+            },
+            VolumeSpec::Uniform {
+                files: Some(7),
+                blocks_per_file: None,
+                file_size: None,
+            },
+            VolumeSpec::Uniform {
+                files: None,
+                blocks_per_file: Some(1),
+                file_size: None,
+            },
+            VolumeSpec::Uniform {
+                files: None,
+                blocks_per_file: None,
+                file_size: Some(64 * mib),
+            },
+            VolumeSpec::Pow2Limit {
+                limit: Pow2Limit::Named("largest_source".to_string()),
+            },
+            VolumeSpec::Pow2Limit {
+                limit: Pow2Limit::Blocks { blocks: 1 },
+            },
+            VolumeSpec::Pow2Limit {
+                limit: Pow2Limit::Size { size: 64 * mib },
+            },
+        ]
+    }
+
+    /// The recovery count `preview` resolves for `spec`, by the same
+    /// calls it makes, without laying anything out.
+    fn resolved_recovery(spec: &CreateSpec) -> u64 {
+        let Expansion { members, .. } = expand_sources(
+            &spec.sources,
+            spec.path_mode,
+            spec.base_path.as_deref(),
+            SourceRules::Par2,
+        )
+        .expect("sources");
+        let (o, _) = options_for(spec, &members).expect("options");
+        let lengths: Vec<u64> = members.iter().map(|m| m.length).collect();
+        let (block_size, block_count, _) = grid(&o, &lengths);
+        parfast::create::recovery_blocks(&o, block_count, block_size)
+    }
+
+    /// A RECOVERY COUNT THE CREATE REFUSES is said in the pane, and no
+    /// volume is laid out for it, under every volume scheme.
+    ///
+    /// The reviewer's repro: a 4-byte source at a 1 MiB block asking for
+    /// 32,769 recovery blocks drew eighteen files and no warning, and
+    /// the same request through `parfast c` failed with "32769 recovery
+    /// slices exceeds the PAR2 limit of 32768". The boundary is the
+    /// engine's (`par2gen::check_recovery_count`), so 32,768 is a full
+    /// layout and 32,769 is the index alone plus the create's own words.
+    #[test]
+    fn a_recovery_count_the_create_refuses_is_said_before_any_layout() {
+        let d = tmp("recovceil");
+        let ceiling = nzbkit::par2gen::MAX_INPUT_SLICES as u64;
+        for volumes in every_volume_scheme() {
+            let mut spec = spec_over(&d, &[("data.bin", 4)]);
+            spec.block = Some(BlockSpec::Size { size: 1 << 20 });
+            spec.volumes = volumes.clone();
+
+            spec.recovery = Some(RecoverySpec::Count { count: ceiling });
+            let fine = preview(&spec).expect("preview");
+            assert_eq!(fine.recovery_blocks, ceiling, "{volumes:?}");
+            assert!(
+                fine.warnings.iter().all(|w| !w.contains("will refuse")),
+                "{volumes:?}: {:?}",
+                fine.warnings
+            );
+            assert!(fine.files.len() > 1, "{volumes:?}: volumes are listed");
+            assert_eq!(
+                fine.files.iter().map(|f| f.blocks).sum::<u64>(),
+                ceiling,
+                "{volumes:?}: every slice is in some volume"
+            );
+
+            spec.recovery = Some(RecoverySpec::Count { count: ceiling + 1 });
+            let over = preview(&spec).expect("a refusal is a warning, not an error");
+            assert_eq!(over.recovery_blocks, ceiling + 1, "{volumes:?}");
+            assert!(
+                over.warnings.iter().any(|w| w.contains("will refuse")
+                    && w.contains("32769 recovery slices exceeds the PAR2 limit")),
+                "{volumes:?}: {:?}",
+                over.warnings
+            );
+            assert_eq!(over.files.len(), 1, "{volumes:?}: the index alone");
+            assert_eq!(over.files[0].blocks, 0, "{volumes:?}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A recovery SIZE or PERCENTAGE can resolve far past the ceiling, and
+    /// the count the layout is handed stays bounded whatever was asked.
+    ///
+    /// Tested at the seam (`layout_recovery`) and not by previewing the
+    /// huge ask, so a regression fails here as an assertion rather than as
+    /// an allocation the size of the request. The preview half uses a
+    /// size that is over the ceiling but cheap to lay out either way.
+    #[test]
+    fn a_huge_recovery_ask_never_reaches_the_layout() {
+        let d = tmp("recovhuge");
+        let ceiling = nzbkit::par2gen::MAX_INPUT_SLICES;
+        for volumes in every_volume_scheme() {
+            let mut spec = spec_over(&d, &[("data.bin", 4)]);
+            spec.block = Some(BlockSpec::Size { size: 1 << 20 });
+            spec.volumes = volumes.clone();
+            for ask in [
+                RecoverySpec::Size { size: u64::MAX },
+                RecoverySpec::Size { size: 1 << 50 },
+                RecoverySpec::Percent { percent: 1e12 },
+                RecoverySpec::Count { count: u64::MAX },
+            ] {
+                spec.recovery = Some(ask);
+                let recovery = resolved_recovery(&spec);
+                assert!(
+                    recovery > ceiling as u64,
+                    "{ask:?} resolves past the ceiling"
+                );
+                let refused = recovery_refusal(recovery);
+                assert!(refused.is_some(), "{volumes:?} {ask:?}");
+                assert_eq!(layout_recovery(recovery, refused.as_deref()), 0);
+            }
+            // Every count the seam passes on is one the create writes.
+            for recovery in [0u64, 1, ceiling as u64] {
+                let refused = recovery_refusal(recovery);
+                assert!(refused.is_none(), "{recovery}");
+                assert_eq!(
+                    layout_recovery(recovery, refused.as_deref()),
+                    recovery as usize
+                );
+            }
+
+            // Through the whole preview, at a size just over the ceiling.
+            spec.recovery = Some(RecoverySpec::Size {
+                size: (ceiling as u64 + 100) << 20,
+            });
+            let p = preview(&spec).expect("preview");
+            assert_eq!(p.recovery_blocks, ceiling as u64 + 100, "{volumes:?}");
+            assert_eq!(p.files.len(), 1, "{volumes:?}");
+            assert!(
+                p.warnings.iter().any(|w| w.contains("will refuse")),
+                "{volumes:?}: {:?}",
+                p.warnings
+            );
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

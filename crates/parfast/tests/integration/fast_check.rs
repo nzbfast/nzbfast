@@ -8,20 +8,16 @@
 //! This is the CLI half: the switch parses, both settings reach the
 //! engine's global (`par2::fast_check_enabled`), and a verify and a repair
 //! under each print what the other prints and leave what the other
-//! leaves. It drives `parfast::run_with` in-process; every run sets the
-//! global explicitly, so the order of runs does not matter.
+//! leaves. It drives `parfast::run_with` in-process, so it holds
+//! `crate::inproc`'s lock for the whole test: every run sets the global,
+//! and without the lock a neighbour's run could reset it between a
+//! `--slow` run here and the assertion that reads it back.
 
+use crate::inproc::in_process;
 use crate::scratch::scratch;
 
 fn arg(s: &str) -> String {
     s.to_string()
-}
-
-fn run(args: &[String]) -> (u8, String, String) {
-    let mut sink = parfast::out::Sink::buffered();
-    let code = parfast::run_with("parfast", args, &mut sink);
-    let (out, err) = sink.take();
-    (code, out, err)
 }
 
 /// The default tier and `--slow` match on exit code and stdout for a clean
@@ -31,6 +27,8 @@ fn run(args: &[String]) -> (u8, String, String) {
 fn the_default_tier_and_slow_answer_alike_on_an_honest_set() {
     const BLOCK: usize = 65536;
     const BLOCKS: usize = 200;
+    let parfast = in_process();
+    let run = |args: &[String]| parfast.run(args);
     let dir = scratch("fast-check");
     let data = dir.join("payload.bin");
     let payload: Vec<u8> = (0..(BLOCK * BLOCKS) as u32)

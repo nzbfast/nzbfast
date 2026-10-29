@@ -49,6 +49,12 @@
                         <FontIcon Glyph="&#xE710;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <!-- Hidden unless the core reports posting_set; see LocaliseChrome. -->
+                <NavigationViewItem x:Name="NavPosting" Tag="posting" Visibility="Collapsed">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE7B8;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
                 <NavigationViewItem x:Name="NavChecksums" Tag="checksums">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE9D9;" />
@@ -71,6 +77,7 @@
                     <views:VerifyPage x:Name="PageVerify" />
                     <views:CreatePage x:Name="PageCreate" Visibility="Collapsed" />
                     <views:ChecksumsPage x:Name="PageChecksums" Visibility="Collapsed" />
+                    <views:PostingPage x:Name="PagePosting" Visibility="Collapsed" />
                     <views:QueuePage x:Name="PageQueue" Visibility="Collapsed" />
                     <views:SettingsPage x:Name="PageSettings" Visibility="Collapsed" />
                 </Grid>

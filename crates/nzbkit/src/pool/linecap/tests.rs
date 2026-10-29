@@ -2121,6 +2121,7 @@ fn probe_run_to(
             t * 1_000,
             rate(fleet),
             fleet,
+            fleet,
             ceiling,
             proven,
             anchored,
@@ -2223,6 +2224,110 @@ fn a_cold_probe_never_fires_on_a_slow_line() {
     }
 }
 
+/// Drive [`probe_step`] every 500 ms over a fleet whose sockets CONNECT
+/// one at a time, `ramp_ms` apart, after each raise, and whose rate is
+/// `per_socket` times the sockets that are up, capped at `grant` sockets
+/// (an account that grants no more), read through the gauge's 1 s
+/// half-life as the governor reads it. The reporter's run connected ~270
+/// ms a socket fleet-wide (28 of 50 up 2 s after a raise, 38 at 4 s, all
+/// 50 at 8 s), slower than `ramp_delay` alone because every dial pays a
+/// TCP, TLS and login round trip to a server 67-145 ms away.
+/// `judge_on_admitted` replays the pre-25-Oct probe, which divided by
+/// the admitted count and judged on the dwell alone. Returns the fleet
+/// after each tick and the tick (ms) of every raise.
+fn probe_ramp_run(
+    secs: u64,
+    per_socket: u64,
+    ramp_ms: u64,
+    grant: usize,
+    proven: usize,
+    judge_on_admitted: bool,
+) -> (Vec<usize>, Vec<u64>) {
+    let mut p = Probe::default();
+    let mut fleet = LINE_CAP_DEFAULT_FLEET;
+    // The seed is up from the start; after each raise, socket k of the
+    // new rung connects k x ramp_ms later, never past what is granted.
+    let mut up = LINE_CAP_DEFAULT_FLEET.min(grant);
+    let mut gauge = (per_socket * up as u64) as f64;
+    let (mut rung_base, mut raised_at) = (up, 0u64);
+    let (mut seen, mut raises) = (Vec::new(), Vec::new());
+    for tick in 0..secs * 2 {
+        let now = tick * 500;
+        let dialled = (now.saturating_sub(raised_at) / ramp_ms) as usize;
+        up = fleet.min(grant).min(rung_base + dialled).max(up);
+        let connected = if judge_on_admitted { fleet } else { up };
+        // One 500 ms step of a 1 s half-life: 29% of the way to the
+        // instantaneous rate.
+        gauge += ((per_socket * up as u64) as f64 - gauge) * (1.0 - 0.5f64.sqrt());
+        let (f, next) = probe_step(
+            p,
+            fleet,
+            now,
+            gauge as u64,
+            fleet,
+            connected,
+            LINE_CAP_MAX_FLEET,
+            proven,
+            false,
+        );
+        p = next;
+        if f != fleet {
+            raises.push(now);
+            raised_at = now;
+            rung_base = up;
+            fleet = f;
+        }
+        seen.push(fleet);
+    }
+    (seen, raises)
+}
+
+/// GitHub #103, 25 Oct 2026, the reporter's first job on 1.9.0: sockets
+/// carrying ~33 Mbit each, dialled 150 ms apart. The 35 -> 50 rung was
+/// judged at its 2 s dwell with 28 of 50 sockets up, read as unpaid, and
+/// latched at 50 for the job. Judged once its sockets are up, the same
+/// rung pays and the probe walks on to the proven ceiling.
+#[test]
+fn a_probe_rung_is_judged_once_its_sockets_are_up() {
+    let carry = mbit(33);
+    let ramp = 300;
+    let (old, _) = probe_ramp_run(40, carry, ramp, usize::MAX, 100, true);
+    let (new, raises) = probe_ramp_run(40, carry, ramp, usize::MAX, 100, false);
+    assert!(
+        *old.last().unwrap() <= LINE_CAP_MAX_FLEET,
+        "the replayed old probe should stop at the first ceiling: {old:?}"
+    );
+    assert!(
+        *new.last().unwrap() > LINE_CAP_MAX_FLEET,
+        "a rung judged once up should pay and walk past 50: {new:?}"
+    );
+    // Each rung waits for its sockets: no two raises closer than the
+    // time their sockets took to dial.
+    for w in raises.windows(2) {
+        assert!(w[1] - w[0] >= LINE_CAP_PROBE_SETTLE_MS, "{raises:?}");
+    }
+}
+
+/// An account that grants fewer sockets than the rung asks for never
+/// reaches `connected >= dialling`. The probe must still judge the rung
+/// at LINE_CAP_PROBE_MAX_DWELL_MS, on the sockets that did come up, and
+/// not wait for ever.
+#[test]
+fn a_rung_a_provider_holds_short_is_judged_at_the_max_dwell() {
+    // 40 sockets granted: the 25 -> 35 rung comes up in full and pays,
+    // the 35 -> 50 rung gets five more and never fills.
+    let (seen, raises) = probe_ramp_run(40, mbit(33), 300, 40, 100, false);
+    assert!(raises.len() >= 2, "{seen:?} {raises:?}");
+    let to_50 = raises[1];
+    let judged_after = raises.get(2).map(|r| r - to_50);
+    match judged_after {
+        // 40 > 35 sockets carrying their share pays, so it raises again,
+        // but only once the max dwell has passed.
+        Some(gap) => assert!(gap >= LINE_CAP_PROBE_MAX_DWELL_MS, "{raises:?}"),
+        None => panic!("the short rung was never judged: {seen:?} {raises:?}"),
+    }
+}
+
 /// The price `LINE_CAP_PROBE_COLD_MIN_BPS` names, on a FLAT reading: a
 /// cold run on a full line between 400 Mbit and 2 Gbit gets the first
 /// rung and no more, because a line the seed already fills cannot pay.
@@ -2249,6 +2354,7 @@ fn the_probe_waits_for_a_dwell_and_ignores_no_reading() {
         0,
         mbit(5_000),
         25,
+        25,
         LINE_CAP_MAX_FLEET,
         LINE_CAP_MAX_FLEET,
         true,
@@ -2259,6 +2365,7 @@ fn the_probe_waits_for_a_dwell_and_ignores_no_reading() {
         25,
         LINE_CAP_PROBE_SETTLE_MS - 1,
         mbit(5_000),
+        25,
         25,
         50,
         50,
@@ -2271,6 +2378,7 @@ fn the_probe_waits_for_a_dwell_and_ignores_no_reading() {
         10_000,
         0,
         25,
+        25,
         LINE_CAP_MAX_FLEET,
         LINE_CAP_MAX_FLEET,
         true,
@@ -2281,6 +2389,7 @@ fn the_probe_waits_for_a_dwell_and_ignores_no_reading() {
         25,
         LINE_CAP_PROBE_SETTLE_MS,
         mbit(5_000),
+        25,
         25,
         50,
         50,
@@ -2293,12 +2402,12 @@ fn the_probe_waits_for_a_dwell_and_ignores_no_reading() {
 /// than being judged on time it never had.
 #[test]
 fn a_curve_raise_restarts_the_probes_dwell() {
-    let (_, p) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 50, 50, true);
-    let (f, p) = probe_step(p, 30, 1_900, mbit(5_000), 30, 50, 50, true);
+    let (_, p) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 25, 50, 50, true);
+    let (f, p) = probe_step(p, 30, 1_900, mbit(5_000), 30, 30, 50, 50, true);
     assert_eq!(f, 30);
-    let (f, _) = probe_step(p, 30, 2_100, mbit(5_000), 30, 50, 50, true);
+    let (f, _) = probe_step(p, 30, 2_100, mbit(5_000), 30, 30, 50, 50, true);
     assert_eq!(f, 30, "30's dwell began at 1.9 s");
-    let (f, _) = probe_step(p, 30, 3_900, mbit(5_000), 30, 50, 50, true);
+    let (f, _) = probe_step(p, 30, 3_900, mbit(5_000), 30, 30, 50, 50, true);
     assert_eq!(f, 45);
 }
 
@@ -2310,7 +2419,17 @@ fn a_rung_whose_slots_never_dialled_does_not_pay() {
     let mut fleet = 25;
     for t in 0..20u64 {
         // The account grants 25 and no more.
-        let (f, n) = probe_step(p, fleet, t * 1_000, mbit(4_500 + t * 10), 25, 50, 50, true);
+        let (f, n) = probe_step(
+            p,
+            fleet,
+            t * 1_000,
+            mbit(4_500 + t * 10),
+            25,
+            25,
+            50,
+            50,
+            true,
+        );
         p = n;
         fleet = f;
     }
@@ -2356,10 +2475,10 @@ fn a_probe_that_paid_walks_past_the_first_ceiling() {
 /// however generous `proven` is.
 #[test]
 fn the_first_probe_step_never_uses_the_proven_ceiling() {
-    let (f, _) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 30, 100, true);
+    let (f, _) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 25, 30, 100, true);
     assert_eq!(f, 25);
-    let (_, p) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 30, 100, true);
-    let (f, p) = probe_step(p, 25, 2_000, mbit(5_000), 25, 30, 100, true);
+    let (_, p) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 25, 30, 100, true);
+    let (f, p) = probe_step(p, 25, 2_000, mbit(5_000), 25, 25, 30, 100, true);
     assert_eq!(f, 30, "the unproven step stops at `ceiling`");
     assert!(!p.paid);
 }
@@ -2410,4 +2529,125 @@ fn the_shard_basis_holds_an_unproven_auto_cap_to_the_first_ceiling() {
     assert_eq!(shard_basis(&fleet(25, true, true)), 100);
     assert_eq!(shard_basis(&fleet(25, false, false)), 100, "typed fleet");
     assert_eq!(shard_basis(&fleet(0, true, false)), 100, "cap off");
+}
+
+/// Tick [`regret_step`] once a second from `t0` over `rates` (MB/s), all
+/// `fleet` sockets up, evidence on. Returns the fleet after each tick.
+fn regret_run(r: Regret, fleet: usize, t0: u64, rates: &[u64]) -> (Vec<usize>, Regret) {
+    let (mut r, mut cap, mut seen) = (r, fleet, Vec::new());
+    for (i, mbs) in rates.iter().enumerate() {
+        let (f, next) = regret_step(
+            r,
+            cap,
+            cap,
+            t0 + i as u64 * 1_000,
+            mbs * 1_000_000,
+            cap,
+            cap,
+            true,
+        );
+        r = next;
+        cap = f;
+        seen.push(cap);
+    }
+    (seen, r)
+}
+
+/// GitHub #103, 25 Oct 2026, the reporter's second 1.9.0 job: 70 -> 100 on
+/// a line moving ~340 MB/s, after which the total settled at ~215 (63%).
+/// Three settled readings under 70% of the best step the fleet back to 70
+/// and hold it.
+#[test]
+fn a_raise_that_cut_the_total_is_stepped_back_and_held() {
+    let (f, r) = regret_step(Regret::default(), 70, 100, 0, 340_000_000, 70, 70, true);
+    assert_eq!(f, 100);
+    // 279 is 82% of the best, no strike; 216, 215 and 214 are under 70%
+    // and step back on the third.
+    let (seen, r) = regret_run(r, 100, 2_000, &[279, 216, 215, 214, 216]);
+    assert_eq!(seen, vec![100, 100, 100, 70, 70], "{seen:?}");
+    // Held: the arms asking for more again get no more than 70.
+    let (f, _) = regret_step(r, 70, 100, 9_000, 215_000_000, 70, 70, true);
+    assert_eq!(f, 70, "a stepped-back fleet grew again");
+}
+
+/// A raise that paid, or held the line level, is never stepped back.
+#[test]
+fn a_raise_that_paid_or_held_is_kept() {
+    for after in [[360u64, 380, 390, 400], [335, 330, 340, 338]] {
+        let (_, r) = regret_step(Regret::default(), 70, 100, 0, 340_000_000, 70, 70, true);
+        let (seen, _) = regret_run(r, 100, 2_000, &after);
+        assert!(seen.iter().all(|&f| f == 100), "{after:?}: {seen:?}");
+    }
+}
+
+/// One bad reading is noise: the strikes have to be consecutive.
+#[test]
+fn a_single_dip_does_not_step_back() {
+    let (_, r) = regret_step(Regret::default(), 70, 100, 0, 340_000_000, 70, 70, true);
+    let (seen, _) = regret_run(r, 100, 2_000, &[200, 200, 330, 200, 200, 330, 200]);
+    assert!(seen.iter().all(|&f| f == 100), "{seen:?}");
+}
+
+/// No evidence, no strike: a zero reading (queue-dry, the tail) and a
+/// reading the client limited (a full holds ledger, a refusal) neither
+/// strike nor step back, and a rung still connecting is not judged.
+#[test]
+fn the_step_back_only_reads_line_evidence() {
+    let (_, r0) = regret_step(Regret::default(), 70, 100, 0, 340_000_000, 70, 70, true);
+    let mut r = r0;
+    for t in 0..6u64 {
+        let (f, n) = regret_step(r, 100, 100, 2_000 + t * 1_000, 0, 100, 100, true);
+        assert_eq!(f, 100);
+        r = n;
+    }
+    let mut r = r0;
+    for t in 0..6u64 {
+        let (f, n) = regret_step(r, 100, 100, 2_000 + t * 1_000, 150_000_000, 100, 100, false);
+        assert_eq!(f, 100, "a client-limited reading stepped back");
+        r = n;
+    }
+    // 60 of 100 up and inside the max dwell: not settled, not judged.
+    let mut r = r0;
+    for t in 0..6u64 {
+        let (f, n) = regret_step(r, 100, 100, 2_000 + t * 1_000, 150_000_000, 100, 60, true);
+        assert_eq!(f, 100, "a rung still connecting was judged");
+        r = n;
+    }
+}
+
+/// A drop long after the raise is not that raise's fault.
+#[test]
+fn a_drop_past_the_window_is_not_blamed_on_the_raise() {
+    let (_, r) = regret_step(Regret::default(), 70, 100, 0, 340_000_000, 70, 70, true);
+    let t0 = LINE_CAP_REGRET_WINDOW_MS + 1_000;
+    let (seen, _) = regret_run(r, 100, t0, &[150, 150, 150, 150]);
+    assert!(seen.iter().all(|&f| f == 100), "{seen:?}");
+}
+
+/// The baseline is the BEST rate since the raise, not the reading at it:
+/// a raise usually lands while the rung below is still ramping. The rig
+/// in fault_rigs/linecap_rigs.rs read 0.39 MB/s at its raise, 1.03 MB/s
+/// three seconds later and 0.64 once the line had collapsed - under the
+/// reading at the raise it would never have stepped back.
+#[test]
+fn the_step_back_baseline_is_the_best_since_the_raise() {
+    let (_, r) = regret_step(Regret::default(), 50, 55, 0, 390_000, 50, 50, true);
+    let rates_kb = [1_030u64, 730, 650, 640, 630];
+    let (mut r, mut cap, mut seen) = (r, 55, Vec::new());
+    for (i, kb) in rates_kb.iter().enumerate() {
+        let (f, n) = regret_step(
+            r,
+            cap,
+            cap,
+            2_000 + i as u64 * 1_000,
+            kb * 1_000,
+            55,
+            55,
+            true,
+        );
+        r = n;
+        cap = f;
+        seen.push(cap);
+    }
+    assert_eq!(seen, vec![55, 55, 55, 55, 50], "{seen:?}");
 }

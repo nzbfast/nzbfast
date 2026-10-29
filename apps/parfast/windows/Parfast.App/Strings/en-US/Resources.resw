@@ -8,9 +8,6 @@
   <data name="app_name" xml:space="preserve">
     <value>parfast</value>
   </data>
-  <data name="app_stage" xml:space="preserve">
-    <value>Beta</value>
-  </data>
   <data name="app_tagline" xml:space="preserve">
     <value>PAR2 create, verify and repair</value>
   </data>
@@ -374,6 +371,12 @@
   <data name="error_output_exists" xml:space="preserve">
     <value>A file with that name is already there. Turn on overwrite, or pick another name.</value>
   </data>
+  <data name="error_password_required" xml:space="preserve">
+    <value>This posting set was interrupted. Enter its password again to run it.</value>
+  </data>
+  <data name="error_rar_failed" xml:space="preserve">
+    <value>The archive could not be written: {reason}</value>
+  </data>
   <data name="error_read_failed" xml:space="preserve">
     <value>{path} could not be read.</value>
   </data>
@@ -391,6 +394,9 @@
   </data>
   <data name="job_kind_create" xml:space="preserve">
     <value>Create</value>
+  </data>
+  <data name="job_kind_posting_set" xml:space="preserve">
+    <value>Posting set</value>
   </data>
   <data name="job_kind_repair" xml:space="preserve">
     <value>Repair</value>
@@ -418,6 +424,9 @@
   </data>
   <data name="mode_create" xml:space="preserve">
     <value>Create</value>
+  </data>
+  <data name="mode_posting" xml:space="preserve">
+    <value>Posting set</value>
   </data>
   <data name="mode_queue" xml:space="preserve">
     <value>Queue</value>
@@ -463,6 +472,132 @@
   </data>
   <data name="phase_writing" xml:space="preserve">
     <value>Writing</value>
+  </data>
+  <data name="posting_action_create" xml:space="preserve">
+    <value>Create posting set</value>
+  </data>
+  <data name="posting_cancel_note" xml:space="preserve">
+    <value>A stopped or failed posting set removes every file it wrote, so there is nothing to clean up.</value>
+  </data>
+  <data name="posting_compression_best" xml:space="preserve">
+    <value>Best</value>
+  </data>
+  <data name="posting_compression_fast" xml:space="preserve">
+    <value>Fast</value>
+  </data>
+  <data name="posting_compression_fastest" xml:space="preserve">
+    <value>Fastest</value>
+  </data>
+  <data name="posting_compression_good" xml:space="preserve">
+    <value>Good</value>
+  </data>
+  <data name="posting_compression_normal" xml:space="preserve">
+    <value>Normal</value>
+  </data>
+  <data name="posting_compression_note" xml:space="preserve">
+    <value>Video and archives barely compress, so storing is the usual choice for a post.</value>
+  </data>
+  <data name="posting_compression_store" xml:space="preserve">
+    <value>Store (no compression)</value>
+  </data>
+  <data name="posting_compression_title" xml:space="preserve">
+    <value>Compression</value>
+  </data>
+  <data name="posting_empty_body" xml:space="preserve">
+    <value>Add files or a folder. They are packed into a RAR archive with a PAR2 set beside it.</value>
+  </data>
+  <data name="posting_empty_title" xml:space="preserve">
+    <value>Add the files to post</value>
+  </data>
+  <data name="posting_intro" xml:space="preserve">
+    <value>Packs files into a RAR 5 archive and writes a PAR2 set over it, ready to post.</value>
+  </data>
+  <data name="posting_name" xml:space="preserve">
+    <value>Archive name</value>
+  </data>
+  <data name="posting_name_tip" xml:space="preserve">
+    <value>Written as {name}.rar, or {name}.part1.rar onward when split, with {name}.par2 beside it.</value>
+  </data>
+  <data name="posting_output_par2" xml:space="preserve">
+    <value>PAR2 set</value>
+  </data>
+  <data name="posting_output_rar" xml:space="preserve">
+    <value>RAR archive</value>
+  </data>
+  <data name="posting_output_title" xml:space="preserve">
+    <value>Files written</value>
+  </data>
+  <data name="posting_output_folder" xml:space="preserve">
+    <value>Output folder</value>
+  </data>
+  <data name="posting_overwrite" xml:space="preserve">
+    <value>Replace an earlier set with the same name</value>
+  </data>
+  <data name="posting_overwrite_tip" xml:space="preserve">
+    <value>Removes every file of the earlier set first, so no stale volume is left beside the new ones.</value>
+  </data>
+  <data name="posting_par2_title" xml:space="preserve">
+    <value>PAR2 recovery</value>
+  </data>
+  <data name="posting_password_encrypt_headers" xml:space="preserve">
+    <value>Encrypt file names too</value>
+  </data>
+  <data name="posting_password_placeholder" xml:space="preserve">
+    <value>No password</value>
+  </data>
+  <data name="posting_password_title" xml:space="preserve">
+    <value>Password</value>
+  </data>
+  <data name="posting_recovery_record" xml:space="preserve">
+    <value>RAR recovery record</value>
+  </data>
+  <data name="posting_recovery_record_value" xml:space="preserve">
+    <value>{percent} of the archive</value>
+  </data>
+  <data name="posting_route_expect_one_pass" xml:space="preserve">
+    <value>One pass: the archive is hashed into its PAR2 set as it is written.</value>
+  </data>
+  <data name="posting_route_expect_two_pass" xml:space="preserve">
+    <value>Two passes: the archive is written first, then its PAR2 set.</value>
+  </data>
+  <data name="posting_route_one_pass" xml:space="preserve">
+    <value>Done in one pass. The archive was never read back.</value>
+  </data>
+  <data name="posting_route_title" xml:space="preserve">
+    <value>Route</value>
+  </data>
+  <data name="posting_route_two_pass_because" xml:space="preserve">
+    <value>Done in two passes, because {reason}.</value>
+  </data>
+  <data name="posting_solid" xml:space="preserve">
+    <value>Solid archive</value>
+  </data>
+  <data name="posting_solid_tip" xml:space="preserve">
+    <value>Compresses the files as one run. Smaller for many small files, slower to extract one.</value>
+  </data>
+  <data name="posting_title" xml:space="preserve">
+    <value>Create a posting set</value>
+  </data>
+  <data name="posting_volumes_count" xml:space="preserve">
+    <value>Split into a number of volumes</value>
+  </data>
+  <data name="posting_volumes_count_label" xml:space="preserve">
+    <value>Number of volumes</value>
+  </data>
+  <data name="posting_volumes_min_size" xml:space="preserve">
+    <value>A volume is at least 64 KiB.</value>
+  </data>
+  <data name="posting_volumes_none" xml:space="preserve">
+    <value>One archive</value>
+  </data>
+  <data name="posting_volumes_size" xml:space="preserve">
+    <value>Split by size</value>
+  </data>
+  <data name="posting_volumes_size_label" xml:space="preserve">
+    <value>Volume size</value>
+  </data>
+  <data name="posting_volumes_title" xml:space="preserve">
+    <value>Volumes</value>
   </data>
   <data name="progress_background" xml:space="preserve">
     <value>Run in the background</value>

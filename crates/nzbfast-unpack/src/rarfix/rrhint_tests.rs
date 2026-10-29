@@ -3,7 +3,8 @@
 //! hint costs a second pass rather than the repair.
 
 use super::rrhint::{
-    DamageHint, RrPassStats, Verdict, rr_repair_volumes, try_rar_rr_repair_hinted,
+    DamageHint, RrPassStats, RrStopped, Verdict, rr_repair_volumes, try_rar_rr_repair_hinted,
+    try_rar_rr_repair_hinted_why, volume_deadline,
 };
 use super::*;
 use crate::rarfixtures::{self as rf, Member};
@@ -115,7 +116,7 @@ fn hinted_pass_leaves_par2_proven_volumes_unread() {
             set_mode(v, 0o000);
         }
     }
-    let stats = rr_repair_volumes(&dir, &vols, None, Some(&hint));
+    let stats = rr_repair_volumes(&dir, &vols, None, Some(&hint), None);
     #[cfg(unix)]
     for (i, v) in vols.iter().enumerate() {
         if i != bad {
@@ -152,7 +153,7 @@ fn blind_pass_scans_every_volume_as_before() {
     assert_the_fixture_is_really_damaged(&dir);
     let total: u64 = vols.iter().map(|v| size(v)).sum();
 
-    let stats = rr_repair_volumes(&dir, &vols, None, None);
+    let stats = rr_repair_volumes(&dir, &vols, None, None, None);
     assert_eq!(stats.hard_failures, 0, "{stats:?}");
     // Only the damaged volume is rewritten - the intact ones open their
     // record, prove the prefix, and are counted separately.
@@ -194,7 +195,7 @@ fn volumes_outside_par2_coverage_get_the_full_pass() {
         assert_eq!(hint.verdict(v), Verdict::Unknown);
     }
 
-    let stats = rr_repair_volumes(&dir, &vols, None, Some(&hint));
+    let stats = rr_repair_volumes(&dir, &vols, None, Some(&hint), None);
     let covered: u64 = vols[..n / 2].iter().map(|v| size(v)).sum();
     let uncovered: u64 = vols[n / 2..].iter().map(|v| size(v)).sum();
     assert_eq!(stats.hard_failures, 0, "{stats:?}");
@@ -430,12 +431,12 @@ fn rr_hint_wall_time() {
         restore(&vols);
         damage(&vols[bad]);
         let t = std::time::Instant::now();
-        let blind_pass = rr_repair_volumes(&dir, &vols, None, None);
+        let blind_pass = rr_repair_volumes(&dir, &vols, None, None, None);
         let pass_blind = t.elapsed();
         restore(&vols);
         damage(&vols[bad]);
         let t = std::time::Instant::now();
-        let hinted_pass = rr_repair_volumes(&dir, &vols, None, Some(&hint));
+        let hinted_pass = rr_repair_volumes(&dir, &vols, None, Some(&hint), None);
         let pass_hinted = t.elapsed();
         assert_eq!(blind_pass.hard_failures + hinted_pass.hard_failures, 0);
         eprintln!(
@@ -589,7 +590,7 @@ fn encrypted_rr_pass_derives_the_key_once_per_set() {
         ));
         for v in &vols {
             let r = if shared {
-                rr_repair_volume_in(&mut session, v, Some("PW"))
+                rr_repair_volume_in(&mut session, v, Some("PW"), None)
             } else {
                 rr_repair_volume(v, Some("PW"))
             };
@@ -975,4 +976,169 @@ fn rr_groups_fold_a_numeric_rar_set_into_one_group() {
         "{movie:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// Issue 115: an unrepairable job sat in Repairing for 14 hours because one
+// volume's RR repair never returned, and nothing could stop the pass - not
+// a delete, not a clock. These pin the three ways it now ends early.
+
+/// Damage well past the fixture's 20% record, leaving the headers alone so
+/// the record is found and REFUSES rather than the volume failing to parse.
+fn damage_past_the_record(path: &std::path::Path) {
+    let mut bytes = std::fs::read(path).unwrap();
+    let (start, end) = (bytes.len() / 10, bytes.len() * 7 / 10);
+    for b in &mut bytes[start..end] {
+        *b ^= 0x5a;
+    }
+    std::fs::write(path, &bytes).unwrap();
+}
+
+fn repair_temps(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("rrtmp") || n.contains("rrstage"))
+        .collect()
+}
+
+#[test]
+fn the_pass_stops_at_the_first_volume_it_cannot_repair() {
+    // Both callers read one hard failure as "could not save the set", so a
+    // volume opened after it is read for nothing. The reported job read 41
+    // of them after its first refusal, and the second never came back.
+    let dir = temp_dir("stop-first");
+    let data = payload(100_000, 2246822519);
+    let vols = write_rr_set(&dir, &data);
+    damage_past_the_record(&vols[0]);
+    damage_past_the_record(&vols[2]);
+    let after = std::fs::read(&vols[2]).unwrap();
+
+    let stats = rr_repair_volumes(&dir, &vols, None, None, None);
+    assert_eq!(stats.hard_failures, 1, "{stats:?}");
+    assert_eq!(stats.stopped, Some(RrStopped::Unrepairable), "{stats:?}");
+    assert_eq!(
+        stats.bytes_scanned,
+        size(&vols[0]),
+        "nothing after the refusal is read"
+    );
+    assert_eq!(
+        stats.rewritten + stats.intact + stats.no_record,
+        0,
+        "{stats:?}"
+    );
+    assert_eq!(std::fs::read(&vols[2]).unwrap(), after);
+    assert!(repair_temps(&dir).is_empty(), "{:?}", repair_temps(&dir));
+    assert!(!try_rar_rr_repair(&dir, None));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_cancelled_pass_opens_nothing_and_does_not_extract() {
+    let dir = temp_dir("cancelled");
+    let data = payload(100_000, 374761393);
+    let vols = write_rr_set(&dir, &data);
+    damage(&vols[1]);
+    let cancel = crate::streamhub::SideCancel::new();
+    cancel.cancel();
+
+    let stats = rr_repair_volumes(&dir, &vols, None, None, Some(&cancel));
+    assert_eq!(stats.stopped, Some(RrStopped::Cancelled), "{stats:?}");
+    assert_eq!(stats.bytes_scanned, 0, "{stats:?}");
+    // The same set repairs fine uncancelled, so the refusal below is the
+    // cancel and not the fixture.
+    assert_eq!(
+        try_rar_rr_repair_hinted_why(&dir, None, None, Some(&cancel)),
+        Err(None)
+    );
+    assert!(
+        !dir.join("inner").exists(),
+        "a cancelled rung must not extract"
+    );
+    assert!(try_rar_rr_repair(&dir, None));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A "volume" whose open never returns: a FIFO with no writer. Opening it
+/// for reading parks the thread at no CPU until something opens the other
+/// end - the same signature as the reported hang, with nothing to fix
+/// inside the repair, which is the point: what is under test is that the
+/// PASS can leave.
+#[cfg(unix)]
+fn wedged_volume(dir: &std::path::Path) -> PathBuf {
+    let p = dir.join("wedged.part01.rar");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&p)
+        .status()
+        .unwrap();
+    assert!(made.success(), "mkfifo failed");
+    p
+}
+
+/// Unpark whatever is blocked opening `fifo`, so a walked-away worker can
+/// finish and exit instead of outliving the test.
+#[cfg(unix)]
+fn release(fifo: &std::path::Path) {
+    let _ = std::fs::OpenOptions::new().write(true).open(fifo);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_delete_reaches_a_volume_repair_that_never_returns() {
+    let dir = temp_dir("wedge-cancel");
+    let fifo = wedged_volume(&dir);
+    let cancel = std::sync::Arc::new(crate::streamhub::SideCancel::new());
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let (dir, fifo, cancel) = (dir.clone(), fifo.clone(), cancel.clone());
+        std::thread::spawn(move || {
+            let stats = rr_repair_volumes(&dir, &[fifo], None, None, Some(&cancel));
+            let _ = tx.send(stats);
+        });
+    }
+    // Long enough that the worker is inside the open, not before it.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(rx.try_recv().is_err(), "the fixture must actually wedge");
+    cancel.cancel();
+    let stats = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("a cancel did not reach a wedged volume repair");
+    assert_eq!(stats.stopped, Some(RrStopped::Cancelled), "{stats:?}");
+    assert_eq!(
+        stats.hard_failures, 0,
+        "a cancel is not a failure: {stats:?}"
+    );
+    release(&fifo);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_volume_repair_past_its_deadline_is_given_up() {
+    // The deadline itself is minutes; the mechanism is the same at any
+    // length, so drive the worker directly with a short one.
+    let dir = temp_dir("wedge-deadline");
+    let fifo = wedged_volume(&dir);
+    let worker = super::rrhint::VolumeWorker::start(dir.clone(), Vec::new(), None).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let fifo = fifo.clone();
+        std::thread::spawn(move || {
+            let wait = worker.repair(&fifo, None, std::time::Duration::from_millis(500));
+            let _ = tx.send(matches!(wait, super::rrhint::VolumeWait::Wedged));
+        });
+    }
+    let wedged = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the deadline did not end the wait");
+    assert!(wedged, "a repair past its deadline must read as wedged");
+    release(&fifo);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_volume_deadline_is_minutes_not_seconds() {
+    // A floor for the slow-but-moving case, and growth with the volume.
+    assert_eq!(volume_deadline(0).as_secs(), 300);
+    assert_eq!(volume_deadline(117 << 20).as_secs(), 417);
+    assert!(volume_deadline(4 << 30) > std::time::Duration::from_secs(3600));
 }

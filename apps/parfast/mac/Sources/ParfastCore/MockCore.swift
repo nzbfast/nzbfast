@@ -54,6 +54,8 @@ public final class MockCore: CoreClient {
         var excluded: Set<String> = []
         /// Taken ahead of its turn by `pf_job_run_next`.
         var runNext = false
+        /// A posting set's two halves, decided at submit time.
+        var posting: PostingResult?
 
         init(id: Int64, spec: JobSpec, title: String, duration: Double,
              totalBytes: Int64, lowPriority: Bool) {
@@ -263,7 +265,9 @@ public final class MockCore: CoreClient {
             volume_limit_explicit: true,
             pause_in_fold: true,
             cancel_in_fold: true,
-            progress_in_fold: true)
+            progress_in_fold: true,
+            posting_set: true,
+            posting_one_pass: true)
     }
 
     public func settingsGet() throws -> CoreSettings { lock.withLock { settings } }
@@ -351,7 +355,102 @@ public final class MockCore: CoreClient {
                               duration: 4, totalBytes: 512_000_000, lowPriority: lowPriority)
             job.checksumEntries = entries
             return job
+
+        case .postingSet(let ps):
+            return try makePostingJob(id: id, spec: ps, lowPriority: lowPriority)
         }
+    }
+
+    /// A posting set, mirrored from the core's contract (API.md `posting_set`)
+    /// and its recorded run (`shared/contract/posting-set-snapshots.json`): the
+    /// same refusals, the same route rule, the same file names, the same
+    /// phase bands and sentences. The figures are arithmetic, as everywhere in
+    /// this mock; the PAR2 half is the planner's answer over the RAR files.
+    private func makePostingJob(id: Int64, spec ps: PostingSetSpec,
+                                lowPriority: Bool) throws -> MockJob {
+        let name = ps.name.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, !name.contains("/"), name != ".", name != ".." else {
+            throw CoreError(code: "bad_spec", message: "the set name must be one path component")
+        }
+        guard !ps.output_dir.isEmpty else {
+            throw CoreError(code: "bad_spec", message: "no output folder")
+        }
+        guard (0...5).contains(ps.rar.compression) else {
+            throw CoreError(code: "bad_spec", message: "compression level \(ps.rar.compression) is not 0 to 5")
+        }
+        if case .size(let n) = ps.rar.volumes, n < 65_536 {
+            throw CoreError(code: "bad_spec", message: "a volume is at least 64 KiB")
+        }
+        let sources = resolveSources(ps.sources)
+        let bytes = sources.reduce(Int64(0)) { $0 + $1.size }
+        // Stored is the payload plus a header per member; compression is a
+        // made-up 0.9 so a compressed set visibly differs.
+        let payload = (ps.rar.compression == 0 ? bytes : bytes * 9 / 10)
+            + Int64(72 * max(1, sources.count))
+        let withRecord = payload + payload * Int64(ps.rar.recovery_percent) / 100
+        var volumeSize: Int64?
+        switch ps.rar.volumes {
+        case .none: volumeSize = nil
+        case .size(let n): volumeSize = n
+        case .count(let n):
+            let raw = (withRecord + Int64(max(1, n)) - 1) / Int64(max(1, n))
+            volumeSize = (raw + 4095) / 4096 * 4096
+        }
+        var rar: [WrittenFile] = []
+        if let size = volumeSize, size < withRecord {
+            let count = Int((withRecord + size - 1) / size)
+            let width = String(count).count
+            for i in 1...count {
+                let left = withRecord - Int64(i - 1) * size
+                let number = String(repeating: "0", count: max(0, width - String(i).count)) + String(i)
+                rar.append(WrittenFile(name: "\(name).part\(number).rar", size: min(size, left)))
+            }
+        } else {
+            rar.append(WrittenFile(name: "\(name).rar", size: withRecord))
+        }
+
+        let defaults = lock.withLock { settings.create }
+        let create = CreateSpec(
+            sources: rar.map { SourceItem(path: ps.output_dir + "/" + $0.name) },
+            block: ps.par2.block ?? (defaults.block_allocation == .size
+                ? .size(defaults.block_size) : .count(defaults.block_count)),
+            recovery: ps.par2.recovery ?? .percent(defaults.recovery_percent),
+            output: ps.output_dir + "/" + name + ".par2",
+            volumes: ps.par2.volumes ?? .pow2,
+            first_recovery_block: ps.par2.first_recovery_block,
+            comment: ps.par2.comment,
+            std_naming: ps.par2.std_naming ?? defaults.std_naming)
+        let preview = MockPlanner.plan(spec: create, sources: rar.map {
+            MockPlanner.Source(name: $0.name, size: $0.size, path: ps.output_dir + "/" + $0.name)
+        })
+        let par2 = preview.files.map { WrittenFile(name: $0.name, size: $0.size) }
+
+        let onePass = ps.rar.expectsOnePass
+        let reason: String?
+        if onePass {
+            reason = nil
+        } else if ps.rar.volumes != .none && rar.count > 1 {
+            reason = "a volume set's PAR2 recovery data can only be computed once every volume is written (PAR2 orders its files by an id that hashes each file's length)"
+        } else if ps.rar.compression != 0 {
+            reason = "a compressed archive's size is not known until it is written"
+        } else {
+            reason = "the RAR recovery record is written after the archive data"
+        }
+        let job = MockJob(id: id, spec: .postingSet(Self.withheld(ps)), title: name,
+                          duration: max(6.0, min(40.0, Double(bytes) / 200_000_000.0)),
+                          totalBytes: bytes, lowPriority: lowPriority)
+        job.preview = preview
+        job.posting = PostingResult(route: onePass ? .onePass : .twoPass, route_reason: reason,
+                                    rar: rar, par2: par2, source_bytes: bytes,
+                                    source_files: sources.count)
+        return job
+    }
+
+    /// What the core keeps of a spec: the password goes, the marker stays.
+    private static func withheld(_ spec: PostingSetSpec) -> PostingSetSpec {
+        var out = spec
+        if out.rar.password != nil { out.rar.password = .withheld }
+        return out
     }
 
     private func resolveSources(_ items: [SourceItem]) -> [MockPlanner.Source] {
@@ -484,6 +583,17 @@ public final class MockCore: CoreClient {
                 ok: job.checksumEntries.count, mismatch: 0, missing: 0))
             job.log.append("Wrote \(job.checksumEntries.count) lines.")
 
+        case .postingSet:
+            job.state = .done
+            let posting = job.posting
+            job.result = JobResult(written: (posting?.rar ?? []) + (posting?.par2 ?? []),
+                                   posting: posting)
+            if let first = posting?.rar.first, posting?.route == .onePass {
+                job.log.append("Wrote \(first.name) (\(first.size) bytes) and hashed it as it went")
+            } else {
+                job.log.append("Done")
+            }
+
         case .checksumVerify:
             let entries = job.checksumEntries
             let bad = entries.filter { $0.status == .mismatch || $0.status == .missing }
@@ -588,6 +698,14 @@ public final class MockCore: CoreClient {
             return fraction < 0.99 ? .writing : .finishing
         case .checksumCreate, .checksumVerify:
             return fraction < 0.99 ? .hashing : .finishing
+        case .postingSet:
+            if job.state == .done { return .finishing }
+            if job.posting?.route == .onePass {
+                return fraction < 0.10 ? .scanning : .writing
+            }
+            if fraction < 0.45 { return .writing }
+            if fraction < 0.75 { return .hashing }
+            return fraction < 0.95 ? .solving : .writing
         }
     }
 
@@ -634,6 +752,23 @@ public final class MockCore: CoreClient {
         case .checksumVerify:
             let done = Int(Double(job.checksumEntries.count) * fraction)
             return "Checking \(formatted(done)) of \(formatted(job.checksumEntries.count)) files"
+        case .postingSet:
+            // The core's own sentences, band for band (API.md, Progress).
+            func pct(_ from: Double, _ to: Double) -> Int {
+                Int((max(0, min(1, (fraction - from) / (to - from)))) * 100)
+            }
+            if job.posting?.route == .onePass {
+                if fraction < 0.10 { return "Reading the source files - \(pct(0, 0.10))%" }
+                if fraction < 0.95 && job.state != .done {
+                    return "Writing the archive and its recovery set - \(pct(0.10, 0.95))%"
+                }
+                return "Writing the recovery volumes"
+            }
+            if job.state == .done { return "Writing the recovery volumes - 100%" }
+            if fraction < 0.45 { return "Writing the archive - \(pct(0, 0.45))%" }
+            if fraction < 0.75 { return "Hashing the source files - \(pct(0.45, 0.75))%" }
+            if fraction < 0.95 { return "Building the recovery blocks - \(pct(0.75, 0.95))%" }
+            return "Writing the recovery volumes - \(pct(0.95, 1))%"
         }
     }
 
@@ -862,6 +997,9 @@ public final class MockCore: CoreClient {
         case .create(let c): return "Opening: \((c.output as NSString).lastPathComponent)"
         case .checksumCreate(let c): return "Writing \(c.format.display) list."
         case .checksumVerify(let c): return "Loading \"\((c.file as NSString).lastPathComponent)\"."
+        case .postingSet:
+            if let reason = job.posting?.route_reason { return "Two passes: \(reason)" }
+            return "One pass: the archive is hashed as it is written"
         }
     }
 
@@ -909,7 +1047,7 @@ public final class MockCore: CoreClient {
             if fraction > 0.85 {
                 once("write", ["Writing recovery packets", "Writing verification packets"])
             }
-        case .checksumCreate, .checksumVerify:
+        case .checksumCreate, .checksumVerify, .postingSet:
             break
         }
     }

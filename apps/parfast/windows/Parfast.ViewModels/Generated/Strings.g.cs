@@ -13,9 +13,6 @@ public static class Strings
     /// <summary>parfast</summary>
     public const string AppName = "parfast";
 
-    /// <summary>Beta</summary>
-    public const string AppStage = "Beta";
-
     /// <summary>PAR2 create, verify and repair</summary>
     public const string AppTagline = "PAR2 create, verify and repair";
 
@@ -380,6 +377,12 @@ public static class Strings
     /// <summary>A file with that name is already there. Turn on overwrite, or pick another name.</summary>
     public const string ErrorOutputExists = "A file with that name is already there. Turn on overwrite, or pick another name.";
 
+    /// <summary>This posting set was interrupted. Enter its password again to run it.</summary>
+    public const string ErrorPasswordRequired = "This posting set was interrupted. Enter its password again to run it.";
+
+    /// <summary>The archive could not be written: {reason}</summary>
+    public const string ErrorRarFailed = "The archive could not be written: {reason}";
+
     /// <summary>{path} could not be read.</summary>
     public const string ErrorReadFailed = "{path} could not be read.";
 
@@ -397,6 +400,9 @@ public static class Strings
 
     /// <summary>Create</summary>
     public const string JobKindCreate = "Create";
+
+    /// <summary>Posting set</summary>
+    public const string JobKindPostingSet = "Posting set";
 
     /// <summary>Repair</summary>
     public const string JobKindRepair = "Repair";
@@ -424,6 +430,9 @@ public static class Strings
 
     /// <summary>Create</summary>
     public const string ModeCreate = "Create";
+
+    /// <summary>Posting set</summary>
+    public const string ModePosting = "Posting set";
 
     /// <summary>Queue</summary>
     public const string ModeQueue = "Queue";
@@ -470,6 +479,132 @@ public static class Strings
 
     /// <summary>Writing</summary>
     public const string PhaseWriting = "Writing";
+
+    /// <summary>Create posting set</summary>
+    public const string PostingActionCreate = "Create posting set";
+
+    /// <summary>A stopped or failed posting set removes every file it wrote, so there is nothing to clean up.</summary>
+    public const string PostingCancelNote = "A stopped or failed posting set removes every file it wrote, so there is nothing to clean up.";
+
+    /// <summary>Best</summary>
+    public const string PostingCompressionBest = "Best";
+
+    /// <summary>Fast</summary>
+    public const string PostingCompressionFast = "Fast";
+
+    /// <summary>Fastest</summary>
+    public const string PostingCompressionFastest = "Fastest";
+
+    /// <summary>Good</summary>
+    public const string PostingCompressionGood = "Good";
+
+    /// <summary>Normal</summary>
+    public const string PostingCompressionNormal = "Normal";
+
+    /// <summary>Video and archives barely compress, so storing is the usual choice for a post.</summary>
+    public const string PostingCompressionNote = "Video and archives barely compress, so storing is the usual choice for a post.";
+
+    /// <summary>Store (no compression)</summary>
+    public const string PostingCompressionStore = "Store (no compression)";
+
+    /// <summary>Compression</summary>
+    public const string PostingCompressionTitle = "Compression";
+
+    /// <summary>Add files or a folder. They are packed into a RAR archive with a PAR2 set beside it.</summary>
+    public const string PostingEmptyBody = "Add files or a folder. They are packed into a RAR archive with a PAR2 set beside it.";
+
+    /// <summary>Add the files to post</summary>
+    public const string PostingEmptyTitle = "Add the files to post";
+
+    /// <summary>Packs files into a RAR 5 archive and writes a PAR2 set over it, ready to post.</summary>
+    public const string PostingIntro = "Packs files into a RAR 5 archive and writes a PAR2 set over it, ready to post.";
+
+    /// <summary>Archive name</summary>
+    public const string PostingName = "Archive name";
+
+    /// <summary>Written as {name}.rar, or {name}.part1.rar onward when split, with {name}.par2 beside it.</summary>
+    public const string PostingNameTip = "Written as {name}.rar, or {name}.part1.rar onward when split, with {name}.par2 beside it.";
+
+    /// <summary>PAR2 set</summary>
+    public const string PostingOutputPar2 = "PAR2 set";
+
+    /// <summary>RAR archive</summary>
+    public const string PostingOutputRar = "RAR archive";
+
+    /// <summary>Files written</summary>
+    public const string PostingOutputTitle = "Files written";
+
+    /// <summary>Output folder</summary>
+    public const string PostingOutputFolder = "Output folder";
+
+    /// <summary>Replace an earlier set with the same name</summary>
+    public const string PostingOverwrite = "Replace an earlier set with the same name";
+
+    /// <summary>Removes every file of the earlier set first, so no stale volume is left beside the new ones.</summary>
+    public const string PostingOverwriteTip = "Removes every file of the earlier set first, so no stale volume is left beside the new ones.";
+
+    /// <summary>PAR2 recovery</summary>
+    public const string PostingPar2Title = "PAR2 recovery";
+
+    /// <summary>Encrypt file names too</summary>
+    public const string PostingPasswordEncryptHeaders = "Encrypt file names too";
+
+    /// <summary>No password</summary>
+    public const string PostingPasswordPlaceholder = "No password";
+
+    /// <summary>Password</summary>
+    public const string PostingPasswordTitle = "Password";
+
+    /// <summary>RAR recovery record</summary>
+    public const string PostingRecoveryRecord = "RAR recovery record";
+
+    /// <summary>{percent} of the archive</summary>
+    public const string PostingRecoveryRecordValue = "{percent} of the archive";
+
+    /// <summary>One pass: the archive is hashed into its PAR2 set as it is written.</summary>
+    public const string PostingRouteExpectOnePass = "One pass: the archive is hashed into its PAR2 set as it is written.";
+
+    /// <summary>Two passes: the archive is written first, then its PAR2 set.</summary>
+    public const string PostingRouteExpectTwoPass = "Two passes: the archive is written first, then its PAR2 set.";
+
+    /// <summary>Done in one pass. The archive was never read back.</summary>
+    public const string PostingRouteOnePass = "Done in one pass. The archive was never read back.";
+
+    /// <summary>Route</summary>
+    public const string PostingRouteTitle = "Route";
+
+    /// <summary>Done in two passes, because {reason}.</summary>
+    public const string PostingRouteTwoPassBecause = "Done in two passes, because {reason}.";
+
+    /// <summary>Solid archive</summary>
+    public const string PostingSolid = "Solid archive";
+
+    /// <summary>Compresses the files as one run. Smaller for many small files, slower to extract one.</summary>
+    public const string PostingSolidTip = "Compresses the files as one run. Smaller for many small files, slower to extract one.";
+
+    /// <summary>Create a posting set</summary>
+    public const string PostingTitle = "Create a posting set";
+
+    /// <summary>Split into a number of volumes</summary>
+    public const string PostingVolumesCount = "Split into a number of volumes";
+
+    /// <summary>Number of volumes</summary>
+    public const string PostingVolumesCountLabel = "Number of volumes";
+
+    /// <summary>A volume is at least 64 KiB.</summary>
+    public const string PostingVolumesMinSize = "A volume is at least 64 KiB.";
+
+    /// <summary>One archive</summary>
+    public const string PostingVolumesNone = "One archive";
+
+    /// <summary>Split by size</summary>
+    public const string PostingVolumesSize = "Split by size";
+
+    /// <summary>Volume size</summary>
+    public const string PostingVolumesSizeLabel = "Volume size";
+
+    /// <summary>Volumes</summary>
+    public const string PostingVolumesTitle = "Volumes";
 
     /// <summary>Run in the background</summary>
     public const string ProgressBackground = "Run in the background";
@@ -943,7 +1078,6 @@ public static System.Collections.Generic.IReadOnlyDictionary<string, string> All
     new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.Ordinal)
     {
             ["app.name"] = "parfast",
-            ["app.stage"] = "Beta",
             ["app.tagline"] = "PAR2 create, verify and repair",
             ["checksums.create"] = "Create",
             ["checksums.expected"] = "Expected",
@@ -1065,12 +1199,15 @@ public static System.Collections.Generic.IReadOnlyDictionary<string, string> All
             ["error.no_par2"] = "That file is not a PAR2 index.",
             ["error.no_sources"] = "Add at least one file or folder first.",
             ["error.output_exists"] = "A file with that name is already there. Turn on overwrite, or pick another name.",
+            ["error.password_required"] = "This posting set was interrupted. Enter its password again to run it.",
+            ["error.rar_failed"] = "The archive could not be written: {reason}",
             ["error.read_failed"] = "{path} could not be read.",
             ["error.title"] = "Something went wrong",
             ["error.unrepairable"] = "Not enough recovery blocks. {short} more are needed.",
             ["error.write_failed"] = "{path} could not be written.",
             ["job.kind.checksums"] = "Checksums",
             ["job.kind.create"] = "Create",
+            ["job.kind.posting_set"] = "Posting set",
             ["job.kind.repair"] = "Repair",
             ["job.kind.verify"] = "Verify",
             ["log.copy"] = "Copy log",
@@ -1080,6 +1217,7 @@ public static System.Collections.Generic.IReadOnlyDictionary<string, string> All
             ["mock.banner.short"] = "Demo build",
             ["mode.checksums"] = "Checksums",
             ["mode.create"] = "Create",
+            ["mode.posting"] = "Posting set",
             ["mode.queue"] = "Queue",
             ["mode.settings"] = "Settings",
             ["mode.verify"] = "Verify & Repair",
@@ -1095,6 +1233,48 @@ public static System.Collections.Generic.IReadOnlyDictionary<string, string> All
             ["phase.scanning"] = "Scanning",
             ["phase.solving"] = "Solving",
             ["phase.writing"] = "Writing",
+            ["posting.action.create"] = "Create posting set",
+            ["posting.cancel_note"] = "A stopped or failed posting set removes every file it wrote, so there is nothing to clean up.",
+            ["posting.compression.best"] = "Best",
+            ["posting.compression.fast"] = "Fast",
+            ["posting.compression.fastest"] = "Fastest",
+            ["posting.compression.good"] = "Good",
+            ["posting.compression.normal"] = "Normal",
+            ["posting.compression.note"] = "Video and archives barely compress, so storing is the usual choice for a post.",
+            ["posting.compression.store"] = "Store (no compression)",
+            ["posting.compression.title"] = "Compression",
+            ["posting.empty_body"] = "Add files or a folder. They are packed into a RAR archive with a PAR2 set beside it.",
+            ["posting.empty_title"] = "Add the files to post",
+            ["posting.intro"] = "Packs files into a RAR 5 archive and writes a PAR2 set over it, ready to post.",
+            ["posting.name"] = "Archive name",
+            ["posting.name_tip"] = "Written as {name}.rar, or {name}.part1.rar onward when split, with {name}.par2 beside it.",
+            ["posting.output.par2"] = "PAR2 set",
+            ["posting.output.rar"] = "RAR archive",
+            ["posting.output.title"] = "Files written",
+            ["posting.output_folder"] = "Output folder",
+            ["posting.overwrite"] = "Replace an earlier set with the same name",
+            ["posting.overwrite_tip"] = "Removes every file of the earlier set first, so no stale volume is left beside the new ones.",
+            ["posting.par2.title"] = "PAR2 recovery",
+            ["posting.password.encrypt_headers"] = "Encrypt file names too",
+            ["posting.password.placeholder"] = "No password",
+            ["posting.password.title"] = "Password",
+            ["posting.recovery_record"] = "RAR recovery record",
+            ["posting.recovery_record_value"] = "{percent} of the archive",
+            ["posting.route.expect_one_pass"] = "One pass: the archive is hashed into its PAR2 set as it is written.",
+            ["posting.route.expect_two_pass"] = "Two passes: the archive is written first, then its PAR2 set.",
+            ["posting.route.one_pass"] = "Done in one pass. The archive was never read back.",
+            ["posting.route.title"] = "Route",
+            ["posting.route.two_pass_because"] = "Done in two passes, because {reason}.",
+            ["posting.solid"] = "Solid archive",
+            ["posting.solid_tip"] = "Compresses the files as one run. Smaller for many small files, slower to extract one.",
+            ["posting.title"] = "Create a posting set",
+            ["posting.volumes.count"] = "Split into a number of volumes",
+            ["posting.volumes.count_label"] = "Number of volumes",
+            ["posting.volumes.min_size"] = "A volume is at least 64 KiB.",
+            ["posting.volumes.none"] = "One archive",
+            ["posting.volumes.size"] = "Split by size",
+            ["posting.volumes.size_label"] = "Volume size",
+            ["posting.volumes.title"] = "Volumes",
             ["progress.background"] = "Run in the background",
             ["progress.background_tip"] = "Drops the job to a low thread priority so the rest of the PC stays responsive.",
             ["progress.cancel_confirm"] = "Stop this job?",

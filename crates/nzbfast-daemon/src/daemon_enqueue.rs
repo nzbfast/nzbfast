@@ -93,6 +93,9 @@ pub struct AddPending<'a> {
     /// a row admitted with its ids already known never costs a later add
     /// the spool read that used to make the add path quadratic.
     post_ids: Arc<spare::PostIds>,
+    /// `AddExtras::paused`: an un-held duplicate is re-paused from it as
+    /// well as from `priority == -2`.
+    add_paused: bool,
 }
 
 impl Daemon {
@@ -215,6 +218,9 @@ impl Daemon {
         extras: AddExtras,
     ) -> Result<Enqueued> {
         let nzo_id = self.mint_nzo_id(id);
+        // Copied out now: `extras` is moved onto the row piecemeal below,
+        // and the un-held arm needs this after that.
+        let add_paused = extras.paused;
         let nzb = nzbkit::nzb::Nzb::parse(nzb_bytes)?;
         let AddIdentity {
             mut stem,
@@ -462,7 +468,7 @@ impl Daemon {
             finished_unix: None,
             // SAB priority -2 means "add paused", -100 means "the default".
             priority: enqueue_priority(priority, duplicate),
-            paused: duplicate || priority == -2,
+            paused: duplicate || priority == -2 || add_paused,
             queued_at: Some(Instant::now()),
             queued_unix: Some(unix_now()),
             idle_at_add: runner_idle,
@@ -582,6 +588,7 @@ impl Daemon {
                 hook_reject,
                 dupe_action,
                 post_ids,
+                add_paused,
             },
         )
     }
@@ -630,6 +637,7 @@ impl Daemon {
             hook_reject,
             dupe_action,
             post_ids,
+            add_paused,
         } = pending;
         // §129 4a: a pre-queue REJECT files to history as Failed with
         // the reason - the dupe_action="fail" shape verbatim, so the
@@ -785,7 +793,7 @@ impl Daemon {
                             enqueue_priority(priority, false),
                             "the original it was held for is gone",
                         );
-                        g.paused = priority == -2;
+                        g.paused = priority == -2 || add_paused;
                         g.held_for.clear();
                         // No longer held: the add-time insurance stamp applies.
                         g.insurance = self.insurance_at_add(priority, false, g.library);
@@ -811,7 +819,7 @@ impl Daemon {
                         "origin": origin,
                         "total_bytes": total_bytes,
                         "duplicate": duplicate,
-                        "paused": duplicate || priority == -2,
+                        "paused": duplicate || priority == -2 || add_paused,
                     }),
                 );
                 // The memo §292's arm reads, primed from the NZB this

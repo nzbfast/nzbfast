@@ -57,11 +57,14 @@ impl Daemon {
         // under it too: read outside, a resume landing in between was
         // computed away and the queue stuck paused with nothing saying so.
         //
-        // BOTH edges drop the deadline, which is what the generation
-        // bump this replaced did: it cancelled the pending timer on the
-        // way back online as well, and left the deadline behind for
-        // `pause_int` to report as time still to run on a timer that had
-        // already been cancelled.
+        // Going offline drops the deadline, as it always has. Coming back
+        // online drops it only when it RESUMES - a
+        // pause that is still standing afterwards was decided after the
+        // outage began (`take_pause_cancel_timer` revoked the claim), and
+        // a "pause for 60 minutes" taken offline must still lift on its
+        // own clock rather than become indefinite (27 Oct 2026 sweep F3).
+        // An offline-owned pause has no deadline to keep: going offline
+        // cleared it, and every later timed pause revokes the claim.
         {
             let mut until = self.pause_until.lock_ok();
             let (paused, by_offline) = offline_pause_transition(
@@ -71,7 +74,9 @@ impl Daemon {
             );
             self.paused.store(paused, Ordering::Relaxed);
             self.paused_by_offline.store(by_offline, Ordering::Relaxed);
-            *until = None;
+            if want_offline || !paused {
+                *until = None;
+            }
         }
         // Outside the lock: the worker wakes, reads no deadline, and
         // retires rather than sleeping out the rest of a cancelled pause.

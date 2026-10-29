@@ -28,7 +28,7 @@ workspace = true
 # `webasset.rs` and `devweb.rs`, all api-layer units, and the OUT_DIR
 # gz/etag pairs they read are written by `precompress_pages` here.
 [dependencies]
-nzbkit = { path = "../nzbkit", default-features = false }
+nzbkit = { path = "../nzbkit", default-features = false, features = ["rar"] }
 nzbfast-core = { path = "../nzbfast-core" }
 nzbfast-unpack = { path = "../nzbfast-unpack" }
 nzbfast-meta = { path = "../nzbfast-meta" }

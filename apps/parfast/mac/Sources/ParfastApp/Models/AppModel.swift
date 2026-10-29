@@ -15,7 +15,7 @@ import ParfastCore
 final class AppModel: ObservableObject {
 
     enum Mode: String, CaseIterable, Identifiable, Hashable {
-        case verify, create, checksums, queue
+        case verify, create, posting, checksums, queue
 
         var id: String { rawValue }
 
@@ -23,6 +23,7 @@ final class AppModel: ObservableObject {
             switch self {
             case .verify: return S.modeVerify
             case .create: return S.modeCreate
+            case .posting: return S.modePosting
             case .checksums: return S.modeChecksums
             case .queue: return S.modeQueue
             }
@@ -34,6 +35,7 @@ final class AppModel: ObservableObject {
             switch self {
             case .verify: return "checkmark.shield"
             case .create: return "plus.square.on.square"
+            case .posting: return "shippingbox"
             case .checksums: return "number.square"
             case .queue: return "list.bullet.rectangle"
             }
@@ -57,6 +59,7 @@ final class AppModel: ObservableObject {
     let verify: VerifyModel
     let create: CreateModel
     let checksums: ChecksumsModel
+    let posting: PostingModel
 
     @Published var mode: Mode = .verify
     @Published var queue = QueueSnapshot()
@@ -83,9 +86,11 @@ final class AppModel: ObservableObject {
         self.verify = VerifyModel()
         self.create = CreateModel()
         self.checksums = ChecksumsModel()
+        self.posting = PostingModel()
         self.settings = (try? core.settingsGet()) ?? CoreSettings()
         create.applyDefaults(settings)
         checksums.applyDefaults(settings)
+        posting.applyDefaults(settings)
         verify.applyDefaults(settings)
         start()
     }
@@ -113,6 +118,7 @@ final class AppModel: ObservableObject {
         autoRepairIfDue()
         create.apply(queue: snapshot)
         checksums.apply(queue: snapshot)
+        posting.apply(queue: snapshot)
         noteCompletions(snapshot)
     }
 
@@ -198,6 +204,9 @@ final class AppModel: ObservableObject {
         case (.create, _):
             let size = job.result?.written?.reduce(Int64(0)) { $0 + $1.size } ?? 0
             content.body = S.notifyCreateDone(set: name, size: Fmt.bytes(size))
+        case (.postingSet, _):
+            let size = job.result?.written?.reduce(Int64(0)) { $0 + $1.size } ?? 0
+            content.body = S.notifyCreateDone(set: name, size: Fmt.bytes(size))
         case (.checksumCreate, _), (.checksumVerify, _):
             if let c = job.result?.checksum {
                 content.body = S.checksumsResult(ok: Fmt.count(c.ok),
@@ -219,7 +228,15 @@ final class AppModel: ObservableObject {
         case .verify: return S.jobKindVerify
         case .repairSet: return S.jobKindRepair
         case .checksumCreate, .checksumVerify: return S.jobKindChecksums
+        case .postingSet: return S.jobKindPostingSet
         }
+    }
+
+    /// The modes this core can serve, in sidebar order. The posting set is
+    /// HIDDEN against a core whose `pf_capabilities.posting_set` is not true:
+    /// that core would refuse the job (API.md, capability table).
+    var availableModes: [Mode] {
+        Mode.allCases.filter { $0 != .posting || capabilities.hasPostingSet }
     }
 
     // MARK: - Drop routing (5.1)
@@ -238,6 +255,12 @@ final class AppModel: ObservableObject {
         }
         if let index = lower.firstIndex(where: { Self.checksumExtensions.contains($0) }) {
             openChecksumFile(paths[index])
+            return
+        }
+        // Plain files dropped on the posting-set pane are ITS sources; from
+        // anywhere else they start a Create, as they always have.
+        if mode == .posting && capabilities.hasPostingSet {
+            posting.addSources(paths)
             return
         }
         mode = .create
@@ -326,6 +349,20 @@ final class AppModel: ObservableObject {
         let spec = create.spec()
         if let id = submit(.create(spec), showSheet: !queueOnly) {
             create.jobId = id
+            if queueOnly { toast = Toast(text: S.createActionQueue) }
+        }
+    }
+
+    /// The posting set. The spec carries the password, if any, straight to the
+    /// core; nothing here logs or keeps a copy of it.
+    func startPosting(queueOnly: Bool = false) {
+        guard capabilities.hasPostingSet else { return }
+        guard !posting.sources.isEmpty else {
+            alert = AlertBox(title: S.errorTitle, message: S.errorNoSources)
+            return
+        }
+        if let id = submit(.postingSet(posting.spec()), showSheet: !queueOnly) {
+            posting.jobId = id
             if queueOnly { toast = Toast(text: S.createActionQueue) }
         }
     }

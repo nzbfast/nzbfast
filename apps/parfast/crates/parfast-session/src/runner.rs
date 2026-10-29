@@ -420,6 +420,7 @@ pub fn run(job: &Job) {
             JobSpec::ChecksumVerify { checksum_verify } => {
                 crate::runner::checksums::verify(job, checksum_verify, started)
             }
+            JobSpec::PostingSet { posting_set } => posting::run(job, posting_set, started),
         }
     };
     let elapsed = started.elapsed().as_millis() as u64;
@@ -846,6 +847,13 @@ fn existing_set_member(output: &std::path::Path) -> Option<std::path::PathBuf> {
 
 /// The create, through `parfast::create::run` for the same reason.
 fn run_create(job: &Job, spec: &CreateSpec, _started: Instant) -> Outcome {
+    run_create_banded(job, spec, (0.0, 1.0))
+}
+
+/// [`run_create`] drawing its bar inside `band` - `(base, span)` of the
+/// job's 0..1 - which is how a posting set puts its PAR2 half after its
+/// RAR half on one bar. A plain create is the whole band.
+fn run_create_banded(job: &Job, spec: &CreateSpec, band: (f64, f64)) -> Outcome {
     let planner::Expansion { members, left_out } = match planner::expand_sources(
         &spec.sources,
         spec.path_mode,
@@ -956,7 +964,7 @@ fn run_create(job: &Job, spec: &CreateSpec, _started: Instant) -> Outcome {
     let mut sink = sink_for(job);
     // ONE cancel bit and ONE pause bit, as for the repair above: the
     // engine's gate IS this job's `Control`.
-    let watch = CreateProgress::watch(job);
+    let watch = CreateProgress::watch(job, band);
     let code = parfast::create::run_watched(&opts, &mut sink, &watch);
     // THE ENGINE'S VERDICT DECIDES, and the order of these two checks
     // is the whole of it.
@@ -1323,15 +1331,19 @@ struct CreateProgress {
     /// On a multi-batch create the hash cannot reach the end anyway,
     /// because it is capped at the batch it runs beside.
     band_full: AtomicBool,
+    /// Where on the job's bar this create draws: `(base, span)`, so its
+    /// own 0..1 lands at `base + span * x`. `(0, 1)` for a plain create;
+    /// a posting set's second half otherwise.
+    band: (f64, f64),
 }
 
 impl CreateProgress {
     /// The watch to hand `parfast::create::run_watched`: this job's own
     /// gate, and a sink that publishes into its snapshot.
-    fn watch(job: &Job) -> CreateWatch {
+    fn watch(job: &Job, band: (f64, f64)) -> CreateWatch {
         CreateWatch {
             control: nzbkit::par2gen::control::CreateControl::new(
-                Some(Arc::new(CreateProgress::new(job.publisher.clone()))),
+                Some(Arc::new(CreateProgress::new(job.publisher.clone(), band))),
                 Some(job.control.engine_gate()),
             ),
         }
@@ -1339,9 +1351,10 @@ impl CreateProgress {
 
     /// A sink publishing into `publisher`, framed as one batch of one
     /// until the engine says otherwise.
-    fn new(publisher: Arc<Publisher>) -> CreateProgress {
+    fn new(publisher: Arc<Publisher>, band: (f64, f64)) -> CreateProgress {
         CreateProgress {
             publisher,
+            band,
             batch: AtomicU32::new(0),
             batches: AtomicU32::new(1),
             band_full: AtomicBool::new(false),
@@ -1413,10 +1426,14 @@ impl par2repair::ProgressSink for CreateProgress {
             // on of the two, one batch to the next - can present a
             // smaller figure than the one already on screen, and a bar
             // that falls back reads as a restart.
-            s.progress = s.progress.max(match band {
-                Some(b) => 0.90 * b,
-                None => 0.90 + 0.10 * frac,
-            });
+            let (base, span) = self.band;
+            s.progress = s.progress.max(
+                base + span
+                    * match band {
+                        Some(b) => 0.90 * b,
+                        None => 0.90 + 0.10 * frac,
+                    },
+            );
         });
     }
 }
@@ -1544,6 +1561,9 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
 
 /// The two checksum jobs, which are wholly this crate's - see
 /// [`crate::checksum`] for why they are not `nzbfast-engine`'s parser.
+/// The posting set: RAR 5 plus a PAR2 set over it, one job.
+mod posting;
+
 mod checksums {
     use super::*;
     use crate::checksum;
@@ -1867,6 +1887,7 @@ pub fn kind_label(kind: JobKind) -> &'static str {
         JobKind::Repair => "Repair",
         JobKind::ChecksumCreate => "Checksum",
         JobKind::ChecksumVerify => "Check",
+        JobKind::PostingSet => "Posting set",
     }
 }
 
@@ -2335,7 +2356,7 @@ mod tests {
             "2026-09-12T00:00:00Z".into(),
             false,
         ));
-        let sink = CreateProgress::new(Arc::clone(&p));
+        let sink = CreateProgress::new(Arc::clone(&p), (0.0, 1.0));
         sink.progress(par2repair::RepairPhase::Verify, 1, 2);
         assert!((p.get().progress - 0.45).abs() < 1e-9, "{:?}", p.get());
         assert_eq!(p.get().phase, Phase::Hashing);
@@ -2388,7 +2409,7 @@ mod tests {
                 "2026-09-12T00:00:00Z".into(),
                 false,
             ));
-            let sink = CreateProgress::new(Arc::clone(&p));
+            let sink = CreateProgress::new(Arc::clone(&p), (0.0, 1.0));
             if announce {
                 sink.slab(0, 1);
             }
@@ -2447,7 +2468,7 @@ mod tests {
             "2026-09-12T00:00:00Z".into(),
             false,
         ));
-        let sink = CreateProgress::new(Arc::clone(&p));
+        let sink = CreateProgress::new(Arc::clone(&p), (0.0, 1.0));
         let mut last = 0.0f64;
         for b in 0..OF {
             sink.slab(b, OF);
@@ -2527,7 +2548,7 @@ mod tests {
         p.set_wake(Some(Box::new(move || {
             w2.fetch_add(1, Ordering::Relaxed);
         })));
-        let sink = CreateProgress::new(Arc::clone(&p));
+        let sink = CreateProgress::new(Arc::clone(&p), (0.0, 1.0));
         sink.progress(P::Fold, 1, 4);
         let after_fold = p.get();
         let wakes = woke.load(Ordering::Relaxed);
@@ -2577,7 +2598,7 @@ mod tests {
             "2026-09-12T00:00:00Z".into(),
             false,
         ));
-        let sink = CreateProgress::new(Arc::clone(&p));
+        let sink = CreateProgress::new(Arc::clone(&p), (0.0, 1.0));
         sink.progress(P::Fold, 1, 4);
         sink.progress(P::Write, 1, 4);
         assert!(

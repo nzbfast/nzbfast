@@ -110,15 +110,9 @@ pub(super) fn resolve(
             .div_ceil(100)
             .max(1),
     };
-    // Every recovery slice needs its own exponent against the same
-    // coprime sequence the input slices walk, so the input limit is the
-    // practical ceiling here too.
-    if n_recovery_u64 > MAX_INPUT_SLICES as u64 {
-        return Err(Par2GenError::Other(format!(
-            "{n_recovery_u64} recovery slices exceeds the PAR2 limit of {MAX_INPUT_SLICES} \
-             - lower the redundancy or raise the block size"
-        )));
-    }
+    // The recovery ceiling, through the one predicate a preview asks too
+    // (`super::check_recovery_count`, which carries the reasoning).
+    super::check_recovery_count(n_recovery_u64)?;
     let n_recovery = n_recovery_u64 as usize;
     if n_recovery > 0 && n_slices == 0 {
         return Err(Par2GenError::Other(

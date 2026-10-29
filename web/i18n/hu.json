@@ -2776,6 +2776,7 @@
  "toast.promote.unknown": "Ez a fájl már nem része ennek a letöltésnek.",
  "toast.pvfail": "Ezt a fájlt nem sikerült itt megnyitni.",
  "toast.pwfail": "A jelszót nem sikerült beállítani.",
+ "toast.pwlayer": "A jelszó megnyitotta az archívumot, de benne egy másik zárolt archívum van - adja meg annak a jelszavát.",
  "toast.pwsaved": "Jelszó mentve.",
  "toast.pwunlocked": "Kicsomagolva - a jelszó működött.",
  "toast.pwwrong": "Ez a jelszó nem nyitotta ki az archívumot - a letöltött fájlok érintetlenek, próbáljon másikat.",

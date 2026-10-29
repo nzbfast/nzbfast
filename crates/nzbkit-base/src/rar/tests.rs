@@ -2016,6 +2016,7 @@ fn the_head_field_length_is_solved_when_volume_zero_is_absent() {
 /// Volume 2's `off_base` really is four bytes above the others - the
 /// member CRC32 that rides the last fragment alone - which is the second
 /// term the fix had to drop.
+#[cfg(feature = "rar")]
 #[test]
 fn a_real_writer_stored_set_reaches_arithmetic_placement() {
     let data = payload(300_000, 31);

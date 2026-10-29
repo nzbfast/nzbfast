@@ -97,6 +97,20 @@ public sealed record Capabilities
     /// </summary>
     [JsonPropertyName("progress_in_fold")] public bool ProgressInFold { get; init; }
 
+    /// <summary>
+    /// The core accepts kind posting_set (25 Oct 2026). False: the posting-set
+    /// screen is hidden, nav entry and all, because an engine built without the
+    /// RAR half would refuse every job it submitted.
+    /// </summary>
+    [JsonPropertyName("posting_set")] public bool PostingSet { get; init; }
+
+    /// <summary>
+    /// A single stored archive's PAR2 set is built in the same pass as the archive.
+    /// Informational: result.posting.route reports what each job actually did, and
+    /// nothing is gated on this.
+    /// </summary>
+    [JsonPropertyName("posting_one_pass")] public bool PostingOnePass { get; init; }
+
     // Every capability false is the honest default for a session whose
     // pf_capabilities call failed: the UI then shows only controls it knows
     // the core supports, rather than offering a switch that does nothing.

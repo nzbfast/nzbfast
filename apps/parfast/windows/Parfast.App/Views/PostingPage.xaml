@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Parfast.App.Views.PostingPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Parfast.App.Controls"
+    xmlns:vm="using:Parfast.ViewModels">
+
+    <!-- Create a posting set (plan B1): RAR 5 volumes plus a PAR2 set over
+         them, as one job. Shown only while the core reports posting_set; the
+         nav entry is hidden with it in MainWindow. -->
+    <Grid>
+        <Grid x:Name="EmptyState" Padding="24">
+            <Border Style="{StaticResource DropZone}">
+                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="12" MaxWidth="440">
+                    <FontIcon Glyph="&#xE7B8;" FontSize="42" Opacity="0.55" />
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8">
+                        <TextBlock x:Name="EmptyTitle" Style="{StaticResource SectionTitle}"
+                                   TextAlignment="Center" />
+                    </StackPanel>
+                    <TextBlock x:Name="EmptyBody" Style="{StaticResource MutedCaption}"
+                               HorizontalAlignment="Center" TextAlignment="Center" />
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8" Margin="0,8,0,0">
+                        <Button x:Name="EmptyAddFiles" Style="{StaticResource AccentButtonStyle}" Click="OnAddFiles" />
+                        <Button x:Name="EmptyAddFolder" Click="OnAddFolder" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <ScrollViewer x:Name="FormView" Visibility="Collapsed" Padding="{StaticResource PagePadding}">
+            <Grid RowSpacing="12">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- Title, the beta label, and what the job does. -->
+                <StackPanel Grid.Row="0" Spacing="4">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock x:Name="PageTitle" Style="{StaticResource SectionTitle}" />
+                    </StackPanel>
+                    <TextBlock x:Name="Intro" Style="{StaticResource MutedCaption}" TextWrapping="Wrap" />
+                </StackPanel>
+
+                <Grid Grid.Row="1" ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="420" />
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Sources. -->
+                    <Border Grid.Column="0" Style="{StaticResource Card}" Padding="0" VerticalAlignment="Top">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="260" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <Grid Grid.Row="0" Padding="16,12,16,8"
+                                  BorderBrush="{ThemeResource SeparatorBrush}" BorderThickness="0,0,0,1">
+                                <TextBlock x:Name="SourcesHeader" Style="{StaticResource GroupHeader}" Margin="0" />
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6">
+                                    <Button x:Name="AddFiles" Click="OnAddFiles" Padding="10,3,10,3" />
+                                    <Button x:Name="AddFolder" Click="OnAddFolder" Padding="10,3,10,3" />
+                                    <Button x:Name="RemoveSources" Click="OnRemove" Padding="10,3,10,3" />
+                                </StackPanel>
+                            </Grid>
+
+                            <ListView x:Name="SourceList" Grid.Row="1" SelectionMode="Extended"
+                                      Padding="8,4,8,8" SelectionChanged="OnSelectionChanged"
+                                      ItemContainerTransitions="{x:Null}">
+                                <ListView.ItemTemplate>
+                                    <DataTemplate x:DataType="vm:SourceRow">
+                                        <Grid ColumnSpacing="12" Padding="8,4,8,4">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="110" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8">
+                                                <FontIcon FontSize="14" Glyph="&#xE8B7;" Opacity="0.7"
+                                                          Visibility="{x:Bind IsFolder}" />
+                                                <TextBlock Text="{x:Bind Name}" TextTrimming="CharacterEllipsis"
+                                                           ToolTipService.ToolTip="{x:Bind Path}"
+                                                           VerticalAlignment="Center" />
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="1" Style="{StaticResource FigureText}"
+                                                       Text="{x:Bind SizeText}" HorizontalAlignment="Right"
+                                                       VerticalAlignment="Center" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+
+                            <TextBlock x:Name="SourcesFooter" Grid.Row="2" Padding="16,8,16,12"
+                                       Style="{StaticResource MutedCaption}" />
+                        </Grid>
+                    </Border>
+
+                    <StackPanel Grid.Column="1" Spacing="12">
+                        <!-- The archive: name, folder, volumes, compression, password, recovery record. -->
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel Spacing="10">
+                                <TextBox x:Name="NameBox" LostFocus="OnNameCommitted" />
+                                <TextBlock x:Name="NameTip" Style="{StaticResource MutedCaption}" TextWrapping="Wrap" />
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="FolderBox" Grid.Column="0" LostFocus="OnFolderCommitted" />
+                                    <Button x:Name="BrowseFolder" Grid.Column="1" Click="OnBrowseFolder"
+                                            VerticalAlignment="Bottom" />
+                                </Grid>
+
+                                <TextBlock x:Name="VolumesHeader" Style="{StaticResource GroupHeader}" Margin="0,6,0,0" />
+                                <RadioButton x:Name="SplitNone" GroupName="split" Checked="OnSplitChanged" />
+                                <RadioButton x:Name="SplitSize" GroupName="split" Checked="OnSplitChanged" />
+                                <TextBox x:Name="VolumeSizeBox" Margin="28,0,0,0" LostFocus="OnVolumeSizeCommitted" />
+                                <RadioButton x:Name="SplitCount" GroupName="split" Checked="OnSplitChanged" />
+                                <NumberBox x:Name="VolumeCountBox" Margin="28,0,0,0" Minimum="1" Maximum="9999"
+                                           SpinButtonPlacementMode="Compact" ValueChanged="OnVolumeCountChanged" />
+
+                                <ComboBox x:Name="CompressionBox" HorizontalAlignment="Stretch" Margin="0,6,0,0"
+                                          SelectionChanged="OnCompressionChanged" />
+                                <TextBlock x:Name="CompressionNote" Style="{StaticResource MutedCaption}"
+                                           TextWrapping="Wrap" />
+                                <CheckBox x:Name="SolidBox" Checked="OnSolidChanged" Unchecked="OnSolidChanged" />
+
+                                <!-- Hidden reveal: the password is never shown back, here
+                                     or anywhere else in the app. -->
+                                <PasswordBox x:Name="PasswordField" PasswordRevealMode="Hidden" Margin="0,6,0,0"
+                                             PasswordChanged="OnPasswordChanged" />
+                                <CheckBox x:Name="EncryptHeadersBox" Visibility="Collapsed"
+                                          Checked="OnEncryptHeadersChanged" Unchecked="OnEncryptHeadersChanged" />
+
+                                <NumberBox x:Name="RecoveryRecordBox" Minimum="0" Maximum="100" SmallChange="1"
+                                           SpinButtonPlacementMode="Compact" Margin="0,6,0,0"
+                                           ValueChanged="OnRecoveryRecordChanged" />
+                                <TextBlock x:Name="RecoveryRecordValue" Style="{StaticResource MutedCaption}" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- PAR2 redundancy, the same choices as Create. -->
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel Spacing="10">
+                                <TextBlock x:Name="Par2Header" Style="{StaticResource GroupHeader}" Margin="0" />
+                                <RadioButton x:Name="RecByPercent" GroupName="precovery" Checked="OnRecoveryModeChanged" />
+                                <Grid Margin="28,0,0,0" ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <NumberBox x:Name="PercentBox" Grid.Column="0" Minimum="0" Maximum="1000"
+                                               SmallChange="1" SpinButtonPlacementMode="Compact"
+                                               ValueChanged="OnPercentChanged" />
+                                    <StackPanel x:Name="PercentChips" Grid.Column="1"
+                                                Orientation="Horizontal" Spacing="4" />
+                                </Grid>
+                                <RadioButton x:Name="RecByCount" GroupName="precovery" Checked="OnRecoveryModeChanged" />
+                                <NumberBox x:Name="RecCountBox" Margin="28,0,0,0" Minimum="0" Maximum="65535"
+                                           SpinButtonPlacementMode="Compact" ValueChanged="OnRecoveryCountChanged" />
+                                <RadioButton x:Name="RecBySize" GroupName="precovery" Checked="OnRecoveryModeChanged" />
+                                <TextBox x:Name="RecSizeBox" Margin="28,0,0,0" LostFocus="OnRecoverySizeCommitted" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </Grid>
+
+                <!-- The route, the job, and the files it wrote. -->
+                <Border Grid.Row="2" Style="{StaticResource Card}">
+                    <StackPanel Spacing="10">
+                        <Grid>
+                            <TextBlock x:Name="RouteHeader" Style="{StaticResource GroupHeader}" Margin="0" />
+                            <controls:StatusPill x:Name="Status" HorizontalAlignment="Right" />
+                        </Grid>
+                        <TextBlock x:Name="RouteText" TextWrapping="Wrap" />
+                        <ProgressBar x:Name="Bar" Height="8" Maximum="1" CornerRadius="4" Visibility="Collapsed" />
+                        <TextBlock x:Name="PhaseText" Style="{StaticResource MutedCaption}" />
+                        <InfoBar x:Name="Problem" IsOpen="False" IsClosable="False" Severity="Warning" />
+                        <TextBlock x:Name="CancelNote" Style="{StaticResource MutedCaption}" TextWrapping="Wrap" />
+
+                        <StackPanel x:Name="OutputPanel" Spacing="6" Visibility="Collapsed">
+                            <Grid>
+                                <TextBlock x:Name="OutputHeader" Style="{StaticResource ColumnHeader}" />
+                                <TextBlock x:Name="OutputTotal" Style="{StaticResource FigureText}"
+                                           HorizontalAlignment="Right" />
+                            </Grid>
+                            <ScrollViewer MaxHeight="220" VerticalScrollBarVisibility="Auto">
+                                <ItemsRepeater x:Name="OutputList">
+                                    <ItemsRepeater.ItemTemplate>
+                                        <DataTemplate x:DataType="vm:PostingFileRow">
+                                            <Grid ColumnSpacing="12" Padding="4,3,4,3">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="110" />
+                                                    <ColumnDefinition Width="110" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0" Text="{x:Bind Name}"
+                                                           TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Grid.Column="1" Style="{StaticResource MutedCaption}"
+                                                           Text="{x:Bind HalfText}" />
+                                                <TextBlock Grid.Column="2" Style="{StaticResource FigureText}"
+                                                           Text="{x:Bind SizeText}" HorizontalAlignment="Right" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsRepeater.ItemTemplate>
+                                </ItemsRepeater>
+                            </ScrollViewer>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Action bar. -->
+                <Grid Grid.Row="3" ColumnSpacing="8" Margin="0,0,0,8">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <CheckBox x:Name="OverwriteBox" Checked="OnOverwriteChanged" Unchecked="OnOverwriteChanged" />
+                        <Button x:Name="LogButton" Click="OnToggleLog" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                        <Button x:Name="CancelButton" Click="OnCancel" Visibility="Collapsed" />
+                        <Button x:Name="QueueButton" Click="OnAddToQueue" />
+                        <Button x:Name="CreateButton" Style="{StaticResource AccentButtonStyle}" Click="OnCreate" />
+                    </StackPanel>
+                </Grid>
+            </Grid>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

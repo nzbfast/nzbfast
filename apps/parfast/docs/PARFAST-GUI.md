@@ -1,19 +1,16 @@
 # parfast for desktop
 
 parfast protects files with PAR2 recovery data, checks files you already
-have, and repairs files that have gone missing or been damaged. This is
-the guide to the desktop app. The command line tool of the same name is
-covered by `parfast --help`, and the two share one engine, so anything
-the app can do the command line can do as well.
+have, and repairs files that have gone missing or been damaged. It also
+makes a posting set: RAR volumes with a PAR2 set over them, in one job.
+This is the guide to the desktop app. The command line tool of the same
+name is covered by `parfast --help`, and the two share one PAR2 engine,
+so anything the app does with PAR2 the command line can do as well. The
+RAR volumes are written by rarkit, the library inside rarfast
+(https://github.com/nzbfast/rarfast).
 
-> **The app is a BETA.** It builds, it passes a measured acceptance
-> corpus on both platforms, it has been driven by hand, and the
-> screenshots below are of the real thing - but it is younger than the
-> engine inside it. Expect the odd rough edge. That engine is the one
-> the parfast command line tool ships, and that tool is a full release
-> as of 1.6.0; it is the app around it that is newer. Where the app and
-> this page disagree, the app is right and this page is behind: please
-> say so if you find a difference.
+Where the app and this page disagree, the app is right and this page is
+behind: please say so if you find a difference.
 
 ## What PAR2 is for, in one paragraph
 
@@ -25,9 +22,9 @@ create the set: a set made with ten percent recovery can rebuild about
 ten percent of the protected data. PAR2 cannot rebuild more than it was
 given, so the figure you choose at creation is the figure you live with.
 
-## The four modes
+## The five modes
 
-The window has one mode picker, always visible, with four entries.
+The window has one mode picker, always visible, with five entries.
 
 ### Verify and repair
 
@@ -118,6 +115,45 @@ which is what you want if the real job belongs in a script.
 
 Create starts the job. Add to queue puts it in line behind whatever else
 is running.
+
+### Posting set
+
+Pack files into a RAR 5 archive and write a PAR2 set over it, ready to
+post, in one job.
+
+On the left, the **sources**, the same as Create: add files, add a
+folder, or drag things in.
+
+On the right, the **archive**. **Output folder** and **Archive name**
+decide where it goes and what it is called: `name.rar`, or
+`name.part1.rar` onward when it is split, with `name.par2` and its
+recovery volumes beside it. **Volumes** is one archive, a volume size,
+or a number of volumes (a volume is at least 64 KiB). **Compression**
+runs from Store to Best; Store is the default, because video and
+archives barely compress and storing is the usual choice for a post.
+**Solid archive** compresses the files as one run, which is smaller for
+many small files and slower to extract one of them. A **password**
+encrypts the archive, and **Encrypt file names too** hides the names as
+well. **RAR recovery record** adds the archive's own recovery data, as a
+percentage of the archive; it is off by default, because the PAR2 set
+is the recovery a post usually carries.
+
+Below that, **PAR2 recovery** is the same percentage the Create mode
+offers, and **Replace an earlier set with the same name** removes every
+file of an earlier set first, so no stale volume is left beside the new
+ones.
+
+The **route** line says how the job will run. One stored archive (no
+split, no compression) is hashed into its PAR2 set as it is written, in
+one pass, and never read back. Anything else takes two passes, the
+archive first and then its PAR2 set: a PAR2 set over several volumes
+cannot be started until the last volume's size is known, and a
+compressed archive's size is known only once it is compressed. When the
+job finishes, a card at the top says which route it took and why, and
+lists every RAR and PAR2 file it wrote.
+
+A posting set that is stopped or fails removes every file it wrote, so
+there is nothing to clean up.
 
 ### Checksums
 

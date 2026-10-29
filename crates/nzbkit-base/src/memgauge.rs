@@ -267,6 +267,9 @@ impl MemGauges {
 /// One gauge's current charge - the single-sub read for a hot path
 /// that wants one number, not the whole snapshot.
 pub fn cur(s: Sub) -> u64 {
+    // Without the `rar` feature the engine is not linked and this tier
+    // reads 0, like any gauge nothing charges.
+    #[cfg(feature = "rar")]
     if let Sub::RarsWork = s {
         return rars::memtrack::current();
     }
@@ -283,9 +286,12 @@ pub fn snapshot() -> MemGauges {
     // crate), so its tier is PULLED here rather than charged through
     // `add`/`sub`. Reading it into the same arrays first means one
     // snapshot describes one instant for every tier, including this one.
-    let i = Sub::RarsWork as usize;
-    CUR[i].store(rars::memtrack::current(), Relaxed);
-    PEAK[i].fetch_max(rars::memtrack::peak(), Relaxed);
+    #[cfg(feature = "rar")]
+    {
+        let i = Sub::RarsWork as usize;
+        CUR[i].store(rars::memtrack::current(), Relaxed);
+        PEAK[i].fetch_max(rars::memtrack::peak(), Relaxed);
+    }
     let mut g = MemGauges::default();
     for i in 0..SUB_COUNT {
         g.cur[i] = CUR[i].load(Relaxed);

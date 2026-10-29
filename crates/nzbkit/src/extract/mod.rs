@@ -1591,6 +1591,7 @@ impl Extractor {
     /// (`ensure_plain_writer`), and a depth-0 extractor's plain writers
     /// are downloaded volumes that never hash - so driving the ledger
     /// seam through one would test a shape `chase_teardown` never makes.
+    #[cfg(feature = "rar")]
     #[cfg(test)]
     pub(super) fn new_nested_for_tests(out_dir: &Path, n_slots: usize) -> Extractor {
         sweep_holds_scratch(out_dir);
@@ -3325,7 +3326,7 @@ mod sfx_tests;
 #[cfg(test)]
 mod zip_split_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rar"))]
 mod trim_spill_tests;
 
 #[cfg(test)]

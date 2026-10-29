@@ -28,16 +28,19 @@
 # step of it. That argument is not weaker for a third product, it is
 # stronger: this one is a pair of NATIVE GUI APPS with a code-signing
 # story, a bundle layout, a .NET publish and an installer between them,
-# and it shares with the CLI only the version string and the `-beta`
-# convention. Same reasoning, same answer, own file.
+# and it shares with the CLI only the version string. Same reasoning,
+# same answer, own file.
 #
-# `-beta` IN EVERY FILENAME, for build-parfast-bundles.sh's reason and
-# one more of its own. That script's header: the release notes are one
-# page a downloader may never read, and an asset list is what they
-# actually click, so the filename has to carry the warning. The extra
-# reason here is that these apps are PRIVATE (plan decision D2), so
-# these bundles go to the maintainer and to testers by hand, one at a
-# time, with no release page around them to carry a caveat at all.
+# A PRE-RELEASE STAGE IN THE FILENAME, WHEN THERE IS ONE, for
+# build-parfast-bundles.sh's reason: the release notes are one page a
+# downloader may never read, and an asset list is what they actually
+# click, so the filename has to carry the warning. Through the betas it
+# did, from $GUI_STAGE below. The app left beta at 1.9.0 (plan
+# research/PLAN-PARFAST-APP-RARFAST-AND-1.0-2026-10-25.md, Part A), so a
+# stable build's filenames carry its bare x.y.z and nothing else. The
+# apps have been public since 12 Sep 2026 and built and attested by
+# provenance-parfast.yml since 25 Oct 2026; this script is the local
+# build that workflow drives.
 #
 # THE WINDOWS HOST IS NOT NAMED IN THIS FILE, and that is a decision
 # rather than an omission. Two reasons, and the second is the one that
@@ -130,18 +133,12 @@ CLI_VERSION=$(grep -m1 '^version' crates/parfast/Cargo.toml | sed 's/.*"\(.*\)".
 # alpha.1 .. alpha.4, then beta.1 at 1.6.0 (17 Sep 2026). The count
 # RESTARTS at a stage change, as the CLI's own beta series restarted per
 # version: an alpha.4 followed by a beta.5 would claim four betas that
-# never existed. The day the app is no longer a beta, GUI_STAGE goes
-# empty and the `case` below is what stops the filename saying nothing.
-GUI_STAGE=beta.4
-VERSION="${CLI_VERSION%%-*}-$GUI_STAGE"
-
-# The stage in the filename, exactly once. $VERSION now always carries one,
-# so this never appends a second - it stays because the day the GUI reaches
-# a bare x.y.z with no stage at all, a bundle that says nothing is wrong.
-case $VERSION in
-    *beta*|*alpha*|*rc*) BETA_SUFFIX="" ;;
-    *)                   BETA_SUFFIX="-beta" ;;
-esac
+# never existed. GUI_STAGE went EMPTY at 1.9.0, when the app left beta:
+# the version is then the CLI's bare x.y.z, with no trailing dash. A
+# future pre-release (an rc ahead of a release) sets it again, and the
+# same expression in provenance-parfast.yml's two app jobs follows it.
+GUI_STAGE=
+VERSION="${CLI_VERSION%%-*}${GUI_STAGE:+-$GUI_STAGE}"
 
 MAC_APP_DIR=apps/parfast/mac
 WIN_APP_DIR=apps/parfast/windows
@@ -281,14 +278,14 @@ build_mac() {
     work=$(mktemp -d); inner="$work/parfast-gui-$VERSION-macos"
     mkdir -p "$inner"
     cp -R "$app" "$inner/$APP_NAME"
-    cp LICENSE COPYRIGHT.md "$inner/"
+    cp LICENSE COPYRIGHT.md apps/parfast/THIRD-PARTY-NOTICES.txt "$inner/"
     write_readme "$inner"
-    zip="parfast-gui-$VERSION-macos-universal$BETA_SUFFIX.zip"
+    zip="parfast-gui-$VERSION-macos-universal.zip"
     ( cd "$work" && zip -q -r -X "$DIST/$zip" "$(basename "$inner")" )
     echo "  -> $DIST/$zip"
 
     # The DMG: app, an Applications symlink to drag it to, and the same
-    # two licence files. Deliberately NOT the styled image
+    # licence files. Deliberately NOT the styled image
     # packaging/mac/make-dmg.sh builds for nzbfast - that one renders a
     # committed SVG background and writes a Finder layout with ds-store
     # and mac-alias, a pip install this script must not require of a
@@ -298,8 +295,9 @@ build_mac() {
     cp -R "$app" "$stage/$APP_NAME"
     ln -s /Applications "$stage/Applications"
     cp LICENSE "$stage/LICENSE"
+    cp apps/parfast/THIRD-PARTY-NOTICES.txt "$stage/"
     write_readme "$stage"
-    dmg="parfast-gui-$VERSION-macos-universal$BETA_SUFFIX.dmg"
+    dmg="parfast-gui-$VERSION-macos-universal.dmg"
     rm -f "$DIST/$dmg"
     hdiutil create -srcfolder "$stage" -volname "parfast $VERSION" \
         -fs HFS+ -format UDZO -imagekey zlib-level=9 -ov "$DIST/$dmg" >/dev/null
@@ -511,7 +509,7 @@ build_win() {
     # apps/parfast/windows/packaging/out. Both are under the app tree, not
     # the sync root, which is what the paths below say.
     local winout="$rroot\\$WIN_APP_DIR_WIN\\out\\publish"
-    local zip="parfast-gui-$VERSION-windows-x64$BETA_SUFFIX.zip"
+    local zip="parfast-gui-$VERSION-windows-x64.zip"
     rsh "Compress-Archive -Force -Path '$winout\\*' -DestinationPath '$rroot\\$zip'"
     # FORWARD SLASHES FOR scp's REMOTE HALF, backslashes everywhere else.
     # scp runs its remote end through the box's default shell, which here is
@@ -550,18 +548,14 @@ write_readme() {
 parfast $VERSION - make, check and repair PAR2 recovery sets
 
 parfast protects a set of files with PAR2 recovery data, checks a set
-you already have, and repairs one that has lost or damaged files. It is
-the desktop app over the same engine as the parfast command line tool.
+you already have, and repairs one that has lost or damaged files. It
+also makes a posting set: RAR 5 volumes, optionally with a password,
+and a PAR2 set over them, in one job. It is the desktop app over the
+same PAR2 engine as the parfast command line tool, and the RAR volumes
+are written by rarkit, the library inside rarfast.
 
-THIS IS A BETA. The app has been built, tested against a measured
-acceptance corpus and screenshotted, and driven by hand, but it is
-younger than the engine inside it. Expect the odd rough edge, and
-please say how you got on - hearing that it worked is as useful as
+Please say how you got on - hearing that it worked is as useful as
 hearing that it did not.
-
-The ENGINE underneath is the same one the parfast command line tool
-ships, and that one is a full release; it is the app around it that is
-newer.
 
 Repairing rewrites files in place, which is what repairing is. Keep a
 copy of anything you cannot lose, the same as with any other such tool.
@@ -570,14 +564,15 @@ This build is not signed yet, so the first launch needs a little help:
 on macOS, right click the app and choose Open, then Open again. On
 Windows, choose More info and then Run anyway.
 
-Licence: GPL-3.0-or-later. See LICENSE beside this file.
+Licence: GPL-3.0-or-later. See LICENSE beside this file, and
+THIRD-PARTY-NOTICES.txt for the RAR library's own licence.
 README
 }
 
 # ---------------------------------------------------------------------
 
 if [ "$CHECK_ONLY" = 1 ]; then
-    echo "parfast GUI bundles $VERSION$BETA_SUFFIX"
+    echo "parfast GUI bundles $VERSION"
     echo
     check_mac
     echo

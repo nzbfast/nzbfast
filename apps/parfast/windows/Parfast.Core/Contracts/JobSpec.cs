@@ -21,6 +21,7 @@ public sealed record JobSpec
     [JsonPropertyName("repair")] public RepairSpec? Repair { get; init; }
     [JsonPropertyName("checksum_create")] public ChecksumCreateSpec? ChecksumCreate { get; init; }
     [JsonPropertyName("checksum_verify")] public ChecksumVerifySpec? ChecksumVerify { get; init; }
+    [JsonPropertyName("posting_set")] public PostingSetSpec? PostingSet { get; init; }
 
     public static JobSpec ForCreate(CreateSpec s) => new() { Kind = JobKind.Create, Create = s };
     public static JobSpec ForVerify(VerifySpec s) => new() { Kind = JobKind.Verify, Verify = s };
@@ -29,6 +30,8 @@ public sealed record JobSpec
         new() { Kind = JobKind.ChecksumCreate, ChecksumCreate = s };
     public static JobSpec ForChecksumVerify(ChecksumVerifySpec s) =>
         new() { Kind = JobKind.ChecksumVerify, ChecksumVerify = s };
+    public static JobSpec ForPostingSet(PostingSetSpec s) =>
+        new() { Kind = JobKind.PostingSet, PostingSet = s };
 
     /// <summary>The set or output name a progress title uses, without a path.</summary>
     public string DisplayName()
@@ -40,6 +43,8 @@ public sealed record JobSpec
             JobKind.Repair => Repair?.Par2,
             JobKind.ChecksumCreate => ChecksumCreate?.Output,
             JobKind.ChecksumVerify => ChecksumVerify?.File,
+            // A posting set's name is already one path component, not a path.
+            JobKind.PostingSet => PostingSet?.Name,
             _ => null,
         };
         return string.IsNullOrEmpty(path) ? string.Empty : PathUtil.FileName(path);
@@ -180,4 +185,101 @@ public sealed record ChecksumCreateSpec
 public sealed record ChecksumVerifySpec
 {
     [JsonPropertyName("file")] public string File { get; init; } = string.Empty;
+}
+
+/// <summary>rar.volumes of a posting set: one archive, a volume FILE size, or about N volumes.</summary>
+public sealed record RarVolumes
+{
+    [JsonPropertyName("split")] public RarSplit Split { get; init; }
+    [JsonPropertyName("size")] public long? Size { get; init; }
+    [JsonPropertyName("count")] public int? Count { get; init; }
+
+    /// <summary>rar's -v floor. The core refuses a smaller volume with bad_spec.</summary>
+    public const long MinSize = 64 * 1024;
+
+    public static RarVolumes None() => new() { Split = RarSplit.None };
+    public static RarVolumes BySize(long bytes) => new() { Split = RarSplit.Size, Size = bytes };
+    public static RarVolumes ByCount(int count) => new() { Split = RarSplit.Count, Count = count };
+}
+
+/// <summary>The RAR half of a posting set (crates/parfast-ffi/API.md, posting_set).</summary>
+/// <remarks>
+/// THE PASSWORD IS A STRING ON THE WAY IN AND NEVER COMES BACK: the core
+/// answers <c>{"withheld":true}</c> in every snapshot and in the persisted
+/// queue. This record is the one place in the app that holds it, so its
+/// generated ToString is overridden below. A record prints every property by
+/// default, and a spec that reaches a log line, an exception message or a
+/// debugger tooltip would otherwise carry the password with it.
+/// </remarks>
+public sealed record RarSpec
+{
+    [JsonPropertyName("volumes")] public RarVolumes Volumes { get; init; } = RarVolumes.None();
+
+    /// <summary>0 stores (the posting default); 1 to 5 compress, fastest to smallest.</summary>
+    [JsonPropertyName("compression")] public int Compression { get; init; }
+
+    [JsonPropertyName("solid")] public bool Solid { get; init; }
+
+    /// <summary>Null for no password. Never logged, never echoed back by the core.</summary>
+    [JsonPropertyName("password")] public string? Password { get; init; }
+
+    /// <summary>rar's -hp. Only read when there is a password; on by default.</summary>
+    [JsonPropertyName("encrypt_headers")] public bool EncryptHeaders { get; init; } = true;
+
+    [JsonPropertyName("recovery_percent")] public int RecoveryPercent { get; init; }
+
+    /// <summary>
+    /// Whether this archive can take the one-pass route: ONE archive, stored, no
+    /// recovery record (API.md's route table). A prediction for the form only;
+    /// result.posting.route is what actually happened.
+    /// </summary>
+    [JsonIgnore]
+    public bool OnePassShaped =>
+        Volumes.Split == RarSplit.None && Compression == 0 && RecoveryPercent == 0;
+
+    private bool PrintMembers(System.Text.StringBuilder sb)
+    {
+        sb.Append($"Volumes = {Volumes}, Compression = {Compression}, Solid = {Solid}, ");
+        sb.Append($"Password = {(Password is null ? "none" : "withheld")}, ");
+        sb.Append($"EncryptHeaders = {EncryptHeaders}, RecoveryPercent = {RecoveryPercent}");
+        return true;
+    }
+}
+
+/// <summary>
+/// The PAR2 half of a posting set. Every member left null takes the Settings
+/// pane's Create default in the core, exactly as a fresh Create pane would.
+/// </summary>
+public sealed record PostingPar2Spec
+{
+    [JsonPropertyName("block")] public BlockSpec? Block { get; init; }
+    [JsonPropertyName("recovery")] public RecoverySpec? Recovery { get; init; }
+    [JsonPropertyName("volumes")] public VolumeSpec? Volumes { get; init; }
+    [JsonPropertyName("first_recovery_block")] public int? FirstRecoveryBlock { get; init; }
+    [JsonPropertyName("comment")] public string? Comment { get; init; }
+    [JsonPropertyName("std_naming")] public bool? StdNaming { get; init; }
+}
+
+/// <summary>
+/// A posting set: files in, a RAR 5 archive or volume set and a PAR2 set over it
+/// out, as one job. Only <see cref="OutputDir"/> and <see cref="Name"/> are
+/// required by the core.
+/// </summary>
+public sealed record PostingSetSpec
+{
+    [JsonPropertyName("sources")] public IReadOnlyList<SourceSpec> Sources { get; init; } = [];
+    [JsonPropertyName("path_mode")] public PathMode PathMode { get; init; } = PathMode.Basename;
+    [JsonPropertyName("base_path")] public string? BasePath { get; init; }
+    [JsonPropertyName("output_dir")] public string OutputDir { get; init; } = string.Empty;
+
+    /// <summary>One path component: the set is &lt;name&gt;.rar or &lt;name&gt;.partN.rar plus &lt;name&gt;.par2.</summary>
+    [JsonPropertyName("name")] public string Name { get; init; } = string.Empty;
+
+    [JsonPropertyName("rar")] public RarSpec Rar { get; init; } = new();
+    [JsonPropertyName("par2")] public PostingPar2Spec? Par2 { get; init; }
+
+    /// <summary>True removes every file of an earlier set under the same name first.</summary>
+    [JsonPropertyName("overwrite")] public bool Overwrite { get; init; }
+
+    [JsonPropertyName("perf")] public PerfSpec? Perf { get; init; }
 }

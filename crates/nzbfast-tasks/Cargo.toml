@@ -27,7 +27,7 @@ workspace = true
 # the api layer, so this crate has no build.rs and no `dashboard`
 # feature.
 [dependencies]
-nzbkit = { path = "../nzbkit", default-features = false }
+nzbkit = { path = "../nzbkit", default-features = false, features = ["rar"] }
 nzbfast-core = { path = "../nzbfast-core" }
 nzbfast-unpack = { path = "../nzbfast-unpack" }
 nzbfast-meta = { path = "../nzbfast-meta" }

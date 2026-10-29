@@ -333,13 +333,35 @@ fn record_sevenz_unlocked(dir: &Path, parts: &[PathBuf]) {
 /// An `Ok` also prunes `UNLOCKED_7Z_MARKER` down to the spent 7z sets
 /// still on disk, and removes it when there are none
 /// (`retire_sevenz_marker`).
+///
+/// An `Ok` also means NOTHING LOCKED IS LEFT. A container this password
+/// opened can publish another locked one (an encrypted 7z inside an
+/// encrypted 7z), and nothing behind this call looked: the API cleared
+/// `password_required` over an inner archive still packed, and the
+/// completed tail read `still_locked` as false and ran the ordinary
+/// cleanup, which deletes every `.7z` a cleanup list names - the inner
+/// archive was the only copy of the payload (Codex sweep F5, 27 Oct
+/// 2026). So the non-RAR arm spends the same password on each layer it
+/// exposes, and whatever arm answered, a directory [`encrypted_archive`]
+/// still finds a lock in answers `Err(None)`: the sweeps go on to their
+/// next candidate (the opened layers are stamped or delivered, so only
+/// the inner one is tried), and with none left the job parks locked with
+/// its archives spared.
 pub fn unlock(dir: &Path, password: &str) -> std::result::Result<(), Option<String>> {
-    let answer = unlock_all(dir, password);
+    let mut answer = unlock_all(dir, password);
+    if answer.is_ok() && encrypted_archive(dir).is_some() {
+        answer = Err(None);
+    }
     if answer.is_ok() {
         retire_sevenz_marker(dir);
     }
     answer
 }
+
+/// How many layers of locked 7z or zip one password is spent through.
+/// Real releases nest one or two deep; the bound is for a crafted set
+/// that unpacks into itself.
+const NESTED_UNLOCK_DEPTH: usize = 8;
 
 /// Drop every [`UNLOCKED_7Z_MARKER`] line whose part is gone or is no
 /// longer the file it stamped, and the marker once nothing is left.
@@ -395,7 +417,21 @@ fn unlock_all(dir: &Path, password: &str) -> std::result::Result<(), Option<Stri
     if encrypted_rar(dir).is_none()
         && let Some(unlocked) = others.spend(dir, password)
     {
-        return unlocked.then_some(()).ok_or(None);
+        if !unlocked {
+            return Err(None);
+        }
+        // Each layer the spend exposed gets the same password, the way
+        // a release locked twice under one password expects. A layer it
+        // does not open stops the walk; `unlock` then reports the lock
+        // that is left.
+        for _ in 0..NESTED_UNLOCK_DEPTH {
+            if encrypted_rar(dir).is_some()
+                || LockedNonRar::find(dir).spend(dir, password) != Some(true)
+            {
+                break;
+            }
+        }
+        return Ok(());
     }
     // Native path first: encrypted STORE sets (the obfuscated-release
     // norm) re-extract and AES-decrypt without unrar, deleting their

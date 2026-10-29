@@ -301,6 +301,7 @@ public sealed class ProgressViewModel : Observable
         JobKind.Create => Strings.JobKindCreate,
         JobKind.Verify => Strings.JobKindVerify,
         JobKind.Repair => Strings.JobKindRepair,
+        JobKind.PostingSet => Strings.JobKindPostingSet,
         _ => Strings.JobKindChecksums,
     };
 

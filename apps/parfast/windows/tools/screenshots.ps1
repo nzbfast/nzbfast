@@ -116,7 +116,9 @@ $shots = @(
     @{ key = "";             screen = "checksums"; name = "13-checksums" },
     @{ key = "slowcreate";   screen = "queue";     name = "14-queue" },
     @{ key = "";             screen = "settings";  name = "15-settings" },
-    @{ key = "damaged";      screen = "log";       name = "16-log-drawer" }
+    @{ key = "damaged";      screen = "log";       name = "16-log-drawer" },
+    @{ key = "";             screen = "posting";   name = "17-posting-set" },
+    @{ key = "";             screen = "posting-done"; name = "18-posting-set-done" }
 )
 
 # A shot that is one flat colour is the failure this script had, so it is

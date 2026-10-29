@@ -23,7 +23,7 @@ workspace = true
 # `devweb.rs`, which SERVE_LAYERS puts in the api layer, so they stayed in
 # the bin with the `dashboard` feature and this crate has no build.rs.
 [dependencies]
-nzbkit = { path = "../nzbkit", default-features = false }
+nzbkit = { path = "../nzbkit", default-features = false, features = ["rar"] }
 nzbfast-core = { path = "../nzbfast-core" }
 nzbfast-unpack = { path = "../nzbfast-unpack" }
 nzbfast-meta = { path = "../nzbfast-meta" }

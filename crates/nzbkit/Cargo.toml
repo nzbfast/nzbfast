@@ -103,7 +103,8 @@ chacha20poly1305 = "0.11"
 num-bigint = "0.5"
 # Nested one-pass phase 2: the chasing decompressor drives the vendored
 # RAR engine's streaming reader over still-arriving inner volumes.
-rars = { path = "../../vendor/rars" }
+# OPTIONAL behind the `rar` feature below (see nzbkit-base's).
+rars = { path = "../../vendor/rars", optional = true }
 # Nested one-pass phase 3: inner 7z archives parse + decode in-stream
 # through a blocking Read+Seek view of the arriving bytes.
 # `deflate` is free: flate2 is already a direct dependency above, so the
@@ -177,7 +178,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [features]
-default = ["indexer"]
+default = ["indexer", "rar"]
 # The indexer stack: newsgroup index, Spotnet source, availability
 # oracle - sqlite's only consumers. Slim builds (phones, small boxes)
 # disable it and the whole bundled-sqlite C build drops out of the
@@ -192,6 +193,12 @@ ktls = ["nzbkit-base/ktls"]
 # The validated digest cache, a pure forward: the module and its BLAKE3
 # dependency are base's. parfast turns it on; the daemon never does.
 digest-cache = ["nzbkit-base/digest-cache"]
+# The vendored RAR engine: the RAR chasing decompressor in `extract`
+# (and base's RAR policies, forwarded). Off, a compressed RAR demotes
+# to materialized volumes exactly as `NZBFAST_NO_NESTED_CHASE=1` makes
+# it. ON by default and named by every daemon-side crate; parfast and
+# the parfast app leave it off (nzbkit-base's `rar` says why).
+rar = ["nzbkit-base/rar", "dep:rars"]
 # Build-gate for the [[test]] targets at the bottom of this file
 # (TODO 116b): the two elapsed-time suites and, since 1 Sep 2026, the
 # three hand-run allocator rigs. EMPTY on purpose - it compiles no code
@@ -288,6 +295,16 @@ required-features = ["indexer"]
 [[example]]
 name = "index_open_bench"
 required-features = ["indexer"]
+
+# The two RAR recovery probes drive `vendor/rars` directly, so they are
+# `rar`-gated targets (the slim `--all-targets` line builds without it).
+[[example]]
+name = "prodrar"
+required-features = ["rar"]
+
+[[example]]
+name = "prodrev"
+required-features = ["rar"]
 
 # conn_tuner races a throttled mock over a connection ladder - an
 # elapsed-time suite whose home is nightly.yml, not the push path. The

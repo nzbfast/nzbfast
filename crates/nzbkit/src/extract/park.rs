@@ -158,6 +158,10 @@ impl Extractor {
     /// The chain's root, weakly: where the park lives. A root answers
     /// with itself; a child walks its parent links up, which is the
     /// direction the promote walk already takes.
+    #[cfg_attr(
+        not(feature = "rar"),
+        expect(dead_code, reason = "read only by the RAR chase worker")
+    )]
     pub(super) fn park_root(self: &Arc<Self>) -> Weak<Extractor> {
         let mut cur = self.clone();
         while cur.depth != 0 {

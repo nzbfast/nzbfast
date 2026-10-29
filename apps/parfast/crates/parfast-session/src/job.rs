@@ -297,6 +297,166 @@ pub struct ChecksumVerifySpec {
     pub file: PathBuf,
 }
 
+/// How a posting set's RAR is split. `none` is ONE archive, which is
+/// also the only shape whose PAR2 set can be built in the same pass as
+/// the archive (see [`crate::runner`]'s posting module for why).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "split", rename_all = "snake_case")]
+pub enum RarVolumes {
+    /// One `.rar`.
+    #[default]
+    None,
+    /// Volumes of this many bytes, each FILE no larger than `size`
+    /// (rar's `-v<size>`); the last is whatever is left.
+    Size { size: u64 },
+    /// About this many volumes: the payload divided by `count`, rounded
+    /// up to the next 4 KiB. Headers are part of each volume, so the
+    /// count written can differ from the count asked by one; the result
+    /// lists what was written.
+    Count { count: u32 },
+}
+
+/// A RAR password as it crosses the boundary: a string on the way in,
+/// and NEVER on the way out. Serialized as `{"withheld":true}` so the
+/// persisted queue (`queue.json`) and every snapshot carry no secret; a
+/// spec that comes back from disk with the marker is refused at run time
+/// (`password_required`) rather than run without encryption.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum RarPassword {
+    Given(String),
+    Withheld { withheld: bool },
+}
+
+impl RarPassword {
+    /// The password, if this side of the boundary still has it.
+    pub fn given(&self) -> Option<&str> {
+        match self {
+            RarPassword::Given(p) => Some(p),
+            RarPassword::Withheld { .. } => None,
+        }
+    }
+}
+
+impl Serialize for RarPassword {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut m = s.serialize_map(Some(1))?;
+        m.serialize_entry("withheld", &true)?;
+        m.end()
+    }
+}
+
+impl std::fmt::Debug for RarPassword {
+    /// Says which side of the boundary this is, never the bytes.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RarPassword::Given(_) => "RarPassword::Given(..)",
+            RarPassword::Withheld { .. } => "RarPassword::Withheld",
+        })
+    }
+}
+
+/// The RAR half of a posting set. RAR 5 only (decided 25 Oct 2026).
+/// Every default is the posting default: stored, not solid, no
+/// password, no recovery record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RarOptions {
+    #[serde(default)]
+    pub volumes: RarVolumes,
+    /// 0 is store (no compression, the posting default), 1 to 5 the
+    /// engine's levels from fastest to smallest.
+    #[serde(default)]
+    pub compression: u8,
+    /// One compression history across members. Meaningless when
+    /// stored.
+    #[serde(default)]
+    pub solid: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<RarPassword>,
+    /// Encrypt the headers too, so listing the archive needs the
+    /// password (rar's `-hp`). Only read when there is a password, and
+    /// ON by default there: a posting set's file names are the part a
+    /// password is usually protecting.
+    #[serde(default = "yes")]
+    pub encrypt_headers: bool,
+    /// An inline recovery record, as a percentage of each volume
+    /// (rar's `-rr<n>%`). 0 is none, the posting default: the PAR2 set
+    /// is the recovery a posting carries.
+    #[serde(default)]
+    pub recovery_percent: u32,
+}
+
+/// By hand rather than derived, so a spec that leaves out the whole
+/// `rar` object gets the same `encrypt_headers` as one that leaves out
+/// only that field: a derived default would say `false` here while the
+/// field's serde default says `true`.
+impl Default for RarOptions {
+    fn default() -> RarOptions {
+        RarOptions {
+            volumes: RarVolumes::None,
+            compression: 0,
+            solid: false,
+            password: None,
+            encrypt_headers: true,
+            recovery_percent: 0,
+        }
+    }
+}
+
+/// The PAR2 half of a posting set. Every field left out takes the
+/// Settings pane's Create defaults, which is "the app's current
+/// redundancy defaults" the posting set promises.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PostingPar2 {
+    #[serde(default)]
+    pub block: Option<BlockSpec>,
+    #[serde(default)]
+    pub recovery: Option<RecoverySpec>,
+    #[serde(default)]
+    pub volumes: Option<VolumeSpec>,
+    #[serde(default)]
+    pub first_recovery_block: u64,
+    #[serde(default)]
+    pub comment: String,
+    #[serde(default)]
+    pub std_naming: Option<bool>,
+}
+
+/// `{"kind":"posting_set","posting_set":{...}}`: files in, a RAR 5
+/// archive (or volumes) and a PAR2 set over it out, in one job. An
+/// ADDITION to section 4.5, for plan B1
+/// (research/PLAN-PARFAST-APP-RARFAST-AND-1.0-2026-10-25.md).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PostingSetSpec {
+    #[serde(default)]
+    pub sources: Vec<Source>,
+    /// How a source's path becomes the name stored IN THE ARCHIVE:
+    /// the basename, or the path relative to `base_path`.
+    #[serde(default)]
+    pub path_mode: PathMode,
+    #[serde(default)]
+    pub base_path: Option<PathBuf>,
+    /// Where the archive and the PAR2 set are written.
+    pub output_dir: PathBuf,
+    /// The set's name: `<name>.rar` or `<name>.partN.rar`, and
+    /// `<name>.par2` beside it. One path component.
+    pub name: String,
+    #[serde(default)]
+    pub rar: RarOptions,
+    #[serde(default)]
+    pub par2: PostingPar2,
+    /// May the job replace a set already under `name` in `output_dir`?
+    /// `false` refuses (`exists`) if ANY file of either half is there.
+    /// `true` removes every file of an earlier set under the name
+    /// before writing, because a stale `.part12.rar` left beside a new
+    /// eleven-volume set would be posted with it.
+    #[serde(default)]
+    pub overwrite: bool,
+    #[serde(default)]
+    pub perf: Perf,
+}
+
 /// What a host submits. The tag is `kind` and the payload rides in a
 /// field named after it, exactly as section 4.5 spells it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -307,6 +467,7 @@ pub enum JobSpec {
     Repair { repair: RepairSpec },
     ChecksumCreate { checksum_create: ChecksumCreateSpec },
     ChecksumVerify { checksum_verify: ChecksumVerifySpec },
+    PostingSet { posting_set: PostingSetSpec },
 }
 
 impl JobSpec {
@@ -318,6 +479,7 @@ impl JobSpec {
             JobSpec::Repair { .. } => JobKind::Repair,
             JobSpec::ChecksumCreate { .. } => JobKind::ChecksumCreate,
             JobSpec::ChecksumVerify { .. } => JobKind::ChecksumVerify,
+            JobSpec::PostingSet { .. } => JobKind::PostingSet,
         }
     }
 
@@ -330,6 +492,9 @@ impl JobSpec {
             JobSpec::Repair { repair } => &repair.par2,
             JobSpec::ChecksumCreate { checksum_create } => &checksum_create.output,
             JobSpec::ChecksumVerify { checksum_verify } => &checksum_verify.file,
+            // A posting set is about the set it names, which is not a
+            // path of its own.
+            JobSpec::PostingSet { posting_set } => return posting_set.name.clone(),
         };
         p.file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -337,7 +502,8 @@ impl JobSpec {
     }
 }
 
-/// The five job kinds.
+/// The job kinds: section 4.5's five, and `posting_set` (an ADDITION,
+/// 25 Oct 2026).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
@@ -346,6 +512,7 @@ pub enum JobKind {
     Repair,
     ChecksumCreate,
     ChecksumVerify,
+    PostingSet,
 }
 
 /// Where a job is in its life.
@@ -449,6 +616,31 @@ pub struct JobResult {
     /// state of a mac volume's root.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// What a posting set wrote and how. An ADDITION (25 Oct 2026);
+    /// absent for every other kind. `written` above still lists every
+    /// file, both halves together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posting: Option<PostingResult>,
+}
+
+/// A posting set's own account of itself, inside [`JobResult`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PostingResult {
+    /// `one_pass`: the PAR2 set was built from the archive's bytes as
+    /// they were written. `two_pass`: the archive was written, then the
+    /// PAR2 set created from the finished files.
+    pub route: String,
+    /// Why a set took `two_pass`, in a sentence a host can show. Empty
+    /// for `one_pass`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub route_reason: String,
+    /// The RAR files, in volume order.
+    pub rar: Vec<WrittenFile>,
+    /// The PAR2 files, index first.
+    pub par2: Vec<WrittenFile>,
+    /// Source bytes taken in, and members.
+    pub source_bytes: u64,
+    pub source_files: u64,
 }
 
 /// Why a job failed, in the two fields section 4.5 names.

@@ -400,7 +400,7 @@ impl Daemon {
                     continue;
                 }
             };
-            match self.enqueue_as(
+            match self.enqueue_as_with(
                 Some(&row.nzo_id),
                 &bytes,
                 &row.name,
@@ -414,20 +414,17 @@ impl Daemon {
                 // here - an empty `hold_for` would be a spare held
                 // against a job with no id.
                 Some(row.held_for.as_str()).filter(|h| !h.is_empty()),
+                // THROUGH the add, never after it: the row is published
+                // and the add saves it before returning, and a pause
+                // written once it had returned left that whole window
+                // with a runnable copy of a row the user had paused
+                // (27 Oct 2026 sweep F2).
+                AddExtras {
+                    paused: row.paused,
+                    ..AddExtras::default()
+                },
             ) {
                 Ok(e) => {
-                    if row.paused {
-                        // After the add, not through it: `enqueue_as`
-                        // has no paused parameter and inventing one for
-                        // this would move sixteen call sites.
-                        for j in self.queue.lock_ok().iter() {
-                            let mut g = j.lock_ok();
-                            if g.nzo_id == e.nzo_id {
-                                g.paused = true;
-                                break;
-                            }
-                        }
-                    }
                     self.reuse_cancelled_dir(&e.nzo_id, &row.out_dir);
                     info!(target: "queue", "undo: {} ({}) is back in the queue", e.nzo_id, row.name);
                     out.restored.push(e.nzo_id);

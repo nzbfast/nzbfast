@@ -22,6 +22,9 @@ public enum JobKind
     Repair,
     ChecksumCreate,
     ChecksumVerify,
+
+    /// <summary>RAR 5 archive or volumes plus a PAR2 set over them, as one job (plan B1, 25 Oct 2026).</summary>
+    PostingSet,
 }
 
 [JsonConverter(typeof(SnakeCaseEnumConverter<JobState>))]
@@ -132,4 +135,26 @@ public enum PostQueueAction
     Notify,
     Sleep,
     Shutdown,
+}
+
+/// <summary>How a posting set's archive is split: rar.volumes.split.</summary>
+[JsonConverter(typeof(SnakeCaseEnumConverter<RarSplit>))]
+public enum RarSplit
+{
+    None = 0,
+    Size,
+    Count,
+}
+
+/// <summary>
+/// Which route a posting set took, from result.posting.route. One pass hashes
+/// the archive into its PAR2 set as it is written; two passes write the archive
+/// and then create the PAR2 set over the finished files.
+/// </summary>
+[JsonConverter(typeof(SnakeCaseEnumConverter<PostingRoute>))]
+public enum PostingRoute
+{
+    Unknown = 0,
+    OnePass,
+    TwoPass,
 }

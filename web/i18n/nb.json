@@ -2776,6 +2776,7 @@
  "toast.promote.unknown": "Denne filen er ikke lenger en del av denne nedlastingen.",
  "toast.pvfail": "Kunne ikke åpne filen her.",
  "toast.pwfail": "Kunne ikke sette passord.",
+ "toast.pwlayer": "Passordet åpnet arkivet, men det inneholdt et annet låst arkiv - skriv inn passordet til det.",
  "toast.pwsaved": "Passord lagret.",
  "toast.pwunlocked": "Pakket ut - passordet virket.",
  "toast.pwwrong": "Passordet åpnet ikke arkivet - de nedlastede filene er urørt, prøv et annet.",

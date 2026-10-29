@@ -508,6 +508,94 @@ async fn a_recategorize_inside_the_pick_to_start_gap_cannot_start_the_job() {
     let _log = rig.d.stop();
 }
 
+/// 27 Oct 2026 sweep F1: a per-job pause accepted inside the
+/// pick-to-start gap holds.
+///
+/// `pick_job` skips a paused row, but it drops the job lock before it
+/// returns, and the per-job pause handler only winds down a row that is
+/// already Downloading - this one is still Queued. So the pause answered
+/// `status:true`, the queue showed Paused, and when the gap closed the
+/// flip ran anyway and the server saw BODY commands for a job the user
+/// had paused. The flipping critical section now re-reads `paused` and
+/// `state` for an ordinary pick, the way it always did for insurance.
+///
+/// The control at the end matters as much as the hold: a row the re-read
+/// refused for good would pass every assertion above it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_pause_inside_the_pick_to_start_gap_holds() {
+    const PICK_MS: u64 = 3_000;
+    let rig = relocate_rig(
+        "pickpause",
+        &[("NZBFAST_TEST_STALL_PICK_MS", &PICK_MS.to_string())],
+    )
+    .await;
+    let port = rig.d.port;
+    let log = rig.d.log_path();
+    let xml = rig.xml.clone();
+    let served = rig._srv.served.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let id = pause_and_add(port, &xml, "----pickpause");
+
+        http(port, "/api?mode=resume&apikey=sekrit&output=json", None);
+        let picked = wait_for_marker(&log, "test stall in the pick-to-start gap");
+
+        let r = http(
+            port,
+            &format!("/api?mode=queue&name=pause&value={id}&apikey=sekrit&output=json"),
+            None,
+        );
+        assert!(
+            r.contains("\"status\":true"),
+            "the per-job pause was refused: {r}"
+        );
+        assert!(
+            picked.elapsed() < std::time::Duration::from_millis(PICK_MS),
+            "the pause landed after the pick stall lifted, so it was not inside the gap: this \
+             run proved nothing"
+        );
+
+        // Hold across the moment the stall lifts and well past it.
+        let deadline = picked + std::time::Duration::from_millis(PICK_MS + 4_000);
+        while std::time::Instant::now() < deadline {
+            let q = http(port, "/api?mode=queue&apikey=sekrit&output=json", None);
+            assert_eq!(
+                queue_slot(&q, &id)["status"],
+                "Paused",
+                "a pause accepted in the pick-to-start gap did not hold: {q}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert_eq!(
+            served.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the server was asked for articles of a job the user had paused"
+        );
+
+        // Control: the refusal is not permanent. Resuming the row lets
+        // the next pick start it (the stall fires once more on the way).
+        http(
+            port,
+            &format!("/api?mode=queue&name=resume&value={id}&apikey=sekrit&output=json"),
+            None,
+        );
+        let mut started = false;
+        for _ in 0..60 {
+            let q = http(port, "/api?mode=queue&apikey=sekrit&output=json", None);
+            if queue_slot(&q, &id)["status"] == "Downloading" {
+                started = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(started, "the resumed job never started");
+    })
+    .await
+    .unwrap();
+
+    let _log = rig.d.stop();
+}
+
 /// Review finding F-06, the rename front: the label and the directory of one
 /// rename can never be seen disagreeing.
 ///

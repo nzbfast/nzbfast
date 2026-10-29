@@ -61,6 +61,11 @@ pub(super) struct FrontierBuffer {
     /// through this when it parks at a hole in a volume marked `lost` -
     /// the one wedge (§156.1) neither a verdict nor an arrival can
     /// announce, because a fully-arrived set sees no more of either.
+    // Read only by the RAR engine's blocking reader.
+    #[cfg_attr(
+        not(feature = "rar"),
+        expect(dead_code, reason = "read only by the RAR chase worker")
+    )]
     pager: Option<Weak<Extractor>>,
 }
 
@@ -1805,6 +1810,7 @@ impl Drop for FrontierBuffer {
 
 /// The RAR engine reads chased volumes through this: block at the
 /// frontier, `Ok(0)` only at the declared end, error after abort.
+#[cfg(feature = "rar")]
 impl rars::BlockingRangeSource for FrontierBuffer {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() {
@@ -1979,10 +1985,12 @@ pub(super) mod page_cold_hook {
 
     /// Run `f` once per scratch write `page_cold` makes on this thread
     /// until [`clear`].
+    #[cfg(feature = "rar")]
     pub(crate) fn set(f: impl FnMut(&FrontierBuffer) + 'static) {
         HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
     }
 
+    #[cfg(feature = "rar")]
     pub(crate) fn clear() {
         HOOK.with(|h| *h.borrow_mut() = None);
     }
@@ -2033,6 +2041,7 @@ mod tests {
     /// to succeed on the same buffer once the pause lifts, so a pause
     /// that silently never engaged would fail the first half rather
     /// than pass both.
+    #[cfg(feature = "rar")]
     #[test]
     fn a_paused_buffer_serves_neither_reader_until_it_resumes() {
         let buf = Arc::new(FrontierBuffer::new(1000));
@@ -2075,6 +2084,7 @@ mod tests {
     /// parked after ten seconds. The blocking readers wait on a condvar
     /// with no timeout, so a regression that blocks at a covered offset
     /// would otherwise wedge the whole suite instead of reporting.
+    #[cfg(feature = "rar")]
     fn within<T: Send + 'static>(
         buf: &Arc<FrontierBuffer>,
         what: &str,
@@ -2114,6 +2124,7 @@ mod tests {
     ///
     /// All four resolvers are exercised deliberately: fixing `frontier()`
     /// alone leaves the reads parked at the very edge it now reports.
+    #[cfg(feature = "rar")]
     #[test]
     fn overlapping_parks_resolve_to_the_furthest_reaching_span() {
         use rars::BlockingRangeSource as _;
@@ -2215,6 +2226,7 @@ mod tests {
     /// was holding, on a range `intervals` reported covered. Pinned
     /// separately from the paging test above so the RAR chase shape
     /// cannot regress behind a fix scoped to the scratch path.
+    #[cfg(feature = "rar")]
     #[test]
     fn plain_overlapping_parks_serve_the_covering_span() {
         use rars::BlockingRangeSource as _;
@@ -2615,11 +2627,13 @@ mod tests {
 
     /// Bytes that differ from `pat` at every offset: a same-length
     /// repair of the range, as a PAR2 rewrite delivers it.
+    #[cfg(feature = "rar")]
     fn repaired(off: usize, n: usize) -> Vec<u8> {
         pat(off, n).into_iter().map(|b| !b).collect()
     }
 
     /// Reads `[off, off + n)` back through the forward-only reader.
+    #[cfg(feature = "rar")]
     fn read_back(buf: &FrontierBuffer, off: usize, n: usize) -> Vec<u8> {
         use rars::BlockingRangeSource as _;
         let mut out = vec![0u8; n];
@@ -2635,6 +2649,7 @@ mod tests {
     /// Arms the `page_cold` seam to deliver `bytes` at `at` on the FIRST
     /// scratch write only, so the rewrite lands in the window between
     /// the off-lock append and the commit.
+    #[cfg(feature = "rar")]
     fn rewrite_in_page_window(at: u64, bytes: Vec<u8>) {
         let mut once = Some(bytes);
         page_cold_hook::set(move |buf| {
@@ -2650,6 +2665,7 @@ mod tests {
     /// leaves `conflict` clear by design (unserved), and the length
     /// still matches, so the old guard committed: the corrected RAM
     /// copy was dropped and the stale clone published in its place.
+    #[cfg(feature = "rar")]
     #[test]
     fn page_cold_pending_commit_refuses_a_clone_an_unserved_repair_outdated() {
         let dir = tmpdir("frontier-page-pending-repair");
@@ -2688,6 +2704,7 @@ mod tests {
     /// of unserved tail bytes moves neither `frontier_ram()` nor
     /// `data`'s length, so `tail_stood_still` passed and the commit
     /// truncated the corrected bytes out of RAM.
+    #[cfg(feature = "rar")]
     #[test]
     fn page_cold_tail_commit_refuses_a_clone_an_unserved_repair_outdated() {
         let dir = tmpdir("frontier-page-tail-repair");
@@ -2714,6 +2731,7 @@ mod tests {
     /// at all (`rewrite_seq` stands), so each arm's first commit takes
     /// and nothing is written twice - the tripwire must not turn every
     /// routing duplicate into a refused page.
+    #[cfg(feature = "rar")]
     #[test]
     fn page_cold_commits_through_an_agreeing_duplicate_in_the_window() {
         let dir = tmpdir("frontier-page-dup");
@@ -2742,6 +2760,7 @@ mod tests {
     /// READ sets the sticky conflict, so the commit walks away and the
     /// buffer is left exactly as the demote expects it - corrected
     /// bytes in RAM, nothing paged, the refused region released.
+    #[cfg(feature = "rar")]
     #[test]
     fn page_cold_tail_leaves_a_below_served_rewrite_in_ram() {
         let dir = tmpdir("frontier-page-served");
@@ -2760,6 +2779,7 @@ mod tests {
         assert_eq!(sc.st().live, 0, "the refused region must be released");
     }
 
+    #[cfg(feature = "rar")]
     #[test]
     fn stall_paging_serves_paged_spans_and_pops_them_back() {
         use rars::BlockingRangeSource as _;
@@ -3022,6 +3042,7 @@ mod tests {
     /// The per-range serve is CLAMPED at the next unvouched block, and
     /// a read that starts in one parks - a per-range answer is not a
     /// licence to serve the whole file.
+    #[cfg(feature = "rar")]
     #[test]
     fn a_per_range_serve_stops_at_the_next_unvouched_block() {
         let gate = crate::live::VerifyGate::new(1);
@@ -3124,6 +3145,7 @@ mod tests {
     /// FrontierBuffer contract: out-of-order spans park and fold in as
     /// gaps fill; a blocked reader wakes on exactly the fill; peek and
     /// intervals see parked bytes the blocking reader must not.
+    #[cfg(feature = "rar")]
     #[test]
     fn frontier_buffer_holes_and_blocking() {
         use rars::BlockingRangeSource as _;
@@ -3182,6 +3204,7 @@ mod tests {
     /// has READ the range (and only then - row 27), and the retained
     /// record ends up holding the CORRECTED bytes, because a demotion
     /// materializes the volume straight out of it.
+    #[cfg(feature = "rar")]
     #[test]
     fn frontier_buffer_flags_a_differing_rewrite() {
         use rars::BlockingRangeSource as _;
@@ -3257,6 +3280,7 @@ mod tests {
     /// corrected bytes; the same rewrite one byte into the read range
     /// is a conflict. `served` only moves on the decode's readers:
     /// peeks, pops and materialization leave it alone.
+    #[cfg(feature = "rar")]
     #[test]
     fn differing_rewrite_conflicts_only_below_the_served_line() {
         use rars::BlockingRangeSource as _;
@@ -3335,6 +3359,7 @@ mod tests {
     /// inside the window by construction. `u64::MAX` keeps the caller
     /// off the `offset >= lim` arm, so the read falls straight through
     /// to the checks the window is about.
+    #[cfg(feature = "rar")]
     struct WindowGate {
         /// Set after construction - the buffer holds the gate, so the
         /// gate can only hold it back weakly.
@@ -3343,6 +3368,7 @@ mod tests {
         fired: std::sync::atomic::AtomicBool,
     }
 
+    #[cfg(feature = "rar")]
     impl WindowGate {
         fn arm(act: fn(&FrontierBuffer)) -> Arc<WindowGate> {
             Arc::new(WindowGate {
@@ -3364,6 +3390,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "rar")]
     impl crate::live::ChaseGate for WindowGate {
         fn watermark(&self) -> u64 {
             if !self.fired.swap(true, std::sync::atomic::Ordering::AcqRel)
@@ -3380,6 +3407,7 @@ mod tests {
     /// What a reader driven into the gate window did. `Parked` is the
     /// lost wakeup itself; `Panicked` is the trim guard's version of it
     /// (an unchecked `offset - base` underflows).
+    #[cfg(feature = "rar")]
     #[derive(Debug)]
     enum WindowRead {
         Returned(io::Result<usize>),
@@ -3400,6 +3428,7 @@ mod tests {
     /// run leaves no thread behind: the abort or trim the window
     /// injected is already in place, so one notify sends the reader's
     /// next loop pass out through the checks at the top of the loop.
+    #[cfg(feature = "rar")]
     fn read_in_the_gate_window(
         total: u64,
         prime: fn(&FrontierBuffer),
@@ -3463,6 +3492,7 @@ mod tests {
     /// forward arm fails as `Parked` at the full timeout with a name on
     /// it, rather than wedging the suite the way the defect wedges the
     /// engine.
+    #[cfg(feature = "rar")]
     #[test]
     fn a_finish_seal_ends_both_blocking_reads() {
         for forward in [false, true] {
@@ -3557,6 +3587,7 @@ mod tests {
     /// these four cases fails - the abort cases by parking, the trim
     /// cases by underflowing `offset - base` in the serve that should
     /// never have been reached.
+    #[cfg(feature = "rar")]
     #[test]
     fn an_abort_or_trim_inside_the_gate_window_ends_both_blocking_reads() {
         for forward in [false, true] {

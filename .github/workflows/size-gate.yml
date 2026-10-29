@@ -791,6 +791,9 @@ on:
       - 'Cargo.toml'
       - 'crates/**/Cargo.toml'
       - 'vendor/**/Cargo.toml'
+      - 'tools/parfast-no-rars-gate.py'
+      # `parfast-no-rars-gate` reads the same manifests (the three
+      # Cargo.toml lines above) and `apps/**` below - no further trigger.
       - 'tools/detached-lock-gate.py'
       # For `detached-lock-gate`, whose subject is a tree the root
       # workspace does not name: `apps/parfast/` is a DETACHED cargo
@@ -2551,6 +2554,31 @@ jobs:
         # step did.
         if: ${{ !cancelled() }}
         run: tools/detached-lock-gate.py --selftest && tools/detached-lock-gate.py
+      # ---- parfast-no-rars-gate -------------------------------------
+      # parfast (the PAR2 CLI) and the parfast app's core have no RAR
+      # feature, yet until 25 Oct 2026 both linked the vendored RAR engine
+      # `vendor/rars` through nzbkit - an engine a 14 Sep 2026 provenance
+      # audit found not clean. nzbkit and nzbkit-base now own their `rars`
+      # dependency behind a `rar` feature (on for every daemon-side crate)
+      # and parfast takes nzbkit with it off. The way back in is one word
+      # in a manifest - `default-features = false` dropped, `"rar"` added,
+      # a new feature whose closure reaches `dep:rars` - and every one of
+      # those builds, tests and lints green, because parfast never calls
+      # the engine. So this resolves parfast's and the app members' NORMAL
+      # dependency closures over the local manifests with cargo's feature
+      # rules, and scans apps/parfast/Cargo.lock for the package at all.
+      # It refuses unless the DAEMON still reaches the engine through the
+      # same resolver, so a resolver gone blind cannot read as clean.
+      # Build-free (tomllib), ~0.05 s; `--cargo` cross-checks it against
+      # the two `cargo tree -i rars` lines locally. Plan:
+      # research/PLAN-PARFAST-APP-RARFAST-AND-1.0-2026-10-25.md, M2.
+      - name: parfast no-rars gate
+        # Run even when an earlier gate in this group failed - a
+        # persistent red in one gate must not mask the verdicts of
+        # the gates grouped after it. The job still reds if ANY
+        # step did.
+        if: ${{ !cancelled() }}
+        run: tools/parfast-no-rars-gate.py --selftest && tools/parfast-no-rars-gate.py
       # ---- shot-version-gate ---------------------------------------
       # Every dashboard capture in website/assets/ rendered the running
       # version in its header pill, and nothing held those images to the

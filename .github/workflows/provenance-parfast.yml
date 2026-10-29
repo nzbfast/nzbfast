@@ -3,8 +3,8 @@
 #
 # provenance-release.yml does this for nzbfast and gates itself to `v*`
 # tags on purpose. parfast ships two more releases from this repository -
-# the CLI (`parfast-vX.Y.Z`) and the desktop app (`parfast-gui-vX.Y.Z-
-# <stage>`) - and until 24 Oct 2026 both were built on the release Mac and
+# the CLI (`parfast-vX.Y.Z`) and the desktop app (`parfast-gui-vX.Y.Z[-
+# <stage>]`) - and until 24 Oct 2026 both were built on the release Mac and
 # a Windows build box and uploaded by hand, so nothing on their release
 # pages could be traced to a build. This is the same answer for them, in a
 # file of its own: the two products share none of nzbfast's release
@@ -59,7 +59,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing parfast release tag (parfast-vX.Y.Z or parfast-gui-vX.Y.Z-<stage>) to build, attest and attach to"
+        description: "Existing parfast release tag (parfast-vX.Y.Z or parfast-gui-vX.Y.Z[-<stage>]) to build, attest and attach to"
         required: true
 
 env:
@@ -299,10 +299,12 @@ jobs:
           [ "$want" = "$(git rev-parse HEAD)" ] || { echo "checkout is not tag $TAG" >&2; exit 1; }
           [ "$want" = "$GITHUB_SHA" ] || {
             echo "this run's ref is $GITHUB_SHA but tag $TAG is $want; re-dispatch with --ref $TAG" >&2; exit 1; }
-          # The app's version is the bundler's: the CLI's x.y.z plus GUI_STAGE.
+          # The app's version is the bundler's: the CLI's x.y.z plus GUI_STAGE,
+          # and a bare x.y.z with no trailing dash once GUI_STAGE is empty
+          # (the app left beta at 1.9.0).
           cli=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/parfast/Cargo.toml | head -1)
           stage=$(sed -n 's/^GUI_STAGE=//p' apps/parfast/packaging/build-parfast-gui-bundles.sh | head -1)
-          VER="${cli%%-*}-$stage"
+          VER="${cli%%-*}${stage:+-$stage}"
           [ "$TAG" = "parfast-gui-v$VER" ] || { echo "tag $TAG is not the app's version $VER" >&2; exit 1; }
           echo "VER=$VER" >> "$GITHUB_ENV"
           echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
@@ -420,7 +422,7 @@ jobs:
             echo "this run's ref is $GITHUB_SHA but tag $TAG is $want; re-dispatch with --ref $TAG" >&2; exit 1; }
           cli=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/parfast/Cargo.toml | head -1)
           stage=$(sed -n 's/^GUI_STAGE=//p' apps/parfast/packaging/build-parfast-gui-bundles.sh | head -1)
-          VER="${cli%%-*}-$stage"
+          VER="${cli%%-*}${stage:+-$stage}"
           [ "$TAG" = "parfast-gui-v$VER" ] || { echo "tag $TAG is not the app's version $VER" >&2; exit 1; }
           # The runner image ships python under one name or the other
           # depending on the release; take whichever is there.

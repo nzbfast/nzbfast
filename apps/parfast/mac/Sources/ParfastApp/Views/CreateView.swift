@@ -213,7 +213,12 @@ struct CreateView: View {
                 }
             case .count:
                 Row(label: S.createRecoveryCount) {
-                    NumberField(value: $model.recoveryCount, range: 0...65535)
+                    // 32768 is the create's own ceiling
+                    // (par2gen::check_recovery_count); the preview says why
+                    // when a percentage or size resolves past it. DUPLICATED
+                    // in the Windows app's CreateViewModel.RecoveryCount and
+                    // CreatePage.xaml RecCountBox.
+                    NumberField(value: $model.recoveryCount, range: 0...32768)
                 }
             case .size:
                 Row(label: S.createRecoverySize) {

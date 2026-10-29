@@ -36,6 +36,16 @@ parfast = { path = "../../../../crates/parfast" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.150"
 
+# THE RAR WRITER for the posting-set job (`posting.rs`), and the one RAR
+# engine this app links: the clean-room rarkit library that rarfast
+# ships, by pinned tag of its PUBLIC repository (decided 25 Oct 2026,
+# research/PLAN-PARFAST-APP-RARFAST-AND-1.0-2026-10-25.md section 6).
+# The library only - never the `rarfast` command line - and with its
+# default `parallel` feature, so the encoder runs on rayon's pool. The
+# app consumes the public API alone (SPEC-API-rarkit.md); nothing here
+# reads the engine's internals.
+rarkit = { git = "https://github.com/nzbfast/rarfast", tag = "rarfast-v0.9.0" }
+
 # The two checksum formats the engine does not already carry. CRC32 is
 # `nzbkit::yenc_simd::crc32` and MD5 is `nzbkit::md5fast`, both of them
 # the same implementations the download path uses; SHA-1 and SHA-256 are

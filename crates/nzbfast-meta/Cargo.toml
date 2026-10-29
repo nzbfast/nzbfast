@@ -16,7 +16,7 @@ workspace = true
 # into unpack, engine or bin is a refusal there); the absence of a
 # dependency line here is what holds it from the cargo side.
 [dependencies]
-nzbkit = { path = "../nzbkit", default-features = false }
+nzbkit = { path = "../nzbkit", default-features = false, features = ["rar"] }
 nzbfast-core = { path = "../nzbfast-core" }
 anyhow = "1"
 # `scan`'s ingest loop and `oracle_backtest`'s replay both run on the

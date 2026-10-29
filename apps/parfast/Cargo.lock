@@ -161,7 +161,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
- "zeroize",
 ]
 
 [[package]]
@@ -271,7 +270,6 @@ dependencies = [
  "block-buffer 0.12.1",
  "crypto-common 0.2.2",
  "inout",
- "zeroize",
 ]
 
 [[package]]
@@ -427,6 +425,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
+name = "either"
+version = "1.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -556,7 +560,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27f864f10dfb56725ce5ce5472bc52252c8f93a4ab86327122cebf62c5f59a17"
 dependencies = [
  "typenum",
- "zeroize",
 ]
 
 [[package]]
@@ -772,7 +775,6 @@ dependencies = [
  "num-bigint",
  "nzbkit-base",
  "quick-xml",
- "rars",
  "regex-lite",
  "rsa",
  "rustls",
@@ -812,7 +814,6 @@ dependencies = [
  "memchr",
  "num-bigint",
  "quick-xml",
- "rars",
  "rayon-core",
  "regex-lite",
  "rsa",
@@ -865,6 +866,7 @@ dependencies = [
  "md-5",
  "nzbkit",
  "parfast",
+ "rarkit",
  "serde",
  "serde_json",
  "sha1",
@@ -1029,21 +1031,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
-name = "rars"
-version = "0.4.6+nzbfast"
+name = "rarkit"
+version = "0.9.0"
+source = "git+https://github.com/nzbfast/rarfast?tag=rarfast-v0.9.0#32c2a5585f685506728a4b5847788c0e5aa5c661"
 dependencies = [
  "aes",
  "aho-corasick",
  "blake2s_simd",
- "cbc",
  "crc32fast",
  "getrandom 0.4.3",
  "hmac",
  "libc",
  "memchr",
+ "rayon",
  "sha1",
  "sha2",
  "zeroize",
+]
+
+[[package]]
+name = "rayon"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
+dependencies = [
+ "either",
+ "rayon-core",
 ]
 
 [[package]]

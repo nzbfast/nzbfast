@@ -479,9 +479,10 @@ pub mod linux {
         "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt",
     ];
 
-    /// The `bwrap` arguments for `policy`, up to and including the `--`
-    /// that ends them. The program and its own arguments follow.
-    pub fn bwrap_args(policy: &Policy) -> Vec<OsString> {
+    /// The `bwrap` arguments for running `program` under `policy`, up to
+    /// and including the `--` that ends them. The program and its own
+    /// arguments follow.
+    pub fn bwrap_args(program: &Path, policy: &Policy) -> Vec<OsString> {
         let mut a: Vec<OsString> = Vec::new();
         if policy.tie_lifetime {
             a.push("--die-with-parent".into());
@@ -533,6 +534,27 @@ pub mod linux {
             // carries the system temp directory.
             a.push("--tmpfs".into());
             a.push("/tmp".into());
+            // The tool's OWN executable, when nothing above or below
+            // shows it. Without this a strict child can only run a tool
+            // that lives under `SYSTEM_READ`, and a par2 or unrar the
+            // user installed under `$HOME` (or the CI runner's pinned
+            // reference at `~/par2ref/par2`) is an ENOENT from bwrap's
+            // own execvp - which reads as the tool having run and
+            // failed. That was latent until GitHub's `ubuntu-latest`
+            // became 26.04 in Oct 2026: 24.04 refused bwrap at the probe
+            // (an AppArmor userns rule; see `bwrap_refused`), so every
+            // spawn there fell down the ladder and nothing was confined.
+            //
+            // The FILE, not its directory, and that is deliberately
+            // narrower than the macOS profile's `program.parent()`: a
+            // tool at `~/par2` would otherwise hand the child the whole
+            // home directory, provider password included. After the
+            // tmpfs, so a tool under /tmp is not hidden by it.
+            if !shown(program, policy) {
+                a.push("--ro-bind-try".into());
+                a.push(program.into());
+                a.push(program.into());
+            }
         }
         for dir in &policy.writable {
             a.push("--bind-try".into());
@@ -541,6 +563,15 @@ pub mod linux {
         }
         a.push("--".into());
         a
+    }
+
+    /// Whether a bind [`bwrap_args`] already lays down shows `program`
+    /// to a strict child. /tmp is the one system path that does NOT,
+    /// being a fresh tmpfs.
+    fn shown(program: &Path, policy: &Policy) -> bool {
+        SYSTEM_READ.iter().any(|d| program.starts_with(d))
+            || policy.readable.iter().any(|d| program.starts_with(d))
+            || policy.writable.iter().any(|d| program.starts_with(d))
     }
 
     /// The `unshare` arguments for the network-only rung. A user
@@ -1272,7 +1303,7 @@ fn detect_uncached() -> Availability {
     let mut refused: Option<String> = None;
     if let Some(bwrap) = find_in_path("bwrap") {
         let mut c = std::process::Command::new(&bwrap);
-        c.args(linux::bwrap_args(&policy)).arg(&probe);
+        c.args(linux::bwrap_args(&probe, &policy)).arg(&probe);
         let (st, err) = probe_status_capturing(c, PROBE_SECS, true);
         if st.is_some_and(|st| st.success()) {
             return Availability {
@@ -1460,7 +1491,7 @@ pub fn command(program: &Path, policy: &Policy) -> std::process::Command {
         },
         (Mechanism::Bwrap, Some(bwrap)) => {
             let mut c = std::process::Command::new(bwrap);
-            c.args(linux::bwrap_args(policy)).arg(program);
+            c.args(linux::bwrap_args(program, policy)).arg(program);
             c
         }
         (Mechanism::UnshareNet, Some(unshare)) => {

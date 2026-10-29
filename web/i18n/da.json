@@ -2776,6 +2776,7 @@
  "toast.promote.unknown": "Denne fil er ikke længere en del af denne download.",
  "toast.pvfail": "Kunne ikke åbne filen her.",
  "toast.pwfail": "Kunne ikke sætte adgangskode.",
+ "toast.pwlayer": "Adgangskoden åbnede arkivet, men der var endnu et låst arkiv inde i det - angiv adgangskoden til det.",
  "toast.pwsaved": "Adgangskode gemt.",
  "toast.pwunlocked": "Udpakket - adgangskoden virkede.",
  "toast.pwwrong": "Adgangskoden åbnede ikke arkivet - de hentede filer er urørte, prøv en anden.",

@@ -208,6 +208,109 @@ by its name: an SFV saved as `.md5` is an SFV, because where the digest
 sits is what a checker has to know. A file that mixes the two shapes is
 refused at the line that mixes them.
 
+### posting_set
+
+**ADDED 25 Oct 2026** (plan B1,
+`research/PLAN-PARFAST-APP-RARFAST-AND-1.0-2026-10-25.md`): files in,
+a RAR 5 archive or volume set and a PAR2 set over it out, as ONE job.
+`pf_capabilities.posting_set` says it is there.
+
+```json
+{"kind":"posting_set","posting_set":{
+  "sources":[{"path":"/abs/a.mkv"},{"path":"/abs/dir","recursive":true}],
+  "path_mode":"basename|relative","base_path":"/abs",
+  "output_dir":"/abs/out","name":"Movie.2026",
+  "rar":{"volumes":{"split":"none"} | {"split":"size","size":104857600} |
+                    {"split":"count","count":20},
+         "compression":0,"solid":false,
+         "password":"secret","encrypt_headers":true,
+         "recovery_percent":0},
+  "par2":{"block":{"count":2000},"recovery":{"percent":5.0},
+          "volumes":{"scheme":"pow2"},"first_recovery_block":0,
+          "comment":"","std_naming":false},
+  "overwrite":false,
+  "perf":{"threads":null,"memory_mb":null,"low_priority":false}}}
+```
+
+Only `output_dir` and `name` are required. Every default is the posting
+default decided on 25 Oct 2026: one archive, STORED (`compression` 0;
+1 to 5 compress, fastest to smallest), not solid, no password, no RAR
+recovery record. Each `par2` field left out takes the Settings pane's
+Create default, exactly as a fresh Create pane would.
+
+- `name` is one path component. The set is `<name>.rar` (one archive)
+  or `<name>.part1.rar` ... `<name>.partN.rar` (volumes; the number is
+  as wide as N needs, so `part01` from ten volumes up), and
+  `<name>.par2` plus its volumes beside it, in `output_dir`.
+- `rar.volumes.size` is the volume FILE size, rar's `-v`; the least is
+  64 KiB. `count` divides an estimate of the archive, so the set comes
+  out at about that many volumes; `result.posting.rar` lists what was
+  written.
+- `rar.password` is a STRING on the way in and is never sent back: in
+  every snapshot and in the persisted queue it is `{"withheld":true}`.
+  A job that comes back from the persisted queue with that marker fails
+  with `password_required` instead of writing an unencrypted archive, so
+  a host re-asks for the password before re-running an interrupted
+  posting set. `encrypt_headers` (rar's `-hp`, ON by default) is only
+  read when there is a password.
+- `overwrite: false` refuses with `exists` when ANY file of either half
+  is already under `name`. `true` removes every file of the earlier set
+  first, because a stale `part12` beside a new eleven-volume set would
+  be posted with it.
+
+**The two routes.** `result.posting.route` says which a job took:
+
+| route | when | what it costs |
+|---|---|---|
+| `one_pass` | ONE archive, stored, no RAR recovery record | the archive's bytes are hashed and folded into the PAR2 set AS THEY ARE WRITTEN; the archive is never read back. The sources are read twice (a parallel CRC32 read first, which the RAR header needs before the data). |
+| `two_pass` | volumes, compression, or a RAR recovery record | the archive is written, then the PAR2 set made from the finished files, by the same create the Create pane runs. `result.posting.route_reason` says why, in a sentence a host can show. |
+
+Why volumes cannot be one pass, which a host may want to say beside the
+volume choice: PAR2 numbers its input blocks in the order of a per-file
+id that hashes each file's LENGTH, so no block of a volume set can be
+folded until the last volume is finished. One file has no order to wait
+for. Measured wall times are in
+`research/POSTING-SET-ONE-PASS-2026-10-25.md`; on a volume set the
+two-pass create is fold-bound and already fast, so nothing is being
+given up there.
+
+**Progress.** One bar for both halves:
+
+| phase | `phase_text` | route |
+|---|---|---|
+| `scanning` | `Reading the source files - N%` (the CRC read), 0 to 0.10 | one_pass |
+| `writing` | `Writing the archive and its recovery set - N%`, 0.10 to 0.95 | one_pass |
+| `writing` | `Writing the recovery volumes`, 0.95 to 1 | one_pass |
+| `writing` | `Writing the archive - N%`, 0 to 0.45 | two_pass |
+| `hashing` / `solving` / `writing` | the create's own sentences, 0.45 to 1 | two_pass |
+
+Cancel reaches every phase, and a cancelled or failed posting set
+removes EVERY file it wrote, archive and PAR2 alike, so a host has
+nothing to clean up and must not offer to. Pause parks the archive
+write between two pieces of output, the CRC read between two 64 MiB
+pieces, and the PAR2 half wherever a create parks.
+
+**Result.** `result.written` lists every file, RAR first then PAR2; the
+same files split by half are in `result.posting`:
+
+```json
+"result":{"written":[...],"exit_code":0,
+  "posting":{"route":"one_pass","route_reason":"",
+             "rar":[{"name":"Movie.2026.rar","size":4294967830}],
+             "par2":[{"name":"Movie.2026.par2","size":40380},
+                     {"name":"Movie.2026.vol00+01.par2","size":2187932}],
+             "source_bytes":4294967296,"source_files":4}}
+```
+
+New error codes: `bad_spec` (the name, folder, level or volume size),
+`password_required` (above), `rar_failed` (the archive write), plus
+the create's own codes from the PAR2 half and `exists` / `io` as the
+other kinds use them.
+
+A recorded run of each route, real snapshots from the core and nothing
+a mock invented, is in `apps/parfast/shared/contract/posting-set-snapshots.json`
+for the two app mocks to play back.
+
 ---
 
 ## JobSnapshot (`pf_job_snapshot`)
@@ -221,6 +324,8 @@ As section 4.5, with these additions:
 | `result.exit_code` | **ADDED** | The process exit code the equivalent `parfast` line would have returned. The CLI's dialect is the one thing a script user already knows, and a GUI that hides it makes its own behaviour unreproducible from a terminal. |
 | `result.warnings` | **ADDED** (17 Sep 2026) | What the job could not take in: a folder that could not be read, a link a walk did not follow, an item that is not an ordinary file. Omitted when empty. On the RESULT and not only on the preview because the walk happens AGAIN when the job runs, over a tree that may have changed - a folder that became unreadable since the pane was drawn would otherwise reach nobody. Never an error: show it beside Done. It matters most on a checksum CREATE, where what is not in the manifest is not checked and the verify that reads it back reports CLEAN over the gap. |
 | `command` | **ADDED** | The `parfast` command line equivalent to this job, for the Advanced pane's "show the equivalent command". Empty for the two checksum kinds, which have no CLI equivalent. |
+| `kind: "posting_set"` | **ADDED** enum value (25 Oct 2026) | The posting set, above. |
+| `result.posting` | **ADDED** (25 Oct 2026) | A posting set's route and its two halves' files - see `posting_set` above. Omitted for every other kind. |
 
 `eta_ms`, `rate_bytes_per_s`, `survey`, `result` and `error` are OMITTED
 when they have no value rather than sent as `null`. A host decodes them
@@ -345,7 +450,8 @@ A host HIDES any control whose capability is false.
  "unicode_policy":false,"comment":true,
  "data_skipping":true,"fast_solver":true,
  "pause":true,"pause_in_fold":true,"cancel_in_fold":true,
- "progress_in_fold":true,"low_priority":false}
+ "progress_in_fold":true,"low_priority":false,
+ "posting_set":true,"posting_one_pass":true}
 ```
 
 | Key | Status | What it means today |
@@ -361,6 +467,8 @@ A host HIDES any control whose capability is false.
 | `cancel_in_fold` | **ADDED** | **true since 12 Sep 2026.** See below. |
 | `progress_in_fold` | **ADDED** | **true since 12 Sep 2026.** See below. |
 | `low_priority` | plan 4.5 | **false.** The flag is carried in the snapshot for the host to act on (a host can lower its own process priority); nothing in the engine reads it. |
+| `posting_set` | **ADDED** (25 Oct 2026) | **true.** `{"kind":"posting_set"}` is accepted - see JobSpec above. Hide the posting-set pane while it is false. |
+| `posting_one_pass` | **ADDED** (25 Oct 2026) | **true.** A single stored archive's PAR2 set is built in the same pass as the archive. Informational: `result.posting.route` reports per job what actually happened, and nothing is gated on this key. |
 
 ### What cancel, pause and progress actually reach
 

@@ -2776,6 +2776,7 @@
  "toast.promote.unknown": "Dit bestand hoort niet meer bij deze download.",
  "toast.pvfail": "Kon dit bestand hier niet openen.",
  "toast.pwfail": "Wachtwoord instellen mislukt.",
+ "toast.pwlayer": "Het wachtwoord opende het archief, maar daarin zit nog een vergrendeld archief - voer het wachtwoord daarvoor in.",
  "toast.pwsaved": "Wachtwoord opgeslagen.",
  "toast.pwunlocked": "Uitgepakt - het wachtwoord werkte.",
  "toast.pwwrong": "Dit wachtwoord opende het archief niet - de gedownloade bestanden zijn onaangeroerd, probeer een ander.",

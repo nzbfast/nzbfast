@@ -293,7 +293,8 @@ pub unsafe extern "C" fn pf_queue_snapshot(s: *mut pf_session) -> *mut c_char {
 
 /// Cancel a job. A queued job stops at once; a running one at its next
 /// honouring point - see `parfast_session::runner` for what each kind
-/// can actually reach.
+/// can actually reach. A cancelled posting set removes every file it
+/// wrote, archive and PAR2 set alike.
 ///
 /// # Safety
 /// `s` is a live session.
@@ -310,7 +311,9 @@ pub unsafe extern "C" fn pf_job_cancel(s: *mut pf_session, id: i64) -> i32 {
 /// create runs on. `pf_capabilities.pause_in_fold` is what a host reads
 /// before offering the button on a repair, and it has been true since
 /// 12 Sep 2026 - with one stated exception, the solve, which is seconds
-/// on a structured repair. See that key's comment.
+/// on a structured repair. See that key's comment. A posting set parks
+/// while its archive is being written (between two pieces of output)
+/// and, in its PAR2 half, wherever a create parks.
 ///
 /// # Safety
 /// `s` is a live session.
@@ -645,6 +648,16 @@ pub fn capabilities_json() -> String {
         "cancel_in_fold": true,
         "progress_in_fold": true,
         "low_priority": false,
+        // THE POSTING SET (25 Oct 2026, plan B1): `{"kind":"posting_set"}`
+        // is accepted, writing a RAR 5 archive or volume set through the
+        // rarkit library and a PAR2 set over it. A host hides the
+        // posting-set pane while this is false.
+        "posting_set": true,
+        // Whether a single STORED archive is built in one pass - its PAR2
+        // set made from the archive's bytes as they are written - which
+        // is what `result.posting.route` reports per job. A pane may say
+        // so beside the volume choice; nothing is gated on it.
+        "posting_one_pass": true,
     });
     caps.to_string()
 }
@@ -911,6 +924,8 @@ mod tests {
             "cancel_in_fold",
             "progress_in_fold",
             "low_priority",
+            "posting_set",
+            "posting_one_pass",
         ] {
             assert!(v[key].is_boolean(), "{key} is {:?}", v[key]);
         }

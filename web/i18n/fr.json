@@ -2776,6 +2776,7 @@
  "toast.promote.unknown": "Ce fichier ne fait plus partie de ce téléchargement.",
  "toast.pvfail": "Impossible d'ouvrir ce fichier ici.",
  "toast.pwfail": "Impossible de définir le mot de passe.",
+ "toast.pwlayer": "Ce mot de passe a ouvert l'archive, mais elle en contient une autre verrouillée - saisissez le mot de passe de celle-ci.",
  "toast.pwsaved": "Mot de passe enregistré.",
  "toast.pwunlocked": "Décompressé - le mot de passe a fonctionné.",
  "toast.pwwrong": "Ce mot de passe n'a pas ouvert l'archive - les fichiers téléchargés sont intacts, essayez-en un autre.",

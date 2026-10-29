@@ -393,6 +393,82 @@ public sealed class FfiIntegrationTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// A posting set against the REAL core: one stored archive takes the one-pass
+    /// route, and every file result.posting names is on disk under the given name.
+    /// </summary>
+    /// <remarks>
+    /// The mock replays recorded frames; this is what keeps the contract types
+    /// honest against the engine that recorded them (posting_set, API.md).
+    /// </remarks>
+    [Fact]
+    public void APostingSetOfOneStoredArchiveTakesOnePass()
+    {
+        using var core = TryOpen(out var why);
+        if (Skip(core, why))
+        {
+            return;
+        }
+
+        Assert.True(core!.Capabilities.PostingSet, "this branch's core carries posting_set");
+        var src = WriteSource("film.bin", 768 * 1024, seed: 7);
+        var outDir = Path.Combine(_dir, "out");
+        Directory.CreateDirectory(outDir);
+
+        var job = Drain(core, core.Submit(JobSpec.ForPostingSet(new PostingSetSpec
+        {
+            Sources = [new SourceSpec { Path = src }],
+            OutputDir = outDir,
+            Name = "Film.2026",
+        })));
+
+        Assert.Equal(JobState.Done, job.State);
+        Assert.Equal(JobKind.PostingSet, job.Kind);
+        var posting = job.Result?.Posting;
+        Assert.NotNull(posting);
+        Assert.Equal(PostingRoute.OnePass, posting!.Route);
+        Assert.Equal(["Film.2026.rar"], posting.Rar.Select(f => f.Name));
+        Assert.Contains(posting.Par2, f => f.Name == "Film.2026.par2");
+        Assert.All(posting.Rar.Concat(posting.Par2), f =>
+            Assert.Equal(f.Size, new FileInfo(Path.Combine(outDir, f.Name)).Length));
+    }
+
+    /// <summary>
+    /// A posting set split into volumes takes two passes and says why, and a
+    /// password goes in and never comes back out of a snapshot.
+    /// </summary>
+    [Fact]
+    public void APostingSetOfVolumesTakesTwoPassesAndWithholdsThePassword()
+    {
+        using var core = TryOpen(out var why);
+        if (Skip(core, why))
+        {
+            return;
+        }
+
+        const string secret = "ffi-secret-not-for-snapshots";
+        var src = WriteSource("film.bin", 1024 * 1024, seed: 8);
+        var outDir = Path.Combine(_dir, "out2");
+        Directory.CreateDirectory(outDir);
+
+        var id = core!.Submit(JobSpec.ForPostingSet(new PostingSetSpec
+        {
+            Sources = [new SourceSpec { Path = src }],
+            OutputDir = outDir,
+            Name = "Film.2026",
+            Rar = new RarSpec { Volumes = RarVolumes.BySize(256 * 1024), Password = secret },
+        }));
+        var job = Drain(core, id);
+
+        Assert.Equal(JobState.Done, job.State);
+        Assert.Equal(PostingRoute.TwoPass, job.Result!.Posting!.Route);
+        Assert.False(string.IsNullOrEmpty(job.Result.Posting.RouteReason));
+        Assert.True(job.Result.Posting.Rar.Count > 1, "a 1 MiB source in 256 KiB volumes is several volumes");
+        Assert.DoesNotContain(secret, ParfastJson.Write(core.QueueSnapshot()));
+        Assert.DoesNotContain(secret, string.Join("\n", job.LogTail));
+        Assert.DoesNotContain(secret, job.Command);
+    }
+
     [Fact]
     public void EveryReturnedStringIsFreedRatherThanLeaked()
     {

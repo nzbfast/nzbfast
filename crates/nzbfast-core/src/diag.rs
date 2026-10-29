@@ -1812,8 +1812,16 @@ pub fn bomb_failure() -> String {
 pub fn unlock_answers(fail_message: &str) -> bool {
     fail_message == "password required to unpack"
         || fail_message == "password did not unlock the archive"
+        || fail_message == UNLOCK_LAYER_LEFT
         || nzbkit::disk::bomb_verdict(fail_message)
 }
+
+/// The manual unlock's answer when the typed password opened a container
+/// and exposed another locked one inside it (Codex sweep F5, 27 Oct
+/// 2026). Not "wrong password": that would send the user back to the one
+/// that just worked. The dashboard's `watchUnlock` matches it exactly.
+pub const UNLOCK_LAYER_LEFT: &str =
+    "the password opened the archive, but another archive inside it needs a password";
 
 /// The job failure a refused disk unpack composes: the ladder's OWN
 /// reason when it named one, else the caller's generic wording.

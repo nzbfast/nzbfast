@@ -15,6 +15,7 @@ use crate::rar::fixtures;
 /// is one step, and the number of steps a case needs is a property of
 /// the test rather than of the box. Sized at the same 30 s
 /// `feed_chase_volumes_paced` above already uses per volume.
+#[cfg(feature = "rar")]
 pub(super) const NO_PROGRESS: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Run `ex.finish()` under a hard wall-clock deadline (a BELT, not the
@@ -126,6 +127,7 @@ pub(super) fn feed(ex: &Extractor, slot: usize, name: &str, vol: &[u8], art: usi
 /// [`paced_deadline_expiries`] for a case that wants to assert on it. It
 /// is deliberately NOT a hard failure here: on a loaded runner that would
 /// turn contention into a red gate (see `.config/nextest.toml`).
+#[cfg(feature = "rar")]
 pub(super) fn feed_chase_volumes_paced(
     ex: &Extractor,
     names: &[String],
@@ -160,6 +162,7 @@ pub(super) fn feed_chase_volumes_paced(
     ex.chase_trimmed_bytes()
 }
 
+#[cfg(feature = "rar")]
 static PACED_EXPIRIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Process-wide count of `feed_chase_volumes_paced` deadline expiries so
@@ -167,6 +170,7 @@ static PACED_EXPIRIES: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomi
 /// paced; a case that needs the paced shape can skip or soften its
 /// assertion when the delta is non-zero, rather than failing on a loaded
 /// box for a reason its output does not show.
+#[cfg(feature = "rar")]
 pub(super) fn paced_deadline_expiries() -> usize {
     PACED_EXPIRIES.load(std::sync::atomic::Ordering::SeqCst)
 }
@@ -357,6 +361,7 @@ pub(super) fn rar5_compressed_volume(name: &str, data: &[u8]) -> Vec<u8> {
 /// and `postfast::container::rarfixtures` - deliberate duplicates, since
 /// a dev-dependency edge between these crates would move the
 /// workspace's feature resolution for the engine.
+#[cfg(feature = "rar")]
 pub(super) fn compressed_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
     use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
     let entries: Vec<CompressedEntry> = entries
@@ -377,6 +382,7 @@ pub(super) fn compressed_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
 
 /// A COMPRESSED RAR 5 multivolume set (one member split across
 /// volumes), capped payload bytes per volume.
+#[cfg(feature = "rar")]
 pub(super) fn compressed_volume_set(name: &str, data: &[u8], per_vol: usize) -> Vec<Vec<u8>> {
     compressed_volume_set_at_effort(name, data, per_vol, None)
 }
@@ -420,6 +426,7 @@ pub(super) fn compressed_volume_set(name: &str, data: &[u8], per_vol: usize) -> 
 /// `chase_volume_set` fixture's packed size, which the slightly worse
 /// ratio moves. A fixture whose size a test asserts on is not one to
 /// re-cut in passing.
+#[cfg(feature = "rar")]
 pub(super) fn compressed_volume_set_at_effort(
     name: &str,
     data: &[u8],
@@ -447,6 +454,7 @@ pub(super) fn compressed_volume_set_at_effort(
 
 /// One COMPRESSED RAR 4 (2.9/3.x) archive - a real LZ bitstream with
 /// valid CRCs.
+#[cfg(feature = "rar")]
 pub(super) fn rar4_compressed_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
     use rars::rar15_40::{FileEntry, WriterOptions, write_compressed_archive};
     use rars::{ArchiveVersion, FeatureSet};
@@ -471,6 +479,7 @@ pub(super) fn rar4_compressed_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
 
 /// A COMPRESSED RAR 4 multivolume set (one member split across
 /// volumes), capped packed bytes per volume.
+#[cfg(feature = "rar")]
 pub(super) fn rar4_compressed_volume_set(name: &str, data: &[u8], per_vol: usize) -> Vec<Vec<u8>> {
     use rars::rar15_40::{FileEntry, WriterOptions, write_compressed_volumes};
     use rars::{ArchiveVersion, FeatureSet};
@@ -493,6 +502,7 @@ pub(super) fn rar4_compressed_volume_set(name: &str, data: &[u8], per_vol: usize
 /// An ENCRYPTED, compressed RAR 4 multivolume set. `hp` encrypts the headers
 /// too (`-hp`; needs the Rar30 target - Rar29 refuses header encryption),
 /// otherwise the data alone (`-p`).
+#[cfg(feature = "rar")]
 pub(super) fn rar4_encrypted_volume_set(
     name: &str,
     data: &[u8],
@@ -532,6 +542,7 @@ pub(super) fn rar4_encrypted_volume_set(
 ///
 /// The writer refuses a single-volume encrypted set, so `per_vol` must
 /// be small enough against the payload to produce at least two.
+#[cfg(feature = "rar")]
 pub(super) fn encrypted_compressed_volume_set(
     name: &str,
     data: &[u8],
@@ -557,6 +568,7 @@ pub(super) fn encrypted_compressed_volume_set(
 
 /// An ENCRYPTED, compressed RAR 4 single archive (`-p` data
 /// encryption, headers in the clear).
+#[cfg(feature = "rar")]
 pub(super) fn rar4_encrypted_archive(name: &str, data: &[u8], password: &str) -> Vec<u8> {
     use rars::rar15_40::{FileEntry, WriterOptions, write_compressed_archive};
     use rars::{ArchiveVersion, FeatureSet};
@@ -600,6 +612,7 @@ pub(super) fn noisy(n: usize, seed: u64) -> Vec<u8> {
 /// Prove a fixture really is compressed: the store mapper must refuse
 /// it with NotStore (otherwise the test would silently exercise the
 /// phase-1 store path instead of the chase).
+#[cfg(feature = "rar")]
 pub(super) fn assert_not_store(vol: &[u8]) {
     let mut m = VolumeMapper::new(vol.len() as u64);
     m.feed(0, vol);
@@ -662,6 +675,7 @@ pub(super) fn split_7z(arch: &[u8], n: usize) -> Vec<Vec<u8>> {
 /// How far the nested child's RAR chase has READ its first chased
 /// volume, in child-volume offsets - the served line a rewrite is
 /// judged against. None while the child has no chase yet.
+#[cfg(feature = "rar")]
 pub(super) fn child_chase_served(ex: &Extractor) -> Option<u64> {
     let child = ex.inner.lock().unwrap().child.clone()?;
     let ci = child.inner.lock().unwrap();
@@ -673,6 +687,7 @@ pub(super) fn child_chase_served(ex: &Extractor) -> Option<u64> {
 /// Block until the child chase has read at least `min` bytes of its
 /// volume, or `timeout` passes (then panic - the test's premise is that
 /// the decode reaches that point on its own).
+#[cfg(feature = "rar")]
 pub(super) fn wait_child_chase_served(ex: &Extractor, min: u64, timeout: std::time::Duration) {
     let start = std::time::Instant::now();
     loop {

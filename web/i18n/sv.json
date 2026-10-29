@@ -2776,6 +2776,7 @@
  "toast.promote.unknown": "Den här filen ingår inte längre i den här nedladdningen.",
  "toast.pvfail": "Kunde inte öppna filen här.",
  "toast.pwfail": "Kunde inte sätta lösenordet.",
+ "toast.pwlayer": "Lösenordet öppnade arkivet, men det innehöll ett annat låst arkiv - ange lösenordet för det.",
  "toast.pwsaved": "Lösenord sparat.",
  "toast.pwunlocked": "Uppackat - lösenordet fungerade.",
  "toast.pwwrong": "Lösenordet öppnade inte arkivet - de hämtade filerna är orörda, prova ett annat.",

@@ -289,6 +289,7 @@ impl Session {
     pub fn submit(&self, spec: JobSpec) -> i64 {
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let low = matches!(&spec, JobSpec::Create { create } if create.perf.low_priority)
+            || matches!(&spec, JobSpec::PostingSet { posting_set } if posting_set.perf.low_priority)
             || self
                 .inner
                 .settings

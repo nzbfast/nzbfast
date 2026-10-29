@@ -59,6 +59,7 @@ enum DemoRoute {
 
         switch q["screen"] {
         case "create": setUpCreate(app, q)
+        case "posting": setUpPosting(app, q)
         case "checksums": setUpChecksums(app, q)
         case "queue": setUpQueue(app, q)
         case "settings": NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
@@ -91,6 +92,22 @@ enum DemoRoute {
         app.create.output = ""
         app.create.comment = ""
         app.create.applyDefaults(app.settings)
+        app.posting.sources = []
+        app.posting.selection = []
+        app.posting.jobId = nil
+        app.posting.snapshot = nil
+        app.posting.outputEdited = false
+        app.posting.nameEdited = false
+        app.posting.baseEdited = false
+        app.posting.name = ""
+        app.posting.outputDir = ""
+        app.posting.password = ""
+        app.posting.split = .none
+        app.posting.compression = 0
+        app.posting.solid = false
+        app.posting.recoveryRecord = 0
+        app.posting.overwrite = false
+        app.posting.applyDefaults(app.settings)
         app.checksums.sources = []
         app.checksums.file = ""
         app.checksums.jobId = nil
@@ -142,6 +159,28 @@ enum DemoRoute {
         app.create.recompute(with: app.core)
         if q["run"] == "1" {
             app.startCreate()
+            if q["sheet"] != "1" { app.progressJob = nil }
+        }
+    }
+
+    /// `screen=posting` with `split=size|count`, `compression=1..5`,
+    /// `password=1`, `rr=N` (RAR recovery record), `run=1` and `sheet=1`.
+    private static func setUpPosting(_ app: AppModel, _ q: [String: String]) {
+        app.mode = .posting
+        let m = app.posting
+        if m.sources.isEmpty {
+            m.addSources(MockScenario.postingSources().map(\.path))
+        }
+        switch q["split"] {
+        case "size": m.split = .size; m.volumeSize = 104_857_600
+        case "count": m.split = .count; m.volumeCount = 20
+        default: break
+        }
+        if let level = q["compression"].flatMap(Int.init) { m.compression = level }
+        if q["password"] == "1" { m.password = "demo-password" }
+        if let rr = q["rr"].flatMap(Int.init) { m.recoveryRecord = rr }
+        if q["run"] == "1" {
+            app.startPosting()
             if q["sheet"] != "1" { app.progressJob = nil }
         }
     }

@@ -848,6 +848,9 @@ enum Command {
         /// the dashboard's setup preset for that (no renaming, no Trash,
         /// no indexing or Spotnet scans, duplicates fail into History,
         /// group-readable files). Settings you already saved are kept.
+        /// When the config already exists and --force is not given, ONLY
+        /// the preset is applied and the servers are left as they are;
+        /// --force --arr re-imports the servers too.
         #[arg(long)]
         arr: bool,
     },

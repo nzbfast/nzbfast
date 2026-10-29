@@ -745,7 +745,7 @@ pub fn try_rar_rr_repair_why(
     dir: &std::path::Path,
     password: Option<&str>,
 ) -> std::result::Result<(), Option<String>> {
-    try_rar_rr_repair_hinted_why(dir, password, None)
+    try_rar_rr_repair_hinted_why(dir, password, None, None)
 }
 
 /// Why one `.rev` file was set aside, carried back from the scan pool so
@@ -1529,7 +1529,7 @@ pub(crate) fn rr_repair_volume(path: &std::path::Path, password: Option<&str>) -
     let mut session = rars::ReadSession::new(rars::ArchiveReadOptions::with_optional_password(
         password.map(str::as_bytes),
     ));
-    rr_repair_volume_in(&mut session, path, password)
+    rr_repair_volume_in(&mut session, path, password, None)
 }
 
 /// [`rr_repair_volume`] over a caller-owned parse session. A loop over
@@ -1544,10 +1544,18 @@ pub(crate) fn rr_repair_volume(path: &std::path::Path, password: Option<&str>) -
 /// ones the repair reuses, so nothing below re-derives. `password` is
 /// the session's password, spelled again only for the raw-scan fallback,
 /// which takes options of its own.
+///
+/// `walked_away` is the RR pass saying it no longer waits for this answer
+/// (issue 115: `rrhint::rr_repair_volumes` runs each volume on a worker it
+/// can abandon on a cancel or a deadline). It is read once, at the last
+/// moment before the repaired copy is published, so a repair that comes
+/// back after the job moved on deletes its temp and renames NOTHING over a
+/// volume the job may already be judging, trashing or re-fetching.
 pub(crate) fn rr_repair_volume_in(
     session: &mut rars::ReadSession<'_>,
     path: &std::path::Path,
     password: Option<&str>,
+    walked_away: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<RrRepair> {
     // A UNIQUE temp we provably created, not `path.with_extension("rrtmp")`.
     //
@@ -1676,6 +1684,10 @@ pub(crate) fn rr_repair_volume_in(
                 );
                 cleanup(&tmp);
                 return Ok(RrRepair::PrefixIntact);
+            }
+            if walked_away.is_some_and(|w| w.load(std::sync::atomic::Ordering::Acquire)) {
+                cleanup(&tmp);
+                anyhow::bail!("the recovery-record pass stopped waiting for this volume");
             }
             // Flush the rebuild before the rename publishes it - the
             // rename replaces the original, so a torn temp published

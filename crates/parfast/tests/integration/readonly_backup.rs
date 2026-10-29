@@ -26,6 +26,7 @@
 //! cfg'd-out test in a compiled module leaves its helpers with no
 //! caller, which `-D warnings` refuses.
 
+use crate::inproc::{InProcess, in_process};
 use crate::scratch::scratch;
 
 fn arg(s: &str) -> String {
@@ -47,6 +48,7 @@ fn arg(s: &str) -> String {
 /// needs nothing from the directory. Both routes matter here and each
 /// test below names the one it wants.
 fn damaged_set(
+    parfast: &InProcess,
     dir: &std::path::Path,
     second: bool,
     blocks: &str,
@@ -72,7 +74,7 @@ fn damaged_set(
         std::fs::write(&other, "a second, intact member\n".repeat(400)).expect("second member");
         argv.push(arg(&other.to_string_lossy()));
     }
-    let code = parfast::run_with("parfast", &argv, &mut parfast::out::Sink::buffered());
+    let (code, _, _) = parfast.run(&argv);
     assert_eq!(code, 0, "fixture create failed");
 
     let mut bytes = std::fs::read(&data).expect("read back");
@@ -88,16 +90,11 @@ fn damaged_set(
 /// crate was once believed to be in.
 #[test]
 fn an_ordinary_repair_keeps_the_backup_and_is_quiet_about_it() {
+    let parfast = in_process();
     let dir = scratch("readonly-backup-control");
-    let (set, data) = damaged_set(&dir, true, "-b32");
+    let (set, data) = damaged_set(&parfast, &dir, true, "-b32");
 
-    let mut sink = parfast::out::Sink::buffered();
-    let code = parfast::run_with(
-        "parfast",
-        &[arg("r"), arg("-q"), arg(&set.to_string_lossy())],
-        &mut sink,
-    );
-    let (_out, err) = sink.take();
+    let (code, _out, err) = parfast.run(&[arg("r"), arg("-q"), arg(&set.to_string_lossy())]);
     assert_eq!(code, 0, "the repair should succeed; stderr: {err}");
 
     let backup = dir.join("payload.bin.1");
@@ -129,8 +126,9 @@ fn a_read_only_directory_loses_the_backup_and_says_so() {
     // Two members and `-b32`: the IN-PLACE route, so the repair itself
     // asks nothing of the directory and the backup is the only thing
     // that cannot be written.
+    let parfast = in_process();
     let dir = scratch("readonly-backup");
-    let (set, _data) = damaged_set(&dir, true, "-b32");
+    let (set, _data) = damaged_set(&parfast, &dir, true, "-b32");
 
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).expect("chmod");
     // Running as root defeats a read-only directory, and some CI legs
@@ -142,13 +140,7 @@ fn a_read_only_directory_loses_the_backup_and_says_so() {
         return;
     }
 
-    let mut sink = parfast::out::Sink::buffered();
-    let code = parfast::run_with(
-        "parfast",
-        &[arg("r"), arg("-q"), arg(&set.to_string_lossy())],
-        &mut sink,
-    );
-    let (out, err) = sink.take();
+    let (code, out, err) = parfast.run(&[arg("r"), arg("-q"), arg(&set.to_string_lossy())]);
     let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
 
     // The repair itself is untouched: patching in place needs nothing
@@ -211,8 +203,9 @@ fn the_temp_staging_route_also_fails_on_a_read_only_directory_and_still_reports(
     use std::os::unix::fs::PermissionsExt;
 
     // ONE member, default geometry: its own donor, so `via_temp`.
+    let parfast = in_process();
     let dir = scratch("readonly-backup-temp-route");
-    let (set, _data) = damaged_set(&dir, false, "-b256");
+    let (set, _data) = damaged_set(&parfast, &dir, false, "-b256");
 
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).expect("chmod");
     if std::fs::write(dir.join(".probe"), b"x").is_ok() {
@@ -222,13 +215,7 @@ fn the_temp_staging_route_also_fails_on_a_read_only_directory_and_still_reports(
         return;
     }
 
-    let mut sink = parfast::out::Sink::buffered();
-    let code = parfast::run_with(
-        "parfast",
-        &[arg("r"), arg("-q"), arg(&set.to_string_lossy())],
-        &mut sink,
-    );
-    let (_out, err) = sink.take();
+    let (code, _out, err) = parfast.run(&[arg("r"), arg("-q"), arg(&set.to_string_lossy())]);
     let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
 
     assert_ne!(

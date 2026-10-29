@@ -424,6 +424,16 @@ pub struct Throttle {
     pub dip_at_conns: usize,
     /// What the line dips TO while the dip is active (bytes/sec).
     pub dip_to_bps: u64,
+    /// A line that gets WORSE with more sockets on it, for as long as
+    /// they are on it: while more than this many connections are open,
+    /// the line runs at `collapse_to_bps` instead, and recovers the
+    /// moment the count falls back. 0 = off. Replays GitHub #103's shared
+    /// path (25 Oct 2026), where nine more sockets on one provider cut
+    /// the whole fleet's rate from ~340 to ~215 MB/s - the case the
+    /// line-cap step-back check exists for.
+    pub collapse_above_conns: usize,
+    /// What the line falls to while `collapse_above_conns` is exceeded.
+    pub collapse_to_bps: u64,
 }
 
 /// Shared pacing state for one mock server's [`Throttle`].
@@ -493,6 +503,11 @@ impl ThrottleState {
     /// The line cap in force right now, arming the dip when concurrency
     /// first reaches the trigger.
     fn line_bps_now(&self, t: &Throttle) -> u64 {
+        if t.collapse_above_conns > 0
+            && self.active.load(Ordering::Relaxed) > t.collapse_above_conns
+        {
+            return t.collapse_to_bps.max(1);
+        }
         if t.dip_at_conns > 0 {
             match self.dip_state.load(Ordering::Relaxed) {
                 0 if self.active.load(Ordering::Relaxed) >= t.dip_at_conns => {
@@ -528,7 +543,10 @@ impl ThrottleState {
     ) -> std::io::Result<()> {
         self.bytes_out
             .fetch_add(data.len() as u64, Ordering::Relaxed);
-        if t.per_conn_bps == 0 && t.line_bps == 0 && self.line_override.load(Ordering::Relaxed) == 0
+        if t.per_conn_bps == 0
+            && t.line_bps == 0
+            && t.collapse_above_conns == 0
+            && self.line_override.load(Ordering::Relaxed) == 0
         {
             return w.write_all(data).await;
         }
@@ -546,7 +564,10 @@ impl ThrottleState {
     /// stale future reservations that throttled the NEXT rung long
     /// after the dip was over. No lock is held across the sleeps.
     async fn pace(&self, t: &Throttle, conn_next: &mut std::time::Instant, bytes: usize) {
-        if t.per_conn_bps == 0 && t.line_bps == 0 && self.line_override.load(Ordering::Relaxed) == 0
+        if t.per_conn_bps == 0
+            && t.line_bps == 0
+            && t.collapse_above_conns == 0
+            && self.line_override.load(Ordering::Relaxed) == 0
         {
             return;
         }

@@ -19,7 +19,7 @@ workspace = true
 # facade. `default-features = false` for the same reason nzbfast gives:
 # base's default turns `indexer` on, and a generator has no business
 # pulling sqlite in.
-nzbkit = { path = "../nzbkit", default-features = false }
+nzbkit = { path = "../nzbkit", default-features = false, features = ["rar"] }
 # The archive writers (rar13, rar15_40, rar50). The workspace member is
 # the vendor mirror; the fork at the upstream rars fork is where a writer change
 # is made and synced in from - never edit vendor/rars/src directly.

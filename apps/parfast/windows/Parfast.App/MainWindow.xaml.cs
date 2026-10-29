@@ -59,6 +59,7 @@ public sealed partial class MainWindow : Window, IShellHost, IUiDispatcher
         PageVerify.Bind(_shell);
         PageCreate.Bind(_shell);
         PageChecksums.Bind(_shell);
+        PagePosting.Bind(_shell);
         PageQueue.Bind(_shell);
         PageSettings.Bind(_shell);
 
@@ -225,6 +226,24 @@ public sealed partial class MainWindow : Window, IShellHost, IUiDispatcher
                 _shell.Verify.Open(par2, autoRepair: false);
                 _shell.ToggleLog();
                 break;
+
+            // The posting-set form, split into 100 MiB volumes so the two-pass
+            // route line shows; and the same job run to Done over the mock's
+            // RECORDED core frames, so the route and the written-files list are
+            // the real core's.
+            case "posting":
+            case "posting-done":
+                _shell.Mode = Mode.Posting;
+                _shell.Posting.Add([@"D:\Usenet\post\Holiday.2026.mkv"]);
+                _shell.Posting.Split = Parfast.Core.Contracts.RarSplit.Size;
+                if (_options.Shot == "posting-done")
+                {
+                    _shell.StartPosting(showProgress: false);
+                    _shell.Mode = Mode.Posting;
+                    PagePosting.ScrollToResultWhenDone();
+                }
+
+                break;
         }
     }
 
@@ -359,18 +378,12 @@ public sealed partial class MainWindow : Window, IShellHost, IUiDispatcher
     {
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(TitleStrip);
-        // THE STAGE IS IN THE TITLE because it is the only surface this app has
-        // for it: there is no About box and no version anywhere in the Windows
-        // UI, so without this a tester who installed a pre-release has nothing
-        // on screen telling them so. It also reaches the taskbar and the window
-        // switcher, which is where somebody actually looks. Stage-neutral on
-        // purpose: it reads Strings.AppStage, so alpha -> beta at 1.6.0 needed
-        // no edit here and neither will the next move.
-        //
-        // The window title only - NOT Strings.AppName itself, which names the
-        // product in a dozen other places (the drop caption below, the
-        // installer, the file associations) and must stay "parfast".
-        Title = $"{Strings.AppName} ({Strings.AppStage.ToLowerInvariant()})";
+        // The product name alone. Through the alpha and the betas the
+        // stage stood in brackets here, the one surface this app has for it
+        // (there is no About box on Windows); the app left beta at 1.9.0,
+        // and the installer's program-list name dropped its "(beta)" in the
+        // same commit. A future pre-release puts the stage back in both.
+        Title = Strings.AppName;
 
         if (AppWindow.TitleBar is { } bar)
         {
@@ -668,6 +681,12 @@ public sealed partial class MainWindow : Window, IShellHost, IUiDispatcher
         NavVerify.Content = Strings.ModeVerify;
         NavCreate.Content = Strings.ModeCreate;
         NavChecksums.Content = Strings.ModeChecksums;
+        NavPosting.Content = Strings.ModePosting;
+
+        // The RAR feature is gated on the core's posting_set capability: an engine
+        // without it refuses every job the screen could submit, so there is no
+        // entry to click.
+        NavPosting.Visibility = _shell.ShowPosting ? Visibility.Visible : Visibility.Collapsed;
         NavQueue.Content = Strings.ModeQueue;
         LogTitle.Text = Strings.LogTitle;
         LogEmpty.Text = Strings.LogEmpty;
@@ -690,6 +709,7 @@ public sealed partial class MainWindow : Window, IShellHost, IUiDispatcher
         {
             "create" => Mode.Create,
             "checksums" => Mode.Checksums,
+            "posting" => Mode.Posting,
             "queue" => Mode.Queue,
             _ => Mode.Verify,
         };
@@ -723,6 +743,7 @@ public sealed partial class MainWindow : Window, IShellHost, IUiDispatcher
         PageVerify.Visibility = _shell.IsVerify ? Visibility.Visible : Visibility.Collapsed;
         PageCreate.Visibility = _shell.IsCreate ? Visibility.Visible : Visibility.Collapsed;
         PageChecksums.Visibility = _shell.IsChecksums ? Visibility.Visible : Visibility.Collapsed;
+        PagePosting.Visibility = _shell.IsPosting ? Visibility.Visible : Visibility.Collapsed;
         PageQueue.Visibility = _shell.IsQueue ? Visibility.Visible : Visibility.Collapsed;
         PageSettings.Visibility = _shell.IsSettings ? Visibility.Visible : Visibility.Collapsed;
 
@@ -730,6 +751,7 @@ public sealed partial class MainWindow : Window, IShellHost, IUiDispatcher
         {
             Mode.Create => NavCreate,
             Mode.Checksums => NavChecksums,
+            Mode.Posting => NavPosting,
             Mode.Queue => NavQueue,
             Mode.Settings => null,
             _ => (NavigationViewItem?)NavVerify,

@@ -2776,6 +2776,7 @@
  "toast.promote.unknown": "Tämä tiedosto ei enää kuulu tähän lataukseen.",
  "toast.pvfail": "Tiedostoa ei voitu avata tässä.",
  "toast.pwfail": "Salasanan asetus epäonnistui.",
+ "toast.pwlayer": "Salasana avasi arkiston, mutta sen sisällä on toinen lukittu arkisto - anna sen salasana.",
  "toast.pwsaved": "Salasana tallennettu.",
  "toast.pwunlocked": "Purettu - salasana toimi.",
  "toast.pwwrong": "Tämä salasana ei avannut arkistoa - ladatut tiedostot ovat koskemattomia, kokeile toista.",

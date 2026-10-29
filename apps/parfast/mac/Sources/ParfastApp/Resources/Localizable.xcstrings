@@ -12,17 +12,6 @@
         }
       }
     },
-    "app.stage": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Beta"
-          }
-        }
-      }
-    },
     "app.tagline": {
       "extractionState": "manual",
       "localizations": {
@@ -1343,6 +1332,28 @@
         }
       }
     },
+    "error.password_required": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This posting set was interrupted. Enter its password again to run it."
+          }
+        }
+      }
+    },
+    "error.rar_failed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The archive could not be written: {reason}"
+          }
+        }
+      }
+    },
     "error.read_failed": {
       "extractionState": "manual",
       "localizations": {
@@ -1405,6 +1416,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "Create"
+          }
+        }
+      }
+    },
+    "job.kind.posting_set": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Posting set"
           }
         }
       }
@@ -1504,6 +1526,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "Create"
+          }
+        }
+      }
+    },
+    "mode.posting": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Posting set"
           }
         }
       }
@@ -1658,6 +1691,468 @@
           "stringUnit": {
             "state": "translated",
             "value": "Writing"
+          }
+        }
+      }
+    },
+    "posting.action.create": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create posting set"
+          }
+        }
+      }
+    },
+    "posting.cancel_note": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A stopped or failed posting set removes every file it wrote, so there is nothing to clean up."
+          }
+        }
+      }
+    },
+    "posting.compression.best": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Best"
+          }
+        }
+      }
+    },
+    "posting.compression.fast": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fast"
+          }
+        }
+      }
+    },
+    "posting.compression.fastest": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fastest"
+          }
+        }
+      }
+    },
+    "posting.compression.good": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Good"
+          }
+        }
+      }
+    },
+    "posting.compression.normal": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Normal"
+          }
+        }
+      }
+    },
+    "posting.compression.note": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Video and archives barely compress, so storing is the usual choice for a post."
+          }
+        }
+      }
+    },
+    "posting.compression.store": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Store (no compression)"
+          }
+        }
+      }
+    },
+    "posting.compression.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compression"
+          }
+        }
+      }
+    },
+    "posting.empty_body": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add files or a folder. They are packed into a RAR archive with a PAR2 set beside it."
+          }
+        }
+      }
+    },
+    "posting.empty_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add the files to post"
+          }
+        }
+      }
+    },
+    "posting.intro": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Packs files into a RAR 5 archive and writes a PAR2 set over it, ready to post."
+          }
+        }
+      }
+    },
+    "posting.name": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archive name"
+          }
+        }
+      }
+    },
+    "posting.name_tip": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Written as {name}.rar, or {name}.part1.rar onward when split, with {name}.par2 beside it."
+          }
+        }
+      }
+    },
+    "posting.output.par2": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PAR2 set"
+          }
+        }
+      }
+    },
+    "posting.output.rar": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "RAR archive"
+          }
+        }
+      }
+    },
+    "posting.output.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Files written"
+          }
+        }
+      }
+    },
+    "posting.output_folder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Output folder"
+          }
+        }
+      }
+    },
+    "posting.overwrite": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Replace an earlier set with the same name"
+          }
+        }
+      }
+    },
+    "posting.overwrite_tip": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Removes every file of the earlier set first, so no stale volume is left beside the new ones."
+          }
+        }
+      }
+    },
+    "posting.par2.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PAR2 recovery"
+          }
+        }
+      }
+    },
+    "posting.password.encrypt_headers": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Encrypt file names too"
+          }
+        }
+      }
+    },
+    "posting.password.placeholder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No password"
+          }
+        }
+      }
+    },
+    "posting.password.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Password"
+          }
+        }
+      }
+    },
+    "posting.recovery_record": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "RAR recovery record"
+          }
+        }
+      }
+    },
+    "posting.recovery_record_value": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "{percent} of the archive"
+          }
+        }
+      }
+    },
+    "posting.route.expect_one_pass": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "One pass: the archive is hashed into its PAR2 set as it is written."
+          }
+        }
+      }
+    },
+    "posting.route.expect_two_pass": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Two passes: the archive is written first, then its PAR2 set."
+          }
+        }
+      }
+    },
+    "posting.route.one_pass": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Done in one pass. The archive was never read back."
+          }
+        }
+      }
+    },
+    "posting.route.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Route"
+          }
+        }
+      }
+    },
+    "posting.route.two_pass_because": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Done in two passes, because {reason}."
+          }
+        }
+      }
+    },
+    "posting.solid": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Solid archive"
+          }
+        }
+      }
+    },
+    "posting.solid_tip": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compresses the files as one run. Smaller for many small files, slower to extract one."
+          }
+        }
+      }
+    },
+    "posting.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create a posting set"
+          }
+        }
+      }
+    },
+    "posting.volumes.count": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Split into a number of volumes"
+          }
+        }
+      }
+    },
+    "posting.volumes.count_label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Number of volumes"
+          }
+        }
+      }
+    },
+    "posting.volumes.min_size": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A volume is at least 64 KiB."
+          }
+        }
+      }
+    },
+    "posting.volumes.none": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "One archive"
+          }
+        }
+      }
+    },
+    "posting.volumes.size": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Split by size"
+          }
+        }
+      }
+    },
+    "posting.volumes.size_label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Volume size"
+          }
+        }
+      }
+    },
+    "posting.volumes.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Volumes"
           }
         }
       }

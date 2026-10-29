@@ -151,6 +151,7 @@ struct QueueView: View {
     private func symbol(_ kind: JobKind) -> String {
         switch kind {
         case .create: return "plus.square.on.square"
+        case .postingSet: return "shippingbox"
         case .verify: return "checkmark.shield"
         case .repairSet: return "wrench.and.screwdriver"
         case .checksumCreate, .checksumVerify: return "number.square"

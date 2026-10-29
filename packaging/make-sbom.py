@@ -31,6 +31,15 @@ which on a builder is that builder's home. Workspace and vendored crates
 are recorded by their path RELATIVE to the repository root, and a path
 dependency outside the root is a refusal: an SBOM is a published file.
 
+GIT DEPENDENCIES (25 Oct 2026, for the parfast app's rarkit, which it
+takes by pinned tag of the public nzbfast/rarfast repository). Recorded
+by the repository URL and the FULL commit the workspace's Cargo.lock
+pinned, as `git+<url>@<commit>`, with the tag or rev cargo tree printed.
+Refused: a source that is not https, a URL that carries credentials, a
+BRANCH pin (a published build names a tag or a commit, never a moving
+name), and a git package the lock cannot pin to a full commit. A git
+package carries no checksum: the commit is its integrity anchor.
+
 DETERMINISM. `created` comes from SOURCE_DATE_EPOCH when it is set (the
 provenance workflow pins it to the tag's commit time), and every list is
 sorted, so a rebuild of the same tag writes the same bytes.
@@ -71,6 +80,53 @@ def cargo_tree(targets, packages, root):
         cmd += ["-p", p]
     out = subprocess.run(cmd, cwd=root, check=True, capture_output=True, text=True)
     return out.stdout
+
+
+def lock_git_commits(root):
+    """{(name, version): (url, full commit)} for git packages, from Cargo.lock."""
+    commits = {}
+    name = version = None
+    in_pkg = False
+    with open(os.path.join(root, "Cargo.lock"), encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("["):
+                in_pkg = line == "[[package]]"
+                name = version = None
+            elif not in_pkg:
+                continue
+            elif line.startswith("name = "):
+                name = line.split('"')[1]
+            elif line.startswith("version = "):
+                version = line.split('"')[1]
+            elif line.startswith('source = "git+') and name and version:
+                src = line.split('"')[1][len("git+"):]
+                url, _, commit = src.partition("#")
+                commits[(name, version)] = (url.split("?")[0], commit)
+    return commits
+
+
+def parse_git_source(key, source):
+    """(url, pin, short commit) of a git source as cargo tree prints it,
+    `https://host/owner/repo?tag=T#abcd1234`, or a Refusal."""
+    url, _, short = source.partition("#")
+    base, _, query = url.partition("?")
+    if base.startswith("git+"):
+        base = base[len("git+"):]
+    if not base.startswith("https://"):
+        raise Refusal("%s %s comes from git over %s; only https sources are recorded"
+                      % (key[0], key[1], base.split(":")[0]))
+    if "@" in base.split("//", 1)[1].split("/", 1)[0]:
+        raise Refusal("%s %s names a git URL with credentials in it; refusing to "
+                      "publish it" % key)
+    if query.startswith("branch=") or not query:
+        raise Refusal("%s %s is pinned by %s; a published build names a tag or a "
+                      "commit (tag= or rev=), never a branch"
+                      % (key[0], key[1], query or "nothing"))
+    if not re.fullmatch(r"[0-9a-f]{7,40}", short):
+        raise Refusal("%s %s: cargo tree printed no commit for its git source (%s)"
+                      % (key[0], key[1], source))
+    return base, query, short
 
 
 def lock_checksums(root):
@@ -146,13 +202,11 @@ def parse_tree(text, root):
                     "refusing to write its location into a published file"
                     % (key[0], key[1], source))
             rel = os.path.relpath(path, root_real).replace(os.sep, "/")
+        git = None
         if source.startswith(("http", "git+")):
-            raise Refusal(
-                "%s %s comes from git (%s); this generator records crates.io "
-                "and workspace paths only - teach it the git case before "
-                "shipping one" % (key[0], key[1], source))
+            git = parse_git_source(key, source)
         if key not in pkgs:
-            pkgs[key] = {"license": spdx_license(m.group("license")), "path": rel}
+            pkgs[key] = {"license": spdx_license(m.group("license")), "path": rel, "git": git}
         elif rel and not pkgs[key]["path"]:
             pkgs[key]["path"] = rel
         del stack[depth:]
@@ -175,7 +229,7 @@ def spdx_id(key):
         re.sub(r"[^A-Za-z0-9.-]", "-", key[1]))
 
 
-def build_doc(asset_name, asset_sha, targets, pkgs, edges, roots, sums, epoch):
+def build_doc(asset_name, asset_sha, targets, pkgs, edges, roots, sums, epoch, commits=None):
     target = " + ".join(targets)
     created = datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc)
     artifact = {
@@ -201,7 +255,22 @@ def build_doc(asset_name, asset_sha, targets, pkgs, edges, roots, sums, epoch):
             "licenseDeclared": info["license"],
             "copyrightText": "NOASSERTION",
         }
-        if info["path"] is not None:
+        if info.get("git"):
+            url, pin, _short = info["git"]
+            commit = (commits or {})[key][1]
+            p["downloadLocation"] = "git+%s@%s" % (url, commit)
+            p["sourceInfo"] = "built from %s (%s), commit %s" % (url, pin, commit)
+            host_path = url[len("https://"):].rstrip("/")
+            if host_path.endswith(".git"):
+                host_path = host_path[:-4]
+            if host_path.startswith("github.com/") and host_path.count("/") == 2:
+                p["externalRefs"] = [{
+                    "referenceCategory": "PACKAGE-MANAGER",
+                    "referenceType": "purl",
+                    "referenceLocator": "pkg:github/%s@%s" % (
+                        host_path[len("github.com/"):], commit),
+                }]
+        elif info["path"] is not None:
             p["downloadLocation"] = "NOASSERTION"
             p["sourceInfo"] = "built from %s in %s" % (info["path"], REPO_URL)
         else:
@@ -294,9 +363,24 @@ def generate(asset, targets, packages, out, root=ROOT, tree_text=None, workspace
     got = {k[0] for k in roots}
     if want - got:
         raise Refusal("cargo tree did not root at %s (got %s)" % (sorted(want - got), sorted(got)))
+    # A git package is recorded at the FULL commit its lock pinned, and
+    # the short one cargo tree printed must be a prefix of it - a lock
+    # that does not name the package, or names another commit, is the
+    # graph and the lock disagreeing about what was built.
+    commits = lock_git_commits(ws)
+    for key, info in pkgs.items():
+        if info.get("git"):
+            url, _pin, short = info["git"]
+            pinned = commits.get(key)
+            if not pinned or not re.fullmatch(r"[0-9a-f]{40}", pinned[1]):
+                raise Refusal("%s %s comes from git but Cargo.lock pins no full commit "
+                              "for it" % key)
+            if not pinned[1].startswith(short) or pinned[0] != url:
+                raise Refusal("%s %s: cargo tree built %s#%s, Cargo.lock pins %s#%s"
+                              % (key[0], key[1], url, short, pinned[0], pinned[1]))
     epoch = int(os.environ.get("SOURCE_DATE_EPOCH") or 0)
     doc = build_doc(os.path.basename(asset), sha256_file(asset), targets,
-                    pkgs, edges, roots, lock_checksums(ws), epoch)
+                    pkgs, edges, roots, lock_checksums(ws), epoch, commits)
     faults = check_doc(doc)
     if faults:
         raise Refusal("generated SBOM fails its own checks: " + "; ".join(faults))
@@ -315,7 +399,9 @@ def selftest():
         with open(os.path.join(root, "Cargo.lock"), "w") as f:
             f.write('version = 4\n\n[[package]]\nname = "dep"\nversion = "1.0.0"\n'
                     'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
-                    'checksum = "%s"\n' % ("ab" * 32))
+                    'checksum = "%s"\n\n[[package]]\nname = "rk"\nversion = "0.9.0"\n'
+                    'source = "git+https://github.com/org/rk?tag=rk-v0.9.0#%s"\n'
+                    % ("ab" * 32, "c0ffee" + "1" * 34))
         asset = os.path.join(root, "app.tar.gz")
         with open(asset, "wb") as f:
             f.write(b"payload")
@@ -326,6 +412,7 @@ def selftest():
             "2dep v1.0.0|MIT/Apache-2.0 (*)",
             "1mac v0.2.0 (proc-macro)|MIT",
             "1wsm v0.3.0 (proc-macro) (%s/crates/app/wsm)|MIT" % root,
+            "1rk v0.9.0 (https://github.com/org/rk?tag=rk-v0.9.0#c0ffee11)|MIT OR Apache-2.0",
         ]) + "\n"
         out = os.path.join(root, "app.tar.gz.spdx.json")
         doc = generate(asset, ["x86_64-unknown-linux-musl"], ["app"], out, root, tree)
@@ -343,9 +430,17 @@ def selftest():
              "a path proc-macro keeps its path"),
             ("externalRefs" in by["mac"] and "sourceInfo" not in by["mac"],
              "a registry proc-macro is a registry crate"),
+            (by["rk"]["downloadLocation"]
+             == "git+https://github.com/org/rk@c0ffee" + "1" * 34,
+             "a git package is recorded at the lock's full commit"),
+            ("tag=rk-v0.9.0" in by["rk"]["sourceInfo"], "a git package names its tag"),
+            (by["rk"]["externalRefs"][0]["referenceLocator"]
+             == "pkg:github/org/rk@c0ffee" + "1" * 34, "a github purl, not a crates.io one"),
+            ("checksums" not in by["rk"], "a git package carries no registry checksum"),
             ({(r["spdxElementId"], r["relatedSpdxElement"]) for r in doc["relationships"]
               if r["relationshipType"] == "DEPENDS_ON"}
              == {(spdx_id(("app", "1.2.3")), spdx_id(("dep", "1.0.0"))),
+                 (spdx_id(("app", "1.2.3")), spdx_id(("rk", "0.9.0"))),
                  (spdx_id(("app", "1.2.3")), spdx_id(("eng", "0.1.0"))),
                  (spdx_id(("app", "1.2.3")), spdx_id(("mac", "0.2.0"))),
                  (spdx_id(("app", "1.2.3")), spdx_id(("wsm", "0.3.0"))),
@@ -356,6 +451,16 @@ def selftest():
         for bad, why in [
             ("0app v1.2.3 (/elsewhere/app)|MIT\n", "outside-root path refused"),
             ("0app v1.2.3 (%s/crates/app)|MIT\nnonsense\n" % root, "unreadable line refused"),
+            ("0app v1.2.3 (%s/crates/app)|MIT\n1rk v0.9.0 (https://github.com/org/rk?branch=main#c0ffee11)|MIT\n"
+             % root, "a branch-pinned git source refused"),
+            ("0app v1.2.3 (%s/crates/app)|MIT\n1rk v0.9.0 (http://github.com/org/rk?tag=t#c0ffee11)|MIT\n"
+             % root, "a git source over plain http refused"),
+            ("0app v1.2.3 (%s/crates/app)|MIT\n1rk v0.9.0 (https://me:pw@github.com/org/rk?tag=t#c0ffee11)|MIT\n"
+             % root, "a git URL with credentials refused"),
+            ("0app v1.2.3 (%s/crates/app)|MIT\n1zz v0.1.0 (https://github.com/org/zz?tag=t#c0ffee11)|MIT\n"
+             % root, "a git package the lock does not pin refused"),
+            ("0app v1.2.3 (%s/crates/app)|MIT\n1rk v0.9.0 (https://github.com/org/rk?tag=rk-v0.9.0#deadbeef)|MIT\n"
+             % root, "a commit the lock does not pin refused"),
         ]:
             try:
                 generate(asset, ["t"], ["app"], out + ".bad", root, bad)

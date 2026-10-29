@@ -331,7 +331,10 @@ impl Extractor {
     /// ahead of the decode that the live window alone fills the cap -
     /// trimming declines there, and declining is how it says so.
     fn try_attach_chase(&self, inner: &mut Inner, slot: usize, b: &MapBlocker) -> io::Result<bool> {
-        if (self.depth == 0 && !inner.top_chase_on)
+        // A build without the `rar` feature has no engine to chase with:
+        // it demotes here exactly as `NZBFAST_NO_NESTED_CHASE=1` does.
+        if !cfg!(feature = "rar")
+            || (self.depth == 0 && !inner.top_chase_on)
             || !inner.nested_on
             || !inner.chase_on
             || inner.protect_sources
@@ -2256,6 +2259,7 @@ impl Extractor {
     /// extractor is reached weakly so a cancelled job can drop (Drop
     /// aborts the buffers, the next upgrade here fails, the worker
     /// exits). The outcome is recorded for finish() to act on.
+    #[cfg(feature = "rar")]
     fn chase_worker(
         me: Weak<Extractor>,
         ctl: Arc<ChaseCtl>,
@@ -2374,6 +2378,19 @@ impl Extractor {
         drop(st);
         ctl.cv.notify_all();
     }
+    /// No engine in this build: `try_attach_chase` never starts a chase,
+    /// so this is unreachable, and it fails the set (the demote path)
+    /// rather than pretend to decode should that ever change.
+    #[cfg(not(feature = "rar"))]
+    fn chase_worker(
+        _me: Weak<Extractor>,
+        ctl: Arc<ChaseCtl>,
+        _key: String,
+        _password: Option<std::sync::Arc<str>>,
+    ) {
+        ctl.shared.lock_ok().outcome = Some(Err("built without the RAR engine".into()));
+        ctl.cv.notify_all();
+    }
     /// Natural 0-based volume index from a RAR4 volume NAME. Old-style
     /// naming is already 0-based (`.rar` then `.r00`, `.r01`, rolling to
     /// `.s00`…); `.partNN.rar` and bare-numeric `.001` naming start at 1,
@@ -2411,6 +2428,7 @@ impl Extractor {
     /// by the same amount. The buffer underneath still holds the file
     /// from byte 0 - the stub included - so a demote materializes the
     /// posted `.exe` exactly as before.
+    #[cfg(feature = "rar")]
     fn chase_wait_volume(
         ctl: &ChaseCtl,
         index: usize,
@@ -2469,6 +2487,7 @@ impl Extractor {
     /// `rar15_40` incremental parse (TODO 220: the eager walk waited for
     /// the volume's tail, pinning a whole volume in the holds budget
     /// before the engine read a byte of it).
+    #[cfg(feature = "rar")]
     fn chase_next_volume_v4(
         ctl: &ChaseCtl,
         index: usize,
@@ -2490,6 +2509,7 @@ impl Extractor {
     /// as the volume's first entries are readable, NOT once the volume
     /// has fully arrived (TODO 220). `no_more` (set at finish) turns a
     /// wait into a clean end-of-set.
+    #[cfg(feature = "rar")]
     fn chase_next_volume(
         ctl: &ChaseCtl,
         index: usize,
@@ -2518,6 +2538,7 @@ impl Extractor {
     /// of the nested child extractor, whose offset-0 sniff classifies the
     /// decompressed bytes (store RAR maps on, anything else lands Plain).
     /// The slot is recorded so a demotion can abandon partial outputs.
+    #[cfg(feature = "rar")]
     fn chase_open_sink(
         me: &Weak<Extractor>,
         ctl: &ChaseCtl,
@@ -2897,11 +2918,19 @@ pub(super) struct ChaseCtl {
     /// thread and may take no lock it does not already hold, so this is
     /// an atomic and the increment is O(1): a `u64::MAX` mark (a whole
     /// volume) is not summable and wakes unconditionally instead.
+    #[cfg_attr(
+        not(feature = "rar"),
+        expect(dead_code, reason = "read only by the RAR chase worker")
+    )]
     pub(super) progress_consumed: AtomicU64,
     /// The value of `progress_consumed` at the last pager wake. The
     /// spacing between the two is what keeps a 39-second decode from
     /// waking the pager on every one of its tens of thousands of
     /// reads; see the wake spacing in `chase_worker`.
+    #[cfg_attr(
+        not(feature = "rar"),
+        expect(dead_code, reason = "read only by the RAR chase worker")
+    )]
     pub(super) progress_wake_at: AtomicU64,
 }
 
@@ -2982,11 +3011,13 @@ impl io::Write for ChaseSink {
     }
 }
 
-#[cfg(test)]
+// RAR-chase suites: nothing to drive without the engine.
+#[cfg(all(test, feature = "rar"))]
 #[path = "chase_tests.rs"]
 pub(super) mod chase_tests;
 
-#[cfg(test)]
+// RAR-chase suites: nothing to drive without the engine.
+#[cfg(all(test, feature = "rar"))]
 #[path = "chase_shape_tests.rs"]
 pub(super) mod chase_shape_tests;
 
@@ -2997,12 +3028,14 @@ pub(super) mod chase_shape_tests;
 /// [`file_watermark`] on the way out, so the [`FrontierBuffer`] and
 /// everyone reading it (the trim, the pace gate, the demote) stay in
 /// file coordinates.
+#[cfg(feature = "rar")]
 #[derive(Debug)]
 pub(super) struct OffsetSource {
     pub(super) buf: Arc<FrontierBuffer>,
     pub(super) base: u64,
 }
 
+#[cfg(feature = "rar")]
 impl rars::BlockingRangeSource for OffsetSource {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         let Some(at) = offset.checked_add(self.base) else {
@@ -3024,6 +3057,10 @@ impl rars::BlockingRangeSource for OffsetSource {
 /// (`u64::MAX` = the whole volume), as a FILE offset of the volume that
 /// starts `base` bytes in. The whole-volume marker survives unchanged,
 /// which is what the trim's "finished with" test relies on.
+#[cfg_attr(
+    all(not(feature = "rar"), not(test)),
+    expect(dead_code, reason = "read only by the RAR chase worker")
+)]
 pub(super) fn file_watermark(base: u64, offset: u64) -> u64 {
     if offset == u64::MAX {
         u64::MAX

@@ -306,7 +306,7 @@ fn an_ordinary_unpack_failure_carries_no_reason() {
     // settle-side callers take one arm each: the hinted one in
     // `get/settle/repair.rs`, the plain one in `get/settle/noset.rs`.
     assert_eq!(
-        crate::rarfix::try_rar_rr_repair_hinted_why(&dir, None, None),
+        crate::rarfix::try_rar_rr_repair_hinted_why(&dir, None, None, None),
         Err(None)
     );
     let _ = std::fs::remove_dir_all(&dir);

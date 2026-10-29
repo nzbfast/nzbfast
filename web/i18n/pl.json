@@ -2825,6 +2825,7 @@
  "toast.promote.unknown": "Tego pliku nie ma już w tym pobieraniu.",
  "toast.pvfail": "Nie udało się otworzyć tego pliku tutaj.",
  "toast.pwfail": "Nie udało się ustawić hasła.",
+ "toast.pwlayer": "Hasło otworzyło archiwum, ale w środku jest kolejne zablokowane archiwum - wpisz hasło do niego.",
  "toast.pwsaved": "Hasło zapisane.",
  "toast.pwunlocked": "Rozpakowano - hasło zadziałało.",
  "toast.pwwrong": "To hasło nie otworzyło archiwum - pobrane pliki są nietknięte, spróbuj innego.",

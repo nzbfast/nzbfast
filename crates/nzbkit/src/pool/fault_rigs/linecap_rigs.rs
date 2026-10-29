@@ -633,6 +633,78 @@ async fn a_measured_anchor_puts_sockets_past_the_first_ceiling_on_the_wire() {
     assert_eq!(collect.await.unwrap(), want);
 }
 
+/// GitHub #103 (25 Oct 2026), the step-back check through a real pool:
+/// the measured-anchor rig above on a line that gets WORSE past
+/// [`linecap::LINE_CAP_MAX_FLEET`] sockets (the mock's
+/// `collapse_above_conns`). The supply arm raises to the grant as above;
+/// the five extra sockets cut the line from 1 MB/s to 0.6 MB/s; the
+/// check must take the fleet back to the first ceiling - CONNECTED
+/// sessions included, not just the target - and hold it there, and the
+/// job must still finish.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_raise_that_slows_the_line_is_stepped_back_on_the_wire() {
+    let (srv, ids, want) = second_ceiling_fixture_collapsing(linecap::LINE_CAP_MAX_FLEET).await;
+    let (servers, live, target) = second_ceiling_fleet(&srv, true);
+    let (tx, mut rx) = mpsc::channel(64);
+    let fetch = tokio::spawn(async move { fetch_all_multi(&servers, ids, tx).await });
+    let collect = tokio::spawn(async move {
+        let mut done = 0usize;
+        while let Some(o) = rx.recv().await {
+            if matches!(o, FetchOutcome::Done { .. }) {
+                done += 1;
+            }
+        }
+        done
+    });
+    let connected = || live.servers[0].connected.load(Ordering::Relaxed);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    // Phase 1: the raise lands on the wire.
+    let mut peak = 0usize;
+    while peak <= linecap::LINE_CAP_MAX_FLEET {
+        peak = peak.max(connected());
+        assert!(
+            !fetch.is_finished(),
+            "the run finished before the raise: peak {peak}"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never raised: peak {peak}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Phase 2: the slower line steps it back, sessions and all.
+    while target.get() > linecap::LINE_CAP_MAX_FLEET || connected() > linecap::LINE_CAP_MAX_FLEET {
+        assert!(
+            !fetch.is_finished(),
+            "the run finished on the slow line without stepping back: target {}, {} connected",
+            target.get(),
+            connected()
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never stepped back: target {}, {} connected",
+            target.get(),
+            connected()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Phase 3: held there for the rest of the run.
+    while !fetch.is_finished() {
+        assert!(
+            target.get() <= linecap::LINE_CAP_MAX_FLEET,
+            "a stepped-back fleet grew again to {}",
+            target.get()
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "run hung after the step-back"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    fetch.await.unwrap();
+    assert_eq!(collect.await.unwrap(), want);
+}
+
 /// TODO 275 item 7, the control: the rig above with the anchor's
 /// PROVENANCE taken away and nothing else changed at all - same line,
 /// same carry, same grant, same spawned slots, same seed cap. It must
@@ -1144,6 +1216,18 @@ async fn second_ceiling_fixture() -> (crate::mock::MockServer, Vec<ArticleReq>, 
     second_ceiling_fixture_refusing(None, 0).await
 }
 
+/// [`second_ceiling_fixture`] on a line that falls to 0.6 MB/s - 60% of
+/// what the first ceiling's fifty 20 KB/s sockets carry - while more than
+/// `above` connections are open. 60 MB rather than 26, so the slow line
+/// lasts past the step-back check's three settled strikes before the
+/// queue runs dry (a queue-dry reading is no evidence, and at 26 MB the
+/// rig reached two).
+async fn second_ceiling_fixture_collapsing(
+    above: usize,
+) -> (crate::mock::MockServer, Vec<ArticleReq>, usize) {
+    second_ceiling_fixture_shaped(60_000_000, None, 0, above, 600_000).await
+}
+
 /// [`second_ceiling_fixture`] with one of the mock's two capacity
 /// refusals armed, which is all that separates the refusal pair below
 /// from the measured/typed pair above.
@@ -1175,7 +1259,17 @@ async fn second_ceiling_fixture_refusing(
     accept_cap: Option<u64>,
     cap_ghost_ms: u64,
 ) -> (crate::mock::MockServer, Vec<ArticleReq>, usize) {
-    let data: Vec<u8> = (0..26_000_000u32).map(|i| (i * 13) as u8).collect();
+    second_ceiling_fixture_shaped(26_000_000, accept_cap, cap_ghost_ms, 0, 0).await
+}
+
+async fn second_ceiling_fixture_shaped(
+    bytes: u32,
+    accept_cap: Option<u64>,
+    cap_ghost_ms: u64,
+    collapse_above_conns: usize,
+    collapse_to_bps: u64,
+) -> (crate::mock::MockServer, Vec<ArticleReq>, usize) {
+    let data: Vec<u8> = (0..bytes).map(|i| (i * 13) as u8).collect();
     let mut articles = std::collections::HashMap::new();
     let segs = crate::mock::make_file_articles("lc2.bin", &data, 50_000, "lc2", &mut articles);
     drop(data);
@@ -1188,6 +1282,8 @@ async fn second_ceiling_fixture_refusing(
         crate::mock::Chaos {
             throttle: crate::mock::Throttle {
                 per_conn_bps: 20_000,
+                collapse_above_conns,
+                collapse_to_bps,
                 ..Default::default()
             },
             accept_cap,

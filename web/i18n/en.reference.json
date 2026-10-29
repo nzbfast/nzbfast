@@ -2776,6 +2776,7 @@
  "toast.promote.unknown": "That file is no longer part of this download.",
  "toast.pvfail": "Could not open this file here.",
  "toast.pwfail": "Failed to set password.",
+ "toast.pwlayer": "That password opened the archive, but another locked archive was inside it - enter the password for that one.",
  "toast.pwsaved": "Password saved.",
  "toast.pwunlocked": "Unpacked - the password worked.",
  "toast.pwwrong": "That password did not open the archive - the downloaded files are untouched, try another.",

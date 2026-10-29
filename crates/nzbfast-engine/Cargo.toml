@@ -17,7 +17,7 @@ workspace = true
 # `get` module into meta or the bin is a refusal there); the absence of a
 # dependency line here is what holds it from the cargo side.
 [dependencies]
-nzbkit = { path = "../nzbkit", default-features = false }
+nzbkit = { path = "../nzbkit", default-features = false, features = ["rar"] }
 nzbfast-core = { path = "../nzbfast-core" }
 # The extraction, repair and filing layer. The settle pass drives it
 # directly (`repair` alone is 55 of this crate's production references)
