@@ -80,4 +80,4 @@ nzbfast-daemon = { path = "../nzbfast-daemon", features = ["test-support"] }
 # The index-scan and quality-lap tests open the daemon's closed index
 # directly. Same version/features nzbkit's index tests already compile,
 # so it adds no production dependency.
-rusqlite = { version = "0.40.1", features = ["hooks"] }
+rusqlite = { version = "0.41.0", features = ["hooks"] }

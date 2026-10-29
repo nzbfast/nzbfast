@@ -60,7 +60,7 @@ aws-lc-rs = "1.17"
 # pooled readers got a query budget, and `index/deadline.rs` is
 # production code. The dep is optional, so this widens the feature set of
 # `indexer` builds only - a slim build still has no rusqlite at all.
-rusqlite = { version = "0.40.1", features = [
+rusqlite = { version = "0.41.0", features = [
     "bundled",
     "functions",
     "hooks",
@@ -251,7 +251,7 @@ nzbkit-base = { version = "1.0.0", path = "../nzbkit-base", default-features = f
 # `indexer` feature is not on in every one of them; it is no longer what
 # decides whether a release build has hooks. Verify the split with
 # `cargo tree --no-dev-dependencies`.
-rusqlite = { version = "0.40.1", features = ["hooks"] }
+rusqlite = { version = "0.41.0", features = ["hooks"] }
 # Examples only. nzbkit itself emits tracing events and installs no
 # subscriber (the binary does that); without one here, the PAR2 bench
 # drivers' NZBFAST_REPAIR_TIMING / NZBFAST_FOLD_TRACE output would go

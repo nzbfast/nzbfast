@@ -400,7 +400,7 @@ postfast = { path = "../postfast" }
 # Seed-harvest migration tests open the daemon's closed index directly to
 # model a pre-manifest database. This is the same version/features nzbkit's
 # index tests already compile, so it adds no production dependency.
-rusqlite = { version = "0.40.1", features = ["hooks"] }
+rusqlite = { version = "0.41.0", features = ["hooks"] }
 # TLS daemon tests (§129 2a): rcgen mints the test certificate (end-entity,
 # basicConstraints CA:FALSE by construction - the CaUsedAsEndEntity trap a
 # hand-run `openssl req -x509` falls into), and rustls is the verifying
