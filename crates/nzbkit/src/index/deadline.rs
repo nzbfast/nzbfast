@@ -161,7 +161,7 @@ impl Index {
     /// `MaintenanceArm` for the one case that must be abortable - so
     /// installing a callback there would buy a per-op check on the
     /// hottest path in the crate for a budget nobody would ever arm.
-    pub(super) fn install_query_deadline(&self) -> rusqlite::Result<()> {
+    pub(super) fn install_query_deadline(&mut self) -> rusqlite::Result<()> {
         let state = Arc::clone(&self.deadline.0);
         self.db
             .progress_handler(PROGRESS_OPS, Some(move || state.expired()))

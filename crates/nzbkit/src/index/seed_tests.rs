@@ -4149,7 +4149,7 @@ fn a_failed_schema_release_does_not_strand_the_writer_in_a_transaction() {
     use rusqlite::hooks::{AuthAction, Authorization, TransactionOperation};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let (dir, ix) = open("schema-release-failure");
+    let (dir, mut ix) = open("schema-release-failure");
     // Give `ensure_nzb_seed_schema` real work to do, so it opens its
     // savepoint rather than taking the early return.
     Index::drop_nzb_seed_file_cleanup_triggers_on(&ix.db).unwrap();

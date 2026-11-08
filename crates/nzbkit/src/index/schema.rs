@@ -1655,7 +1655,7 @@ impl Index {
         // No gate and no custom categories: both are ingest-time policy,
         // and ingest cannot happen on a query_only connection. Same for
         // the arrival watch - nothing arrives on a reader.
-        let ix = Index {
+        let mut ix = Index {
             db,
             gate: None,
             fts,

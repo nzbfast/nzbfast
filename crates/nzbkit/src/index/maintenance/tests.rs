@@ -829,7 +829,7 @@ fn a_compact_can_be_aborted_and_leaves_the_database_intact() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("index.db");
-    let ix = Index::open(&path).unwrap();
+    let mut ix = Index::open(&path).unwrap();
 
     // Ballast enough that the rewrite has a VM phase worth
     // interrupting in at all. Since the interrupt is delivered from
