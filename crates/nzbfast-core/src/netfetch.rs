@@ -703,11 +703,8 @@ pub fn resolve_netloc<R: Resolver>(
         .parse()
         .map_err(|_| ureq::Error::BadUri(netloc.to_string()))?;
     let config = ureq::Agent::config_builder().build();
-    let timeout = NextTimeout {
-        after: ureq::unversioned::transport::time::Duration::NotHappening,
-        reason: ureq::Timeout::Global,
-    };
-    r.resolve(&uri, &config, timeout).map(|a| a.to_vec())
+    r.resolve(&uri, &config, NextTimeout::default())
+        .map(|a| a.to_vec())
 }
 
 /// ureq resolver that refuses to hand back any internal address. Because
@@ -1051,7 +1048,10 @@ impl<In: ureq::unversioned::transport::Transport> ureq::unversioned::transport::
         let name = tls_peer_name(details.uri)?;
         let mut conn =
             rustls::ClientConnection::new(nzbkit::nntp::shared_tls_client_config(), name)?;
-        let mut sock = ureq::unversioned::transport::TransportAdapter::new(transport.boxed());
+        let mut sock = ureq::unversioned::transport::TransportAdapter::new(
+            transport.boxed(),
+            details.current_time.clone(),
+        );
         sock.set_timeout(details.timeout);
         conn.complete_io(&mut sock)?;
         Ok(Some(Either::B(SharedTlsTransport {
