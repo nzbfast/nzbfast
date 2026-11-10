@@ -198,7 +198,7 @@ internal sealed class MockPostingJob(long id, JobSpec spec, DateTimeOffset added
             AddedAt = addedAt,
             ElapsedMs = (long)_clockMs,
             LowPriority = LowPriority,
-            Name = spec.PostingSet?.Name ?? frame.Name,
+            Title = spec.PostingSet?.Name ?? frame.DisplayTitle,
             Command = Rename(frame.Command),
             LogTail = log,
             Result = State == JobState.Done ? RenameResult(frame.Result) : null,

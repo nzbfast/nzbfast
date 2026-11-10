@@ -541,6 +541,7 @@ mod twin_charge_tests {
             recovery_set_id: [0u8; 16],
             block_size,
             files,
+            undescribed: Vec::new(),
             nonrecovery: Vec::new(),
             recovery_blocks_seen: 0,
         })

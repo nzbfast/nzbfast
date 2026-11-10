@@ -556,6 +556,22 @@ pub(super) fn reset_hub_for_job(
     // grant, and `conntune::line_cap_headroom_fleet` spawns the slots
     // for that raise to land in. So this store decides a ceiling now
     // rather than only captioning a log line.
+    // 9 Nov 2026: the LAST job's pool and anchor are still on the hub at
+    // this line (both are restamped below), so bank its final line-cap
+    // verdict now. The 1 s ticker that normally does it misses a verdict
+    // that landed as the run ended (`linecap`'s `line_cap_finish`) when
+    // the next job starts inside that second.
+    nzbfast_daemon::linecarry::feed(d);
+    // ...and take that pool off the hub HERE, before the anchor below is
+    // restamped (9 Nov 2026 sweep). The clear used to sit ~40 lines down
+    // with the other per-job slots, so a ticker `feed` landing between
+    // the restamp and it banked the last job's fleet verdict against
+    // THIS job's anchor - a fleet recalled on a line it was never
+    // learned on. `feed` reads the anchor before the pool for the same
+    // reason; the two orders together leave no window. Nothing between
+    // here and the old site reads `pool_live`, and the double-billing
+    // argument at that site only needs it to be None by then.
+    *d.hub.pool_live.lock_ok() = None;
     let (anchor_bps, anchor_src) = d.link_peak.effective(d.line_speed.load(Ordering::Relaxed));
     d.hub.line_anchor_bps.store(anchor_bps, Ordering::Relaxed);
     d.hub
@@ -570,6 +586,14 @@ pub(super) fn reset_hub_for_job(
     d.hub
         .line_carry_bps
         .store(d.line_carry.carry_bps(), Ordering::Relaxed);
+    // 9 Nov 2026: and the fleet the last job on this line settled at,
+    // with any step-back it left, filtered for the line (this anchor)
+    // and for age by the store itself. The fleet build starts there.
+    let (recall_fleet, recall_hold) = d.line_carry.recall(anchor_bps, anchor_src == "measured");
+    d.hub
+        .line_recall_fleet
+        .store(recall_fleet, Ordering::Relaxed);
+    d.hub.line_recall_hold.store(recall_hold, Ordering::Relaxed);
     // M2c.5: allow the engine's speculative recovery prefetch
     // for the main job unless a period quota is configured -
     // same reasoning as the sidecar guard: opportunistic

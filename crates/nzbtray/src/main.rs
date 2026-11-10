@@ -393,9 +393,17 @@ mod app {
     /// `timeout_global` and not one of the per-phase timeouts: ureq 2's
     /// `AgentBuilder::timeout` was the whole-call budget, and every
     /// caller below picks its number for the whole call.
+    ///
+    /// `proxy(None)`, as on every agent `netfetch` builds: ureq 3's
+    /// default config reads `HTTP(S)_PROXY` from the environment, and
+    /// nothing in ureq exempts loopback unless `NO_PROXY` names it. With
+    /// a proxy set, every request here - `keyed_url`, which carries the
+    /// daemon's API key in its query - went to the proxy instead of
+    /// 127.0.0.1, and the tray could not reach its own engine.
     fn agent(timeout_ms: u64, tls: bool) -> ureq::Agent {
         use ureq::unversioned::transport::Connector as _;
         let cfg = ureq::Agent::config_builder()
+            .proxy(None)
             .timeout_global(Some(Duration::from_millis(timeout_ms)))
             .build();
         if tls {
@@ -2378,6 +2386,23 @@ mod app {
             while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        /// The tray speaks only to its own daemon on 127.0.0.1, with the
+        /// API key in the URL, so no agent here may inherit a proxy from
+        /// the environment. NEGATIVE CONTROL: drop the `proxy(None)` in
+        /// `agent` and run with `HTTPS_PROXY` set, and both arms fail.
+        #[test]
+        fn no_tray_agent_inherits_a_proxy_from_the_environment() {
+            for tls in [false, true] {
+                assert!(
+                    super::agent(1_000, tls).config().proxy().is_none(),
+                    "a tray agent picked up a proxy (tls={tls})"
+                );
             }
         }
     }

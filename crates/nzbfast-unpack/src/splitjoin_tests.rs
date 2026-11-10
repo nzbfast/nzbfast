@@ -760,6 +760,54 @@ fn a_joined_final_payload_survives_a_sibling_sets_success() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Bug sweep 9 Nov 2026: the cb7 row above, for a joined file the
+/// final-name guard does NOT name. A byte-split `mod.pk3` (a game asset,
+/// zip bytes under a name of its own) joins beside a split `.rar`; in the
+/// scratch dir the zip arm never sniffs a NAMED file and the stray door
+/// only reads RAR/7z heads, so no arm opens it and nothing fails - and
+/// the RAR's `Produced` used to delete it, its only copy, since its
+/// parts had gone with the join. A joined file is removed only when an
+/// arm owned it.
+#[test]
+fn a_joined_file_no_arm_opens_survives_a_sibling_sets_success() {
+    use nzbkit::rar::fixtures;
+    let dir = split_dir("pk3-beside-rar-split");
+
+    let mut pk3 = b"PK\x03\x04".to_vec();
+    pk3.extend(payload(120_000));
+    let pk3_parts = write_two_parts(&dir, "mod.pk3", &pk3);
+
+    let total = payload(240_000);
+    let archive = fixtures::rar5_volume(&[("film.mkv", total.len() as u64, &total, false, false)]);
+    write_parts(&dir, "stage.rar", &archive, archive.len().div_ceil(4));
+
+    assert!(collect_split_sets(&dir).unwrap().is_empty());
+    assert_eq!(collect_container_split_sets(&dir).unwrap().len(), 2);
+
+    // The verdict is not this row's subject (the zip arm sniffed
+    // `mod.pk3.001` as a container before the rescue and reported its
+    // gap); what is left on disk is.
+    let _ = extract_one_level(&dir, None, 0).unwrap();
+    assert_eq!(
+        sha256(&std::fs::read(dir.join("film.mkv")).unwrap()),
+        sha256(&total),
+        "the split RAR's member is still delivered"
+    );
+    assert_eq!(
+        sha256(&std::fs::read(dir.join("mod.pk3")).expect("the joined pk3 must survive")),
+        sha256(&pk3),
+        "a joined file no arm opened survives, byte for byte"
+    );
+    assert!(
+        !dir.join("stage.rar").exists(),
+        "the spent RAR input is still removed"
+    );
+    for p in &pk3_parts {
+        assert!(!p.exists(), "{} is spent and removed", p.display());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The discriminator, in both directions. A GENUINE numbered volume set
 /// carries the `Rar!` signature on every member, and concatenating those
 /// would publish garbage and delete the volumes - so a head on any part

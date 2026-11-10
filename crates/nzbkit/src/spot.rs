@@ -16,10 +16,18 @@
 //! - base64 fields use a URL-safe variant: `/`→`-s`, `+`→`-p`, `=` stripped.
 //! - The signature that guards the header is the LAST dot-field of the part
 //!   after `@` (spotweb's `headersign`), NOT the field before it in the
-//!   user-part - that one signs the message-id, and is only used for the
-//!   separate full-spot check. It is RSA PKCS#1 v1.5 / SHA-1 over
+//!   user-part. It is RSA PKCS#1 v1.5 / SHA-1 over
 //!   `title + header-without-that-last-field + poster`, over the raw wire
 //!   bytes (the ISO-8859-1 gotcha: never re-encode).
+//! - The user-part field after the modulus (the "user signature") is the
+//!   same scheme over `<message-id>`, made with the modulus beside it.
+//!   Measured on the captured fixture (`SPOT_FREE_PT_OVER`): every one of
+//!   its six records that carries a modulus carries one, and all six
+//!   verify that way; the server-signed records carry neither. It is the
+//!   ONLY thing that binds a self-signed record to the article it rides
+//!   in - the header signature covers neither the message-id nor the
+//!   X-XML - so [`verify_spot`] checks it, and see `ingest_over` for
+//!   what a failure costs.
 //! - `title` is the subject up to the first `|` for modern keys and the
 //!   whole subject on older encodings. Neither rule covers the group on its
 //!   own, so both are tried (measured over 21,384 verified `free.pt` spots:
@@ -108,8 +116,10 @@ pub struct SpotHeader {
     /// PKCS#1 v1.5 signature over the header - the LAST dot-field of the
     /// part after `@` (spotweb's `headersign`).
     pub(crate) signature: Vec<u8>,
-    /// Signature over `<message-id>` made with `Self::modulus`; the
-    /// full-spot check uses it, the header check never does. Optional.
+    /// Signature over `<message-id>` made with `Self::modulus`. The header
+    /// check never reads it; [`verify_spot`] checks it separately, as the
+    /// one binding between a self-signed record and its article. Empty
+    /// when absent, which server-signed records always are.
     pub user_signature: Vec<u8>,
     /// Category, 0-based as spotweb stores it (the wire digit minus one).
     pub(crate) category: u8,
@@ -148,9 +158,10 @@ pub fn parse_spot_from(from_header: &str) -> Option<SpotHeader> {
     let inner = &from_header[lt + 1..gt];
     let (user_part, header) = inner.split_once('@')?;
     // [modulus] or [modulus].[user-signature] - or, on server-signed spots,
-    // a plain random number. Both are optional: only the master key regimes
-    // can verify without a modulus, and nothing here needs the user
-    // signature, so neither absence rejects the record.
+    // a plain random number. Both are optional at PARSE: only the master
+    // key regimes can verify without a modulus, and what an absent user
+    // signature costs is `verify_spot`'s and `ingest_over`'s call, not a
+    // parse failure.
     let mut user_fields = user_part.split('.');
     let modulus = user_fields
         .next()
@@ -270,6 +281,18 @@ pub struct SpotVerify {
     /// title for one poster and a tag appended after it for another.
     /// Store this rather than the raw subject.
     pub(crate) title: Option<String>,
+    /// The user signature over `<message-id>`, checked against the
+    /// record's own modulus: `None` when there is nothing to check (not
+    /// self-signed, or the record carries no user signature), `Some(ok)`
+    /// otherwise.
+    ///
+    /// The header signature covers the title, the record fields and the
+    /// nickname, and NOT the message-id, so a verified From and Subject
+    /// can be copied verbatim onto a fresh article whose X-XML names a
+    /// different NZB and the header still verifies. This is what tells
+    /// the two apart: `Some(false)` is a signature naming a DIFFERENT
+    /// article, which is what a copied record carries.
+    pub(crate) user_signature_ok: Option<bool>,
 }
 
 /// PKCS#1 v1.5 signature scheme for SHA-1, written out rather than
@@ -318,18 +341,32 @@ pub fn verify_spot(header: &SpotHeader, subject: &str, message_id: &str) -> Spot
         }
     }
 
-    let hashcash_ok = if key_source == Some(SpotKeySource::SelfSigned) {
-        let d = Sha1::digest(normalize_msgid(message_id).as_bytes());
-        d[0] == 0 && d[1] == 0
+    let self_signed = key_source == Some(SpotKeySource::SelfSigned);
+    let msgid_digest: [u8; 20] = Sha1::digest(normalize_msgid(message_id).as_bytes()).into();
+    let hashcash_ok = if self_signed {
+        msgid_digest[0] == 0 && msgid_digest[1] == 0
     } else {
         true
     };
+    // Against the modulus alone, never a master key: the user signature
+    // is the poster's own, and `candidate_keys` lists the self-signed
+    // key last, so it is found by source rather than by position.
+    let user_signature_ok = (self_signed && !header.user_signature.is_empty()).then(|| {
+        candidate_keys(header)
+            .into_iter()
+            .find(|(s, _)| *s == SpotKeySource::SelfSigned)
+            .is_some_and(|(_, key)| {
+                key.verify(scheme.clone(), &msgid_digest, &header.user_signature)
+                    .is_ok()
+            })
+    });
 
     SpotVerify {
         signature_ok: key_source.is_some(),
         hashcash_ok,
         key_source,
         title,
+        user_signature_ok,
     }
 }
 
@@ -960,6 +997,9 @@ fn ingest_over(
     // autocommit was a write lock, a WAL commit and an fsync per spot,
     // thousands of times per OVER chunk - see `Index::insert_spots`.
     let mut batch: Vec<Spot> = Vec::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
     for e in entries {
         sum.scanned += 1;
         let Some(h) = parse_spot_from(&e.from) else {
@@ -967,7 +1007,19 @@ fn ingest_over(
             continue;
         };
         let v = verify_spot(&h, &e.subject, &e.message_id);
-        if !v.signature_ok {
+        // A self-signed record whose user signature names a DIFFERENT
+        // article is a copied record: the header signature does not
+        // cover the message-id, so a verified From and Subject can be
+        // replayed onto a fresh article whose X-XML points at somebody
+        // else's NZB, and it used to be stored verified under the
+        // original spotter's id. Counted with the unverified, because
+        // that is what it is - the signature that binds it to THIS
+        // article does not check out. A record with NO user signature is
+        // not refused (nothing in the fixture lacks one, but the parse
+        // has always tolerated it); it is stored without an identity,
+        // below, which leaves a stripped copy exactly as strong as a
+        // record the copier signed with a fresh key of their own.
+        if !v.signature_ok || v.user_signature_ok == Some(false) {
             sum.invalid += 1;
             sum.unverified += 1;
             continue;
@@ -1003,12 +1055,20 @@ fn ingest_over(
             category: h.category,
             subcats: h.subcats.join(","),
             size: h.size,
-            date: h.date,
+            // The record's date is signed but not TRUE: any key can sign
+            // any number, keys are free, and every spot list (and the
+            // resolver's newest-first budget) sorts on this column, so a
+            // far-future date pinned a spot atop all of them. Same
+            // one-day grace the scanner's ingest and `promote_spot` give
+            // a release's posted date.
+            date: h.date.min(now + 86_400),
             // Only a self-signed key identifies a spotter; a master-key
             // spot's user-part is a random number, so hashing it would
-            // mint a fresh "identity" for every post.
-            spotter_id: match v.key_source {
-                Some(SpotKeySource::SelfSigned) => spotter_id(&h.modulus),
+            // mint a fresh "identity" for every post. And only when the
+            // user signature binds the record to this article: without
+            // it the id is a label anyone can copy (see above).
+            spotter_id: match (v.key_source, v.user_signature_ok) {
+                (Some(SpotKeySource::SelfSigned), Some(true)) => spotter_id(&h.modulus),
                 _ => String::new(),
             },
             verified: true,
@@ -1227,22 +1287,6 @@ mod tests {
     /// signature in the LAST header field, and a hashcash-mined message-id
     /// (16 bits - fast).
     fn make_spot(key: &RsaPrivateKey, title: &str, key_id: u8, mine: bool) -> TestSpot {
-        let poster = "TestPoster";
-        let modulus = RsaPublicKey::from(key).n().to_bytes_be();
-        // [cat][keyid][subcats].[size].[random].[date].[custom-id].[custom-value]
-        let signed_part = format!("1{key_id}a09b04.1048576.31337.1700000000.0.0");
-        let mut h = Sha1::new();
-        h.update(title.as_bytes());
-        h.update(signed_part.as_bytes());
-        h.update(poster.as_bytes());
-        let digest = h.finalize();
-        let sig = key.sign(pkcs1v15_sha1(), &digest).expect("sign");
-        let from = format!(
-            "{poster} <{}.{}@{signed_part}.{}>",
-            spot_b64_encode(&modulus),
-            spot_b64_encode(b"user-signature-signs-the-msgid"),
-            spot_b64_encode(&sig),
-        );
         let msgid = if mine {
             // Mine the V2 hashcash: sha1("<...>") starts with 0x0000.
             (0u64..)
@@ -1255,9 +1299,49 @@ mod tests {
         } else {
             "<unmined@spot.net>".to_string()
         };
+        make_spot_for(key, title, key_id, &msgid)
+    }
+
+    /// [`make_spot`] for a message-id the caller picks, with the user
+    /// signature over `<message-id>` made the way the live records make
+    /// it (`live_spot_headers_verify` pins that against real ones).
+    fn make_spot_for(key: &RsaPrivateKey, title: &str, key_id: u8, msgid: &str) -> TestSpot {
+        make_spot_dated(key, title, key_id, msgid, 1_700_000_000)
+    }
+
+    /// [`make_spot_for`] with the record's signed date chosen too.
+    fn make_spot_dated(
+        key: &RsaPrivateKey,
+        title: &str,
+        key_id: u8,
+        msgid: &str,
+        date: i64,
+    ) -> TestSpot {
+        let poster = "TestPoster";
+        let modulus = RsaPublicKey::from(key).n().to_bytes_be();
+        // [cat][keyid][subcats].[size].[random].[date].[custom-id].[custom-value]
+        let signed_part = format!("1{key_id}a09b04.1048576.31337.{date}.0.0");
+        let mut h = Sha1::new();
+        h.update(title.as_bytes());
+        h.update(signed_part.as_bytes());
+        h.update(poster.as_bytes());
+        let digest = h.finalize();
+        let sig = key.sign(pkcs1v15_sha1(), &digest).expect("sign");
+        let user_sig = key
+            .sign(
+                pkcs1v15_sha1(),
+                &Sha1::digest(normalize_msgid(msgid).as_bytes()),
+            )
+            .expect("sign");
+        let from = format!(
+            "{poster} <{}.{}@{signed_part}.{}>",
+            spot_b64_encode(&modulus),
+            spot_b64_encode(&user_sig),
+            spot_b64_encode(&sig),
+        );
         TestSpot {
             from,
-            msgid,
+            msgid: msgid.to_string(),
             title: title.to_string(),
             modulus,
             header_sig: sig,
@@ -1459,6 +1543,21 @@ mod tests {
             assert_eq!(v.key_source, source, "key source of {fragment}");
             assert_eq!(v.signature_ok, source.is_some(), "signature of {fragment}");
             assert_eq!(v.hashcash_ok, hashcash, "hashcash of {fragment}");
+            // Every self-signed record carries a user signature over its
+            // own `<message-id>`, made with its own modulus - the
+            // measurement the replay refusal in `ingest_over` rests on.
+            let want_user = (source == Some(SpotKeySource::SelfSigned)).then_some(true);
+            assert_eq!(
+                v.user_signature_ok, want_user,
+                "user signature of {fragment}"
+            );
+            if source == Some(SpotKeySource::SelfSigned) {
+                // ...and it names THIS article: the same record under
+                // any other message-id fails it.
+                let moved = verify_spot(&h, &e.subject, "<somewhere-else@spot.net>");
+                assert!(moved.signature_ok, "the header alone still verifies");
+                assert_eq!(moved.user_signature_ok, Some(false));
+            }
             // A one-byte change anywhere in the signed bytes must break it.
             let mut tampered = h.clone();
             tampered.signed_part.push('x');
@@ -1729,12 +1828,12 @@ mod tests {
         let overview: Vec<OverRow> = (1..=6u64)
             .map(|n| {
                 let title = format!("Deep Release {n}");
-                let s = make_spot(&key, &title, 7, false);
+                let s = make_spot_for(&key, &title, 7, &format!("<deep{n}@spot.net>"));
                 OverRow {
                     number: n,
                     subject: title,
                     from: s.from,
-                    message_id: format!("<deep{n}@spot.net>"),
+                    message_id: s.msgid,
                     bytes: 500,
                 }
             })
@@ -1777,6 +1876,100 @@ mod tests {
         assert_eq!((sum.scanned, sum.deepened), (0, 0));
 
         conn.quit().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A verified From and Subject copied onto a FRESH article is not
+    /// that spot. The header signature covers neither the message-id nor
+    /// the X-XML, so the copy verified, and was stored verified under the
+    /// original spotter's id with whatever NZB the copier's X-XML named.
+    /// The user signature over `<message-id>` is what binds a record to
+    /// its article: a copy carrying it is refused, a copy with it STRIPPED
+    /// is stored with no identity at all (as strong as a record the
+    /// copier signed with a free key of their own, and no stronger).
+    ///
+    /// Also here, because it is the same `ingest_over` and the same
+    /// "signed is not true" lesson: a far-future signed date is clamped,
+    /// so it cannot pin a spot atop every date-sorted spot list.
+    ///
+    /// NEGATIVE CONTROL, run: drop the `user_signature_ok == Some(false)`
+    /// arm in `ingest_over` and the replay is stored (valid 4, not 3);
+    /// match `spotter_id` on `key_source` alone again and the
+    /// stripped copy carries the victim's id; drop the date clamp and the
+    /// far-future row keeps its year-2286 date.
+    #[tokio::test]
+    async fn a_replayed_spot_record_is_not_stored_as_its_original() {
+        let key = test_key();
+        let title = "Replay Target 2026";
+        let orig = make_spot_for(&key, title, 7, "<orig@spot.net>");
+        // The copy: the same From and Subject, byte for byte, on a fresh
+        // article. The stripped copy drops the user-part's second field,
+        // which the header signature does not cover either.
+        let (head, rest) = orig.from.split_once('.').unwrap();
+        let stripped_from = format!("{head}@{}", rest.split_once('@').unwrap().1);
+        assert!(
+            parse_spot_from(&stripped_from)
+                .unwrap()
+                .user_signature
+                .is_empty()
+        );
+        let future = make_spot_dated(
+            &key,
+            "Far Future 2026",
+            7,
+            "<future@spot.net>",
+            9_999_999_999,
+        );
+        let row = |number: u64, subject: &str, from: &str, message_id: &str| OverRow {
+            number,
+            subject: subject.into(),
+            from: from.into(),
+            message_id: message_id.into(),
+            bytes: 500,
+        };
+        let overview = vec![
+            row(1, title, &orig.from, &orig.msgid),
+            row(2, title, &orig.from, "<replay@spot.net>"),
+            row(3, title, &stripped_from, "<stripped@spot.net>"),
+            row(4, &future.title, &future.from, &future.msgid),
+        ];
+        let srv =
+            MockServer::start_full(HashMap::new(), HashMap::new(), overview, Chaos::default())
+                .await;
+        let (mut conn, _) = Connection::connect(&srv.server_config()).await.unwrap();
+        let dir = std::env::temp_dir().join(format!("nzbfast-spotreplay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ix = Index::open(&dir.join("index.db")).unwrap();
+
+        let sum = scan_spots(&mut conn, &mut ix, "free.pt", "mock", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!((sum.scanned, sum.valid, sum.unverified), (4, 3, 1));
+        assert_eq!(ix.spot_stats().unwrap(), 3, "the replay must not be stored");
+        assert!(ix.spot_by_msgid("<replay@spot.net>").unwrap().is_none());
+
+        let o = ix.spot_by_msgid("<orig@spot.net>").unwrap().unwrap();
+        assert_eq!(o.spotter_id, spotter_id(&orig.modulus));
+        let st = ix.spot_by_msgid("<stripped@spot.net>").unwrap().unwrap();
+        assert!(st.verified, "the header still verifies");
+        assert_eq!(
+            st.spotter_id, "",
+            "a stripped copy must not carry the victim's id"
+        );
+
+        let f = ix.spot_by_msgid("<future@spot.net>").unwrap().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(
+            f.date <= now + 86_400 + 60,
+            "a far-future signed date must be clamped, got {}",
+            f.date
+        );
+        conn.quit().await;
+        drop(ix);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

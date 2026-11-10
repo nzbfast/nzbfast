@@ -63,11 +63,28 @@ fn tconst(raw: &str) -> String {
 /// not good enough for that, and a decline costs only the name we did
 /// not have anyway.
 pub fn parse_archive_crc(body: &str) -> Option<SrrHit> {
+    read_answer(body).flatten()
+}
+
+/// [`parse_archive_crc`], keeping apart the two ways it says `None`:
+/// the outer `None` is a body that is not the service's answer at all
+/// (an HTML error page from a CDN, a truncated or non-JSON 200), the
+/// inner one is a real answer that names no single release.
+///
+/// Only the second is about the CRC, so only the second may be cached:
+/// a junk 200 cached as "no hit" left that CRC nameless for the life of
+/// the daemon, which is the same defect [`archive_crc`] already refuses
+/// for a transport error, reached through a 200.
+fn read_answer(body: &str) -> Option<Option<SrrHit>> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
     let results = v.get("results")?.as_array()?;
     let [only] = results.as_slice() else {
-        return None;
+        return Some(None);
     };
+    Some(hit_of(only))
+}
+
+fn hit_of(only: &serde_json::Value) -> Option<SrrHit> {
     let release = only.get("release")?.as_str()?.trim().to_string();
     if release.is_empty() {
         return None;
@@ -130,7 +147,10 @@ fn fetch(crc: u32) -> (Option<SrrHit>, bool) {
             .build(),
     );
     match resp {
-        Ok(body) => (parse_archive_crc(&body), true),
+        Ok(body) => match read_answer(&body) {
+            Some(hit) => (hit, true),
+            None => (None, false),
+        },
         Err(e) => {
             // Back off the whole lane on an explicit "slow down", so the
             // next finished download does not walk into the same wall.
@@ -185,6 +205,28 @@ mod tests {
         assert_eq!(parse_archive_crc(""), None);
         // An HTML error page is a plausible thing for a CDN to answer with.
         assert_eq!(parse_archive_crc("<html><body>502</body></html>"), None);
+    }
+
+    /// A 200 that is not the service's answer says nothing about the
+    /// CRC and must not be cached as "no hit"; an empty or ambiguous
+    /// ANSWER is a real no and may be. This pins the split `fetch`
+    /// caches by; `fetch` itself names a fixed public host, so it has no
+    /// hermetic test of its own.
+    #[test]
+    fn a_junk_200_is_not_an_answer_but_an_empty_result_is() {
+        for junk in [
+            "<html><body>502</body></html>",
+            "",
+            "not json",
+            r#"{"error":"x"}"#,
+        ] {
+            assert_eq!(read_answer(junk), None, "{junk:?} read as an answer");
+        }
+        assert_eq!(
+            read_answer(r#"{"results":[],"resultsCount":0}"#),
+            Some(None)
+        );
+        assert!(matches!(read_answer(REAL), Some(Some(_))));
     }
 
     /// A release with no IMDb id on file is still a name worth having.

@@ -77,6 +77,20 @@ struct ProgressSheet: View {
                     .foregroundStyle(T.statusBad)
             }
 
+            // What a finished job could not take in (`result.warnings`, A36),
+            // in the core's own sentences. Beside Done, never instead of it:
+            // API.md says these are never an error.
+            if job.state == .done, let left = job.result?.leftOut, !left.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(left, id: \.self) { line in
+                        Label(line, systemImage: "exclamationmark.triangle")
+                            .font(.system(size: 12))
+                            .foregroundStyle(T.statusWarn)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+
             HStack(spacing: T.spacingM) {
                 if app.capabilities.low_priority {
                     Toggle(S.progressBackground, isOn: Binding(
@@ -123,10 +137,13 @@ struct ProgressSheet: View {
         // that has already arrived and `onChange` does not fire for it.
         .onAppear { rates.apply(job) }
         .onChange(of: job) { _, latest in rates.apply(latest) }
+        // One field, and only when it actually differs. The `onAppear` above
+        // moves `notify` from its placeholder to the setting, which fires this
+        // whenever notifications are off; that used to write the model's whole
+        // launch-time settings back over the core's (sweep finding A30).
         .onChange(of: notify) { _, newValue in
-            var settings = app.settings
-            settings.general.notifications = newValue
-            app.apply(settings: settings)
+            guard newValue != app.settings.general.notifications else { return }
+            app.updateSettings { $0.general.notifications = newValue }
         }
         .confirmationDialog(S.progressCancelConfirm, isPresented: $confirmingCancel) {
             Button(S.progressCancelConfirmStop, role: .destructive) {
@@ -199,7 +216,7 @@ struct ProgressSheet: View {
 
     private var tone: StatusPill.Tone {
         switch job.state {
-        case .done: return .good
+        case .done: return job.result?.leftOut.isEmpty == false ? .warn : .good
         case .failed: return .bad
         case .cancelled, .interrupted: return .warn
         case .paused, .queued: return .neutral

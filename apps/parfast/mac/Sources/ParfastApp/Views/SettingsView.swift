@@ -22,8 +22,20 @@ struct SettingsView: View {
             advanced.tabItem { Label(S.settingsAdvanced, systemImage: "wrench.adjustable") }
         }
         .frame(width: 520, height: 360)
-        .onAppear { draft = app.settings }
-        .onChange(of: draft) { _, newValue in app.apply(settings: newValue) }
+        // Re-read first, so the draft is the core's settings as they are now
+        // and not the copy taken at launch. The draft change this makes is
+        // itself seen by `onChange` below, and writes nothing: the diff from
+        // the placeholder to a fresh read, laid over that same fresh read, is
+        // a no-op that `apply(changesFrom:to:)` refuses to send.
+        .onAppear {
+            app.reloadSettings()
+            draft = app.settings
+        }
+        // The edit is the diff from the draft's previous value, so only the
+        // field the user just touched reaches the core (sweep finding A30).
+        .onChange(of: draft) { oldValue, newValue in
+            app.apply(changesFrom: oldValue, to: newValue)
+        }
     }
 
     private var general: some View {

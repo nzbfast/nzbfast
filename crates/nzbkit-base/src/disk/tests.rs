@@ -184,6 +184,102 @@ fn storage_exhausted_kinds_and_raw_codes() {
     }
 }
 
+/// TODO 358 item 6, one errno per assertion: EACCES, EPERM and EISDIR
+/// are the destination refusing the write, and classify as
+/// [`WriteHalt::Refused`] - never as exhaustion, whose verdict ("out of
+/// disk space") would send the user to the wrong fix. Both by KIND (what
+/// std's syscall wrappers hand back) and by raw code (an error built with
+/// `from_raw_os_error` carries only the number).
+#[test]
+fn destination_refused_kinds_and_raw_codes() {
+    // EACCES and EPERM share std's kind; EISDIR has its own.
+    for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::IsADirectory] {
+        let e = io::Error::new(kind, "x");
+        assert!(destination_refused(&e), "{kind:?}");
+        assert!(!storage_exhausted(&e), "{kind:?}");
+        assert_eq!(write_halt(&e), Some(WriteHalt::Refused), "{kind:?}");
+    }
+    // Exhaustion stays exhaustion, and an ordinary failure halts nothing.
+    assert_eq!(
+        write_halt(&io::Error::new(io::ErrorKind::StorageFull, "x")),
+        Some(WriteHalt::Exhausted)
+    );
+    for kind in [
+        io::ErrorKind::NotFound,
+        io::ErrorKind::Interrupted,
+        io::ErrorKind::TimedOut,
+        io::ErrorKind::InvalidData,
+    ] {
+        let e = io::Error::new(kind, "x");
+        assert!(!destination_refused(&e), "{kind:?}");
+        assert_eq!(write_halt(&e), None, "{kind:?}");
+    }
+    assert_eq!(write_halt(&io::Error::other("x")), None);
+    #[cfg(unix)]
+    {
+        // EACCES.
+        let e = io::Error::from_raw_os_error(libc::EACCES);
+        assert!(destination_refused(&e), "{e}");
+        assert_eq!(write_halt(&e), Some(WriteHalt::Refused), "{e}");
+        // EPERM.
+        let e = io::Error::from_raw_os_error(libc::EPERM);
+        assert!(destination_refused(&e), "{e}");
+        assert_eq!(write_halt(&e), Some(WriteHalt::Refused), "{e}");
+        // EISDIR.
+        let e = io::Error::from_raw_os_error(libc::EISDIR);
+        assert!(destination_refused(&e), "{e}");
+        assert_eq!(write_halt(&e), Some(WriteHalt::Refused), "{e}");
+        // The literals the raw-code arm matches ARE these numbers here.
+        assert_eq!((libc::EPERM, libc::EACCES, libc::EISDIR), (1, 13, 21));
+        // 5 is EIO on Unix: Windows' ERROR_ACCESS_DENIED number must not
+        // make a failing disk read as a permissions problem.
+        assert_eq!(write_halt(&io::Error::from_raw_os_error(libc::EIO)), None);
+    }
+    #[cfg(windows)]
+    {
+        // ERROR_ACCESS_DENIED, which is also Windows' answer for opening
+        // a directory as a file; 13 is ERROR_INVALID_DATA here.
+        let e = io::Error::from_raw_os_error(5);
+        assert_eq!(write_halt(&e), Some(WriteHalt::Refused), "{e}");
+        assert_eq!(write_halt(&io::Error::from_raw_os_error(13)), None);
+    }
+}
+
+/// The real syscalls rather than hand-built errors: opening a payload
+/// leaf through the output writer where a directory occupies the name
+/// (EISDIR) or the folder denies writes (EACCES) produces an error the
+/// halt classifier calls a refusal.
+#[cfg(unix)]
+#[test]
+fn a_real_refused_output_open_classifies_as_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("nzbkit-refused-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // EISDIR: a directory where the payload's file must go.
+    std::fs::create_dir_all(dir.join("payload.bin")).unwrap();
+    let e = FileWriter::create(&dir.join("payload.bin"), 16)
+        .err()
+        .expect("a directory in the way refuses the open");
+    assert_eq!(write_halt(&e), Some(WriteHalt::Refused), "{e}");
+
+    // EACCES: a folder with no write permission. Skipped under root,
+    // which the permission bits do not bind.
+    let ro = dir.join("ro");
+    std::fs::create_dir_all(&ro).unwrap();
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o500)).unwrap();
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    if unsafe { libc::geteuid() } != 0 {
+        let e = FileWriter::create(&ro.join("payload.bin"), 16)
+            .err()
+            .expect("a read-only folder refuses the open");
+        assert_eq!(write_halt(&e), Some(WriteHalt::Refused), "{e}");
+    }
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// [`bomb_verdict`] must survive every wrapper the verdict travels
 /// inside before an extraction ladder reads it.
 ///
@@ -3101,4 +3197,56 @@ fn sync_handle_flushes_read_only_and_directory_descriptors() {
     sync_handle(&File::open(&p).unwrap()).unwrap();
     sync_handle(&File::open(&dir).unwrap()).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Sweep 9 Nov 2026 (C, disk.rs:2027): a write through a clone after
+/// `abandon_close` failed with "parked for an external tool", which is
+/// the PARK's text - the engine counts that as a failed article and the
+/// error is what a reader of the job's record sees, sending them after
+/// a repair that never ran. Same kind (callers branch on it), honest
+/// words; and a real park still says park.
+#[test]
+fn a_write_after_abandon_close_does_not_claim_a_park() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-abandon-text-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("gone.bin");
+    let w = std::sync::Arc::new(FileWriter::create(&path, 4096).unwrap());
+    let late = w.clone();
+    let gone = w.abandon_close();
+    std::fs::remove_file(&gone).unwrap();
+    let e = late.write_at(0, &[1u8; 8]).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::NotConnected);
+    assert!(
+        !e.to_string().contains("parked") && e.to_string().contains("discarded"),
+        "{e}"
+    );
+
+    let kept = dir.join("kept.bin");
+    let p = FileWriter::create(&kept, 4096).unwrap();
+    p.park().unwrap();
+    let e = p.write_at(0, &[1u8; 8]).unwrap_err();
+    assert!(e.to_string().contains("parked for an external tool"), "{e}");
+    drop((w, late, p));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Sweep 9 Nov 2026 (C, disk/coverage.rs:72): an empty range has no
+/// byte that could be missing. It was answered by whether some span
+/// happened to touch `off`, so at a hole - or on a file nothing has
+/// been written to - `covered(off, 0)` was false, and a reader that
+/// waits on coverage waited its whole deadline for nothing.
+#[test]
+fn an_empty_range_is_always_covered() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-cover-empty-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = FileWriter::create(&dir.join("e.bin"), 4096).unwrap();
+    assert!(w.covered(0, 0), "nothing written, nothing asked");
+    w.write_at(0, &[7u8; 64]).unwrap();
+    assert!(w.covered(1000, 0), "an empty range at a hole");
+    assert!(
+        !w.covered(1000, 1),
+        "a one-byte range at the same hole is not"
+    );
+    drop(w);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

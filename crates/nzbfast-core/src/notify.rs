@@ -675,7 +675,20 @@ mod smtp {
     struct Conn {
         s: Box<dyn Rw>,
         buf: Vec<u8>,
+        /// When the whole conversation gives up, whatever stage it is at.
+        until: std::time::Instant,
     }
+
+    /// The most one reply may hold, continuation lines and all. A real
+    /// EHLO answer is a few hundred bytes.
+    const REPLY_MAX: usize = 64 * 1024;
+
+    /// The whole conversation's budget. The socket timeouts bound ONE
+    /// read, so a server that drips a byte every few seconds - or sends
+    /// `250-` continuation lines without end - kept the notifier thread
+    /// for as long as it liked. Six of the per-call timeouts is a dozen
+    /// round trips on a slow relay with room to spare.
+    const SESSION_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
     impl Conn {
         fn line(&mut self) -> Result<String, String> {
@@ -688,6 +701,9 @@ mod smtp {
                 // is not an SMTP server.
                 if self.buf.len() > 64 * 1024 {
                     return Err("oversized reply".into());
+                }
+                if std::time::Instant::now() >= self.until {
+                    return Err("the server took too long to answer".into());
                 }
                 let mut tmp = [0u8; 512];
                 let n = self.s.read(&mut tmp).map_err(|e| e.to_string())?;
@@ -709,6 +725,12 @@ mod smtp {
                 let cont = l.len() >= 4 && l.as_bytes()[3] == b'-';
                 all.push_str(&l);
                 all.push('\n');
+                // Per REPLY, not per line: `line` already bounds one
+                // line, and a stream of continuation lines is the same
+                // runaway in pieces.
+                if all.len() > REPLY_MAX {
+                    return Err(format!("{what}: oversized reply"));
+                }
                 if cont {
                     continue;
                 }
@@ -847,11 +869,13 @@ mod smtp {
         };
         let _ = tcp.set_read_timeout(Some(super::TIMEOUT));
         let _ = tcp.set_write_timeout(Some(super::TIMEOUT));
+        let until = std::time::Instant::now() + SESSION_BUDGET;
         let mut c;
         if tls_first {
             c = Conn {
                 s: tls(&host, tcp)?,
                 buf: Vec::new(),
+                until,
             };
             c.reply("greeting")?;
             c.cmd("EHLO nzbfast", "EHLO")?;
@@ -859,6 +883,7 @@ mod smtp {
             let mut plain = Conn {
                 s: Box::new(tcp.try_clone().map_err(|e| e.to_string())?),
                 buf: Vec::new(),
+                until,
             };
             plain.reply("greeting")?;
             let (_, ehlo) = plain.cmd("EHLO nzbfast", "EHLO")?;
@@ -868,6 +893,7 @@ mod smtp {
                 c = Conn {
                     s: tls(&host, tcp)?,
                     buf: Vec::new(),
+                    until,
                 };
                 c.cmd("EHLO nzbfast", "EHLO")?;
             } else if !t.token.is_empty() {
@@ -914,6 +940,48 @@ mod smtp {
         )?;
         let _ = c.cmd("QUIT", "QUIT");
         Ok(code)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn conn(input: Vec<u8>, until: std::time::Instant) -> Conn {
+            Conn {
+                s: Box::new(std::io::Cursor::new(input)),
+                buf: Vec::new(),
+                until,
+            }
+        }
+
+        /// Continuation lines without end are refused at the reply cap
+        /// rather than accumulated. NEGATIVE CONTROL, run: without the
+        /// `REPLY_MAX` check this reads all 4 MB into one reply.
+        #[test]
+        fn endless_continuation_lines_are_an_oversized_reply() {
+            let far = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let flood = b"250-x\r\n".repeat(4 * 1024 * 1024 / 7);
+            let e = conn(flood, far).reply("EHLO").unwrap_err();
+            assert!(e.contains("oversized"), "{e}");
+            // An ordinary multiline reply still parses whole.
+            let ok = conn(b"250-mail.example\r\n250 STARTTLS\r\n".to_vec(), far)
+                .reply("EHLO")
+                .expect("a normal EHLO answer");
+            assert_eq!(ok.0, 250);
+            assert!(ok.1.contains("STARTTLS"));
+        }
+
+        /// Past the session deadline no further read is made, however
+        /// willing the server is to keep talking. NEGATIVE CONTROL, run:
+        /// without the deadline check this returns the reply.
+        #[test]
+        fn a_spent_session_budget_stops_reading() {
+            let spent = std::time::Instant::now();
+            let e = conn(b"220 hello\r\n".to_vec(), spent)
+                .reply("greeting")
+                .unwrap_err();
+            assert!(e.contains("too long"), "{e}");
+        }
     }
 }
 

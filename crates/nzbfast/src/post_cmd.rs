@@ -732,6 +732,7 @@ mod tests {
             block_account: false,
             bind_ip: None,
             socks5: None,
+            http_proxy: None,
             enabled,
             warm_pool: false,
             idle_release_secs: None,

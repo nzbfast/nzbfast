@@ -199,6 +199,106 @@ async fn head_stat_date_group_ladders_answer_hit_and_miss() {
     conn.quit().await;
 }
 
+/// TODO 358 items 2 and 12, the 480 pin at the wire: what a lapsed
+/// login and a group-demanding frontend look like to the BODY reader,
+/// and that the classifier names exactly those two and nothing beside
+/// them. The pool's recovery keys on `session_refusal()`, so a reader
+/// that started raising some other shape for a 480 (or a classifier
+/// that started matching a 430, or a 480 to GROUP) would silently send
+/// every lapse back to the redial or log in on a healthy refusal.
+#[tokio::test]
+async fn a_480_and_a_412_read_as_session_refusals_and_are_answered_in_place() {
+    use std::sync::atomic::AtomicBool;
+    let refused = |cmd: &str, line: &str| {
+        NntpError::Unexpected {
+            cmd: cmd.into(),
+            line: line.into(),
+        }
+        .session_refusal()
+    };
+    assert_eq!(
+        refused("BODY", "480 authentication required"),
+        Some(SessionRefusal::AuthRequired)
+    );
+    assert_eq!(
+        refused("STAT", "412 no newsgroup selected"),
+        Some(SessionRefusal::NoGroup)
+    );
+    assert_eq!(refused("BODY", "430 no such article"), None);
+    assert_eq!(refused("BODY", "502 byte limit exceeded"), None);
+    assert_eq!(refused("GROUP alt.x", "480 authentication required"), None);
+    assert_eq!(refused("DATE", "480 authentication required"), None);
+    assert_eq!(NntpError::Closed.session_refusal(), None);
+
+    let mut articles = std::collections::HashMap::new();
+    make_file_articles("s.bin", &[9u8; 900], 1_000, "sr", &mut articles);
+    let id = articles.keys().next().unwrap().clone();
+    let srv = MockServer::start(
+        articles,
+        Chaos {
+            auth_lapse_after: Some(0),
+            require_group: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut sc = srv.server_config();
+    sc.username = Some("u".into());
+    sc.password = Some("p".into());
+    let (mut conn, _) = Connection::connect(&sc).await.expect("connect to mock");
+    let (echo, down) = (AtomicBool::new(false), AtomicBool::new(false));
+    let mut buf = Vec::new();
+    // The lapse outranks the group gate, as it would on a real server
+    // (an unauthenticated session is refused before anything else).
+    conn.send_body(&id).await.expect("send");
+    conn.flush().await.expect("flush");
+    let e = conn
+        .read_body_into(&mut buf, Some(&id), None, &echo, &down)
+        .await
+        .expect_err("a lapsed login refuses the BODY");
+    assert_eq!(
+        e.session_refusal(),
+        Some(SessionRefusal::AuthRequired),
+        "{e}"
+    );
+    conn.authenticate("u", "p")
+        .await
+        .expect("re-login on the same socket");
+    assert_eq!(
+        srv.session
+            .relogins
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    conn.send_body(&id).await.expect("send");
+    conn.flush().await.expect("flush");
+    let e = conn
+        .read_body_into(&mut buf, Some(&id), None, &echo, &down)
+        .await
+        .expect_err("no group selected yet");
+    assert_eq!(e.session_refusal(), Some(SessionRefusal::NoGroup), "{e}");
+    conn.group("alt.binaries.x").await.expect("GROUP");
+    conn.send_body(&id).await.expect("send");
+    conn.flush().await.expect("flush");
+    assert!(
+        conn.read_body_into(&mut buf, Some(&id), None, &echo, &down)
+            .await
+            .expect("served once logged in and grouped"),
+        "the article is present"
+    );
+    assert_eq!(
+        srv.session.group_log.lock().unwrap().as_slice(),
+        &[(1, "alt.binaries.x".to_string())]
+    );
+    assert_eq!(
+        srv.session
+            .refusals
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    conn.quit().await;
+}
+
 // The mods below moved verbatim from nntp.rs (6 Aug, same size-gate
 // rule as above): kept as nested mods, only their `use super::...`
 // lines rewritten to `use crate::nntp::...` for the new depth.
@@ -405,6 +505,7 @@ mod quit_tests {
             block_account: false,
             bind_ip: None,
             socks5: None,
+            http_proxy: None,
             enabled: true,
             warm_pool: false,
             idle_release_secs: None,
@@ -458,6 +559,7 @@ mod quit_tests {
             block_account: false,
             bind_ip: None,
             socks5: None,
+            http_proxy: None,
             enabled: true,
             warm_pool: false,
             idle_release_secs: None,
@@ -952,6 +1054,7 @@ mod quit_tests {
             block_account: false,
             bind_ip: None,
             socks5: None,
+            http_proxy: None,
             enabled: true,
             warm_pool: false,
             idle_release_secs: None,
@@ -1189,6 +1292,7 @@ mod quit_tests {
             block_account: false,
             bind_ip: None,
             socks5: Some(format!("127.0.0.1:{}", paddr.port())),
+            http_proxy: None,
             enabled: true,
             warm_pool: false,
             idle_release_secs: None,
@@ -1461,6 +1565,7 @@ fn at(port: u16) -> crate::config::ServerConfig {
         block_account: false,
         bind_ip: None,
         socks5: None,
+        http_proxy: None,
         enabled: true,
         warm_pool: false,
         idle_release_secs: None,
@@ -2009,4 +2114,103 @@ async fn compress_deflate_is_refused_cleanly_when_the_server_says_no() {
             other.map(|_| "a wrapped conn").unwrap_or("an error")
         ),
     }
+}
+
+/// A command whose status line cannot be read leaves that answer owed,
+/// and it arrives as the reply to the NEXT command. Only a body that
+/// died partway used to latch `desynced`; a status read that failed in
+/// `exec` - here an over-long status line, cut at `MAX_STATUS_BYTES`
+/// with its tail still on the wire, the same position a timed-out one
+/// leaves - let the next command read the leftovers as its own answer.
+/// The header scan keeps its connection across an `over()` error, so
+/// that was one range's answer filed as another's.
+#[tokio::test]
+async fn a_status_line_that_cannot_be_read_latches_the_desync() {
+    let long: &'static str =
+        Box::leak(format!("224 {}\r\n", "x".repeat(MAX_STATUS_BYTES + 16)).into_boxed_str());
+    let script: &'static [(&'static str, &'static str)] = Box::leak(Box::new([
+        ("OVER", long),
+        ("DATE", "111 20260731000000\r\n"),
+    ]));
+    let port = scripted("200 scripted\r\n", script);
+    let (mut conn, _) = Connection::connect(&at(port)).await.expect("connect");
+    let first = conn.over(1, 5).await;
+    assert!(
+        matches!(first, Err(NntpError::TooLarge(_))),
+        "an over-long status line is refused, got {:?}",
+        first.map(|v| v.len())
+    );
+    let next = tokio::time::timeout(std::time::Duration::from_secs(10), conn.date())
+        .await
+        .expect("a desynced conn must answer at once, not hang");
+    assert!(
+        matches!(next, Err(NntpError::Closed)),
+        "the next command must be refused, not handed OVER's leftovers: {next:?}"
+    );
+}
+
+/// `send_raw` is the POST/IHAVE payload write, and a peer that stops
+/// READING fills its window and then our send buffer: a bare
+/// `write_all` waits on that forever, with every read around it
+/// bounded. The bound is a no-progress one, so it fires on a dead
+/// peer, and it latches the desync because half an article is on the
+/// wire.
+#[tokio::test]
+async fn a_raw_send_to_a_peer_that_stops_reading_is_bounded() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (hold_tx, hold_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let Ok((mut s, _)) = listener.accept() else {
+            return;
+        };
+        let _ = s.write_all(b"200 greeting, then deaf\r\n");
+        // Never read, never close: the socket stays open and full
+        // until the test is done with it.
+        let _ = hold_rx.recv();
+        drop(s);
+    });
+    let (mut conn, _) = Connection::connect(&at(port)).await.expect("connect");
+    // Far past any loopback socket buffer pair, so the write must block.
+    let payload = vec![b'x'; 64 << 20];
+    let r = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        conn.send_raw_bounded(&payload, std::time::Duration::from_millis(300)),
+    )
+    .await
+    .expect("the bounded send must give up, not park the worker");
+    assert!(
+        matches!(r, Err(NntpError::Timeout)),
+        "a stalled peer is a timeout, got {r:?}"
+    );
+    assert!(
+        matches!(conn.date().await, Err(NntpError::Closed)),
+        "half an article is on the wire: the conversation is over"
+    );
+    let _ = hold_tx.send(());
+}
+
+/// A provider's idle reaper writes `400 Idle timeout` and hangs up, so
+/// on a parked session that line is already buffered when the liveness
+/// DATE goes out and reads as its answer. It is the server saying the
+/// session is over, and `date()` - the warm pool's and the pool's one
+/// liveness probe - must not call it alive. Any OTHER answer still is:
+/// a server that does not implement DATE answers 500 and is fine.
+#[tokio::test]
+async fn a_400_to_date_is_a_dead_session_and_a_500_is_not() {
+    const IDLE: &[(&str, &str)] = &[("DATE", "400 Idle timeout\r\n")];
+    let (mut conn, _) = Connection::connect(&at(scripted("200 hi\r\n", IDLE)))
+        .await
+        .expect("connect");
+    let r = conn.date().await;
+    assert!(
+        matches!(&r, Err(NntpError::Unexpected { line, .. }) if line.starts_with("400")),
+        "a 400 is the peer closing, got {r:?}"
+    );
+
+    const NO_DATE: &[(&str, &str)] = &[("DATE", "500 What?\r\n")];
+    let (mut conn, _) = Connection::connect(&at(scripted("200 hi\r\n", NO_DATE)))
+        .await
+        .expect("connect");
+    assert_eq!(conn.date().await.expect("still alive").code, 500);
 }

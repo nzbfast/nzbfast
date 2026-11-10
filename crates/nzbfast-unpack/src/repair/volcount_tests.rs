@@ -117,6 +117,7 @@ fn pset(block_size: u64) -> nzbkit::par2::Par2Set {
             md5_16k: [0u8; 16],
             blocks: Vec::new(),
         }],
+        undescribed: Vec::new(),
         nonrecovery: Vec::new(),
         recovery_blocks_seen: 0,
     }

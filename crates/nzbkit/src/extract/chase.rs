@@ -316,6 +316,9 @@ impl Extractor {
     /// single-entry check below: the blocker fires on the first parsed
     /// entry, so exactly one entry exists at attach time, and the
     /// sequence driver then decodes every member through its own sink.)
+    /// The volume joins the chase of the SET it belongs to, not of the
+    /// member its first entry names - in a multi-member set those differ
+    /// at every member boundary; see [`Self::set_chase_group`].
     ///
     /// Runs at depth 0 too (the top-level analogue of TODO 37 step 1):
     /// a POSTED compressed RAR chases, its decoded members land in the
@@ -378,7 +381,7 @@ impl Extractor {
             };
             (e.name.clone(), vol_index, v4, m.archive_base())
         };
-        let key = Self::canon_key(inner, &name);
+        let key = Self::set_chase_group(inner, slot, &name, v4);
         let grp = inner.groups.entry(key.clone()).or_insert_with(|| Group {
             slots: Vec::new(),
             bases: HashMap::new(),
@@ -551,6 +554,72 @@ impl Extractor {
             self.fallback_slot_or_group(inner, slot, HELD_BYTES_CAP_CHASE)?;
         }
         Ok(true)
+    }
+    /// The group a chased volume joins: the chase of the SET it belongs
+    /// to, not of the member its first entry happens to name.
+    ///
+    /// A chased volume's header parse stops at its first entry (that
+    /// entry is the blocker), so the first-entry name is all the attach
+    /// has to key on - and in a set holding several compressed members,
+    /// which is what `rar a -v` makes from more than one file, that name
+    /// changes at every member boundary. Keyed on it alone, the volume
+    /// that opens on member 1's continuation started a chase of its own,
+    /// nothing ever linked it back (`link_split_names` reads the names a
+    /// MAPPED slot parsed, and a chased slot never parses member 1's
+    /// header), and every such set split into one group per member, all
+    /// of which failed: "split entry is incomplete" for the first,
+    /// "volume set is empty" for the rest, and the disk unpack after the
+    /// download on every leg measured
+    /// (research/MULTIMEMBER-CHASE-2026-11-09.md).
+    ///
+    /// So, in order:
+    ///
+    /// * a group that already owns the name (through the alias map) is
+    ///   the answer, exactly as before - a one-member set, and every
+    ///   volume after the first of each member, still lands here;
+    /// * otherwise the ONE chase group of the same RAR family holding a
+    ///   volume of the same set: same release stem by name, which is how
+    ///   the unpacker itself finds a set's next volume. The engine then
+    ///   decodes the members serially in archive order through that one
+    ///   chase, as it always could; it simply never had their volumes;
+    /// * otherwise a new group under the name.
+    ///
+    /// Two candidates is ambiguity, and ambiguity keeps the old key - the
+    /// worst a refusal costs is today's fallback. A name that numbers no
+    /// volume (a fully obfuscated post with no shared stem) has no set to
+    /// join and keys on its entry name as it always did. A fallen-back
+    /// group still carries its `chase` until finish, so a volume of a set
+    /// that already demoted finds it here and demotes with it rather than
+    /// starting a chase that can only fail. A wrong join is bounded too:
+    /// a volume index the set already holds is refused by the caller, and
+    /// a volume of another archive fails the engine's own header and
+    /// CRC/BLAKE2 checks and demotes the set to the disk path, which
+    /// never reads group membership.
+    fn set_chase_group(inner: &Inner, slot: usize, name: &str, v4: bool) -> String {
+        let key = Self::canon_key(inner, name);
+        if inner.groups.contains_key(&key) {
+            return key;
+        }
+        let Some((_, stem)) = Self::set_position(inner, slot) else {
+            return key;
+        };
+        let mut found: Option<&String> = None;
+        for (k, g) in &inner.groups {
+            if !g.chase.as_ref().is_some_and(|c| c.v4 == v4) {
+                continue;
+            }
+            let same_set = g.slots.iter().any(|&si| {
+                si != slot && Self::set_position(inner, si).is_some_and(|(_, s)| s == stem)
+            });
+            if !same_set {
+                continue;
+            }
+            if found.is_some() {
+                return key;
+            }
+            found = Some(k);
+        }
+        found.cloned().unwrap_or(key)
     }
     /// Route a chased slot's span into its frontier buffer, charging the
     /// shared budget for the retained delta; a breach demotes the whole
@@ -3020,6 +3089,12 @@ pub(super) mod chase_tests;
 #[cfg(all(test, feature = "rar"))]
 #[path = "chase_shape_tests.rs"]
 pub(super) mod chase_shape_tests;
+
+// Multi-member compressed sets (several files through one split set):
+// one chase per SET, not per member. Its own file for the size gate.
+#[cfg(all(test, feature = "rar"))]
+#[path = "chase_multimember_tests.rs"]
+mod chase_multimember_tests;
 
 /// A RAR archive's view of a volume that starts `base` bytes into its
 /// file - the SFX case (TODO 94 C), where a launcher stub precedes the

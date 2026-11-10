@@ -3769,6 +3769,26 @@ mod tree_adopt;
 #[cfg(test)]
 mod adopt_exclusions;
 
+/// Parfast sweep A23 / A24: staging temps on the error exits that used
+/// to leak them - a child module for `padded_windows`' two reasons.
+#[cfg(test)]
+mod temp_cleanup;
+
+/// Parfast sweep: a recovery exponent and its alias modulo 65,535 are
+/// one row - `par2::recovery_row`. A child module for the same reasons.
+#[cfg(test)]
+mod exponent_rows;
+
+/// Parfast sweep: a second name for a target's own file object (an NFD
+/// spelling, a hard link) is never its adoption donor. Same reasons.
+#[cfg(test)]
+mod target_alias;
+
+/// The 9 Nov 2026 Fable sweep's PAR2 engine residue, one test per
+/// confirmed lead. A child module for the same reasons.
+#[cfg(test)]
+mod sweep_residue_10nov;
+
 /// Mapping a packet file parses it EXACTLY as reading it does.
 ///
 /// `Catalog::scan_file` reads a volume whole up to `SLURP_MAX_BYTES` and

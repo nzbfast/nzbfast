@@ -148,6 +148,15 @@ pub struct UndoRow {
     /// `Daemon::reuse_cancelled_dir`, which is the difference between
     /// an undo that resumes and one that quietly starts again from zero.
     pub out_dir: PathBuf,
+    /// What the row was carrying for its processing and for its client,
+    /// none of which the NZB holds: the NZBGet PPParameters (the `drone`
+    /// tag an *arr matches a download by), the SAB `pp` level, the
+    /// per-job script choice - where "None" suppresses the category and
+    /// global scripts and empty inherits them - and the indexer's
+    /// X-DNZB-Failure relationship. A restore without them came back a
+    /// different job under the same id: unmatched by its *arr, and
+    /// running a script its add had switched off (6 Nov 2026 sweep F3).
+    pub extras: AddExtras,
     /// The retained link, under `<spool>/undo/`.
     pub nzb: PathBuf,
 }
@@ -263,6 +272,19 @@ impl Daemon {
             password: g.password.clone(),
             held_for: g.held_for.clone(),
             out_dir: g.out_dir.clone(),
+            extras: AddExtras {
+                pp_params: g.pp_params.clone(),
+                failure_link: g.failure_link.clone(),
+                failure_host: g.failure_host.clone(),
+                failure_https: g.failure_https,
+                failure_depth: g.failure_depth,
+                // The row's own `password` (above) already settled
+                // whatever the header said when it was first added.
+                header_password: String::new(),
+                paused: g.paused,
+                sab_pp: g.sab_pp,
+                script_override: g.script_override.clone(),
+            },
             nzb: dest,
         })
     }
@@ -380,6 +402,21 @@ impl Daemon {
     pub fn spend_cancel_undo(self: &Arc<Self>, batch: UndoBatch) -> UndoOutcome {
         let mut out = UndoOutcome::default();
         for row in batch.rows {
+            // A live twin first, as `spend_hist_undo` checks one: an add
+            // that names its own id publishes a SECOND record under it
+            // when the first is still listed, and every caller that
+            // resolves by id - the *arr, a delete, park - then acts on
+            // whichever it meets first. Nothing in the queue's own flow
+            // brings a cancelled id back inside the window, which is what
+            // makes this a refusal by name rather than a merge.
+            if self.cancelled_id_is_listed(&row.nzo_id) {
+                out.failed.push(format!(
+                    "{}: that download is back in the queue or the history already",
+                    row.name
+                ));
+                let _ = std::fs::remove_file(&row.nzb);
+                continue;
+            }
             let bytes = match std::fs::read(&row.nzb) {
                 Ok(b) if !b.is_empty() => b,
                 // Empty is not "no bytes to worry about": it is
@@ -419,9 +456,12 @@ impl Daemon {
                 // written once it had returned left that whole window
                 // with a runnable copy of a row the user had paused
                 // (27 Oct 2026 sweep F2).
+                //
+                // The rest of what the row carried goes through the same
+                // door, so it is on the row before any worker can see it.
                 AddExtras {
                     paused: row.paused,
-                    ..AddExtras::default()
+                    ..row.extras.clone()
                 },
             ) {
                 Ok(e) => {
@@ -476,6 +516,29 @@ impl Daemon {
     ///   its directory, and moving it out from under a live writer would
     ///   be a far worse bug than the one this fixes.
     fn reuse_cancelled_dir(&self, nzo_id: &str, want: &Path) {
+        // A FIFTH guard, and the one the four above cannot see: the
+        // cancelled RUN may not have let go yet. A cancelled download is
+        // in neither store from the moment the delete answers, so
+        // `dir_claim` reads its directory as Free, but its pipeline winds
+        // down on its own clock - and a cancel that lands after the
+        // network phase leaves verify, repair and unpack to run to their
+        // end (`remove_after_sidecar_drain` has the measurement). Pointing
+        // the restored row at that directory then lets the runner start
+        // it there beside the old tail, two writers on one payload, which
+        // is the collision `enqueue_as` climbs to `.2` to avoid. So while
+        // anything of the old run is still registered under the id, the
+        // restored row keeps the fresh directory the add chose: a resume
+        // given up is a cost, a payload written by two pipelines is a
+        // loss (9 Nov 2026 sweep A3).
+        if self.cancelled_run_still_holds(nzo_id) {
+            info!(
+                target: "queue",
+                "undo: {nzo_id} starts afresh rather than in {} - the cancelled run \
+                 is still winding down there",
+                want.display()
+            );
+            return;
+        }
         let cur = {
             let q = self.queue.lock_ok();
             q.iter()
@@ -514,6 +577,33 @@ impl Daemon {
             g.out_dir = want.to_path_buf();
             return;
         }
+    }
+
+    /// Is a record under this id in either list right now?
+    ///
+    /// ONE LOCK AT A TIME and the queue's first, for the reason
+    /// `histundo`'s twin check gives at its own site: every caller that
+    /// wants both takes them in that order.
+    fn cancelled_id_is_listed(&self, nzo_id: &str) -> bool {
+        let queued = find_job(self.queue.lock_ok().iter(), nzo_id).is_some();
+        queued || find_job(self.history.lock_ok().iter(), nzo_id).is_some()
+    }
+
+    /// Is anything of a cancelled run still registered under its id?
+    ///
+    /// The registers a running pipeline writes and only `park_gen`
+    /// clears: the queue row's activity token and §129's tail-cancel
+    /// handle on the daemon's own hub, plus the prefetch sidecar's slot,
+    /// whose hub is its own and so never reaches the first two. Called
+    /// before the restored row can have started (or with it no longer
+    /// `Queued`, where the caller stands down anyway), so an entry here
+    /// is the old run's. A stale entry costs a resume, never a payload -
+    /// the caller's whole answer to "yes" is to leave the fresh
+    /// directory alone.
+    fn cancelled_run_still_holds(&self, nzo_id: &str) -> bool {
+        self.hub.activity.lock_ok().contains_key(nzo_id)
+            || self.hub.tail_cancel.lock_ok().contains_key(nzo_id)
+            || self.sidecar_owner().is_some_and(|(id, _)| id == nzo_id)
     }
 
     /// Empty the undo store at startup.

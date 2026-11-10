@@ -244,3 +244,43 @@ fn a_hidden_row_comes_back_from_the_store_still_hidden() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A store that refuses part way through a multi-id hide must leave each
+/// record's memory agreeing with its store line (bug sweep 9 Nov 2026,
+/// section C). The rollback cleared every flag, including the ones whose
+/// hidden line had already landed, so those rows reappeared now and
+/// vanished again at the next restart.
+#[test]
+fn a_hide_refused_part_way_keeps_memory_and_store_agreeing() {
+    use nzbfast_daemon::histstore::HistWrite;
+    let jobs: Vec<Arc<Mutex<Job>>> = (0..3)
+        .map(|i| {
+            let j = job_from_json(&json!({
+                "nzo_id": format!("SABnzbd_nzo_hide{i}"), "name": format!("Hide.{i}"),
+                "state": "Completed", "out_dir": "/nonexistent/hide", "nzb_path": "",
+            }))
+            .expect("job");
+            Arc::new(Mutex::new(j))
+        })
+        .collect();
+    for j in &jobs {
+        j.lock_ok().hidden = true;
+    }
+    let mut calls = 0;
+    let ok = publish_hides(&jobs, |_| {
+        calls += 1;
+        if calls == 2 {
+            HistWrite::Refused
+        } else {
+            HistWrite::Wrote
+        }
+    });
+    assert!(!ok, "a refusal is reported");
+    assert_eq!(calls, 2, "nothing is published after the refusal");
+    let flags: Vec<bool> = jobs.iter().map(|j| j.lock_ok().hidden).collect();
+    assert_eq!(
+        flags,
+        [true, false, false],
+        "the published record stays hidden; the refused and unpublished ones go back"
+    );
+}

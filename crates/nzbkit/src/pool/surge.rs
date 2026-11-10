@@ -365,6 +365,35 @@ impl Shared {
         );
     }
 
+    /// Roll back the one provisional loan [`Self::surge_consider`]
+    /// committed when `surge_apply` moved no target.
+    ///
+    /// Saturating, because the rate limit serialises the TAKE side only.
+    /// Every worker's `surge_tick` runs `surge_return_due` first, so
+    /// another thread can return this server's whole episode - our
+    /// provisional loan included, `lent` swapped to zero and `out` cut
+    /// by it - between the commit and this rollback. A plain `fetch_sub`
+    /// then wrapped both counters to `usize::MAX`: `out` past `max`
+    /// shuts the surge for the rest of the run, and the next return
+    /// subtracts `usize::MAX` from `out`.
+    ///
+    /// So `lent` decides: a loan still on this server's ledger is ours
+    /// to take back from both counters, and an empty ledger means a
+    /// return already took it - from `out` too - so there is nothing
+    /// left to undo. Not a saturating cut of `out` on its own: `out` is
+    /// fleet-wide, and cutting it again would spend ANOTHER server's
+    /// loan. Exact while the takes are serialised, which is what the
+    /// `last` compare-exchange in the caller is for: only a take adds
+    /// to `lent`, so nothing else can have refilled it in between.
+    fn surge_unlend(&self, si: usize) {
+        if self.surge.lent[si]
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1))
+            .is_ok()
+        {
+            self.surge.out.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
     /// Take one more socket, if every gate says so.
     ///
     /// Ordered cheapest-first, and the run-level gates come before the
@@ -423,8 +452,7 @@ impl Shared {
         let first = self.surge.lent[si].fetch_add(1, Ordering::Relaxed) == 0;
         self.surge.out.fetch_add(1, Ordering::Relaxed);
         let Some(target) = self.surge_apply(si) else {
-            self.surge.lent[si].fetch_sub(1, Ordering::Relaxed);
-            self.surge.out.fetch_sub(1, Ordering::Relaxed);
+            self.surge_unlend(si);
             return;
         };
         if first {

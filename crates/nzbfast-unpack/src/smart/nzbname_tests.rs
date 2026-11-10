@@ -1015,3 +1015,115 @@ fn a_folder_that_arrives_on_the_name_is_never_merged_into() {
     // loaded CI box decides where an arrival lands, not the climb.
     assert!(wins > 0, "raced nothing: no arrival ever held the name");
 }
+
+/// `from` holding two files and a subfolder with one more.
+fn job_folder(tag: &str) -> (ScratchDir, PathBuf, PathBuf) {
+    let root = scratch(tag);
+    let from = root.join("job");
+    std::fs::create_dir_all(from.join("Subs")).unwrap();
+    std::fs::write(from.join("a.mkv"), b"feature").unwrap();
+    std::fs::write(from.join("b.nfo"), b"nfo").unwrap();
+    std::fs::write(from.join("Subs").join("c.srt"), b"subs").unwrap();
+    let to = root.join("Renamed");
+    (root, from, to)
+}
+
+fn tree_of(dir: &Path) -> Vec<String> {
+    let mut v = names(dir);
+    if dir.join("Subs").is_dir() {
+        v.extend(
+            names(&dir.join("Subs"))
+                .into_iter()
+                .map(|n| format!("Subs/{n}")),
+        );
+    }
+    v.sort();
+    v
+}
+
+/// Bug sweep 9 Nov 2026: an entry the platform will not move (Windows,
+/// a subfolder holding a file the extractor still has open) used to
+/// leave the job SPLIT across both folders while the caller carried on
+/// under the old name. The entries already moved now go back first, so
+/// "not renamed" means whole under the old name.
+#[test]
+fn a_failed_entry_move_is_rolled_back_before_it_is_reported() {
+    let (_root, from, to) = job_folder("rollback");
+    let before = tree_of(&from);
+    let mut calls = 0;
+    let err = move_dir_contents_with(
+        &from,
+        &to,
+        |a, b| {
+            calls += 1;
+            // The second FORWARD move fails; every rollback move succeeds.
+            if calls == 2 && a.starts_with(&from) {
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
+            std::fs::rename(a, b)
+        },
+        |d| std::fs::remove_dir(d),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        tree_of(&from),
+        before,
+        "every entry is back under the old name"
+    );
+    assert!(!to.exists(), "the half-filled new folder is gone");
+}
+
+/// The other half of the same defect: everything moved, and only the
+/// emptied old folder refused to go (Windows keeps a directory with an
+/// open handle on it). That is a rename that happened, and answering
+/// `Err` left the caller on a path that held nothing.
+#[test]
+fn an_emptied_folder_that_will_not_delete_is_still_a_rename() {
+    let (_root, from, to) = job_folder("undeletable");
+    let before = tree_of(&from);
+    move_dir_contents_with(
+        &from,
+        &to,
+        |a, b| std::fs::rename(a, b),
+        |_| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+    )
+    .unwrap();
+    assert_eq!(tree_of(&to), before, "the whole job is under the new name");
+    assert!(
+        names(&from).is_empty(),
+        "the old folder is empty, not split"
+    );
+}
+
+/// A rollback that itself fails is the one ending that still leaves
+/// entries in both places. Nothing is deleted, and it must not come back
+/// as `AlreadyExists`, which would send `rename_dir` round its ladder
+/// into a THIRD folder.
+#[test]
+fn a_failed_rollback_deletes_nothing_and_does_not_step_the_ladder() {
+    let (_root, from, to) = job_folder("rollback-fails");
+    let before = tree_of(&from);
+    let mut forward = 0;
+    let err = move_dir_contents_with(
+        &from,
+        &to,
+        |a, b| {
+            if a.starts_with(&from) {
+                forward += 1;
+                if forward == 2 {
+                    return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+                }
+                return std::fs::rename(a, b);
+            }
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        },
+        |d| std::fs::remove_dir(d),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Other);
+    let mut both = tree_of(&from);
+    both.extend(tree_of(&to));
+    both.sort();
+    assert_eq!(both, before, "every entry is in one folder or the other");
+}

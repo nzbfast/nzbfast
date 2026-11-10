@@ -551,6 +551,30 @@ impl<R: Read> Lzma2ReaderMt<R> {
     }
 }
 
+/// nzbfast: records a worker panic in the error store while the worker
+/// unwinds, so the dispatcher's next poll returns an error instead of
+/// waiting for a unit that will never arrive. Poison-tolerant on purpose:
+/// a second panic during unwinding would abort the process.
+struct ReportPanic {
+    error_store: Arc<Mutex<Option<io::Error>>>,
+    shutdown_flag: Arc<AtomicBool>,
+}
+
+impl Drop for ReportPanic {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            let mut guard = self
+                .error_store
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.is_none() {
+                *guard = Some(io::Error::other("LZMA2 decoder worker panicked"));
+            }
+            self.shutdown_flag.store(true, Ordering::Release);
+        }
+    }
+}
+
 /// The logic for a single worker thread.
 fn worker_thread_logic(
     worker_handle: WorkerHandle<WorkUnit>,
@@ -565,11 +589,27 @@ fn worker_thread_logic(
     // flight instead, which is the quantity a worker cannot empty out from
     // under it - and a count that only becomes true after a worker pops is
     // what round 11 already had to work around.
+    //
+    // nzbfast: a worker that PANICS must still report. The dispatcher waits
+    // on a result channel whose sender it owns itself, so a unit that never
+    // comes back is never `Disconnected` either; its only other way out is
+    // the error store it polls every `ERROR_CHECK_INTERVAL`. Without this
+    // guard a panic in the decode (a decoder bug reachable from hostile
+    // input) left the reader waiting forever on the 7z chase thread. The
+    // guard costs nothing on the hot path: it is armed once per thread.
+    let _report_panic = ReportPanic {
+        error_store: Arc::clone(&error_store),
+        shutdown_flag: Arc::clone(&shutdown_flag),
+    };
     while !shutdown_flag.load(Ordering::Acquire) {
         let Some((seq, work_unit_data, decoded_len)) = worker_handle.steal() else {
             // No more work available and queue is closed
             break;
         };
+        #[cfg(test)]
+        if preset_dict.as_deref().map(Vec::as_slice) == Some(tests::WORKER_PANIC_DICT) {
+            panic!("test-only worker panic");
+        }
 
         let mut reader = Lzma2Reader::new(
             work_unit_data.as_slice(),
@@ -1044,6 +1084,34 @@ mod tests {
                 Err(_) => panic!(
                     "{workers} workers: the reader never returned on an empty pack stream"
                 ),
+            }
+            handle.join().expect("the reader thread must not panic");
+        }
+    }
+
+    /// The preset dictionary that makes a test build's worker panic on
+    /// its first unit (`worker_thread_logic`).
+    pub(super) const WORKER_PANIC_DICT: &[u8] = b"nzbfast test: panic in the worker";
+
+    /// nzbfast, 9 Nov 2026 sweep: a worker that panicked never sent its
+    /// unit's result, and the dispatcher, which owns a sender of that
+    /// channel itself, waited forever. It must now return an error.
+    /// Watchdog-shaped like the test above, because the failure mode is a
+    /// hang. NEGATIVE CONTROL, run: without `ReportPanic` this times out.
+    #[test]
+    fn a_panicking_worker_errors_instead_of_wedging() {
+        for workers in [1u32, 4] {
+            let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>();
+            let handle = thread::spawn(move || {
+                let mut out = Vec::new();
+                let r = Lzma2ReaderMt::new(&[0x00u8][..], DICT, Some(WORKER_PANIC_DICT), workers)
+                    .read_to_end(&mut out);
+                let _ = tx.send(r.map(|_| out));
+            });
+            match rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(Err(e)) => assert!(e.to_string().contains("panicked"), "{e}"),
+                Ok(Ok(_)) => panic!("{workers} workers: a panicked unit cannot decode"),
+                Err(_) => panic!("{workers} workers: the reader wedged on a panicked worker"),
             }
             handle.join().expect("the reader thread must not panic");
         }

@@ -328,3 +328,52 @@ async fn a_refused_member_path_fails_the_job_and_keeps_the_source() {
         "the payload was written outside the output directory\n{log}"
     );
 }
+
+/// TODO 358 item 6 follow-up: an archive member whose name is an
+/// EXISTING DIRECTORY in the output tree is a name clash, not a folder
+/// that refuses writes. Before the fix the member's create-open met
+/// EISDIR (access denied on Windows), and since item 6 that halts the
+/// whole job with a "check its permissions" verdict. The extractor's
+/// name claim now counts a directory as a taken name, so the member
+/// lands under the next free name the way a file collision does, and
+/// the directory is left exactly as it was.
+///
+/// The level-0 shape - a directory where a POSTED file must go - is
+/// deliberately not this: e2e_refused's EISDIR leg still halts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_named_like_an_existing_directory_is_renamed_not_halted() {
+    let mut fx = Fixture::new("reldirclash");
+    let inner = payload(300_000, 41);
+    let vol = fixtures::rar5_volume(&[("Extras", 300_000, &inner, false, false)]);
+    fx.add_file("r.rar", &vol, 60_000);
+    let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+    // The user's own folder, already there, with something in it.
+    std::fs::create_dir_all(out.join("Extras")).unwrap();
+    std::fs::write(out.join("Extras").join("keep.txt"), b"mine").unwrap();
+    let (log, ok) = tokio::task::spawn_blocking({
+        let (cfg, nzb, out) = (cfg.clone(), nzb.clone(), out.clone());
+        move || run_get(&cfg, &nzb, &out, &[])
+    })
+    .await
+    .unwrap();
+    assert!(
+        ok,
+        "a member named like an existing directory must not fail the job:\n{log}"
+    );
+    assert!(
+        !log.contains("refused a write"),
+        "a name clash is not a refused destination:\n{log}"
+    );
+    let landed = std::fs::read(out.join("000-Extras"))
+        .unwrap_or_else(|e| panic!("member missing under its renamed name: {e}\n{log}"));
+    assert_eq!(landed, inner, "member bytes differ\n{log}");
+    assert!(out.join("Extras").is_dir(), "the directory is left alone");
+    assert_eq!(
+        std::fs::read(out.join("Extras").join("keep.txt")).unwrap(),
+        b"mine",
+        "the directory's contents are left alone\n{log}"
+    );
+}

@@ -34,6 +34,13 @@ public sealed record CommandLineOptions
 
     public bool IsScreenshot => Shot is not null;
 
+    /// <summary>
+    /// Run without the queue store. Never parsed from argv: set by the app for a
+    /// launch another instance could not take over (<see cref="LaunchRoute.Separate"/>),
+    /// so this window cannot overwrite the first instance's saved queue.
+    /// </summary>
+    public bool NoQueueStore { get; init; }
+
     public MockSet? ScenarioSet => Scenario is null ? null : MockScenarios.ByKey(Scenario);
 
     public static CommandLineOptions Parse(IReadOnlyList<string> argv)

@@ -19,12 +19,12 @@
 # regression now; this is the other half, so there is nothing to
 # improvise.
 #
-# WHAT GOES IN, and the rule is the release notes' own: the files a
-# PERSON downloads. The `nzbfast-updater-*` payloads, `latest.json`,
-# `latest.json.sig` and `RELEASE_NOTES.md` are machine-only or not
-# assets, and none of them has ever been in this file - the manifest
-# carries its own signed sha256 per payload, which is the check that
-# matters there.
+# WHAT GOES IN: every file of the release that a person or a machine
+# downloads and runs. The `nzbfast-updater-*` payloads are IN since issue
+# 107 pointed out that a checksum file skipping six assets is a hole in
+# the "every file" claim, even though the manifest carries its own signed
+# sha256 per payload. `latest.json` and its signature are not: they are
+# signed metadata, and `RELEASE_NOTES.md` is not an asset.
 #
 # The Synology `.spk` and the QNAP `.qpkg` ARE in it since 23 Oct 2026.
 # They used to be built after the release was published, by scripts that
@@ -37,7 +37,15 @@
 #
 # RUN IT LAST. Every asset must be in its final form: regenerate after
 # any rebuild, or the file attests bytes that are no longer there.
+#
+# RUNS IN TWO PLACES, AND THEY MUST AGREE BYTE FOR BYTE. The published
+# file is written by provenance-release.yml's `sums` job over the assets
+# on the draft, and attested there; the release Mac runs this over its
+# <dist-dir> and `cmp`s the two (publish-release step 4). LC_ALL=C is what
+# makes that possible: `sort` under a UTF-8 locale on one side orders `-`
+# and `_` differently from the other.
 set -eu
+export LC_ALL=C
 
 DIST=${1:?usage: make-sha256sums.sh <dist-dir>}
 [ -d "$DIST" ] || { echo "no such directory: $DIST" >&2; exit 1; }
@@ -50,7 +58,6 @@ cd "$DIST"
 # provenance-release.yml attaches beside each CI-built file are metadata
 # about an asset, like the `.intoto.jsonl` bundles, and stay out too.
 list=$(ls -1 2>/dev/null | grep '^nzbfast' \
-    | grep -v '^nzbfast-updater-' \
     | grep -v '\.sha256$' | grep -v '\.intoto\.jsonl$' | grep -v '\.spdx\.json$' \
     | sort || true)
 

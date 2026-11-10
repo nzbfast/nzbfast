@@ -1,0 +1,1641 @@
+{
+ "_source": "NZBGet 26.3 (Homebrew), JSON-RPC, recorded 2026-11-09 against a scratch instance and a local NNTP stub; DestDir rewritten, everything else verbatim",
+ "listfiles": [
+  {
+   "ID": 7,
+   "FileSizeLo": 1400000,
+   "FileSizeHi": 0,
+   "RemainingSizeLo": 700000,
+   "RemainingSizeHi": 0,
+   "PostTime": 1700000200,
+   "FilenameConfirmed": true,
+   "Paused": false,
+   "NZBID": 4,
+   "NZBName": "t4",
+   "NZBNicename": "t4",
+   "NZBFilename": "t4.nzb",
+   "Subject": "Other [1/1] - \"c.rar\" yEnc (1/2)",
+   "Filename": "c.rar",
+   "DestDir": "/downloads/inter/t4.#4",
+   "Category": "",
+   "Priority": 0,
+   "ActiveDownloads": 1,
+   "Progress": 500
+  }
+ ],
+ "postqueue": [
+  {
+   "ID": 2,
+   "InfoName": "t2",
+   "ParFilename": "",
+   "Stage": "QUEUED",
+   "FileProgress": 0,
+   "NZBID": 2,
+   "NZBName": "t2",
+   "NZBNicename": "t2",
+   "Kind": "NZB",
+   "URL": "",
+   "NZBFilename": "t2.nzb",
+   "DestDir": "/downloads/inter/t2.#2",
+   "FinalDir": "",
+   "Category": "",
+   "ParStatus": "NONE",
+   "ExParStatus": "NONE",
+   "UnpackStatus": "NONE",
+   "MoveStatus": "NONE",
+   "ScriptStatus": "NONE",
+   "DeleteStatus": "NONE",
+   "MarkStatus": "NONE",
+   "UrlStatus": "NONE",
+   "FileSizeLo": 1405000,
+   "FileSizeHi": 0,
+   "FileSizeMB": 1,
+   "FileCount": 2,
+   "MinPostTime": 1700000000,
+   "MaxPostTime": 1700000100,
+   "TotalArticles": 3,
+   "SuccessArticles": 3,
+   "FailedArticles": 0,
+   "Health": 1000,
+   "CriticalHealth": 996,
+   "DupeKey": "",
+   "DupeScore": 0,
+   "DupeMode": "FORCE",
+   "Deleted": false,
+   "DownloadedSizeLo": 3533,
+   "DownloadedSizeHi": 0,
+   "DownloadedSizeMB": 0,
+   "DownloadTimeSec": 0,
+   "PostTotalTimeSec": 0,
+   "ParTimeSec": 0,
+   "RepairTimeSec": 0,
+   "UnpackTimeSec": 0,
+   "MessageCount": 5,
+   "ExtraParBlocks": 0,
+   "Parameters": [
+    {
+     "Name": "*Unpack:",
+     "Value": "no"
+    }
+   ],
+   "ScriptStatuses": [],
+   "ServerStats": [
+    {
+     "ServerID": 1,
+     "SuccessArticles": 3,
+     "FailedArticles": 0
+    }
+   ],
+   "ProgressLabel": "",
+   "StageProgress": 0,
+   "StageTimeSec": 0,
+   "TotalTimeSec": 0,
+   "Log": [
+    {
+     "ID": 1,
+     "Kind": "INFO",
+     "Time": 1794245053,
+     "Text": "Collection t2 added to queue"
+    },
+    {
+     "ID": 2,
+     "Kind": "INFO",
+     "Time": 1794245053,
+     "Text": "Successfully downloaded t2/a.rar"
+    },
+    {
+     "ID": 3,
+     "Kind": "INFO",
+     "Time": 1794245053,
+     "Text": "Successfully downloaded t2/a.par2"
+    },
+    {
+     "ID": 4,
+     "Kind": "INFO",
+     "Time": 1794245053,
+     "Text": "Collection t2 completely downloaded"
+    },
+    {
+     "ID": 5,
+     "Kind": "INFO",
+     "Time": 1794245053,
+     "Text": "Queueing t2 for post-processing"
+    }
+   ]
+  }
+ ],
+ "servervolumes": [
+  {
+   "ServerID": 0,
+   "DataTime": 1794245389,
+   "FirstDay": 20766,
+   "TotalSizeLo": 4805,
+   "TotalSizeHi": 0,
+   "TotalSizeMB": 0,
+   "CustomSizeLo": 4805,
+   "CustomSizeHi": 0,
+   "CustomSizeMB": 0,
+   "CustomTime": 1794244874,
+   "CountersResetTime": 1794244874,
+   "SecSlot": 49,
+   "MinSlot": 29,
+   "HourSlot": 12,
+   "DaySlot": 0,
+   "BytesPerSeconds": [
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 1193,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    }
+   ],
+   "BytesPerMinutes": [
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 79,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 3533,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 1193,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    }
+   ],
+   "BytesPerHours": [
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 4805,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    }
+   ],
+   "BytesPerDays": [
+    {
+     "SizeLo": 4805,
+     "SizeHi": 0,
+     "SizeMB": 0
+    }
+   ],
+   "ArticlesPerDays": [
+    {
+     "Failed": 3,
+     "Success": 4
+    }
+   ]
+  },
+  {
+   "ServerID": 1,
+   "DataTime": 1794245389,
+   "FirstDay": 20766,
+   "TotalSizeLo": 4805,
+   "TotalSizeHi": 0,
+   "TotalSizeMB": 0,
+   "CustomSizeLo": 4805,
+   "CustomSizeHi": 0,
+   "CustomSizeMB": 0,
+   "CustomTime": 1794244874,
+   "CountersResetTime": 1794244874,
+   "SecSlot": 49,
+   "MinSlot": 29,
+   "HourSlot": 12,
+   "DaySlot": 0,
+   "BytesPerSeconds": [
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 1193,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    }
+   ],
+   "BytesPerMinutes": [
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 79,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 3533,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 1193,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    }
+   ],
+   "BytesPerHours": [
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 4805,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    },
+    {
+     "SizeLo": 0,
+     "SizeHi": 0,
+     "SizeMB": 0
+    }
+   ],
+   "BytesPerDays": [
+    {
+     "SizeLo": 4805,
+     "SizeHi": 0,
+     "SizeMB": 0
+    }
+   ],
+   "ArticlesPerDays": [
+    {
+     "Failed": 3,
+     "Success": 4
+    }
+   ]
+  }
+ ]
+}

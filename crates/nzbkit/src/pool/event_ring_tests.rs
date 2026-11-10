@@ -29,6 +29,8 @@ fn live(hosts: &[&str]) -> Arc<LiveStats> {
         line_cap_refused: std::sync::atomic::AtomicBool::new(false),
         line_cap_knee: None,
         line_carry_bps: AtomicU64::new(0),
+        line_cap_settled: AtomicUsize::new(0),
+        line_cap_hold: AtomicUsize::new(0),
     })
 }
 

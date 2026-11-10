@@ -95,15 +95,53 @@ fn err(code: &'static str, message: impl Into<String>) -> ChecksumError {
 /// is and not on what somebody named it. The digest LENGTH then picks
 /// between MD5, SHA-1 and SHA-256, which is unambiguous - 32, 40 and 64
 /// hex digits.
+///
+/// # A line both shapes can read goes with the FILE
+///
+/// `<32 hex> <8 hex>` is an MD5 line for a file called `<8 hex>` AND an
+/// SFV line for a file called `<32 hex>` - and hex file names are the
+/// ordinary shape of an obfuscated Usenet post, which is exactly what
+/// gets an SFV beside it. Read per line, digest-first always won, so such
+/// an SFV either failed as `mixed_formats` or, with every name hex,
+/// verified as an MD5 file of names that do not exist. So an ambiguous
+/// line takes the format the file's UNAMBIGUOUS lines settle on, then
+/// the extension's, and only then the digest-first reading.
 pub fn parse(text: &str, hint: Option<ChecksumFormat>) -> Result<ChecksumFile, ChecksumError> {
-    let mut entries = Vec::new();
-    let mut format: Option<ChecksumFormat> = None;
+    // A byte-order mark is not part of the first line. `str::trim` does
+    // not take it (U+FEFF is not whitespace), so a Notepad-saved file
+    // failed on line 1 as "not a checksum line".
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut lines = Vec::new();
+    let mut settled: Option<ChecksumFormat> = None;
     for (n, raw) in text.lines().enumerate() {
         let line = raw.trim_end_matches(['\r', '\n']).trim();
         if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
             continue;
         }
-        let (name, digest, shape) = split_line(line).ok_or_else(|| {
+        let first = digest_first(line);
+        let last = sfv_shape(line);
+        if settled.is_none() {
+            match (&first, &last) {
+                (Some((_, _, f)), None) => settled = Some(*f),
+                (None, Some(_)) => settled = Some(ChecksumFormat::Sfv),
+                _ => {}
+            }
+        }
+        lines.push((n, line, first, last));
+    }
+    let prefer_sfv = settled.or(hint) == Some(ChecksumFormat::Sfv);
+    let mut entries = Vec::new();
+    let mut format: Option<ChecksumFormat> = None;
+    for (n, line, first, last) in lines {
+        let picked = match (first, last) {
+            (Some(_), Some((name, digest))) if prefer_sfv => {
+                Some((name, digest, ChecksumFormat::Sfv))
+            }
+            (Some(f), _) => Some(f),
+            (None, Some((name, digest))) => Some((name, digest, ChecksumFormat::Sfv)),
+            (None, None) => None,
+        };
+        let (name, digest, shape) = picked.ok_or_else(|| {
             err(
                 "bad_line",
                 format!("line {}: not a checksum line: {line}", n + 1),
@@ -151,22 +189,25 @@ pub fn parse(text: &str, hint: Option<ChecksumFormat>) -> Result<ChecksumFile, C
     Ok(ChecksumFile { format, entries })
 }
 
-/// One line into `(name, digest, the format its shape implies)`.
+/// One line read digest-first: `(name, digest, the format its length
+/// implies)`.
 ///
 /// The discriminator is WHERE the hex is, and it is decided per line
 /// rather than per file so a hand-edited file with a stray line fails
-/// on that line instead of being read as the other format entirely.
-fn split_line(line: &str) -> Option<(&str, &str, ChecksumFormat)> {
+/// on that line instead of being read as the other format entirely -
+/// except a line BOTH readings accept, which [`parse`] settles from the
+/// rest of the file.
+fn digest_first(line: &str) -> Option<(&str, &str, ChecksumFormat)> {
     // `hex *name` / `hex  name`: digest first.
-    if let Some((head, rest)) = line.split_once(char::is_whitespace)
-        && let Some(f) = digest_format(head)
-    {
-        let name = rest.trim_start();
-        let name = name.strip_prefix('*').unwrap_or(name);
-        if !name.is_empty() {
-            return Some((name, head, f));
-        }
-    }
+    let (head, rest) = line.split_once(char::is_whitespace)?;
+    let f = digest_format(head)?;
+    let name = rest.trim_start();
+    let name = name.strip_prefix('*').unwrap_or(name);
+    (!name.is_empty()).then_some((name, head, f))
+}
+
+/// One line read the SFV way, `name crc32`: `(name, digest)`.
+fn sfv_shape(line: &str) -> Option<(&str, &str)> {
     // `name hex`: digest last, which is SFV's. The name may hold
     // spaces, so split at the LAST whitespace run and not the first.
     let trimmed = line.trim_end();
@@ -177,7 +218,53 @@ fn split_line(line: &str) -> Option<(&str, &str, ChecksumFormat)> {
     if name.is_empty() || !is_hex(tail, 8) {
         return None;
     }
-    Some((name, tail, ChecksumFormat::Sfv))
+    Some((name, tail))
+}
+
+/// A checksum file's BYTES as text: UTF-8 with or without a byte-order
+/// mark, or UTF-16 in either order WITH one, which is what Windows tools
+/// that write "Unicode" produce. `read_to_string` refused both of the
+/// UTF-16 shapes outright. Anything else that is not UTF-8 is refused by
+/// name rather than decoded lossily: a guessed code page would turn every
+/// accented name into one that resolves to no file, and a row of false
+/// Missing answers is worse than a refusal that says why.
+pub fn decode_text(bytes: &[u8]) -> Result<String, ChecksumError> {
+    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
+        if !rest.len().is_multiple_of(2) {
+            return Err(err(
+                "not_utf8",
+                "this UTF-16 file has an odd number of bytes",
+            ));
+        }
+        let units: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|c| unit(*c)).collect();
+        String::from_utf16(&units).map_err(|_| err("not_utf8", "this UTF-16 file is not valid"))
+    };
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
+        // UTF-16 with NO byte-order mark: every ASCII character is half
+        // NUL, which is valid UTF-8 and so used to reach the parser as
+        // text and fail on line 1 as "not a checksum line". No checksum
+        // file has a NUL in it, so one is enough to say what this is.
+        _ if bytes.contains(&0) => Err(err(
+            "not_utf8",
+            "this file holds NUL bytes, so it is not UTF-8 text (UTF-16 without a byte-order \
+             mark, most likely); save it as UTF-8 and check again",
+        )),
+        _ => {
+            let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+            String::from_utf8(bytes.to_vec()).map_err(|e| {
+                err(
+                    "not_utf8",
+                    format!(
+                        "this file is not UTF-8 or UTF-16 text (byte {} is not); save it as \
+                         UTF-8 and check again",
+                        e.utf8_error().valid_up_to()
+                    ),
+                )
+            })
+        }
+    }
 }
 
 /// The format a digest-first token's LENGTH implies, or `None` for a
@@ -729,5 +816,68 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A byte-order mark is not part of the first name, in UTF-8 or in
+    /// either UTF-16 order; and a file in some other encoding is refused
+    /// by name rather than read into false Missing rows.
+    #[test]
+    fn a_bom_or_utf16_file_reads_as_its_text() {
+        let text = "d41d8cd98f00b204e9800998ecf8427e *empty.bin\n";
+        let want = parse(text, None).expect("plain");
+        let mut bom = b"\xEF\xBB\xBF".to_vec();
+        bom.extend_from_slice(text.as_bytes());
+        let mut le = vec![0xFF, 0xFE];
+        let mut be = vec![0xFE, 0xFF];
+        for u in text.encode_utf16() {
+            le.extend_from_slice(&u.to_le_bytes());
+            be.extend_from_slice(&u.to_be_bytes());
+        }
+        for (what, bytes) in [("utf-8 bom", bom), ("utf-16le", le), ("utf-16be", be)] {
+            let decoded = decode_text(&bytes).unwrap_or_else(|e| panic!("{what}: {e}"));
+            assert_eq!(parse(&decoded, None).expect(what), want, "{what}");
+        }
+        // And a BOM that reached `parse` as text is taken off there too.
+        assert_eq!(
+            parse(&format!("\u{feff}{text}"), None).expect("bom text"),
+            want
+        );
+        let latin1 = b"d41d8cd98f00b204e9800998ecf8427e *caf\xe9.bin\n";
+        assert_eq!(decode_text(latin1).expect_err("not utf-8").code, "not_utf8");
+        // UTF-16 with no byte-order mark is named for what it is, not
+        // failed later as a bad line.
+        let bare: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        assert_eq!(
+            decode_text(&bare).expect_err("bare utf-16").code,
+            "not_utf8"
+        );
+    }
+
+    /// An SFV whose names are 32 hex digits - an obfuscated post's
+    /// ordinary shape - is an SFV, not an MD5 file of 8-hex names.
+    #[test]
+    fn an_sfv_with_hex_names_is_read_as_an_sfv() {
+        let sfv = "; made by a poster\n\
+                   0123456789abcdef0123456789abcdef deadbeef\n\
+                   fedcba9876543210fedcba9876543210 0badf00d\n";
+        // Every line reads both ways, so the `.sfv` extension decides.
+        // (With no hint at all such a file is undecidable and keeps the
+        // digest-first reading it always had.)
+        let f = parse(sfv, Some(ChecksumFormat::Sfv)).expect("parses");
+        assert_eq!(f.format, ChecksumFormat::Sfv);
+        assert_eq!(f.entries[0].name, "0123456789abcdef0123456789abcdef");
+        assert_eq!(f.entries[0].digest, "deadbeef");
+        // One unambiguous SFV line settles the rest without a hint.
+        let mixed = "0123456789abcdef0123456789abcdef deadbeef\nplain name.bin 0badf00d\n";
+        assert_eq!(
+            parse(mixed, None).expect("parses").format,
+            ChecksumFormat::Sfv
+        );
+        // ...and a genuine MD5 file of 8-hex names stays MD5 under its hint.
+        let md5 = "0123456789abcdef0123456789abcdef deadbeef\n";
+        assert_eq!(
+            parse(md5, Some(ChecksumFormat::Md5)).expect("md5").format,
+            ChecksumFormat::Md5
+        );
     }
 }

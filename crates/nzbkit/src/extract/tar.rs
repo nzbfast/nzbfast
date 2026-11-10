@@ -148,6 +148,7 @@ impl Extractor {
             sink_slots: Mutex::new(Vec::new()),
             outcome: Mutex::new(None),
             direct: Mutex::new(None),
+            pw_finish: Default::default(),
         });
         inner.slots[slot].container_fmt = ChaseFormat::Tar;
         let joined = self.sevenz_join_set(inner, slot, ctl.clone(), 1)?;

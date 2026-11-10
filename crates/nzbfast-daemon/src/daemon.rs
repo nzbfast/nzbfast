@@ -240,6 +240,10 @@ pub struct Daemon {
     /// unpause a queue the operator had paused themselves, which this
     /// remembers. Set only while holding the transition.
     pub paused_by_offline: std::sync::atomic::AtomicBool,
+    /// Held across a whole [`Daemon::set_offline`], so opposite requests
+    /// apply one at a time and in the order they took it - the public
+    /// flag, the pause and its owner, and the pool effects together.
+    pub offline_transition: std::sync::Mutex<()>,
     /// Set once the wind-down has started, and never cleared: this
     /// process is leaving.
     ///
@@ -831,7 +835,28 @@ pub struct Daemon {
     pub heal_auto: super::healauto::HealAutoSettings,
     /// TODO §138 live setting `post_health_fail`, OFF by default and the
     /// ONLY thing in §77 that may fail a job - bar and why on
-    /// [`crate::health::PostHealth::no_server_can_supply`].
+    /// [`crate::health::PostHealth::no_server_can_supply`], width on
+    /// [`crate::health::PostHealth::fails_job`].
+    ///
+    /// Since TODO 358 item 1 it is no longer a silent no-op: at prestart
+    /// it runs the parallel start sample (`postprobe::start_sample`)
+    /// when the record has no wide verdict, so it decides on the job an
+    /// *arr just grabbed instead of only on one that sat in a paused
+    /// queue, and the escalated pass is split over connections so a
+    /// slow-430 provider can finish it.
+    ///
+    /// STILL OFF BY DEFAULT, decided 9 Nov 2026 on the evidence then in
+    /// hand, and not silently: the 43% misfire figure that argued
+    /// against it belonged to the k=8 shortcut, which can no longer fail
+    /// a job, and the unanimous 64-wide bar misfires on a 90%-dead post
+    /// about 0.1% of the time. What is NOT yet in hand is the live half
+    /// the plan's acceptance names (the 12 Oct dead-post legs against
+    /// Weaver, and zero misfires on tv4-dmg5/20/60 on the real fleet),
+    /// and the residual this bar cannot see - a backbone that 430s an
+    /// old post on every account for a few minutes - is exactly what
+    /// only those legs measure. Issue #29's OFF default is a public
+    /// commitment; it is reversed by a decision with that data, not by
+    /// the commit that made the setting work.
     pub post_health_fail: std::sync::atomic::AtomicBool,
     /// Update checker: the manifest of a NEWER version once one is seen
     /// (None = up to date as far as we know), the check on/off toggle,
@@ -1243,6 +1268,10 @@ pub struct Daemon {
     /// M23 cleanup rules - file extensions deleted from a job's folder
     /// after successful completion. Empty = off.
     pub cleanup_exts: Mutex<Vec<String>>,
+    /// TODO 358 item 13 - executable extensions that FAIL a media-shaped
+    /// job holding one (see `exerefuse`). Starts as Weaver's ten; empty =
+    /// off. Separate from `cleanup_exts`, which deletes and never fails.
+    pub refuse_exts: Mutex<Vec<String>>,
     /// SAB/NZBGet-parity passwords file (resolved path; default
     /// `passwords.txt` next to the config): plain text, one candidate
     /// archive password per line, tried in order when a job's volumes
@@ -1712,6 +1741,13 @@ pub struct Daemon {
     /// worker clears this on its way out under the same lock an armer
     /// sets it under, so exactly one of the two happens.
     pub pause_timer_live: std::sync::atomic::AtomicBool,
+    /// Sessions the §77 post-health bursts hold open right now, per
+    /// account (`ConnBudget::key`). Every burst reserves its width here
+    /// for as long as it runs and `postprobe::probe_width` subtracts what
+    /// the OTHER bursts hold, because the job-start sample, the idle
+    /// prober and the add-time preview can all be on the wire at once
+    /// (9 Nov 2026 sweep) and the download's permits do not see them.
+    pub probe_sessions: Mutex<std::collections::HashMap<String, usize>>,
     // --- M16 settings UI: live-tunable knobs. Each is read at its point
     // of use (per job / per loop tick / per request), so a change from
     // the dashboard takes effect without a restart. Changes are also
@@ -2670,6 +2706,10 @@ impl Daemon {
             extras.failure_https = f.https;
             extras.failure_depth = depth;
         }
+        // X-DNZB-Password rides the same way, and for the same reason:
+        // it is settled into `Job::password` as the row is built, so a
+        // record filed straight to history keeps it too.
+        extras.header_password = f.password.clone();
         self.enqueue_as_with(
             None, &f.bytes, name, category, priority, pp, password, origin, exempt, None, extras,
         )

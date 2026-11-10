@@ -29,7 +29,7 @@
 //! to read every intact shard of a damaged volume anyway, so a range
 //! cannot shrink that read - it can only say which volumes to open.
 
-use super::{RrRepair, collect_rar_volumes, rr_repair_volume_in, try_unrar_spent_why};
+use super::{RrRepair, UnpackOutcome, collect_rar_volumes, rr_repair_volume_in, try_unrar_outcome};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
@@ -189,10 +189,11 @@ const RR_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 /// thread blocked inside it cannot be interrupted - so the only way to stop
 /// waiting is not to be the thread doing the work. The pass hands volumes
 /// over one at a time and waits with a timeout; on a cancel or a deadline
-/// it raises `walked_away` and leaves. The worker is then detached: if the
-/// repair ever returns, `rr_repair_volume_in` sees the flag before it
-/// publishes and deletes its temp instead, and the next send fails so the
-/// thread exits. If it never returns it stays parked until the process
+/// it walks away through the shared [`crate::rarfix::RrGate`] and leaves.
+/// The worker is then detached: if the repair ever returns, its publish
+/// claim loses to the walk-away, so it deletes its temp instead of
+/// renaming, and the next send fails so the thread exits. A walk-away that
+/// finds the publish already claimed waits for that one rename instead. If it never returns it stays parked until the process
 /// does, which is what the alternative already cost - a job, a permit and
 /// a queue behind it - minus the job, the permit and the queue.
 ///
@@ -207,7 +208,7 @@ const RR_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 pub(crate) struct VolumeWorker {
     jobs: std::sync::mpsc::Sender<PathBuf>,
     done: std::sync::mpsc::Receiver<std::result::Result<RrRepair, String>>,
-    walked_away: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    gate: std::sync::Arc<crate::rarfix::RrGate>,
 }
 
 pub(crate) enum VolumeWait {
@@ -224,8 +225,8 @@ impl VolumeWorker {
     ) -> std::io::Result<Self> {
         let (jobs, job_rx) = std::sync::mpsc::channel::<PathBuf>();
         let (done_tx, done) = std::sync::mpsc::channel();
-        let walked_away = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let gone = walked_away.clone();
+        let gate = std::sync::Arc::new(crate::rarfix::RrGate::new());
+        let worker_gate = gate.clone();
         let dispatch = tracing::dispatcher::get_default(|d| d.clone());
         let span = tracing::Span::current();
         std::thread::Builder::new()
@@ -243,7 +244,7 @@ impl VolumeWorker {
                         rars::ArchiveReadOptions::with_optional_password(pw.map(str::as_bytes)),
                     );
                     for path in job_rx {
-                        let out = rr_repair_volume_in(&mut session, &path, pw, Some(&gone))
+                        let out = rr_repair_volume_in(&mut session, &path, pw, Some(&worker_gate))
                             .map_err(|e| e.to_string());
                         if done_tx.send(out).is_err() {
                             return;
@@ -251,11 +252,7 @@ impl VolumeWorker {
                     }
                 })
             })?;
-        Ok(VolumeWorker {
-            jobs,
-            done,
-            walked_away,
-        })
+        Ok(VolumeWorker { jobs, done, gate })
     }
 
     /// Repair `path` on the worker and wait for it - or for `cancel`, or
@@ -288,9 +285,18 @@ impl VolumeWorker {
             } else {
                 continue;
             };
-            self.walked_away
-                .store(true, std::sync::atomic::Ordering::Release);
-            return stop;
+            if self.gate.walk_away() {
+                return stop;
+            }
+            // The worker had already claimed the publish: its rename is
+            // flushed and under way, so the honest answer is the one it
+            // is about to give, and leaving now would let that rename land
+            // after this pass had reported it stopped (6 Nov 2026 sweep
+            // F1). One rename, so this waits for a syscall, not a repair.
+            return match self.done.recv() {
+                Ok(out) => VolumeWait::Done(out),
+                Err(_) => VolumeWait::Done(Err("the repair worker stopped".into())),
+            };
         }
     }
 }
@@ -499,6 +505,23 @@ pub fn try_rar_rr_repair_hinted_why(
     hint: Option<&DamageHint>,
     cancel: Option<&crate::streamhub::SideCancel>,
 ) -> std::result::Result<(), Option<String>> {
+    try_rar_rr_repair_hinted_outcome(dir, password, hint, cancel).map(|_| ())
+}
+
+/// [`try_rar_rr_repair_hinted_why`] that keeps the extraction's
+/// [`UnpackOutcome`] rather than reducing it to `()`, for the one caller
+/// that judges what a successful run left packed:
+/// `unpack::unpack_named_rar`. A repair that lets one group of a
+/// multi-set directory open is an `Ok` from the ladder with the groups
+/// that still failed in `packed`, and `()` threw that list away - so a
+/// repaired sample beside a still-broken release read as the level
+/// unpacked (bug sweep 9 Nov 2026, A13).
+pub(crate) fn try_rar_rr_repair_hinted_outcome(
+    dir: &Path,
+    password: Option<&str>,
+    hint: Option<&DamageHint>,
+    cancel: Option<&crate::streamhub::SideCancel>,
+) -> std::result::Result<UnpackOutcome, Option<String>> {
     let volumes = match collect_rar_volumes(dir) {
         Ok(volumes) if !volumes.is_empty() => volumes,
         _ => return Err(None),
@@ -547,9 +570,9 @@ pub fn try_rar_rr_repair_hinted_why(
         warn!(target: "repair", "recovery-record repair could not save the set");
         return Err(None);
     }
-    let first = try_unrar_spent_why(dir, password);
+    let first = try_unrar_outcome(dir, password);
     if first.is_ok() {
-        return Ok(());
+        return first;
     }
     // Nothing was skipped, so there is no second pass to run and no
     // better-informed answer coming: this attempt's reason IS the rung's
@@ -566,9 +589,9 @@ pub fn try_rar_rr_repair_hinted_why(
     //
     // The HINTED form keeps the old behaviour below, and deliberately.
     if stats.skipped.is_empty() {
-        return first.map(|_| ());
+        return first;
     }
-    // Deliberately NOT `return first.map(|_| ())` here, even on a named
+    // Deliberately NOT `return first` here, even on a named
     // reason. This rung has a SECOND attempt below and the control flow
     // is unchanged by §249 item 1 - only the reason it carries out is
     // new. Ending the rung on a first-pass verdict was written and
@@ -598,5 +621,5 @@ pub fn try_rar_rr_repair_hinted_why(
         warn!(target: "repair", "recovery-record repair could not save the set");
         return Err(None);
     }
-    try_unrar_spent_why(dir, password).map(|_| ())
+    try_unrar_outcome(dir, password)
 }

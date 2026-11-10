@@ -699,20 +699,30 @@ impl Daemon {
     /// does it: the rescue path underneath takes the history lock and
     /// then job locks, so this must not be holding a job guard on its way
     /// in.
+    ///
+    /// The `u64` is the `move_seq` the written line CARRIES, read under the
+    /// same hold that serialized it. Park's own stamp is usually it, but a
+    /// retry that lands between that stamp and this serialization has
+    /// stamped the record again, and a caller that has to bury the line
+    /// (`park_gen`'s retry stand-down) needs the bound the line itself
+    /// replays under, not the one it meant to write.
     pub(super) fn park_prewrite(
         &self,
         job: &Arc<Mutex<Job>>,
         dropping: bool,
         cost: impl FnOnce() -> String,
-    ) -> HistWrite {
+    ) -> (HistWrite, u64) {
         if dropping {
-            return HistWrite::Absent;
+            return (HistWrite::Absent, 0);
         }
-        let line = job_json(&job.lock_ok()).to_string();
+        let (line, seq) = {
+            let g = job.lock_ok();
+            (job_json(&g).to_string(), g.move_seq)
+        };
         let lines = std::slice::from_ref(&line);
         let _g = HIST_IO.lock_ok();
         if self.history_write_locked(lines) {
-            return HistWrite::Wrote;
+            return (HistWrite::Wrote, seq);
         }
         // Spelled out rather than delegated to
         // [`Daemon::history_rescue_locked`], because the gate and the
@@ -724,14 +734,14 @@ impl Daemon {
         // the same thing.
         let Some(now) = self.hist_rescue_open() else {
             self.hist_report_refusal(cost, false);
-            return HistWrite::Refused;
+            return (HistWrite::Refused, seq);
         };
         if self.history_rewrite_locked(lines, &[]) {
-            return HistWrite::Wrote;
+            return (HistWrite::Wrote, seq);
         }
         self.hist_rescue_failed(now);
         self.hist_report_refusal(cost, true);
-        HistWrite::Refused
+        (HistWrite::Refused, seq)
     }
 
     /// The same idea one caller further back: the DELETE's history row,
@@ -953,16 +963,30 @@ impl Daemon {
     /// tombstone above gives. The rescue passes NO `drop_ids`, and that
     /// is the generation bound rather than a hole in it: the rewrite
     /// publishes the LIVE records, so a job that has left history is
-    /// omitted (which is what this move asked for) while one that has
-    /// already parked again at a later seq is present (which is what the
-    /// bound exists to protect). The seq is a property of the LINE, and
-    /// a rewrite has no earlier lines to be bounded against.
+    /// omitted from the snapshot (which is what this move asked for)
+    /// while one that has already parked again at a later seq is present
+    /// (which is what the bound exists to protect).
+    ///
+    /// But the snapshot is not all the rewrite publishes, and this is
+    /// where the line itself has to come back in. Both movers call this
+    /// with their `hist_inflight_begin` guard STILL HELD - it spans
+    /// `commit_to_queue`, by design, so a compaction in the move's window
+    /// carries the disk row - and the rewrite carries the latest disk line
+    /// of every in-flight id it does not find in memory. The rescue
+    /// therefore re-published the very seq-N row this call exists to
+    /// bury, and reported the removal durable (9 Nov 2026 sweep). So the
+    /// refused line rides the rewrite as `extra`, LAST, exactly as the
+    /// append would have left it: it buries the carried row by the same
+    /// bound replay applies to the append, and a later generation in the
+    /// snapshot still out-ranks it. `drop_ids` cannot do this job - it
+    /// strikes the id from the snapshot too, which is the later
+    /// generation the bound protects.
     #[must_use]
     pub(super) fn history_tombstone_upto(&self, id: &str, seq: u64) -> bool {
         let line = json!({"nzo_id": id, "deleted": true, "move_seq": seq}).to_string();
         let _g = HIST_IO.lock_ok();
-        self.history_write_locked(std::slice::from_ref(&line))
-            || self.history_rescue_locked(&[], &[])
+        let line = std::slice::from_ref(&line);
+        self.history_write_locked(line) || self.history_rescue_locked(line, &[])
     }
 
     /// Rewrite the store as exactly the live records, atomically. Called
@@ -2212,6 +2236,71 @@ mod store_tests {
         let (rows, _) = d.history_replay();
         let ids: Vec<String> = rows.iter().map(|j| j.nzo_id.clone()).collect();
         assert_eq!(ids, ["r3"], "the store forgot the two it reaped");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 9 Nov 2026 sweep: a move's generation-bound tombstone that the
+    /// append refuses is still a tombstone once the rewrite rescues it.
+    ///
+    /// Retry and library play hold their `hist_inflight_begin` guard
+    /// across `commit_to_queue`, and the rewrite carries the latest disk
+    /// line of every in-flight id that memory no longer holds - so the
+    /// rescue used to publish the very row the move was burying, and say
+    /// it had buried it. The control half matters as much: a LATER
+    /// generation of the same id, parked into history while the move
+    /// was committing, must survive the rescue exactly as it survives
+    /// the append.
+    #[test]
+    fn a_rescued_move_tombstone_buries_the_row_the_mover_still_carries() {
+        use crate::storecut::{Store, arm_store_cut, disarm};
+
+        let dir = tmp("rescue-upto");
+        let d = test_daemon(&dir);
+        let rec = |id: &str| {
+            Arc::new(Mutex::new(
+                job_from_json(&json!({
+                    "nzo_id": id, "name": id, "out_dir": "/tmp/o",
+                    "nzb_path": "/tmp/n.nzb", "state": "Failed",
+                }))
+                .expect("job"),
+            ))
+        };
+        let moved = rec("m1");
+        let reparked = rec("m2");
+        for j in [&moved, &reparked] {
+            d.history.lock_ok().push(j.clone());
+        }
+        assert!(d.history_compact(), "the fixture's own premise");
+
+        // m1: the retry has pulled it out of history and stamped seq 1,
+        // and still holds its in-flight registration.
+        d.history.lock_ok().retain(|j| !Arc::ptr_eq(j, &moved));
+        moved.lock_ok().move_seq = 1;
+        let _m1 = d.hist_inflight_begin("m1");
+        // m2: its move stamped seq 1 too, and it then ran and parked
+        // again at seq 2 before the move's tombstone landed.
+        reparked.lock_ok().move_seq = 2;
+
+        arm_store_cut(&[Store::HistoryAppend]);
+        let m1_buried = d.history_tombstone_upto("m1", 1);
+        let m2_buried = d.history_tombstone_upto("m2", 1);
+        disarm();
+        assert!(
+            m1_buried && m2_buried,
+            "the rewrite was meant to rescue both"
+        );
+
+        let (rows, _) = d.history_replay();
+        let ids: Vec<String> = rows.iter().map(|j| j.nzo_id.clone()).collect();
+        assert!(
+            !ids.contains(&"m1".to_string()),
+            "the rescue re-published the row the move buried: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"m2".to_string()),
+            "the rescue buried a LATER generation: {ids:?}"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -85,8 +85,13 @@ mod daemon_unpackroute;
 // The disk SFX arm end to end - the shape badge this route used to
 // leave blank (sibling dir, size gate).
 mod daemon_sfx;
+// G2 + item 15 (TODO 358): the history word an *arr reads over a packed
+// main payload, and the not-delivered list (sibling dir, size gate).
+mod daemon_g2;
 // §76 fast-job media chip regression (sibling dir, size gate).
 mod daemon_mediafast;
+// TODO 358 item 13: executables refused in a media download (sibling dir).
+mod daemon_exerefuse;
 // TODO 207: the persisted "why was this slow" verdict (sibling dir).
 mod daemon_whyslow;
 // Review finding F-06: the relocation fence - the runner must not start a job
@@ -120,6 +125,10 @@ mod daemon_replaydel;
 // A job's rate after a mid-job restart, and how a dead post fails
 // (sibling dir).
 mod daemon_resumerate;
+// TODO 358 item 3: the dispatch-stall reset against a provider that
+// goes mute, its second stage, and the idle states it must leave alone
+// (sibling dir, size gate).
+mod daemon_dispatchstall;
 // The forward guard on the repeating-payload trap, and the waiver that
 // says a fixture is deliberately in it. A sibling the way `harness` is,
 // and reached from `harness::DaemonLog`'s own Drop, so every daemon this

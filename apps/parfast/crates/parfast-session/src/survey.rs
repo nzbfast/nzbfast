@@ -233,7 +233,17 @@ impl SurveyModel {
         // CLI repairs. A confident green over a broken set is the worst
         // answer this model can give.
         let owed = survey.owed();
-        let verdict = if !survey.damaged() {
+        // A MEMBER THE MAIN PACKET DECLARES WITH NO FILEDESC is never
+        // complete and never repairable, whatever the described members
+        // came to. Nothing names it, so nothing checked it, and the
+        // repair refuses the set outright ("No details available for
+        // recoverable file number N"); `parfast v` exits 6 on it since the
+        // 9 Nov 2026 sweep's A1. The survey only ever sees the described
+        // members, so it read such a set - a one-member set with nothing
+        // described at all included - as Complete, in green, beside exit 6.
+        let verdict = if !loaded.set.undescribed.is_empty() {
+            Verdict::Unrepairable
+        } else if !survey.damaged() {
             Verdict::Complete
         } else if survey.repairable() {
             Verdict::Repairable
@@ -260,12 +270,47 @@ impl SurveyModel {
 /// `nzbkit::par2::verify_file_md5_path`, which is the one
 /// `repair::rename_only` renames on - so what the map promises and what
 /// `-O` would do cannot disagree.
+///
+/// # The 16 KiB hash goes first
+///
+/// Every candidate of the right LENGTH used to be MD5'd whole against
+/// every missing member, so a RAR volume set (dozens of members of one
+/// size) with its volumes gone, beside a folder of other same-sized
+/// files, read each candidate in full once per missing member - after
+/// the verify's last cancel point, so a Cancel could not stop it. The
+/// FileDesc carries the
+/// MD5 of each member's first 16 KiB too, so a candidate whose prefix
+/// does not match is set aside on one small read, and the whole-file
+/// check runs only where the prefix already agrees. The answer is the
+/// same: a file whose prefix differs cannot have the same whole MD5.
 fn claim_misnamed(pool: &mut Vec<&Path>, file: &nzbkit::par2::Par2File) -> Option<String> {
-    let pos = pool
-        .iter()
-        .position(|c| nzbkit::par2::verify_file_md5_path(c, file).unwrap_or(false))?;
+    let pos = pool.iter().position(|c| {
+        prefix_matches(c, file) && nzbkit::par2::verify_file_md5_path(c, file).unwrap_or(false)
+    })?;
     let path = pool.remove(pos);
     Some(path.to_string_lossy().into_owned())
+}
+
+/// Could `path` be `file`, judged on its length and its first 16 KiB
+/// alone? See [`claim_misnamed`]. An unreadable candidate is not a
+/// match, as `verify_file_md5_path` answers for one.
+fn prefix_matches(path: &Path, file: &nzbkit::par2::Par2File) -> bool {
+    use md5::Digest as _;
+    use std::io::Read as _;
+    let Ok(f) = std::fs::File::open(path) else {
+        return false;
+    };
+    if f.metadata().ok().map(|m| m.len()) != Some(file.length) {
+        return false;
+    }
+    let want = file.length.min(16 * 1024) as usize;
+    let mut head = vec![0u8; want];
+    if f.take(want as u64).read_exact(&mut head).is_err() {
+        return false;
+    }
+    let mut h = nzbkit::md5fast::Md5::default();
+    h.update(&head);
+    h.finalize().as_slice() == file.md5_16k
 }
 
 /// Append one member's blocks to the run-length strip, merging with

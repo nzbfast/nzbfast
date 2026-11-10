@@ -90,6 +90,11 @@ mod twin_tests;
 #[path = "daemon_tests/smart_size_tests.rs"]
 mod smart_size_tests;
 
+// TODO 358 item 5: where an indexer's X-DNZB-Password lands among the
+// job's password sources. Same #[path] requirement as its siblings.
+#[path = "daemon_tests/dnzb_password_tests.rs"]
+mod dnzb_password_tests;
+
 // -- find_job (pure) --------------------------------------------------------
 
 #[test]
@@ -1188,6 +1193,40 @@ fn reliability_also_accumulates_a_per_day_article_row() {
             d.add_usage(&[("s1.example".into(), 1)]);
         }
         assert_eq!(row(d), Some((15, 3)), "survives the 60-day byte prune");
+    });
+}
+
+/// TODO 358 sweep E2: a clock before 2000 (a board with no RTC boots at
+/// 1970; a clock before the epoch read as day 0) names no real billing
+/// day, so it gets no day bucket - the bytes still reach `lifetime`.
+#[test]
+fn ledger_day_key_refuses_a_pre_2000_clock() {
+    assert_eq!(super::daemon_usage::ledger_day_key(0), None);
+    assert_eq!(
+        super::daemon_usage::ledger_day_key(10_956),
+        None,
+        "1999-12-31"
+    );
+    assert_eq!(
+        super::daemon_usage::ledger_day_key(10_957).as_deref(),
+        Some("2000-01-01")
+    );
+}
+
+/// TODO 358 sweep E2: a pre-2000 day key already on disk (written by a
+/// build before the guard) is pruned on the next bill. The old prune
+/// only reached keys starting with '2', so `1970-01-01` lived forever
+/// and stretched every NZBGet `servervolumes` reply back to it.
+#[test]
+fn usage_prune_drops_a_pre_2000_day_bucket() {
+    with_daemon("usage1970", |d| {
+        d.usage
+            .lock_ok()
+            .insert("1970-01-01".into(), json!({"s1.example": 5u64}));
+        d.add_usage(&[("s1.example".into(), 1)]);
+        let u = d.usage.lock_ok();
+        assert!(u.get("1970-01-01").is_none(), "{u:?}");
+        assert!(u.get("lifetime").is_some(), "non-day buckets survive");
     });
 }
 

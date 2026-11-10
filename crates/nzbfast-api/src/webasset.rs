@@ -367,17 +367,33 @@ fn respond_304(req: tiny_http::Request, etag: &str) {
 
 /// A 200 with the house headers.
 fn send(req: tiny_http::Request, body: Vec<u8>, gzipped: bool, ctype: &str, etag: &str) {
+    let _ = req.respond(asset_response(body, gzipped, ctype, etag));
+}
+
+/// The response every page and asset above goes out as.
+///
+/// `nosniff` because every caller names its type exactly and none wants
+/// a browser second-guessing it (bug sweep 9 Nov 2026, section C: no
+/// response carried it). Frame headers are deliberately NOT here: the
+/// dashboard frames its own manual, and dashboards such as Organizr
+/// embed SABnzbd-style UIs from a sibling origin, so which framers to
+/// allow is a setting for the owner to decide, not a default to impose.
+fn asset_response(
+    body: Vec<u8>,
+    gzipped: bool,
+    ctype: &str,
+    etag: &str,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     let resp = tiny_http::Response::from_data(body);
     let resp = match gzipped {
         true => resp.with_header(header("Content-Encoding", "gzip")),
         false => resp,
     };
-    let _ = req.respond(
-        resp.with_header(header("Content-Type", ctype))
-            .with_header(header("Cache-Control", "no-cache"))
-            .with_header(header("Vary", "Accept-Encoding"))
-            .with_header(header("ETag", etag)),
-    );
+    resp.with_header(header("Content-Type", ctype))
+        .with_header(header("Cache-Control", "no-cache"))
+        .with_header(header("Vary", "Accept-Encoding"))
+        .with_header(header("ETag", etag))
+        .with_header(header("X-Content-Type-Options", "nosniff"))
 }
 
 /// Does this `Accept-Encoding` value permit a gzip body?
@@ -417,6 +433,19 @@ fn gzip_accepted(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pages and assets carry `X-Content-Type-Options: nosniff` (bug
+    /// sweep 9 Nov 2026, section C).
+    #[test]
+    fn every_page_and_asset_says_nosniff() {
+        let r = asset_response(b"x".to_vec(), false, "text/html", "\"e\"");
+        let got = r
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("X-Content-Type-Options"))
+            .map(|h| h.value.as_str().to_string());
+        assert_eq!(got.as_deref(), Some("nosniff"));
+    }
 
     /// `q=0` is a refusal, not a preference. The old substring scan
     /// compressed for a client that had explicitly said it could not

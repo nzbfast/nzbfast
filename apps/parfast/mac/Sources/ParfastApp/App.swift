@@ -11,9 +11,16 @@ struct ParfastSwiftUIApp: App {
 
     init() {
         let model = AppModel(core: ParfastSwiftUIApp.makeCore())
+        if let error = ParfastSwiftUIApp.storeOpenError {
+            model.reportStoreOpenFailure(error)
+        }
         _app = StateObject(wrappedValue: model)
         AppDelegate.shared = model
     }
+
+    /// Why the queue store could not be opened, if it could not, for the
+    /// model to show once at launch. Set by `makeCore`.
+    nonisolated(unsafe) static var storeOpenError: Error?
 
     /// The size the main window opens at when nothing has been restored -
     /// which since 12 Sep 2026 means the FIRST RUN and nothing else, because
@@ -64,7 +71,14 @@ struct ParfastSwiftUIApp: App {
                 appropriateFor: nil, create: true) {
                 let dir = support.appendingPathComponent("parfast", isDirectory: true)
                 try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                try? core.openQueueStore(at: dir.appendingPathComponent("queue.json").path)
+                // NOT `try?`: a refusal means the user's old queue is not on
+                // screen (written by a newer parfast, or unreadable and moved
+                // aside - API.md), and the core's message says which.
+                do {
+                    try core.openQueueStore(at: dir.appendingPathComponent("queue.json").path)
+                } catch {
+                    storeOpenError = error
+                }
             }
             return core
         }
@@ -180,9 +194,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if !files.isEmpty { app.open(paths: files.map(\.path)) }
             for url in urls where url.scheme == "parfast" {
                 if DemoRoute.handle(url, app: app) { continue }
-                let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-                let paths = items.filter { $0.name == "path" }.compactMap(\.value)
-                if !paths.isEmpty { app.open(paths: paths) }
+                // Host-checked, and never a repair: any web page can fire one
+                // of these (sweep finding A34; `AppModel.open(paths:fromURL:)`).
+                let paths = AppModel.pathsFromOpenURL(url)
+                if !paths.isEmpty { app.open(paths: paths, fromURL: true) }
             }
         }
     }

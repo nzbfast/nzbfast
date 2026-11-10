@@ -540,8 +540,14 @@ fn queue_notices(d: &Daemon) -> QueueNotices {
             // `retry` rather than the path itself: what the page needs
             // to know is whether the button can be offered at all, and
             // a spool path is not a thing to put in front of a person.
+            // `pending` (F15): the Trash call TIMED OUT rather than
+            // refused, so the move may still finish and the page must
+            // not say the files are staying. Derived from the stored
+            // reason rather than stored beside it, so a notice restored
+            // from an older version's file gets the right sentence too.
             json!({"name": n.name, "path": n.path, "why": n.why, "at": n.at,
-                   "retry": !n.nzb.is_empty()})
+                   "retry": !n.nzb.is_empty(),
+                   "pending": crate::smart::kept_reason_may_still_finish(&n.why)})
         })
         .collect();
     // §188: the one-time strip after a history re-derivation. Same
@@ -1733,6 +1739,71 @@ pub(super) fn pp_params_json(g: &Job) -> Value {
     )
 }
 
+/// The rest of NZBGet's per-NZB field set (its `AppendNzbInfoFields`,
+/// which `listgroups` and `history` both carry), for whatever the
+/// caller has not already filled. Issue #118: NZBClient on iOS decodes
+/// these rows strictly and rejected the whole reply over the keys this
+/// facade never sent. Values a builder set win - this only fills gaps,
+/// with the honest empty answer where nzbfast keeps no such number
+/// (article counts, per-server stats, script results).
+pub(super) fn nzbinfo_gaps(o: &mut serde_json::Map<String, Value>, g: &Job) {
+    let id = nzo_int(&g.nzo_id);
+    let dir = g.out_dir.to_string_lossy().into_owned();
+    let nzb_file = g
+        .nzb_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let (dlo, dhi) = lohi(g.downloaded_bytes);
+    let fill = [
+        ("NZBID", json!(id)),
+        ("NZBName", json!(g.name)),
+        ("NZBNicename", json!(g.name)),
+        ("Kind", json!("NZB")),
+        ("URL", json!("")),
+        ("NZBFilename", json!(nzb_file)),
+        ("DestDir", json!(dir)),
+        ("FinalDir", json!(dir)),
+        ("Category", json!(g.category)),
+        ("ParStatus", json!("NONE")),
+        ("ExParStatus", json!("NONE")),
+        ("UnpackStatus", json!("NONE")),
+        ("MoveStatus", json!("NONE")),
+        ("ScriptStatus", json!("NONE")),
+        ("DeleteStatus", json!("NONE")),
+        ("MarkStatus", json!("NONE")),
+        ("UrlStatus", json!("NONE")),
+        ("FileCount", json!(0)),
+        ("MinPostTime", json!(0)),
+        ("MaxPostTime", json!(0)),
+        ("TotalArticles", json!(0)),
+        ("SuccessArticles", json!(0)),
+        ("FailedArticles", json!(0)),
+        ("Deleted", json!(!g.delete_status.is_empty())),
+        ("DownloadedSizeLo", json!(dlo)),
+        ("DownloadedSizeHi", json!(dhi)),
+        ("DownloadedSizeMB", json!(g.downloaded_bytes / API_MB_U)),
+        ("DownloadTimeSec", json!(g.elapsed_secs as u64)),
+        ("ExtraParBlocks", json!(0)),
+        ("DupeKey", json!(g.dupe_key.clone().unwrap_or_default())),
+        ("DupeScore", json!(0)),
+        ("DupeMode", json!("SCORE")),
+        ("ScriptStatuses", json!([])),
+        ("ServerStats", json!([])),
+        ("Health", json!(1000)),
+        ("CriticalHealth", json!(900)),
+        ("PostTotalTimeSec", json!(0)),
+        ("ParTimeSec", json!(0)),
+        ("RepairTimeSec", json!(0)),
+        ("UnpackTimeSec", json!(0)),
+        ("MessageCount", json!(0)),
+    ];
+    for (k, v) in fill {
+        o.entry(k).or_insert(v);
+    }
+    o.entry("Parameters").or_insert_with(|| pp_params_json(g));
+}
+
 fn jr_status(d: &Arc<Daemon>) -> Value {
     let unix_now = || {
         std::time::SystemTime::now()
@@ -1742,7 +1813,7 @@ fn jr_status(d: &Arc<Daemon>) -> Value {
     };
     {
         let rate = d.current_speed_bps() as u64;
-        let (disk_free, _) = disk_stat_walk(&crate::naming::out_dir(d)).unwrap_or((0, 0));
+        let (disk_free, disk_total) = disk_stat_walk(&crate::naming::out_dir(d)).unwrap_or((0, 0));
         let paused = d.paused.load(Ordering::Relaxed);
         // §91: progress is sampled AFTER the disk walk above (which
         // can take milliseconds) and right beside the queue scan, so
@@ -1779,6 +1850,39 @@ fn jr_status(d: &Arc<Daemon>) -> Value {
         o.insert("FreeDiskSpaceLo".into(), json!(dlo));
         o.insert("FreeDiskSpaceHi".into(), json!(dhi));
         o.insert("FreeDiskSpaceMB".into(), json!(disk_free / API_MB_U));
+        let (tlo, thi) = lohi(disk_total);
+        o.insert("TotalDiskSpaceLo".into(), json!(tlo));
+        o.insert("TotalDiskSpaceHi".into(), json!(thi));
+        o.insert("TotalDiskSpaceMB".into(), json!(disk_total / API_MB_U));
+        // Issue #118: every field NZBGet's own `status` carries, because
+        // a client with a strict decoder (NZBClient on iOS) rejects the
+        // whole reply over one missing key. There is one download
+        // directory, so the "Inter" (intermediate dir) pair repeats the
+        // disk above; there is no forced queue, no article cache, no
+        // quota and no per-day/month counter, so those read zero.
+        let (ilo, ihi) = lohi(disk_free);
+        o.insert("FreeInterDiskSpaceLo".into(), json!(ilo));
+        o.insert("FreeInterDiskSpaceHi".into(), json!(ihi));
+        o.insert("FreeInterDiskSpaceMB".into(), json!(disk_free / API_MB_U));
+        o.insert("TotalInterDiskSpaceLo".into(), json!(tlo));
+        o.insert("TotalInterDiskSpaceHi".into(), json!(thi));
+        o.insert("TotalInterDiskSpaceMB".into(), json!(disk_total / API_MB_U));
+        for prefix in ["Forced", "Month", "Day"] {
+            o.extend(size_fields(prefix, 0));
+        }
+        let (rlo, rhi) = lohi(rate);
+        o.extend([
+            ("ArticleCacheLo".to_string(), json!(0)),
+            ("ArticleCacheHi".to_string(), json!(0)),
+            ("ArticleCacheMB".to_string(), json!(0)),
+            ("DownloadRateLo".to_string(), json!(rlo)),
+            ("DownloadRateHi".to_string(), json!(rhi)),
+            ("AverageDownloadRateLo".to_string(), json!(rlo)),
+            ("AverageDownloadRateHi".to_string(), json!(rhi)),
+            ("ServerPaused".to_string(), json!(paused)),
+            ("QuotaReached".to_string(), json!(false)),
+            ("ResumeTime".to_string(), json!(0)),
+        ]);
         o.extend([
             ("DownloadRate".to_string(), json!(rate)),
             ("AverageDownloadRate".to_string(), json!(rate)),
@@ -1792,7 +1896,10 @@ fn jr_status(d: &Arc<Daemon>) -> Value {
             ("ScanPaused".to_string(), json!(false)),
             ("ServerStandBy".to_string(), json!(rate == 0)),
             ("ServerTime".to_string(), json!(unix_now())),
-            ("UpTimeSec".to_string(), json!(0)),
+            (
+                "UpTimeSec".to_string(),
+                json!(d.boot_at.elapsed().as_secs()),
+            ),
             ("DownloadTimeSec".to_string(), json!(0)),
             (
                 "ThreadCount".to_string(),
@@ -1806,6 +1913,38 @@ fn jr_status(d: &Arc<Daemon>) -> Value {
             ("NewsServers".to_string(), json!([])),
         ]);
         Value::Object(o)
+    }
+}
+
+/// A queue row's NZBGet group `Status` word.
+///
+/// NZBGet's own post-processing states for the tail, the counterpart
+/// of the SAB queue's Verifying/Repairing/Extracting - a client that
+/// knows this protocol knows to keep waiting through them. Without them
+/// a finishing job fell back to QUEUED, which reads as "not started"
+/// for work that is nearly done.
+///
+/// One function because two replies ask it: `listgroups` prints the
+/// word, and `postqueue` (sabcompat/nzbget_lists.rs) lists exactly the
+/// rows whose word is a post-processing one - so a job is in NZBGet's
+/// post queue here if and only if its group says it is.
+pub(super) fn nzbget_group_status(
+    phase: Option<&str>,
+    downloading: bool,
+    state: JobState,
+    paused: bool,
+) -> &'static str {
+    match phase {
+        Some("Verifying") => "VERIFYING_SOURCES",
+        Some("Repairing") => "REPAIRING",
+        Some("Extracting") => "UNPACKING",
+        Some(_) => "MOVING",
+        None if downloading => "DOWNLOADING",
+        // §129 Finishing with no phase word left is the finalize/move
+        // window - same NZBGet vocabulary as the Completed mover arm.
+        None if matches!(state, JobState::Completed | JobState::Finishing) => "MOVING",
+        None if paused => "PAUSED",
+        None => "QUEUED",
     }
 }
 
@@ -1823,7 +1962,7 @@ fn jr_listgroups(d: &Arc<Daemon>) -> Value {
             .lock_ok()
             .as_ref()
             .map(|s| (s.nzo_id.clone(), s.progress.load(Ordering::Relaxed)));
-        let groups: Vec<Value> = d
+        let groups: Vec<(String, PathBuf, serde_json::Map<String, Value>)> = d
             .queue
             .lock_ok()
             .iter()
@@ -1892,31 +2031,7 @@ fn jr_listgroups(d: &Arc<Daemon>) -> Value {
                     ("Kind".to_string(), json!("NZB")),
                     (
                         "Status".to_string(),
-                        // NZBGet's own post-processing states for the
-                        // tail, the counterpart of the SAB queue's
-                        // Verifying/Repairing/Extracting - a client
-                        // that knows this protocol knows to keep
-                        // waiting through them. Without them a
-                        // finishing job fell back to QUEUED, which
-                        // reads as "not started" for work that is
-                        // nearly done.
-                        json!(match phase {
-                            Some("Verifying") => "VERIFYING_SOURCES",
-                            Some("Repairing") => "REPAIRING",
-                            Some("Extracting") => "UNPACKING",
-                            Some(_) => "MOVING",
-                            None if downloading => "DOWNLOADING",
-                            // §129 Finishing with no phase word left is
-                            // the finalize/move window - same NZBGet
-                            // vocabulary as the Completed mover arm.
-                            None if matches!(
-                                g.state,
-                                JobState::Completed | JobState::Finishing
-                            ) =>
-                                "MOVING",
-                            None if g.paused => "PAUSED",
-                            None => "QUEUED",
-                        }),
+                        json!(nzbget_group_status(phase, downloading, g.state, g.paused)),
                     ),
                     ("Category".to_string(), json!(g.category)),
                     ("Priority".to_string(), json!(g.priority * 50)),
@@ -1940,12 +2055,31 @@ fn jr_listgroups(d: &Arc<Daemon>) -> Value {
                         json!(g.dupe_key.clone().unwrap_or_default()),
                     ),
                     ("MessageCount".to_string(), json!(0)),
-                    ("RemainingFileCount".to_string(), json!(0)),
                     ("RemainingParCount".to_string(), json!(0)),
                     ("Parameters".to_string(), pp_params_json(&g)),
                     ("PostInfoText".to_string(), json!("")),
                     ("PostStageProgress".to_string(), json!(0)),
+                    ("PostStageTimeSec".to_string(), json!(0)),
+                    ("MinPriority".to_string(), json!(g.priority * 50)),
+                    ("Log".to_string(), json!([])),
                 ]);
+                nzbinfo_gaps(&mut o, &g);
+                (g.nzo_id.clone(), g.nzb_path.clone(), o)
+            })
+            .collect();
+        // The file half - FirstID/LastID in `listfiles`' id namespace
+        // and the real file counts (TODO 358 sweep E1) - read with the
+        // queue lock RELEASED: the listing takes the hub's tables and
+        // may read a spool, and `listing_with` locks the queue itself.
+        let groups: Vec<Value> = groups
+            .into_iter()
+            .map(|(nzo_id, nzb_path, mut o)| {
+                let (first, last, count, remaining) =
+                    nzbget_lists::group_file_ids(d, &nzo_id, nzb_path);
+                o.insert("FirstID".into(), json!(first));
+                o.insert("LastID".into(), json!(last));
+                o.insert("FileCount".into(), json!(count));
+                o.insert("RemainingFileCount".into(), json!(remaining));
                 Value::Object(o)
             })
             .collect();
@@ -2046,7 +2180,12 @@ fn jr_history(d: &Arc<Daemon>, params: &[Value]) -> Value {
                     ("Health".to_string(), json!(1000)),
                     ("CriticalHealth".to_string(), json!(900)),
                     ("Parameters".to_string(), pp_params_json(&g)),
+                    ("ID".to_string(), json!(nzo_int(&g.nzo_id))),
+                    ("RemainingFileCount".to_string(), json!(0)),
+                    ("RetryData".to_string(), json!(false)),
+                    ("Log".to_string(), json!([])),
                 ]);
+                nzbinfo_gaps(&mut o, &g);
                 Value::Object(o)
             })
             .collect();
@@ -2562,29 +2701,16 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                     // hide survives a restart - a hide that did not would
                     // put every imported release back in the *arr's face
                     // at the next start.
-                    for j in &hidden {
-                        if d.history_publish_change(j, "hiding the history record")
-                            == nzbfast_daemon::histstore::HistWrite::Refused
-                        {
-                            // Refused means the store cannot be written
-                            // at all (the append AND the atomic rewrite),
-                            // so the flag is true in memory and nowhere
-                            // else. Put it back rather than answer `true`
-                            // for a change a restart undoes - the same
-                            // take the erase arm below makes about its
-                            // own refusal.
-                            for j in &hidden {
-                                j.lock_ok().hidden = false;
-                            }
-                            *rpc_error = Some(
-                                "the history store could not be written, so the \
-                                 records were left exactly as they were - check \
-                                 the permissions on the data folder"
-                                    .into(),
-                            );
-                            ok = false;
-                            break;
-                        }
+                    if !publish_hides(&hidden, |j| {
+                        d.history_publish_change(j, "hiding the history record")
+                    }) {
+                        *rpc_error = Some(
+                            "the history store could not be written, so the \
+                             records it refused were left as they were - check \
+                             the permissions on the data folder"
+                                .into(),
+                        );
+                        ok = false;
                     }
                 } else {
                     let before = h.len();
@@ -2975,23 +3101,18 @@ pub fn handle_jsonrpc(
         }
         "append" => jr_append(d, &params, &ua_hdr),
         "editqueue" => jr_editqueue(d, &params, &mut rpc_error),
-        // TODO 274 built the per-file listing the SAB side now serves
-        // as `mode=get_files`, and this arm STAYS an empty list rather
-        // than being filled from it. NZBGet's file handle is an integer
-        // in a queue-wide namespace, and the same integer is what its
-        // `editqueue` File* commands take - none of which this facade
-        // implements. Minting integers for a listing whose ids no
-        // command here accepts hands a client rows it cannot act on and
-        // a namespace we would then have to keep stable across
-        // restarts; the empty list is at least an honest answer to
-        // "what can I do per file over JSON-RPC", which is nothing.
-        "listfiles" => json!([]),
-        "postqueue" => json!([]),
+        // TODO 358 item 4: these three answered `[]` until 9 Nov 2026.
+        // The bodies, the field sets (recorded from NZBGet 26.3 itself)
+        // and what each one zero-fills are in sabcompat/nzbget_lists.rs,
+        // including why `listfiles` now mints the integer file ids it
+        // used to refuse to.
+        "listfiles" => nzbget_lists::jr_listfiles(d, &params),
+        "postqueue" => nzbget_lists::jr_postqueue(d, &params),
         // We have one pause, covering the whole pipeline - there is no
         // separate post-processing or scan queue to hold. Answering true
         // is honest for a caller asking us to stop doing that work.
         "pausepost" | "resumepost" | "pausescan" | "resumescan" => json!(true),
-        "servervolumes" => json!([]),
+        "servervolumes" => nzbget_lists::jr_servervolumes(d),
         "log" | "loadlog" => {
             let n = params.get(1).and_then(Value::as_u64).unwrap_or(100) as usize;
             // §163 item 5: scrubbed on the way out. This tail used to go
@@ -3015,6 +3136,10 @@ pub fn handle_jsonrpc(
             // to report", so an unimplemented method looked like a
             // working one that had no answer. JSON-RPC has a code for
             // this and NZBGet itself uses it.
+            // ...and logged, naming the app: a remote client that
+            // fails against this facade (issue #118) is diagnosed from
+            // the user's log, and the method it wanted is the finding.
+            warn!(target: "jsonrpc", "no such method {other:?} (client {ua_hdr:?})");
             rpc_error = Some(format!("no such method {other:?}"));
             Value::Null
         }
@@ -3031,8 +3156,43 @@ pub fn handle_jsonrpc(
     let _ = req.respond(json_resp(resp));
 }
 
+/// Publish each newly hidden record; on the first refusal, take the flag
+/// back off that record and every one not yet published, and answer
+/// false.
+///
+/// Refused means the store took neither the append nor the atomic
+/// rewrite, so that flag is true in memory and nowhere else - put it
+/// back rather than answer `true` for a change a restart undoes. The
+/// records published BEFORE the refusal stay hidden: their store line
+/// says hidden, and clearing them in memory too (which this did until
+/// the 9 Nov 2026 bug sweep) left memory saying visible while the store
+/// said hidden, so they vanished again at the next restart. Every
+/// record ends with memory and store agreeing.
+fn publish_hides(
+    hidden: &[Arc<Mutex<Job>>],
+    mut publish: impl FnMut(&Arc<Mutex<Job>>) -> nzbfast_daemon::histstore::HistWrite,
+) -> bool {
+    for (i, j) in hidden.iter().enumerate() {
+        if publish(j) == nzbfast_daemon::histstore::HistWrite::Refused {
+            for j in &hidden[i..] {
+                j.lock_ok().hidden = false;
+            }
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod editqueue_param_tests;
+
+#[cfg(test)]
+mod nzbget_fields_tests;
+
+mod nzbget_lists;
+
+#[cfg(test)]
+mod nzbget_lists_tests;
 
 #[cfg(test)]
 mod append_url_tests;

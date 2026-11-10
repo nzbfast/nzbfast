@@ -269,3 +269,37 @@ fn the_script_writable_set_covers_the_job_and_the_download_root() {
         );
     }
 }
+
+/// Sweep C (script.rs): a script's LAST stdout lines were read after a
+/// flat 50 ms grace, so a drain thread the scheduler had not run yet
+/// lost them - and for a post-processing chain the last lines are its
+/// `[NZB] FINALDIR=` and friends. The seam slows the sink the way a
+/// starved drain is slow; the reap must wait for it.
+#[cfg(unix)]
+#[test]
+fn a_slow_drain_still_delivers_the_last_nzb_line() {
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c")
+        .arg("printf '[NZB] FINALDIR=/done\\n'; exit 0");
+    let (status, out, _) = super::run_capped_core(
+        cmd,
+        30,
+        super::StdoutMode::Sieve,
+        std::time::Duration::from_millis(200),
+    )
+    .expect("the script launches");
+    assert!(status.is_some_and(|s| s.success()));
+    assert_eq!(out, "[NZB] FINALDIR=/done");
+}
+
+/// Sweep C (settings.rs, prequeue.rs): the timeout settings take any
+/// u64, and `Instant::now() + Duration::from_secs(u64::MAX)` panicked the
+/// runner. A deadline past what an `Instant` holds is no deadline.
+#[cfg(unix)]
+#[test]
+fn a_timeout_past_what_an_instant_holds_runs_without_a_deadline() {
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c").arg("exit 0");
+    let (status, _, _) = run_capped_capture(cmd, u64::MAX).expect("the script launches");
+    assert!(status.is_some_and(|s| s.success()));
+}

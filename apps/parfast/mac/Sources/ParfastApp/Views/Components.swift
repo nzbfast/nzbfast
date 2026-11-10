@@ -253,6 +253,7 @@ struct SizeField: View {
 
     @State private var text: String = ""
     @State private var unitIndex: Int = 2
+    @FocusState private var focused: Bool
 
     var body: some View {
         HStack(spacing: T.spacingS) {
@@ -261,7 +262,9 @@ struct SizeField: View {
                 .frame(width: 90)
                 .monospacedDigit()
                 .multilineTextAlignment(.trailing)
-                .onSubmit(commit)
+                .focused($focused)
+                .onSubmit(settle)
+                .onChange(of: focused) { _, isFocused in if !isFocused { settle() } }
                 .onChange(of: text) { _, _ in commit() }
             Picker("", selection: $unitIndex) {
                 ForEach(Self.units.indices, id: \.self) { i in
@@ -288,16 +291,72 @@ struct SizeField: View {
         text = Fmt.count(bytes / scale)
     }
 
-    private func parsed() -> Int64 {
-        let digits = text.filter { $0.isNumber }
-        let value = Int64(digits) ?? 0
-        return value * Self.units[unitIndex].1
+    /// What the field currently says, in bytes, rounded up to a multiple of
+    /// four where that is asked for; nil when it says something unusable.
+    private func parsed() -> Int64? {
+        Self.parse(text, unit: Self.units[unitIndex].1, multipleOfFour: multipleOfFour)
+    }
+
+    /// Return or leaving the field: an entry the field cannot use is put back
+    /// to the value actually in force, so the field never shows a figure
+    /// that is not the one a job will get.
+    private func settle() {
+        if parsed() == nil { load() } else { commit() }
     }
 
     private func commit() {
-        var value = parsed()
-        if multipleOfFour { value = (value + 3) / 4 * 4 }
-        if value != bytes { bytes = max(0, value) }
+        // An unusable entry - too large for a byte count, or not a number -
+        // leaves the value where it was rather than replacing it, while the
+        // user is still typing; `settle` puts the text back on Return or blur.
+        guard let value = parsed() else { return }
+        if value != bytes { bytes = value }
+    }
+
+    /// The field's text times its unit, in bytes.
+    ///
+    /// Sweep finding A33, both halves. It was `Int64(digits) * unit` over the
+    /// text with everything but digits thrown away, from `onChange(of: text)`:
+    /// eleven digits with GiB selected overflowed that unchecked multiply and
+    /// TRAPPED - the whole app, mid-typing, taking running jobs with it. And
+    /// throwing away every non-digit threw away the decimal separator, so
+    /// "1.5" MiB was 15 MiB. Now the locale's grouping separator is dropped
+    /// (the field shows `Fmt.count`'s "1,024", so it must read it back), its
+    /// decimal separator is honoured, the arithmetic is in `Decimal`, and a
+    /// result outside `Int64` is nil rather than a crash. A fraction of a byte
+    /// rounds to the nearest byte. Empty text is 0, as it always was.
+    static func parse(_ text: String, unit: Int64, multipleOfFour: Bool = false,
+                      locale: Locale = .current) -> Int64? {
+        let grouping = locale.groupingSeparator ?? ","
+        let decimalMark = locale.decimalSeparator ?? "."
+        var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !grouping.isEmpty && grouping != decimalMark {
+            cleaned = cleaned.replacingOccurrences(of: grouping, with: "")
+        }
+        // A non-breaking space is the grouping mark in several locales, and a
+        // plain space is what a person types for it.
+        cleaned = cleaned.filter { !$0.isWhitespace }
+        if cleaned.isEmpty { return 0 }
+        cleaned = cleaned.replacingOccurrences(of: decimalMark, with: ".")
+        guard cleaned.allSatisfy({ $0.isASCII && ($0.isNumber || $0 == ".") }),
+              cleaned.filter({ $0 == "." }).count <= 1,
+              cleaned != ".",
+              let number = Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX"))
+        else { return nil }
+        var product = number * Decimal(unit)
+        var rounded = Decimal()
+        NSDecimalRound(&rounded, &product, 0, .plain)
+        if multipleOfFour {
+            // Up to the next multiple of four, in Decimal, so the round-up
+            // cannot be the step that overflows either.
+            var quarter = rounded / 4
+            var up = Decimal()
+            NSDecimalRound(&up, &quarter, 0, .up)
+            rounded = up * 4
+        }
+        guard rounded >= 0, rounded <= Decimal(Int64.max) else { return nil }
+        // Through the string rather than `int64Value`, which is not exact for
+        // every integral Decimal near the top of the range.
+        return Int64(NSDecimalNumber(decimal: rounded).stringValue)
     }
 }
 
@@ -339,9 +398,8 @@ struct PathField: View {
 
     var body: some View {
         HStack(spacing: T.spacingS) {
-            TextField("", text: $path)
+            TextField("", text: Self.userEdits(of: $path, onEdit: onEdit))
                 .textFieldStyle(.roundedBorder)
-                .onChange(of: path) { _, _ in onEdit?() }
             Button(S.commonBrowse) {
                 if let picked = FilePicker.choose(
                     directory: chooseDirectory, extensions: allowedExtensions,
@@ -351,6 +409,30 @@ struct PathField: View {
                 }
             }
         }
+    }
+
+    /// The text field's binding: a value the USER typed reaches `onEdit`, and
+    /// a value the model wrote does not.
+    ///
+    /// This was `.onChange(of: path) { onEdit() }`, which cannot tell the two
+    /// apart - so the panes' own autofill, run while the field was on screen,
+    /// marked the field as edited by hand, and every later autofill was
+    /// refused. Driving the real app on 9 Nov 2026: add files to Create, add
+    /// one from another folder (the index moves to the common folder and the
+    /// field is now "edited"), clear the list and add a file from a third
+    /// folder - and the index stays in the second folder, under the old name,
+    /// where the no-clobber create then refuses it as "already exists". The
+    /// checksum pane's format switch and the posting pane's output folder
+    /// rode the same callback. The posting pane's name field already used
+    /// this shape.
+    static func userEdits(of path: Binding<String>, onEdit: (() -> Void)?) -> Binding<String> {
+        Binding(
+            get: { path.wrappedValue },
+            set: { new in
+                guard new != path.wrappedValue else { return }
+                path.wrappedValue = new
+                onEdit?()
+            })
     }
 }
 

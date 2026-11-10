@@ -698,6 +698,7 @@ fn a_fetched_add_failed_as_a_duplicate_keeps_its_failure_link() {
             host: "indexer.example".to_string(),
             https: true,
             category: String::new(),
+            password: String::new(),
             addrs: Vec::new(),
             filename: String::new(),
         };

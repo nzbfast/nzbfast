@@ -91,6 +91,33 @@ pub fn run(argv0: &str, args: &[String]) -> u8 {
     run_controlled(argv0, args, &mut sink, Some(gate))
 }
 
+/// argv as the dialect reads it: `argv[0]` and the arguments, as UTF-8.
+///
+/// `Err` names the first argument that is not valid UTF-8, which the
+/// binary refuses at exit 3 with that name on stderr. It used to take
+/// `std::env::args()`, which PANICS on such an argument - exit 101 before
+/// a line of par2 output, so `parfast r set.par2 *` in a directory holding
+/// one Latin-1 file name died outright (sweep A8). Refusing is the honest
+/// half of the fix: the parser and `Options` carry `String`s throughout,
+/// and a lossy conversion would name a file that is not there, which the
+/// create's missing-literal rule then drops in silence.
+///
+/// `argv[0]` is converted lossily instead: it only ever selects a command
+/// by its stem, and none of the three stems it can select is lossy.
+pub fn utf8_argv(
+    argv: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<(String, Vec<String>), std::ffi::OsString> {
+    let mut argv = argv.into_iter();
+    let argv0 = argv.next().map_or_else(
+        || "parfast".to_string(),
+        |a| a.to_string_lossy().into_owned(),
+    );
+    let args = argv
+        .map(|a| a.into_string())
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok((argv0, args))
+}
+
 /// Whether this run's memory is BOUNDED: `-m` was given, or the process
 /// sits under a cgroup memory limit smaller than the machine. The
 /// binary's `main` asks this before any work to decide whether to fix
@@ -322,7 +349,7 @@ pub fn run_controlled(
     sink: &mut out::Sink,
     gate: Option<std::sync::Arc<nzbkit::par2repair::PauseGate>>,
 ) -> u8 {
-    let parsed = match cli::parse(argv0, args) {
+    let mut parsed = match cli::parse(argv0, args) {
         Ok(p) => p,
         Err(e) => {
             // par2cmdline puts the diagnosis on stderr and nothing on
@@ -465,6 +492,25 @@ pub fn run_controlled(
         None
     };
     nzbkit::digest_cache::publish(digest_cache);
+    // `-a` NAMING A SET THAT EXISTS MAKES EVERY BARE ARGUMENT A DATA FILE
+    // on verify and repair too, as it already did on create. The parser
+    // puts the first one in `par2` because it cannot know yet whether the
+    // archive is there (`Options::archive` says why), and `verify::locate`
+    // then reads the archive and never looks at `par2` again - so
+    // `parfast r -a set.par2 donor.dat` dropped its only donor, where
+    // par2cmdline 1.2.0 repairs from it (measured 9 Nov 2026; sweep, CLI
+    // section B). `par2` stays set as well, so `locate`'s wildcard check
+    // still sees every name the user typed, in the reference's order.
+    if matches!(parsed.command, Command::Verify | Command::Repair)
+        && parsed
+            .opts
+            .archive
+            .as_deref()
+            .is_some_and(std::path::Path::exists)
+        && let Some(first) = parsed.opts.par2.clone()
+    {
+        parsed.opts.files.insert(0, first);
+    }
     let command = parsed.command;
     // The watch reads the sink's loudness when it is built, so the level
     // goes on first; the commands set it again, to the same value.
@@ -489,7 +535,19 @@ pub fn run_controlled(
         Command::Verify => verify::run_watched(&parsed.opts, sink, false, &watch),
         Command::Repair => repair::run_watched(&parsed.opts, sink, &watch),
     };
-    if watch.cancelled() {
+    // ONLY A COMMAND THAT DID NOT SUCCEED IS RELABELLED. A cancel every
+    // command honours comes back non-zero - create 6, verify and repair 1
+    // - so a 0 here is a command that FINISHED, whatever the gate says
+    // now. Reading the gate alone turned an interrupt landing after
+    // "Repair complete." (and after a `-p` purge) into exit 130 and
+    // "run the repair again to finish" (sweep A9).
+    //
+    // What this cannot see: an interrupt after a NON-zero verdict that
+    // was not a cancel - a finished verify answering 1, say - is still
+    // relabelled, because 1 is also what a cancelled verify answers and
+    // nothing at this level tells the two apart. Separating them needs
+    // the commands to say whether they stopped for the gate.
+    if watch.cancelled() && code != EXIT_SUCCESS {
         // Said once, on stderr, unfiltered by `-q` like every diagnosis;
         // and the pending `\r` fragment is ended first or this line
         // overprints it. The exit code is the shell's own for an
@@ -625,6 +683,37 @@ mod switch_tests {
             super::cli::parse("parfast", &args).is_err(),
             "-B with nothing after it must refuse"
         );
+    }
+
+    /// `-a <file>` as TWO arguments, the second switch par2cmdline 1.2.0
+    /// takes that way (measured: `par2 c -R -a out.par2 dirA dirB` exits
+    /// 0 and writes `out.par2` over both directories). Until 9 Nov 2026
+    /// parfast read the empty attached value as the archive name, ate
+    /// `out.par2` as the first source and refused "PAR2 base name \"\"".
+    #[test]
+    fn archive_name_takes_a_separated_value_the_way_the_reference_does() {
+        let parse = |a: &[&str]| {
+            let args: Vec<String> = a.iter().map(|s| (*s).to_string()).collect();
+            super::cli::parse("parfast", &args)
+        };
+        let p = parse(&["c", "-R", "-a", "out.par2", "dirA", "dirB"]).expect("-a <file> parses");
+        assert_eq!(
+            p.opts.archive.as_deref(),
+            Some(std::path::Path::new("out.par2"))
+        );
+        assert_eq!(
+            p.opts.par2.as_deref(),
+            Some(std::path::Path::new("dirA")),
+            "out.par2 must not have been eaten as a bare argument"
+        );
+        assert_eq!(p.opts.files, vec![std::path::PathBuf::from("dirB")]);
+        // The attached spelling is unchanged.
+        let q = parse(&["c", "-aout.par2", "dirA"]).expect("-a<file> parses");
+        assert_eq!(
+            q.opts.archive.as_deref(),
+            Some(std::path::Path::new("out.par2"))
+        );
+        assert!(parse(&["c", "-a"]).is_err(), "-a with nothing after it");
     }
 
     /// A long option that is NOT ours still gets the reference's own
@@ -818,6 +907,84 @@ mod switch_tests {
                 .expect_err("no value")
                 .message,
             "Option --volume-blocks requires a value."
+        );
+    }
+}
+
+/// The 9 Nov 2026 sweep's front-end findings. Each had a NEGATIVE
+/// CONTROL run when it landed: the fixed line put back, the test seen to
+/// fail, the line restored.
+#[cfg(test)]
+mod sweep_nov_tests {
+    fn line(words: &[&str]) -> Vec<String> {
+        words.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// A9: a gate that is cancelled when the command returns does not
+    /// relabel a command that SUCCEEDED. `-h` cannot observe a cancel at
+    /// all, so it stands for every command that finished before the
+    /// interrupt landed - the "Repair complete." then exit 130 shape.
+    #[test]
+    fn a_late_interrupt_does_not_relabel_a_finished_command() {
+        let gate = nzbkit::par2repair::PauseGate::new();
+        gate.cancel();
+        let mut sink = super::out::Sink::buffered();
+        let code = super::run_controlled("parfast", &line(&["-h"]), &mut sink, Some(gate));
+        let (out, err) = sink.take();
+        assert_eq!(code, super::EXIT_SUCCESS);
+        assert!(out.contains("Usage:"), "{out}");
+        assert!(!err.contains("Cancelled"), "{err}");
+    }
+
+    /// A16: a listing that opens with a UTF-8 byte order mark still names
+    /// its first file. `str::trim` does not take U+FEFF.
+    #[test]
+    fn a_listing_with_a_byte_order_mark_keeps_its_first_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "parfast-bom-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let list = dir.join("list.txt");
+        std::fs::write(&list, "\u{feff}movie.mkv\r\nother.bin\r\n").unwrap();
+        let at = format!("@{}", list.display());
+        let p = super::cli::parse("parfast", &line(&["c", "out.par2", &at])).expect("parses");
+        assert_eq!(
+            p.opts.files,
+            vec![
+                std::path::PathBuf::from("movie.mkv"),
+                std::path::PathBuf::from("other.bin")
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A8: an argument that is not UTF-8 is an `Err` naming it, never a
+    /// panic; argv[0] is read lossily because it only selects a stem.
+    #[cfg(unix)]
+    #[test]
+    fn an_argument_that_is_not_utf8_is_refused_by_name() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let bad = OsString::from_vec(b"caf\xe9.bin".to_vec());
+        let argv = vec![
+            OsString::from("par2repair"),
+            OsString::from("set.par2"),
+            bad.clone(),
+        ];
+        assert_eq!(super::utf8_argv(argv), Err(bad));
+        let argv = vec![
+            OsString::from_vec(b"/opt/\xff/par2verify".to_vec()),
+            OsString::from("set.par2"),
+        ];
+        let (argv0, args) = super::utf8_argv(argv).expect("argv[0] is lossy");
+        assert!(argv0.ends_with("/par2verify"), "{argv0}");
+        assert_eq!(args, line(&["set.par2"]));
+        assert_eq!(
+            super::utf8_argv(Vec::<OsString>::new()),
+            Ok(("parfast".to_string(), Vec::new()))
         );
     }
 }

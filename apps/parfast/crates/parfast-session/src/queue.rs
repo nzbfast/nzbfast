@@ -187,6 +187,9 @@ pub struct QueueSnapshot {
     pub jobs: Vec<JobSnapshot>,
 }
 
+/// The [`Persisted::version`] this build writes, and the newest it reads.
+const PERSISTED_VERSION: u32 = 1;
+
 /// What the persisted file holds. A version field so a later shape can
 /// be read or discarded on purpose rather than by a parse error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,6 +236,11 @@ struct Inner {
     tick: Condvar,
     tick_lock: Mutex<()>,
     stopping: AtomicBool,
+    /// Test-only: hold `maybe_post_action` off, so a test can stand in
+    /// the gap between the last job finishing and the scheduler's next
+    /// pass, which is otherwise at most 100 ms wide and not raceable.
+    #[cfg(test)]
+    post_action_held: AtomicBool,
 }
 
 impl Session {
@@ -262,6 +270,8 @@ impl Session {
             tick: Condvar::new(),
             tick_lock: Mutex::new(()),
             stopping: AtomicBool::new(false),
+            #[cfg(test)]
+            post_action_held: AtomicBool::new(false),
         });
         let scheduler = Arc::clone(&inner);
         // ONE scheduler thread, which starts workers. It is the only
@@ -297,7 +307,8 @@ impl Session {
                 .unwrap_or_else(|p| p.into_inner())
                 .performance
                 .low_priority;
-        let snap = JobSnapshot::queued(id, spec.kind(), now_rfc3339(), low);
+        let mut snap = JobSnapshot::queued(id, spec.kind(), now_rfc3339(), low);
+        snap.title = spec.subject();
         let publisher = Publisher::new(snap);
         publisher.set_wake(wake_box(
             self.inner
@@ -306,24 +317,29 @@ impl Session {
                 .unwrap_or_else(|p| p.into_inner())
                 .clone(),
         ));
-        self.inner
-            .jobs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(
-                id,
-                Entry {
-                    spec,
-                    control: Control::new(),
-                    publisher,
-                    running: false,
-                    pair: None,
-                    pair_wait: PairWait::default(),
-                    run_next: false,
-                },
-            );
+        let mut jobs = self.inner.jobs.lock().unwrap_or_else(|p| p.into_inner());
+        jobs.insert(
+            id,
+            Entry {
+                spec,
+                control: Control::new(),
+                publisher,
+                running: false,
+                pair: None,
+                pair_wait: PairWait::default(),
+                run_next: false,
+            },
+        );
+        // Lowered UNDER the table lock, which `maybe_post_action` also
+        // holds from its "is the queue drained?" read through its raising
+        // of these two flags. With either half outside the lock, a drain
+        // judged an instant before this insert raised `post_action_due`
+        // an instant after this lowered it: the host was told to sleep
+        // the machine with a job sitting queued, and the latch then
+        // stayed up through the whole of the new batch.
         self.inner.post_action_due.store(false, Ordering::SeqCst);
         self.inner.post_action_fired.store(false, Ordering::SeqCst);
+        drop(jobs);
         self.inner.kick();
         self.inner.persist();
         id
@@ -367,11 +383,21 @@ impl Session {
     /// entry would have been reached - nothing ever wrote the terminal
     /// state down, and the job came back `Queued` after a relaunch and
     /// ran. Terminal states are the queue's own to record.
+    ///
+    /// A FINISHED job is refused, as `set_job_paused` and `remove`
+    /// refuse one. `settled` below is "no worker holds it", which is
+    /// true of a finished job too, so a Cancel pressed on a Done repair
+    /// (or one that landed between the worker publishing Done and
+    /// letting go of `running`) rewrote it to Cancelled with its result
+    /// still attached - a finished job reporting that it never finished.
     pub fn cancel(&self, id: i64) -> bool {
         let jobs = self.inner.jobs.lock().unwrap_or_else(|p| p.into_inner());
         let Some(e) = jobs.get(&id) else {
             return false;
         };
+        if e.publisher.get().state.finished() {
+            return false;
+        }
         e.control.cancel();
         let settled = !e.running;
         if settled {
@@ -471,6 +497,11 @@ impl Session {
         self.inner.ring();
     }
 
+    /// Both of these are `Settings` fields, and `Settings` is what the
+    /// store carries - so both are PERSISTED, as `set_settings` is. They
+    /// were not: a concurrency or a power action chosen through these
+    /// two doors reached the file only if some later submit, cancel or
+    /// worker happened to write it, and was otherwise gone at relaunch.
     pub fn set_concurrency(&self, n: u32) {
         self.inner
             .settings
@@ -478,15 +509,13 @@ impl Session {
             .unwrap_or_else(|p| p.into_inner())
             .concurrency = n.max(1);
         self.inner.kick();
+        self.inner.persist();
         self.inner.ring();
     }
 
     pub fn set_post_action(&self, action: PostQueueAction) {
-        self.inner
-            .settings
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .post_queue_action = action;
+        self.inner.write_settings(|s| s.post_queue_action = action);
+        self.inner.persist();
         self.inner.ring();
     }
 
@@ -505,11 +534,9 @@ impl Session {
     }
 
     pub fn set_settings(&self, s: Settings) {
-        *self
-            .inner
-            .settings
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = s;
+        // The whole struct carries `post_queue_action`, so this is a
+        // door to choosing the action as much as `set_post_action` is.
+        self.inner.write_settings(|held| *held = s);
         self.inner.kick();
         self.inner.persist();
         self.inner.ring();
@@ -531,19 +558,71 @@ impl Session {
     }
 
     /// Persist the table to `path` from now on, and load whatever is
-    /// already there. A file that cannot be parsed is REPORTED and not
+    /// already there. A file that cannot be read is REPORTED and never
     /// deleted: a host that silently dropped a queue it could not read
     /// would lose a night's work to a one-character bug.
+    ///
+    /// # What happens to a store this build cannot use
+    ///
+    /// It used to stay where it was with the path ARMED, so the very next
+    /// submit, cancel or settings write renamed a fresh table over the
+    /// file the paragraph above promises to keep - and both hosts drop the
+    /// error. Two cases now, decided by reading `version` ALONE first:
+    ///
+    /// * **Written by a NEWER build** (`version` above this build's): the
+    ///   file is left exactly where it is and the store is NOT armed, so
+    ///   this session persists nothing and the newer build finds its queue
+    ///   intact on its next launch. The error says so.
+    /// * **Unreadable for any other reason** - zero length, torn by a
+    ///   crash, hand-edited, a shape this build does not know: the file is
+    ///   moved aside to `<name>.unreadable-<seconds>-<pid>` (never deleted),
+    ///   the path IS armed, and the error names where the file went. Not
+    ///   arming here made a single torn write permanent and invisible:
+    ///   nothing was persisted ever again until someone found the file
+    ///   and deleted it by hand. If the move itself fails, nothing is
+    ///   armed, for the newer-build reason.
+    ///
+    /// # Ids already handed out are kept
+    ///
+    /// A host that submits before it opens its store already holds ids
+    /// for those jobs. The counter only moves FORWARD here, and a
+    /// restored job whose id is already in the table takes a fresh one
+    /// rather than replacing the live entry under it.
     pub fn open_store(&self, path: &Path) -> Result<usize, String> {
-        *self.inner.store.lock().unwrap_or_else(|p| p.into_inner()) = Some(path.to_path_buf());
-        let text = match std::fs::read_to_string(path) {
+        let text = match std::fs::read(path) {
             Ok(t) => t,
             // Nothing there yet is the ordinary first run.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(format!("{}: {e}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                *self.inner.store.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(path.to_path_buf());
+                return Ok(0);
+            }
+            Err(e) => return self.set_aside(path, &e.to_string()),
         };
-        let loaded: Persisted =
-            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        // `version` exists so a later shape is "read or discarded on
+        // purpose rather than by a parse error" - and it is read on its
+        // OWN, so a newer shape this build cannot parse is still known to
+        // be newer, and left for the build that can.
+        #[derive(Deserialize)]
+        struct VersionOnly {
+            version: u32,
+        }
+        if let Ok(v) = serde_json::from_slice::<VersionOnly>(&text)
+            && v.version > PERSISTED_VERSION
+        {
+            return Err(format!(
+                "{}: written by a newer parfast (queue format {}, this build reads {}); \
+                 left untouched, and this session's queue is not saved",
+                path.display(),
+                v.version,
+                PERSISTED_VERSION
+            ));
+        }
+        let loaded: Persisted = match serde_json::from_slice(&text) {
+            Ok(l) => l,
+            Err(e) => return self.set_aside(path, &e.to_string()),
+        };
+        *self.inner.store.lock().unwrap_or_else(|p| p.into_inner()) = Some(path.to_path_buf());
         let mut jobs = self.inner.jobs.lock().unwrap_or_else(|p| p.into_inner());
         let wake = self
             .inner
@@ -551,6 +630,12 @@ impl Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
+        // Past every restored id FIRST, so an id taken for a collision
+        // below cannot land on a restored job further down the file.
+        let restored_max = loaded.jobs.iter().map(|j| j.snapshot.id).max().unwrap_or(0);
+        self.inner
+            .next_id
+            .fetch_max(restored_max + 1, Ordering::SeqCst);
         let mut max = 0i64;
         for pj in loaded.jobs {
             let mut snap = pj.snapshot;
@@ -558,6 +643,13 @@ impl Session {
             if matches!(snap.state, JobState::Running | JobState::Paused) {
                 snap.state = JobState::Interrupted;
                 snap.phase_text = "Interrupted".to_string();
+            }
+            // From the spec, not the file: a store older than the field
+            // has none, and the spec is what the name is OF.
+            snap.title = pj.spec.subject();
+            // An id this session already handed out (see the doc above).
+            if jobs.contains_key(&snap.id) {
+                snap.id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
             }
             max = max.max(snap.id);
             let publisher = Publisher::new(snap.clone());
@@ -596,7 +688,7 @@ impl Session {
             self.inner.post_action_fired.store(true, Ordering::SeqCst);
         }
         drop(jobs);
-        self.inner.next_id.store(max + 1, Ordering::SeqCst);
+        self.inner.next_id.fetch_max(max + 1, Ordering::SeqCst);
         *self
             .inner
             .settings
@@ -604,6 +696,33 @@ impl Session {
             .unwrap_or_else(|p| p.into_inner()) = loaded.settings;
         self.inner.kick();
         Ok(n)
+    }
+}
+
+impl Session {
+    /// [`Session::open_store`]'s answer to a store it cannot read: move it
+    /// aside, arm the path, and say both. See there.
+    fn set_aside(&self, path: &Path, why: &str) -> Result<usize, String> {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut aside = path.as_os_str().to_owned();
+        aside.push(format!(".unreadable-{secs}-{}", std::process::id()));
+        let aside = PathBuf::from(aside);
+        if let Err(e) = std::fs::rename(path, &aside) {
+            return Err(format!(
+                "{}: {why}; it could not be moved aside ({e}), so it is left as it is and \
+                 this session's queue is not saved",
+                path.display()
+            ));
+        }
+        *self.inner.store.lock().unwrap_or_else(|p| p.into_inner()) = Some(path.to_path_buf());
+        Err(format!(
+            "{}: {why}; the file was kept as {} and a new queue is saved in its place",
+            path.display(),
+            aside.display()
+        ))
     }
 }
 
@@ -624,6 +743,19 @@ impl Drop for Session {
         // wakes here closes all of it but the callback that is already
         // running, which no amount of locking can close and which
         // `parfast-ffi/API.md` now states as the host's obligation.
+        //
+        // AND THE STORE IS WRITTEN ONCE MORE AND THEN DISARMED, before
+        // a single cancel goes out. The cancels below are the SESSION
+        // ending, not a user's choice, but each worker they reach
+        // finishes Cancelled and persisted that on its way out - so a
+        // job that was running when the app quit came back `cancelled`,
+        // and not `interrupted` as the module doc promises, whenever the
+        // process outlived its session by long enough for the worker to
+        // unwind. Written here it is saved as running (which a reload
+        // reads as interrupted); disarmed, nothing a winding-down worker
+        // does can write over that.
+        self.inner.persist();
+        *self.inner.store.lock().unwrap_or_else(|p| p.into_inner()) = None;
         let jobs = self.inner.jobs.lock().unwrap_or_else(|p| p.into_inner());
         for e in jobs.values() {
             e.control.cancel();
@@ -636,6 +768,37 @@ impl Drop for Session {
 }
 
 impl Inner {
+    /// Change the settings, and raise the post-action latch when this
+    /// change CHOSE an action - from None to anything else - over a queue
+    /// that has ALREADY drained: what finished before the action existed
+    /// has had its drain (see [`maybe_post_action`]).
+    ///
+    /// Only that change. An action that was already chosen when the queue
+    /// drained is ARMED for that drain, and must stay armed however often
+    /// it is written back - the Windows host writes the whole settings
+    /// struct on every toggle, and the mac host re-sends it when Settings
+    /// opens, so a latch raised on any write over a drained queue
+    /// swallowed a "Shut down when done" chosen before the batch whenever
+    /// a save landed between the last job finishing and the scheduler's
+    /// next pass. Switching one action for another keeps it armed too.
+    ///
+    /// The write and the latch decision are made under ONE hold of the
+    /// settings lock, and the latch under the table lock, where
+    /// `maybe_post_action` reads it. With the action written first and the
+    /// latch raised after, a scheduler pass in between saw the new action
+    /// on a drained, unlatched queue and fired it.
+    fn write_settings(&self, write: impl FnOnce(&mut Settings)) {
+        let mut held = self.settings.lock().unwrap_or_else(|p| p.into_inner());
+        let before = held.post_queue_action;
+        write(&mut held);
+        if before == PostQueueAction::None && held.post_queue_action != PostQueueAction::None {
+            let jobs = self.jobs.lock().unwrap_or_else(|p| p.into_inner());
+            if drained(&jobs) {
+                self.post_action_fired.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
     fn kick(&self) {
         let _g = self.tick_lock.lock().unwrap_or_else(|p| p.into_inner());
         self.tick.notify_all();
@@ -689,7 +852,7 @@ impl Inner {
             .clone();
         let jobs = self.jobs.lock().unwrap_or_else(|p| p.into_inner());
         let out = Persisted {
-            version: 1,
+            version: PERSISTED_VERSION,
             settings,
             jobs: jobs
                 .values()
@@ -712,9 +875,14 @@ impl Inner {
         #[cfg(test)]
         persist_seam(&path);
         // Written beside and renamed over: a crash mid-write must not
-        // leave a half a queue, which parses as an empty one.
+        // leave a half a queue, which parses as an empty one. And SYNCED
+        // before the rename, or the rename can reach the disk ahead of
+        // the bytes it names: a power cut then leaves a zero-length or
+        // torn store at the real path, which `open_store` refuses - the
+        // very outcome the rename exists to rule out. A failed rename is
+        // still dropped, deliberately: see "Best effort" above.
         let tmp = persist_tmp_path(&path);
-        if std::fs::write(&tmp, text.as_bytes()).is_ok() {
+        if write_synced(&tmp, text.as_bytes()).is_ok() {
             if std::fs::rename(&tmp, &path).is_err() {
                 let _ = std::fs::remove_file(&tmp);
             }
@@ -722,6 +890,23 @@ impl Inner {
             let _ = std::fs::remove_file(&tmp);
         }
     }
+}
+
+/// `std::fs::write` plus `sync_all`, for [`Inner::persist`].
+///
+/// One full sync per persist, on whichever thread called the door - the
+/// host's UI thread for a submit. Left that way deliberately (9 Nov 2026
+/// review): a host adds a batch as SEQUENTIAL submits, so there is no
+/// burst inside one persist to coalesce, and moving the write to a
+/// background thread would make every door return before its change is
+/// on disk, which the store's readers (and this crate's tests) rely on.
+/// Not measured on a batch add; if it shows up, a coalescing writer
+/// thread with a synchronous flush in `Drop` is the shape to build.
+fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
 }
 
 /// Distinguishes one `persist` temp file from the next. See there.
@@ -940,7 +1125,29 @@ fn start_due(inner: &Arc<Inner>) -> bool {
     std::thread::Builder::new()
         .name(format!("parfast-job-{id}"))
         .spawn(move || {
-            runner::run(&job);
+            // A PANIC IS CONTAINED HERE and turned into a failed job.
+            // Uncaught, it unwound this thread past the bookkeeping below,
+            // so `running` stayed true forever: at concurrency 1 nothing
+            // ever started again until the app was relaunched, and the job
+            // itself sat at `running` with a bar that never moved. The
+            // knob lock it may have held is a `RwLock` every taker reads
+            // through `into_inner`, so its poisoning stops nobody.
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runner::run(&job)))
+            {
+                job.publisher.update(|s| {
+                    s.state = JobState::Failed;
+                    s.eta_ms = None;
+                    s.phase_text = "Failed".to_string();
+                    s.error = Some(crate::job::JobError::new(
+                        "internal",
+                        format!(
+                            "this job stopped on an internal error: {}",
+                            panic_text(payload.as_ref())
+                        ),
+                    ));
+                });
+            }
             let mut jobs = back.jobs.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(e) = jobs.get_mut(&id) {
                 e.running = false;
@@ -973,27 +1180,68 @@ fn pick(jobs: &BTreeMap<i64, Entry>) -> Option<i64> {
         .or_else(|| jobs.iter().find(|(_, e)| ready(e)).map(|(k, _)| *k))
 }
 
-/// Has the queue drained with an action waiting? Set the flag ONCE, so
-/// a host is asked to sleep the machine once and not every tick.
+/// Has the queue drained? Set the flag ONCE, so a host is asked to
+/// sleep the machine once and not every tick.
+///
+/// # A drain under "None" is still a drain
+///
+/// The latch is raised for EVERY drain, and `post_action_due` only when
+/// there was an action to fall due. It used to return early under None
+/// without latching, so a queue that had drained with no action chosen
+/// stayed unlatched - and picking "Shut down when done" afterwards, to
+/// cover the batch the user was about to add, shut the machine down on
+/// the next tick, over work that had finished before the action was
+/// chosen. The same latch is raised from the doors that CHOOSE an action
+/// ([`Inner::write_settings`], and only for a change from None), so the
+/// tick between the drain and the next pass of this loop is not a window
+/// either.
+///
+/// The drained read and both stores are under the table lock, which
+/// `Session::submit` takes to insert AND to lower the flags: see there.
 fn maybe_post_action(inner: &Arc<Inner>) {
+    #[cfg(test)]
+    if inner.post_action_held.load(Ordering::SeqCst) {
+        return;
+    }
+    if inner.post_action_fired.load(Ordering::SeqCst) {
+        return;
+    }
     let action = inner
         .settings
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .post_queue_action;
-    if action == PostQueueAction::None || inner.post_action_fired.load(Ordering::SeqCst) {
+    let jobs = inner.jobs.lock().unwrap_or_else(|p| p.into_inner());
+    // Read AGAIN under the table lock: `Inner::write_settings` may have
+    // latched between the read above and this one, for an action that
+    // the read of `action` already saw.
+    if inner.post_action_fired.load(Ordering::SeqCst) || !drained(&jobs) {
         return;
     }
-    let jobs = inner.jobs.lock().unwrap_or_else(|p| p.into_inner());
-    // Nothing to do if there is nothing here at all: an empty queue on
-    // a fresh launch has not "finished".
-    if jobs.is_empty() || jobs.values().any(|e| !e.publisher.get().state.finished()) {
-        return;
+    inner.post_action_fired.store(true, Ordering::SeqCst);
+    let due = action != PostQueueAction::None;
+    if due {
+        inner.post_action_due.store(true, Ordering::SeqCst);
     }
     drop(jobs);
-    inner.post_action_fired.store(true, Ordering::SeqCst);
-    inner.post_action_due.store(true, Ordering::SeqCst);
-    inner.ring();
+    if due {
+        inner.ring();
+    }
+}
+
+/// Is there something here, all of it finished? An empty queue on a
+/// fresh launch has not "finished".
+fn drained(jobs: &BTreeMap<i64, Entry>) -> bool {
+    !jobs.is_empty() && jobs.values().all(|e| e.publisher.get().state.finished())
+}
+
+/// What a caught panic said, for the failed job's error.
+pub(crate) fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "no message".to_string())
 }
 
 fn wake_box(f: Option<Arc<dyn Fn() + Send + Sync>>) -> Option<Box<dyn Fn() + Send + Sync>> {
@@ -2046,16 +2294,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// A store that cannot be parsed is reported, never deleted.
+    /// A store that cannot be parsed is reported, never deleted: it is
+    /// kept beside, under a name the error gives.
     #[test]
-    fn an_unreadable_store_is_reported_and_left_alone() {
+    fn an_unreadable_store_is_reported_and_kept() {
         let d = tmp("qbad");
         let store = d.join("queue.json");
         std::fs::write(&store, "{ not json").expect("write");
         let s = Session::new(None);
-        assert!(s.open_store(&store).is_err());
-        assert!(store.exists(), "a queue file must never be deleted");
+        let e = s.open_store(&store).expect_err("refused");
+        let kept = set_aside_files(&d);
+        assert_eq!(
+            kept.len(),
+            1,
+            "a queue file must never be deleted: {kept:?}"
+        );
+        assert!(e.contains(&kept[0]), "the error names where it went: {e}");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The `<name>.unreadable-...` files beside a store.
+    fn set_aside_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .expect("dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".unreadable-"))
+            .collect()
     }
 
     /// Section 5.5's "Run now" takes ONE job out of turn.
@@ -2408,6 +2673,66 @@ mod tests {
                 "{tag}: {:?}",
                 job.command
             );
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// A finished repair's survey describes the set: its name and folder,
+    /// its block size, every member's size and block count. The repair
+    /// path builds its survey from the engine's per-member COUNTS, which
+    /// carry none of these, so the window drew a completed repair with a
+    /// blank title, "0 bytes" for the block size and "0 bytes" beside
+    /// every file - found driving the mac app against the real engine,
+    /// 9 Nov 2026. With purge on, because that deletes the index the
+    /// description is read from: it must be read before the repair.
+    #[test]
+    fn a_finished_repair_describes_the_set() {
+        for purge in [false, true] {
+            let tag = format!("repair-describes-{purge}");
+            let (d, s) = built_set(&tag);
+            let mut alpha = std::fs::read(d.join("alpha.bin")).expect("member");
+            for b in &mut alpha[1_000..1_400] {
+                *b ^= 0x5a;
+            }
+            std::fs::write(d.join("alpha.bin"), &alpha).expect("damage");
+            let id = s.submit(JobSpec::Repair {
+                repair: crate::job::RepairSpec {
+                    par2: d.join("set.par2"),
+                    extra_dirs: Vec::new(),
+                    options: Default::default(),
+                    purge,
+                    keep_damaged: false,
+                },
+            });
+            let q = until(&s, "the repair", |q| {
+                q.jobs
+                    .iter()
+                    .find(|j| j.id == id)
+                    .is_some_and(|j| j.state.finished())
+            });
+            let job = q.jobs.iter().find(|j| j.id == id).expect("the repair");
+            assert_eq!(job.state, JobState::Done, "{tag}: {job:?}");
+            let survey = job.survey.as_ref().expect("a repair carries a survey");
+            assert_eq!(survey.set_name, "set.par2", "{tag}");
+            assert_eq!(survey.folder, d.to_string_lossy(), "{tag}");
+            assert_eq!(survey.block_size, 2_048, "{tag}");
+            let want = [
+                ("alpha.bin", 30_001u64),
+                ("bravo.bin", 41_000),
+                ("charlie.bin", 22_003),
+            ];
+            assert_eq!(survey.files.len(), want.len(), "{tag}");
+            for (name, len) in want {
+                let row = survey
+                    .files
+                    .iter()
+                    .find(|f| f.name == name)
+                    .unwrap_or_else(|| panic!("{tag}: no row for {name}"));
+                assert_eq!(row.size, len, "{tag}: {name} size");
+                let blocks = len.div_ceil(2_048) as usize;
+                assert_eq!(row.blocks_total, blocks, "{tag}: {name} blocks");
+                assert_eq!(row.blocks_ok, blocks, "{tag}: {name} blocks ok");
+            }
             let _ = std::fs::remove_dir_all(&d);
         }
     }
@@ -2889,5 +3214,662 @@ mod tests {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(59), (1970, 3, 1));
         assert_eq!(civil_from_days(11_016), (2000, 2, 29));
+    }
+
+    /// A3: a store that cannot be read is never written over - the
+    /// path used to be armed before the parse, so the next submit renamed
+    /// a fresh table over it - and it does not stop persistence for good
+    /// either: a zero-length or torn file is kept aside, byte for byte,
+    /// and the queue is saved afresh at the real path.
+    #[test]
+    fn a_torn_store_is_kept_aside_and_the_queue_is_saved_afresh() {
+        for torn in ["{ not json", ""] {
+            let d = tmp("qbad-armed");
+            let store = d.join("queue.json");
+            std::fs::write(&store, torn).expect("write");
+            let s = Session::new(None);
+            s.set_queue_paused(true);
+            assert!(s.open_store(&store).is_err());
+            s.submit(checksum_job(&d, 1));
+            let kept = set_aside_files(&d);
+            assert_eq!(kept.len(), 1, "{torn:?}: {kept:?}");
+            assert_eq!(
+                std::fs::read_to_string(d.join(&kept[0])).expect("kept"),
+                torn,
+                "the unreadable file was not kept as it was"
+            );
+            let saved: Persisted =
+                serde_json::from_str(&std::fs::read_to_string(&store).expect("saved afresh"))
+                    .expect("a whole table");
+            assert_eq!(saved.jobs.len(), 1, "{torn:?}");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// A3's second shape: a queue written by a NEWER build is refused by
+    /// its version even when this build could parse it, and left alone.
+    #[test]
+    fn a_store_from_a_newer_build_is_refused_by_its_version() {
+        let d = tmp("qnewer");
+        let store = d.join("queue.json");
+        let newer = format!(
+            r#"{{"version":{},"settings":{{}},"jobs":[]}}"#,
+            PERSISTED_VERSION + 1
+        );
+        std::fs::write(&store, &newer).expect("write");
+        let s = Session::new(None);
+        s.set_queue_paused(true);
+        let e = s.open_store(&store).expect_err("a newer format is refused");
+        assert!(e.contains("newer"), "{e}");
+        s.submit(checksum_job(&d, 1));
+        assert_eq!(std::fs::read_to_string(&store).expect("there"), newer);
+        assert!(set_aside_files(&d).is_empty(), "a newer store was moved");
+        // ...and a newer store THIS build cannot even parse is still known
+        // to be newer by its version alone.
+        let newer_shape = format!(
+            r#"{{"version":{},"jobs":"a shape from the future"}}"#,
+            PERSISTED_VERSION + 1
+        );
+        std::fs::write(&store, &newer_shape).expect("write");
+        let s = Session::new(None);
+        s.set_queue_paused(true);
+        assert!(s.open_store(&store).expect_err("refused").contains("newer"));
+        s.submit(checksum_job(&d, 1));
+        assert_eq!(std::fs::read_to_string(&store).expect("there"), newer_shape);
+        assert!(set_aside_files(&d).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A store opened AFTER a submit keeps the live job: a restored id
+    /// that collides takes a fresh one, and the counter never rewinds.
+    #[test]
+    fn opening_a_store_after_a_submit_keeps_the_live_job() {
+        let d = tmp("qrewind");
+        let store = d.join("queue.json");
+        {
+            let s = Session::new(None);
+            s.set_queue_paused(true);
+            s.open_store(&store).expect("open");
+            s.submit(checksum_job(&d, 1));
+            s.submit(checksum_job(&d, 1));
+        }
+        let s = Session::new(None);
+        s.set_queue_paused(true);
+        let live = s.submit(checksum_job(&d, 2));
+        assert_eq!(s.open_store(&store).expect("reopen"), 3);
+        let snap = s.snapshot();
+        let mut ids: Vec<i64> = snap.jobs.iter().map(|j| j.id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 3, "an id was reused: {:?}", snap.jobs);
+        assert!(s.job(live).is_some(), "the live job was replaced");
+        let next = s.submit(checksum_job(&d, 1));
+        assert!(
+            ids.iter().all(|&i| next > i),
+            "the counter rewound: {next} vs {ids:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A10: Cancel on a FINISHED job is refused, and the job keeps its
+    /// state and its result.
+    #[test]
+    fn cancelling_a_finished_job_is_refused_and_keeps_its_result() {
+        let d = tmp("qcancel-done");
+        let s = Session::new(None);
+        let id = s.submit(checksum_job(&d, 1));
+        until(&s, "the job to finish", |q| q.jobs[0].state.finished());
+        assert!(!s.cancel(id), "a finished job accepted a cancel");
+        let j = s.job(id).expect("the job");
+        assert_eq!(j.state, JobState::Done, "{j:?}");
+        assert!(j.result.is_some(), "the result went");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A20: a job that panics FAILS, and the queue goes on to the next
+    /// one - at concurrency 1, where a stuck `running` stopped
+    /// everything.
+    #[test]
+    fn a_panicking_job_fails_and_the_queue_moves_on() {
+        let d = tmp("qpanic");
+        let boom = d.join("boom.sha256");
+        let _seam = {
+            let boom = boom.clone();
+            runner::RUN_SEAM.add(Arc::new(move |job: &Job| {
+                if let JobSpec::ChecksumCreate { checksum_create } = &job.spec
+                    && checksum_create.output == boom
+                {
+                    panic!("a deliberate test panic");
+                }
+            }))
+        };
+        let s = Session::new(None);
+        s.set_queue_paused(true);
+        let mut first = checksum_job(&d, 1);
+        if let JobSpec::ChecksumCreate { checksum_create } = &mut first {
+            checksum_create.output = boom.clone();
+        }
+        let bad = s.submit(first);
+        let good = s.submit(checksum_job(&d, 2));
+        s.set_queue_paused(false);
+        let snap = until(&s, "both jobs to finish", |q| {
+            q.jobs.iter().all(|j| j.state.finished())
+        });
+        let b = snap.jobs.iter().find(|j| j.id == bad).expect("bad");
+        assert_eq!(b.state, JobState::Failed, "{b:?}");
+        assert_eq!(b.error.as_ref().map(|e| e.code.as_str()), Some("internal"));
+        let g = snap.jobs.iter().find(|j| j.id == good).expect("good");
+        assert_eq!(g.state, JobState::Done, "{g:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A21: an action chosen AFTER the queue drained does not fire over
+    /// work that had already finished - and a new batch still arms it.
+    #[test]
+    fn an_action_chosen_after_the_drain_waits_for_the_next_batch() {
+        let d = tmp("qpost-late");
+        let s = Session::new(None);
+        s.submit(checksum_job(&d, 1));
+        until(&s, "the batch to finish", |q| q.jobs[0].state.finished());
+        s.set_post_action(PostQueueAction::Shutdown);
+        for _ in 0..40 {
+            assert!(
+                !s.snapshot().post_action_due,
+                "an action chosen after the drain fired over finished work"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        s.submit(checksum_job(&d, 2));
+        until(&s, "the next batch to arm the action", |q| {
+            q.post_action_due
+        });
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The other half of A21: an action chosen BEFORE the batch stays
+    /// armed through a settings write that lands after the last job
+    /// finished and before the scheduler noticed the drain - the Windows
+    /// host writes the whole struct on every toggle, the mac host on
+    /// opening Settings. The scheduler's pass is held off so the test
+    /// stands in that gap instead of racing it.
+    #[test]
+    fn an_action_chosen_before_the_drain_survives_a_settings_save() {
+        let d = tmp("qpost-armed");
+        let s = Session::new(None);
+        s.inner.post_action_held.store(true, Ordering::SeqCst);
+        s.set_post_action(PostQueueAction::Shutdown);
+        s.submit(checksum_job(&d, 1));
+        until(&s, "the batch to finish", |q| q.jobs[0].state.finished());
+        // The gap: drained, and the scheduler has not looked yet.
+        s.set_settings(s.settings());
+        s.set_post_action(PostQueueAction::Shutdown);
+        s.set_post_action(PostQueueAction::Sleep);
+        s.inner.post_action_held.store(false, Ordering::SeqCst);
+        let q = until(&s, "the armed action to fall due", |q| q.post_action_due);
+        assert_eq!(q.post_action, "sleep");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Session B4: a job RUNNING when the session ends comes back
+    /// interrupted, never cancelled. The session's own shutdown cancels
+    /// every worker, and each one used to persist that on its way out.
+    #[test]
+    fn a_job_running_when_the_session_ends_comes_back_interrupted() {
+        let d = tmp("qquit");
+        let store = d.join("queue.json");
+        let id = {
+            let s = Session::new(None);
+            s.set_queue_paused(true);
+            s.open_store(&store).expect("open");
+            let id = s.submit(checksum_job(&d, 1));
+            // Paused before it starts, so the worker parks at its first
+            // gate and STAYS running until the session ends.
+            assert!(s.set_job_paused(id, true));
+            s.set_queue_paused(false);
+            until(&s, "the job to park", |q| {
+                q.jobs[0].state == JobState::Paused
+            });
+            id
+        };
+        // The cancel releases the parked worker at once; give it every
+        // chance to write what it used to write.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(750);
+        while std::time::Instant::now() < deadline {
+            let text = std::fs::read_to_string(&store).expect("the store");
+            assert!(
+                !text.contains("\"cancelled\""),
+                "a winding-down worker wrote Cancelled over the store"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let s = Session::new(None);
+        s.set_queue_paused(true);
+        s.open_store(&store).expect("reopen");
+        assert_eq!(s.job(id).expect("the job").state, JobState::Interrupted);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Session B5: a concurrency or a power action set through its own
+    /// door reaches the store, with nothing else written after it.
+    #[test]
+    fn concurrency_and_the_post_action_are_persisted_on_their_own() {
+        let d = tmp("qpersist-knobs");
+        let store = d.join("queue.json");
+        // Read off the FILE while the session is still alive: the session
+        // writes once more when it ends, which would carry either value
+        // and hide a door that never wrote (a killed app gets no such
+        // last write). Each door alone, so neither carries the other.
+        let stored = || -> Persisted {
+            serde_json::from_str(&std::fs::read_to_string(&store).expect("the store"))
+                .expect("parses")
+        };
+        let s = Session::new(None);
+        s.open_store(&store).expect("open");
+        s.set_concurrency(3);
+        assert_eq!(stored().settings.concurrency, 3);
+        s.set_post_action(PostQueueAction::Notify);
+        assert_eq!(stored().settings.post_queue_action, PostQueueAction::Notify);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A9's GUI twin: a Cancel that lands AFTER the repair completed -
+    /// in the window between the engine returning and the runner reading
+    /// the flag - reports Done with its result, not Cancelled with none.
+    /// The window is sub-millisecond, so the test stands in it through
+    /// `runner::REPAIR_RETURNED_SEAM` rather than racing it.
+    #[test]
+    fn a_cancel_after_the_repair_completed_reports_done() {
+        let (d, s) = built_set("late-cancel-repair");
+        let mut alpha = std::fs::read(d.join("alpha.bin")).expect("member");
+        for b in &mut alpha[1_000..1_400] {
+            *b ^= 0x5a;
+        }
+        std::fs::write(d.join("alpha.bin"), &alpha).expect("damage");
+        let par2 = d.join("set.par2");
+        let _seam = {
+            let par2 = par2.clone();
+            runner::REPAIR_RETURNED_SEAM.add(Arc::new(move |job: &Job| {
+                if let JobSpec::Repair { repair } = &job.spec
+                    && repair.par2 == par2
+                {
+                    job.control.cancel();
+                }
+            }))
+        };
+        let id = s.submit(JobSpec::Repair {
+            repair: crate::job::RepairSpec {
+                par2: par2.clone(),
+                extra_dirs: Vec::new(),
+                options: Default::default(),
+                purge: false,
+                keep_damaged: true,
+            },
+        });
+        let q = until(&s, "the repair", |q| {
+            q.jobs
+                .iter()
+                .find(|j| j.id == id)
+                .is_some_and(|j| j.state.finished())
+        });
+        let job = q.jobs.iter().find(|j| j.id == id).expect("the repair");
+        assert_eq!(job.state, JobState::Done, "{job:?}");
+        let r = job
+            .result
+            .as_ref()
+            .expect("a completed repair names its result");
+        assert_eq!(r.repaired_files, 1, "{r:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The other half of that rule: a repair that did NOT complete still
+    /// reports a late Cancel, so the change above is not "ignore every
+    /// late cancel". Same seam, same moment, over a set too damaged to
+    /// repair.
+    #[test]
+    fn a_late_cancel_on_a_repair_that_did_not_complete_still_reports_cancelled() {
+        let (d, s) = built_set("late-cancel-unrepairable");
+        for n in ["alpha.bin", "bravo.bin", "charlie.bin"] {
+            std::fs::remove_file(d.join(n)).expect("remove");
+        }
+        let par2 = d.join("set.par2");
+        let _seam = {
+            let par2 = par2.clone();
+            runner::REPAIR_RETURNED_SEAM.add(Arc::new(move |job: &Job| {
+                if let JobSpec::Repair { repair } = &job.spec
+                    && repair.par2 == par2
+                {
+                    job.control.cancel();
+                }
+            }))
+        };
+        let id = s.submit(JobSpec::Repair {
+            repair: crate::job::RepairSpec {
+                par2: par2.clone(),
+                extra_dirs: Vec::new(),
+                options: Default::default(),
+                purge: false,
+                keep_damaged: true,
+            },
+        });
+        let q = until(&s, "the repair", |q| {
+            q.jobs
+                .iter()
+                .find(|j| j.id == id)
+                .is_some_and(|j| j.state.finished())
+        });
+        let job = q.jobs.iter().find(|j| j.id == id).expect("the repair");
+        assert_eq!(job.state, JobState::Cancelled, "{job:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A create from the Create pane's defaults, for the end-to-end
+    /// tests below.
+    fn create_over(sources: Vec<PathBuf>, output: PathBuf) -> crate::job::CreateSpec {
+        use crate::job::{BlockSpec, PathMode, RecoverySpec, UnicodePolicy, VolumeSpec};
+        crate::job::CreateSpec {
+            sources: sources
+                .into_iter()
+                .map(|path| Source {
+                    path,
+                    recursive: false,
+                })
+                .collect(),
+            path_mode: PathMode::Basename,
+            base_path: None,
+            block: Some(BlockSpec::Size { size: 4_096 }),
+            recovery: Some(RecoverySpec::Count { count: 4 }),
+            output,
+            volumes: VolumeSpec::Pow2,
+            first_recovery_block: 0,
+            comment: String::new(),
+            overwrite: false,
+            std_naming: false,
+            unicode: UnicodePolicy::Auto,
+            perf: Default::default(),
+        }
+    }
+
+    fn run_one(spec: JobSpec) -> JobSnapshot {
+        let s = Session::new(None);
+        let id = s.submit(spec);
+        let q = until(&s, "the job", |q| q.jobs.iter().all(|j| j.state.finished()));
+        q.jobs.into_iter().find(|j| j.id == id).expect("the job")
+    }
+
+    /// A6, end to end: a Basename create written into a DIFFERENT folder
+    /// stores each member by its bare name - not under the raw absolute
+    /// path the create fell back to with no `-B`.
+    #[test]
+    fn a_set_written_elsewhere_stores_bare_member_names() {
+        let d = tmp("elsewhere-names");
+        let (src, out) = (d.join("src"), d.join("out"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(src.join("a.bin"), vec![9u8; 50_000]).unwrap();
+        let j = run_one(JobSpec::Create {
+            create: create_over(vec![src.join("a.bin")], out.join("set.par2")),
+        });
+        assert_eq!(j.state, JobState::Done, "{j:?}");
+        let index = std::fs::read(out.join("set.par2")).expect("the index");
+        let has = |needle: &str| index.windows(needle.len()).any(|w| w == needle.as_bytes());
+        assert!(has("a.bin"), "the member is named");
+        assert!(
+            !has(&src.to_string_lossy()),
+            "the member was stored under its source folder's path"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A6 across SEVERAL folders, with the set written outside all of
+    /// them: the run succeeds (the create now IGNORES a source outside its
+    /// base rather than storing a raw path), every member is stored by its
+    /// path below the sources' common folder, and the pane's file sizes -
+    /// built on the member names - are the sizes on disk, which they are
+    /// only if the pane named the members as the run stored them.
+    #[test]
+    fn a_set_over_several_folders_written_elsewhere_matches_its_preview() {
+        let d = tmp("elsewhere-folders");
+        let (src, out) = (d.join("src"), d.join("out"));
+        std::fs::create_dir_all(src.join("deeper")).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(src.join("a.bin"), vec![9u8; 50_000]).unwrap();
+        std::fs::write(src.join("deeper/c.bin"), vec![5u8; 30_000]).unwrap();
+        let spec = create_over(
+            vec![src.join("a.bin"), src.join("deeper/c.bin")],
+            out.join("set.par2"),
+        );
+        let preview = crate::planner::preview(&spec).expect("preview");
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|w| w.contains("more than one folder")),
+            "{:?}",
+            preview.warnings
+        );
+        let j = run_one(JobSpec::Create { create: spec });
+        assert_eq!(j.state, JobState::Done, "{j:?}");
+        let index = std::fs::read(out.join("set.par2")).expect("the index");
+        let has = |needle: &str| index.windows(needle.len()).any(|w| w == needle.as_bytes());
+        assert!(
+            has("deeper/c.bin") && has("a.bin"),
+            "both members are named"
+        );
+        assert!(
+            !has(&src.to_string_lossy()),
+            "a member kept its source path"
+        );
+        let on_disk: Vec<(String, u64)> = j
+            .result
+            .as_ref()
+            .expect("result")
+            .written
+            .iter()
+            .map(|w| (w.name.clone(), w.size))
+            .collect();
+        let drawn: Vec<(String, u64)> = preview
+            .files
+            .iter()
+            .map(|f| (f.name.clone(), f.size))
+            .collect();
+        assert_eq!(
+            on_disk, drawn,
+            "the pane drew a different set from the one written"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The verify-lane's A1, as the GUI draws it: a member the Main
+    /// packet declares with NO FileDesc makes the set Unrepairable - never
+    /// Complete beside the CLI's exit 6, which is what the survey said
+    /// when it judged the described members alone.
+    #[test]
+    fn a_member_with_no_filedesc_is_never_drawn_complete() {
+        let (d, s) = built_set("undescribed");
+        // Drop bravo's FileDesc from every file of the set; a dropped
+        // packet needs no reseal. A dumb packet walk, as the CLI lane's
+        // own test is, so the engine's parser cannot agree with itself.
+        const MAGIC: &[u8; 8] = b"PAR2\0PKT";
+        const FILEDESC: &[u8; 16] = b"PAR 2.0\0FileDesc";
+        for e in std::fs::read_dir(&d).expect("dir").flatten() {
+            let path = e.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("par2") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).expect("read");
+            let mut out = Vec::with_capacity(bytes.len());
+            let mut i = 0usize;
+            while i < bytes.len() {
+                let framed = i + 64 <= bytes.len() && &bytes[i..i + 8] == MAGIC;
+                let len = if framed {
+                    u64::from_le_bytes(bytes[i + 8..i + 16].try_into().expect("8")) as usize
+                } else {
+                    0
+                };
+                if !framed || len < 64 || i + len > bytes.len() {
+                    out.push(bytes[i]);
+                    i += 1;
+                    continue;
+                }
+                let pkt = &bytes[i..i + len];
+                i += len;
+                let named_bravo = &pkt[48..64] == FILEDESC
+                    && String::from_utf8_lossy(&pkt[64 + 56..])
+                        .trim_end_matches('\0')
+                        .starts_with("bravo.bin");
+                if !named_bravo {
+                    out.extend_from_slice(pkt);
+                }
+            }
+            std::fs::write(&path, out).expect("write");
+        }
+        let id = s.submit(JobSpec::Verify {
+            verify: VerifySpec {
+                par2: d.join("set.par2"),
+                extra_dirs: Vec::new(),
+                options: Default::default(),
+            },
+        });
+        let q = until(&s, "the verify", |q| {
+            q.jobs
+                .iter()
+                .find(|j| j.id == id)
+                .is_some_and(|j| j.state.finished())
+        });
+        let j = q.jobs.iter().find(|j| j.id == id).expect("verify");
+        assert_eq!(
+            j.result.as_ref().and_then(|r| r.exit_code),
+            Some(6),
+            "{j:?}"
+        );
+        let m = j.survey.as_ref().expect("a survey");
+        assert_eq!(m.verdict, Verdict::Unrepairable, "{m:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `title` (the mac lane's ask): every snapshot names its job from its
+    /// spec, and a job restored from a store written before the field
+    /// existed still gets one.
+    #[test]
+    fn every_snapshot_carries_a_title_and_a_restored_one_too() {
+        let d = tmp("qtitle");
+        let store = d.join("queue.json");
+        {
+            let s = Session::new(None);
+            s.set_queue_paused(true);
+            s.open_store(&store).expect("open");
+            let id = s.submit(checksum_job(&d, 1));
+            assert_eq!(s.job(id).expect("job").title, "out.sha256");
+        }
+        // A store from before the field: every `title` taken out.
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&store).expect("store")).expect("json");
+        for j in v["jobs"].as_array_mut().expect("jobs") {
+            j["snapshot"]
+                .as_object_mut()
+                .expect("snapshot")
+                .remove("title");
+        }
+        std::fs::write(&store, v.to_string()).expect("rewrite");
+        let s = Session::new(None);
+        s.set_queue_paused(true);
+        s.open_store(&store).expect("reopen");
+        assert_eq!(s.snapshot().jobs[0].title, "out.sha256");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Review item 3, end to end: a set at `/out/set.par2` over sources in
+    /// `/out/sub` verifies COMPLETE from its own folder - the member names
+    /// keep `sub/`, so the verify finds every one where it is.
+    #[test]
+    fn a_set_over_a_subfolder_verifies_complete_from_its_own_folder() {
+        let d = tmp("subfolder-verify");
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("sub/a.bin"), vec![3u8; 40_000]).unwrap();
+        let j = run_one(JobSpec::Create {
+            create: create_over(vec![d.join("sub/a.bin")], d.join("set.par2")),
+        });
+        assert_eq!(j.state, JobState::Done, "{j:?}");
+        let v = run_one(JobSpec::Verify {
+            verify: VerifySpec {
+                par2: d.join("set.par2"),
+                extra_dirs: Vec::new(),
+                options: Default::default(),
+            },
+        });
+        assert_eq!(
+            v.result.as_ref().and_then(|r| r.exit_code),
+            Some(0),
+            "{v:?}"
+        );
+        assert_eq!(
+            v.survey.as_ref().map(|m| m.verdict),
+            Some(Verdict::Complete)
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A38, end to end: the two volume asks the pane accepted and the
+    /// create used to refuse now RUN.
+    #[test]
+    fn volume_counts_the_pane_accepts_are_counts_the_create_runs() {
+        use crate::job::{RecoverySpec, VolumeSpec};
+        let d = tmp("volcount-run");
+        std::fs::write(d.join("a.bin"), vec![4u8; 64_000]).unwrap();
+        let mut none = create_over(vec![d.join("a.bin")], d.join("none.par2"));
+        none.recovery = Some(RecoverySpec::Count { count: 0 });
+        none.volumes = VolumeSpec::None;
+        let j = run_one(JobSpec::Create { create: none });
+        assert_eq!(j.state, JobState::Done, "no recovery, no split: {j:?}");
+        let mut many = create_over(vec![d.join("a.bin")], d.join("many.par2"));
+        many.volumes = VolumeSpec::Uniform {
+            files: Some(30),
+            blocks_per_file: None,
+            file_size: None,
+        };
+        let j = run_one(JobSpec::Create { create: many });
+        assert_eq!(j.state, JobState::Done, "30 files over 4 blocks: {j:?}");
+        let vols = j
+            .result
+            .as_ref()
+            .expect("result")
+            .written
+            .iter()
+            .filter(|w| w.name.contains(".vol"))
+            .count();
+        assert_eq!(vols, 4, "{:?}", j.result);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Runner B7: a checksum verify's per-row log lines are held to the
+    /// log length setting like every other line; the rows themselves are
+    /// all in the result.
+    #[test]
+    fn a_checksum_verify_keeps_its_log_to_the_setting() {
+        let d = tmp("verify-logcap");
+        let s = Session::new(Some(Settings {
+            log_tail_lines: 2,
+            ..Settings::default()
+        }));
+        s.submit(checksum_job(&d, 5));
+        until(&s, "the manifest", |q| q.jobs[0].state.finished());
+        let id = s.submit(JobSpec::ChecksumVerify {
+            checksum_verify: ChecksumVerifySpec {
+                file: d.join("out.sha256"),
+            },
+        });
+        let q = until(&s, "the verify", |q| {
+            q.jobs.iter().all(|j| j.state.finished())
+        });
+        let j = q.jobs.iter().find(|j| j.id == id).expect("verify");
+        assert_eq!(j.state, JobState::Done, "{j:?}");
+        assert!(j.log_tail.len() <= 2, "{:?}", j.log_tail);
+        let rows = j
+            .result
+            .as_ref()
+            .and_then(|r| r.checksum.as_ref())
+            .expect("rows");
+        assert_eq!(rows.entries.len(), 5);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

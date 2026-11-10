@@ -893,8 +893,9 @@ enum Break {
     SegmentAtRoot,
     /// `<group>` straight under `<file>`, with no `<groups>`.
     GroupOutsideGroups,
-    /// `<meta>` outside `<head>`.
-    MetaOutsideHead,
+    /// `<meta>` inside `<file>`. (Directly under the root is a field
+    /// dialect and parses - issue 121 - so the break is one level down.)
+    MetaInFile,
     /// `<file>` inside `<head>`.
     FileInHead,
     /// A core `<file>` inside a namespace-extension element.
@@ -907,7 +908,7 @@ const BREAKS: &[Break] = &[
     Break::FileInFile,
     Break::SegmentAtRoot,
     Break::GroupOutsideGroups,
-    Break::MetaOutsideHead,
+    Break::MetaInFile,
     Break::FileInHead,
     Break::CoreInsideExtension,
 ];
@@ -959,13 +960,15 @@ fn render_break(b: Break, st: &Style) -> String {
             w.nl();
             w.close("nzb");
         }
-        Break::MetaOutsideHead => {
+        Break::MetaInFile => {
             w.root("nzb");
+            w.block("file", &[("subject", "\"ok.mkv\" yEnc (1/1)")]);
             w.open("meta", &[("type", "password")]);
             w.text("secret");
             w.close("meta");
             w.nl();
-            legal_file(&mut w);
+            w.close("file");
+            w.nl();
             w.close("nzb");
         }
         Break::FileInHead => {

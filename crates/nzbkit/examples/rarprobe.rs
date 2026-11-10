@@ -139,6 +139,9 @@ fn main() {
                     "     crypt=rar4 aes128 salt={} check=none (verdict at finish)",
                     c.salt.is_some()
                 ),
+                // Built only by the 7z direct map, never parsed out of a
+                // RAR header, so a RAR probe cannot meet one.
+                Some(EntryCrypt::SevenZ(_)) => println!("     crypt=7z aes256 (not a RAR record)"),
                 None if e.encrypted => {
                     println!("     crypt=UNSUPPORTED (pre-3.0 cipher) - unrar fallback")
                 }

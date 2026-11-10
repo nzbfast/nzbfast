@@ -97,10 +97,10 @@ pub(crate) use nzbfast_meta::{wall, watchlist};
 #[cfg(feature = "dashboard")]
 pub(crate) use nzbfast_daemon::uilocales;
 pub(crate) use nzbfast_daemon::{
-    altcand, apiutil, bootstrap, daemon, disk, earlyfile, fetch, finish_action, fsutil, groupscan,
-    heal, histmigrate, history, httputil, hunt, indexers, insurance, job, lanaddr, listsrc,
-    logscrub, maint, naming, origin, outage, postprobe, postproc, probeids, reqbody, requeue,
-    sabvocab, sched, settings, slowstore, spare, stream, tunestate, update, watchfail,
+    altcand, apiutil, bootstrap, daemon, disk, earlyfile, exerefuse, fetch, finish_action, fsutil,
+    groupscan, heal, histmigrate, history, httputil, hunt, indexers, insurance, job, lanaddr,
+    listsrc, logscrub, maint, naming, origin, outage, postprobe, postproc, probeids, reqbody,
+    requeue, sabvocab, sched, settings, slowstore, spare, stream, tunestate, update, watchfail,
 };
 // Named by this crate's own test modules and by nothing in its
 // production code: a `use` can be unused where a `mod` never could.

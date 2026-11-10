@@ -120,7 +120,8 @@ char *pf_queue_snapshot(struct pf_session *s);
  * Cancel a job. A queued job stops at once; a running one at its next
  * honouring point - see `parfast_session::runner` for what each kind
  * can actually reach. A cancelled posting set removes every file it
- * wrote, archive and PAR2 set alike.
+ * wrote, archive and PAR2 set alike. A job that has already FINISHED is
+ * refused (`PF_ERR_NOT_FOUND`) and keeps its state and its result.
  *
  * # Safety
  * `s` is a live session.
@@ -225,7 +226,12 @@ int32_t pf_queue_clear_post_action(struct pf_session *s);
 
 /**
  * Persist the queue to `path` and load whatever is already there.
- * Answers the number of jobs loaded, or a negative code.
+ * Answers the number of jobs loaded, or a negative code. A store a NEWER
+ * build wrote is refused and left untouched, and the session then saves
+ * nothing. Any other store that cannot be read is kept aside as
+ * `<path>.unreadable-<seconds>-<pid>`, a new queue is saved in its
+ * place, and the call still answers `PF_ERR_REFUSED` naming the kept
+ * file, so the host can tell the user.
  *
  * # Safety
  * `s` is a live session and `path` a NUL-terminated UTF-8 string.

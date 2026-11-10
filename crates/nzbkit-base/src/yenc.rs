@@ -230,9 +230,12 @@ pub struct Meta {
     /// `=ypart` line gets 1.
     pub begin: u64,
     /// Last byte of this part in the file, 1-based and inclusive, from
-    /// `=ypart end=`. The decoder has already checked that
-    /// `end - begin + 1` equals `len`. A single-part post with no
-    /// `=ypart` line gets the `=ybegin size=` figure.
+    /// `=ypart end=`. Where `=ypart` declared both ends the decoder has
+    /// checked that `end - begin + 1` equals `len`; where it left one
+    /// out the range was inferred from `len` and the article reported
+    /// unvouched (see [`Decoded::end`], the same rule). A single-part
+    /// post with no `=ypart` line gets the `=ybegin size=` figure, which
+    /// `place_part` takes as declared without holding it to `len`.
     pub end: u64,
     /// Length of the decoded payload now in the caller's buffer.
     pub len: usize,

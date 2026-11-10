@@ -855,6 +855,44 @@ mod producers {
         );
     }
 
+    /// TODO 358 item 6: the SAME mid-download halt, taken because the
+    /// output folder refused the write rather than filled. It must read
+    /// as none of the disk-space answers - the daemon would otherwise
+    /// park the job for free space it already has, and the drawer would
+    /// show the free-space block - and as `Local`, so no automatic retry
+    /// runs it into the same refusal and no indexer hears it as a dead
+    /// post. The folder is the action. The wording is
+    /// `get::workers::drain_network`'s, byte for byte.
+    #[test]
+    fn the_refused_write_halt_is_local_and_never_reads_as_disk_space() {
+        for sample in [
+            "write a.r01: Permission denied (os error 13)",
+            "write a.r01: Operation not permitted (os error 1)",
+            "write a.r01: Is a directory (os error 21)",
+        ] {
+            let msg = format!(
+                "the output folder refused writes (check its permissions, and that \
+                 nothing else holds the payload's name), so fetching was stopped \
+                 early; what landed is journaled and kept ({sample})"
+            );
+            assert_verdict(
+                &msg,
+                Verdict {
+                    kind: FailKind::Local,
+                    token: "local",
+                    hint: "",
+                    action: "path",
+                    action_locked: "password",
+                    disk_full: false,
+                    mid_download: false,
+                    post_unavailable: false,
+                    transient: false,
+                    another_copy: false,
+                },
+            );
+        }
+    }
+
     /// The pre-flight sample said the post is already beyond repair.
     /// Not transient - nothing about waiting changes arithmetic - and
     /// the answer is another release.

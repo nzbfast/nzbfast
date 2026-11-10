@@ -217,6 +217,54 @@ fn adoption_candidates(
         .filter(|t| t.exists && (t.intact || t.present.iter().any(|&p| p)))
         .map(|t| path_identity_key(fold, &t.path))
         .collect();
+    // ...AND BY FILE OBJECT, because the key above is a SPELLING and
+    // `disk::case_fold_key` does no Unicode normalization (measured,
+    // priced and left - see its header). On a normalization-insensitive
+    // volume (APFS, either case mode) a member the set names in NFC and
+    // a file on disk spelled in NFD are ONE directory entry under two
+    // keys, so the target's own file came back here as a foreign
+    // candidate (parfast sweep, 9 Nov 2026). From there it could be read
+    // as a donor while patched in place - `used_sources` keys by the same
+    // spelling - and, once the repair had made its bytes the target's,
+    // `adopt::spent_donors` proved it "spent" and a caller that sweeps
+    // spent donors deleted the repaired member through its alias.
+    //
+    // So a candidate that IS an existing target's file object is dropped,
+    // except at that target's own spelling when the target is
+    // unidentified - which is a candidate on purpose, see the header. A
+    // hard link is caught too, and costs nothing: it is the same bytes as
+    // the target, so it holds no block the target lacks. One stat per
+    // existing target and per candidate, paid only when adoption runs.
+    //
+    // A MULTIMAP, because two existing targets can share one file object
+    // (two spellings of one entry, a hard link between members) and a
+    // plain map kept only the last, judging a candidate against the wrong
+    // target's key. Both failure directions are safe: a false match only
+    // drops a candidate - a donor this scan then does not read, never a
+    // byte written or a file removed - and a stat that fails is "not the
+    // same object", which keeps the candidate exactly as before this
+    // check existed.
+    let mut target_objects: HashMap<(u64, u64, u64), Vec<(bool, PathBuf)>> = HashMap::new();
+    for t in targets.iter().filter(|t| t.exists) {
+        let key = path_identity_key(fold, &t.path);
+        if let Some(id) = crate::disk::file_object_id(&t.path) {
+            target_objects
+                .entry(id)
+                .or_default()
+                .push((identified.contains(&key), key));
+        }
+    }
+    // An alias unless it IS the own spelling of an unidentified target on
+    // that object, and none of the targets on it is identified.
+    let is_target_alias = |p: &Path| {
+        !target_objects.is_empty()
+            && crate::disk::file_object_id(p).is_some_and(|id| {
+                target_objects.get(&id).is_some_and(|on| {
+                    let own = path_identity_key(fold, p);
+                    on.iter().any(|(ident, _)| *ident) || !on.iter().any(|(_, key)| *key == own)
+                })
+            })
+    };
     // The demotion set: every name SOME set in this directory declares,
     // less the names OUR OWN set declares. See the header. Our own
     // targets' names are removed rather than never added because
@@ -238,6 +286,7 @@ fn adoption_candidates(
             if is_recovery_by_name_and_content(&p)
                 || identified.contains(&path_identity_key(fold, &p))
                 || exclude.contains(&p)
+                || is_target_alias(&p)
                 // Folded by the same identity key as the exclusions
                 // above, first occurrence kept - see the header.
                 || !seen.insert(path_identity_key(fold, &p))
@@ -282,6 +331,7 @@ fn adoption_candidates(
                 && !is_recovery_by_name_and_content(d)
                 && !identified.contains(&path_identity_key(fold, d))
                 && !exclude.contains(d)
+                && !is_target_alias(d)
                 && seen.insert(path_identity_key(fold, d))
             {
                 out.push((d.clone(), meta.len()));
@@ -1111,7 +1161,7 @@ pub(super) fn md5_of_file(path: &Path, limit: Option<u64>) -> Result<[u8; 16], R
     let mut left = limit.unwrap_or(u64::MAX);
     while left > 0 {
         let want = buf.len().min(left.min(usize::MAX as u64) as usize);
-        let n = f.read(&mut buf[..want])?;
+        let n = read_retry(&mut f, &mut buf[..want])?;
         if n == 0 {
             break;
         }
@@ -2125,7 +2175,7 @@ fn scan_candidate(
     'stream: while i < stop {
         let n = if i < len {
             let want = crate::disk::chunk_len(len.min(stop) - i, buf.len());
-            let got = f.read(&mut buf[..want])?;
+            let got = read_retry(&mut f, &mut buf[..want])?;
             if got == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -2549,6 +2599,11 @@ pub(super) fn proven_spent(
 /// the MERGED bitmap - what the aligned pass proved plus what the scan
 /// found - so a caller counts `true`s and nothing else.
 ///
+/// A set whose declared slices exceed [`super::MAX_INPUT_SLICES`] is not
+/// scanned at all and gets `proven` back as it came: those counts are
+/// wire data, and sizing a bitmap from them is how a crafted length
+/// aborted a verify (sweep A19, 9 Nov 2026).
+///
 /// An I/O error on any scanned file drops that file's contribution
 /// rather than failing: this answers a verify, which is read-only and
 /// reports what it could read, and the aligned pass has already had its
@@ -2559,13 +2614,36 @@ pub fn scan_members_for_blocks(
     proven: &[Vec<bool>],
     bs: usize,
 ) -> Vec<Vec<bool>> {
+    // THE SLICE COUNTS ARE WIRE DATA, so they are bounded before
+    // anything is sized from them. A FileDesc length is whatever the
+    // packet says, and `vec![false; n]` over a crafted one was a
+    // multi-exabyte allocation that aborted `parfast v` (sweep A19,
+    // 9 Nov 2026); repair refuses the same set at its target walk on
+    // `MAX_INPUT_SLICES`, which no PAR2 set can exceed. A set over the
+    // limit gets back what the caller already proved, unscanned: a verify
+    // still reports, the bitmaps stay bounded by the caller's own input,
+    // and nothing here invents a slice the spec says cannot exist.
+    let counts: Option<Vec<usize>> = files
+        .iter()
+        .map(|f| {
+            if bs == 0 {
+                Some(0)
+            } else {
+                usize::try_from(f.length.div_ceil(bs as u64)).ok()
+            }
+        })
+        .collect();
+    let total = counts
+        .as_ref()
+        .and_then(|c| c.iter().try_fold(0usize, |acc, &n| acc.checked_add(n)));
+    let Some(counts) = counts.filter(|_| total.is_some_and(|t| t <= super::MAX_INPUT_SLICES))
+    else {
+        return (0..files.len())
+            .map(|i| proven.get(i).cloned().unwrap_or_default())
+            .collect();
+    };
     let mut out: Vec<Vec<bool>> = Vec::with_capacity(files.len());
-    for (i, f) in files.iter().enumerate() {
-        let n = if bs == 0 {
-            0
-        } else {
-            f.length.div_ceil(bs as u64) as usize
-        };
+    for (i, &n) in counts.iter().enumerate() {
         let mut bits = vec![false; n];
         if let Some(have) = proven.get(i) {
             for (b, &ok) in bits.iter_mut().zip(have.iter()) {

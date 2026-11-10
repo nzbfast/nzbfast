@@ -1549,3 +1549,987 @@ fn two_concurrent_no_clobber_creates_leave_exactly_one_whole_set() {
     want.sort();
     assert_eq!(on_disk, want);
 }
+
+// ---- a failed create, and the index it would have replaced ------------
+//
+// Findings A4, A4b and A28 of the 9 Nov 2026 parfast sweep.
+
+/// Every name in `dir`, sorted - hidden staging names included, which is
+/// the point: a leftover staging file is a leftover.
+fn listing(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+/// A create that FAILS - not cancelled - after its index is written must
+/// not leave that index behind. It was the placeholder: real set id and
+/// names, every hash zero, so every reader parses it and calls each intact
+/// member damaged. A DIRECTORY on the first volume's name is the portable
+/// way to fail the create between the index and the volumes. Both write
+/// policies: no-clobber writes its index straight to the final name, an
+/// overwriting create to a staging name, and neither may leave anything.
+#[test]
+fn a_failed_create_leaves_no_placeholder_index_behind() {
+    for no_clobber in [false, true] {
+        let t = Tmp::new(if no_clobber {
+            "fail-noindex-excl"
+        } else {
+            "fail-noindex"
+        });
+        let members = vec![t.write("a.bin", &payload(30_000, 3))];
+        std::fs::create_dir(t.0.join("set.vol000+01.par2")).unwrap();
+        let e = create_into_exact(
+            &t.0,
+            &members,
+            "set",
+            Some(2048),
+            4,
+            CreatePlan::ENGINE.with_no_clobber(no_clobber),
+        )
+        .expect_err("a create that cannot write a volume must fail");
+        assert_eq!(
+            listing(&t.0),
+            vec!["a.bin".to_string(), "set.vol000+01.par2".to_string()],
+            "no_clobber={no_clobber}: the failed create ({e}) left files behind"
+        );
+    }
+}
+
+/// A4b, the non-cancel half: a RE-CREATE that fails must leave the previous
+/// set's index exactly as it was. An overwriting create truncated
+/// `<base>.par2` as its first write, so the old index was gone before the
+/// new set had a single volume - and the unlink then removed the empty file.
+/// The member changes first, so a re-create that ran to the end would write
+/// a different index and an unchanged one cannot be the new run's.
+#[test]
+fn a_failed_re_create_keeps_the_previous_index_whole() {
+    let t = Tmp::new("fail-keepindex");
+    let members = vec![t.write("a.bin", &payload(30_000, 3))];
+    create_into_exact(&t.0, &members, "set", Some(2048), 4, CreatePlan::ENGINE).unwrap();
+    let old_index = std::fs::read(t.0.join("set.par2")).unwrap();
+    std::fs::write(&members[0].path, payload(30_000, 4)).unwrap();
+    std::fs::remove_file(t.0.join("set.vol000+01.par2")).unwrap();
+    std::fs::create_dir(t.0.join("set.vol000+01.par2")).unwrap();
+
+    create_into_exact(&t.0, &members, "set", Some(2048), 4, CreatePlan::ENGINE)
+        .expect_err("a re-create that cannot write a volume must fail");
+    assert_eq!(
+        std::fs::read(t.0.join("set.par2")).unwrap(),
+        old_index,
+        "a failed re-create destroyed the index of the set it was replacing"
+    );
+    assert!(
+        listing(&t.0).iter().all(|n| !n.starts_with(".set.par2.")),
+        "a staging file was left behind: {:?}",
+        listing(&t.0)
+    );
+    // And a re-create that FINISHES does replace it.
+    std::fs::remove_dir(t.0.join("set.vol000+01.par2")).unwrap();
+    let names =
+        create_into_exact(&t.0, &members, "set", Some(2048), 4, CreatePlan::ENGINE).unwrap();
+    assert_ne!(std::fs::read(t.0.join("set.par2")).unwrap(), old_index);
+    assert_eq!(parse(&read_all(&t.0, &names)).files.len(), 1);
+    assert!(listing(&t.0).iter().all(|n| !n.starts_with('.')));
+}
+
+/// A same-length write to a member past its 16 KiB head, DURING a create
+/// on a non-fused route, is refused. Those routes read every member twice
+/// - once for the fold, once for the hashes - and compared only the head
+/// scan's length and head digest, so a write between the two reads gave a
+/// set whose hashes describe the new bytes and whose recovery slices the
+/// old: it verifies and cannot repair. The fused arm's twin is
+/// `a_same_length_write_during_a_fused_create_is_refused`.
+#[test]
+fn a_same_length_write_during_a_non_fused_create_is_refused() {
+    use std::io::{Seek, SeekFrom, Write};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let t = Tmp::new("nonfused-write");
+    let data = payload(4 << 20, 61);
+    let member = t.write("m.bin", &data);
+    // An mtime well in the past, so the write below moves it even on a
+    // filesystem with whole-second timestamps.
+    backdate(&member.path);
+    let wrote = Arc::new(AtomicBool::new(false));
+    // The fused arm emits the same refusal text, so the ROUTE is asserted:
+    // only a non-fused create reports member hashing as its own phase
+    // (`control`'s module doc - on the fused arm `Verify` never reports).
+    let hashed = Arc::new(AtomicBool::new(false));
+    let sink = {
+        let wrote = wrote.clone();
+        let hashed = hashed.clone();
+        let path = member.path.clone();
+        move |phase: control::CreatePhase, done: u64, _total: u64| {
+            if phase == control::CreatePhase::Verify && done > 0 {
+                hashed.store(true, Ordering::SeqCst);
+            }
+            if phase != control::CreatePhase::Fold
+                || done == 0
+                || wrote.swap(true, Ordering::SeqCst)
+            {
+                return;
+            }
+            let mut w = std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .expect("writer");
+            w.seek(SeekFrom::Start(1 << 20)).expect("seek");
+            w.write_all(&payload(1 << 20, 62)).expect("rewrite");
+        }
+    };
+    let control = control::CreateControl::new(Some(Arc::new(sink)), None);
+    let got = create_into_exact_controlled(
+        &t.0,
+        std::slice::from_ref(&member),
+        "set",
+        Some(65_536),
+        3,
+        CreatePlan::ENGINE,
+        None,
+        &control,
+    );
+    assert!(
+        wrote.load(Ordering::SeqCst),
+        "the write was never injected, so this proves nothing"
+    );
+    assert!(
+        hashed.load(Ordering::SeqCst),
+        "no Verify progress, so this create took the fused arm and proves nothing here"
+    );
+    let err = got.expect_err("a create over a member written mid-create must refuse");
+    assert!(
+        err.to_string()
+            .contains("changed while the PAR2 set was being built"),
+        "refused, but not by the change check: {err}"
+    );
+    assert_eq!(listing(&t.0), vec!["m.bin".to_string()]);
+}
+
+/// Set `path`'s mtime an hour back.
+fn backdate(path: &Path) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
+}
+
+/// ...and what the change check must NOT refuse: a member whose metadata
+/// moved and whose bytes did not. A permission change moves ctime - so do a
+/// Finder tag, a last-used-date xattr and a backup tool clearing the
+/// archive bit - and a check over ctime (or over a FUSE mount's renumbered
+/// inodes) failed a healthy create at its very end and removed the set.
+#[cfg(unix)]
+#[test]
+fn a_metadata_only_change_during_a_create_is_not_a_change() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let t = Tmp::new("nonfused-chmod");
+    let member = t.write("m.bin", &payload(4 << 20, 63));
+    backdate(&member.path);
+    let touched = Arc::new(AtomicBool::new(false));
+    let sink = {
+        let touched = touched.clone();
+        let path = member.path.clone();
+        move |phase: control::CreatePhase, done: u64, _total: u64| {
+            if phase == control::CreatePhase::Fold
+                && done > 0
+                && !touched.swap(true, Ordering::SeqCst)
+            {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                    .expect("chmod");
+            }
+        }
+    };
+    let control = control::CreateControl::new(Some(Arc::new(sink)), None);
+    let names = create_into_exact_controlled(
+        &t.0,
+        std::slice::from_ref(&member),
+        "set",
+        Some(65_536),
+        3,
+        CreatePlan::ENGINE,
+        None,
+        &control,
+    )
+    .expect("a chmod mid-create is not a change to the member's bytes");
+    assert!(
+        touched.load(Ordering::SeqCst),
+        "the chmod was never injected"
+    );
+    assert_eq!(parse(&read_all(&t.0, &names)).files.len(), 1);
+}
+
+/// A sink that does `act` (with the output directory) the first time the
+/// create sizes its WRITE phase - after the index placeholder is written,
+/// before the final rename.
+fn on_write_phase(
+    dir: PathBuf,
+    act: impl Fn(&Path) + Send + Sync + 'static,
+) -> control::CreateControl {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let once = AtomicBool::new(false);
+    let sink = move |phase: control::CreatePhase, _done: u64, _total: u64| {
+        if phase == control::CreatePhase::Write && !once.swap(true, Ordering::SeqCst) {
+            act(&dir);
+        }
+    };
+    control::CreateControl::new(Some(Arc::new(sink)), None)
+}
+
+/// A rename that fails for a moment (another process holding the old index,
+/// an antivirus scanner just after the close) is retried, and the create
+/// lands. A DIRECTORY on the final name for 300 ms is the portable stand-in.
+#[test]
+fn the_final_rename_is_retried_past_a_short_lock() {
+    let t = Tmp::new("rename-retry");
+    let members = vec![t.write("a.bin", &payload(30_000, 3))];
+    let control = on_write_phase(t.0.clone(), |dir| {
+        let blocker = dir.join("set.par2");
+        std::fs::create_dir(&blocker).unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::fs::remove_dir(&blocker).unwrap();
+        });
+    });
+    let names = create_into_exact_controlled(
+        &t.0,
+        &members,
+        "set",
+        Some(2048),
+        4,
+        CreatePlan::ENGINE,
+        None,
+        &control,
+    )
+    .expect("a lock that clears inside the retry window must not fail the create");
+    assert_eq!(parse(&read_all(&t.0, &names)).files.len(), 1);
+    assert!(listing(&t.0).iter().all(|n| !n.starts_with('.')));
+}
+
+/// A FRESH create whose index cannot take its final name keeps everything:
+/// the set is complete by then, it replaces nothing that existed before the
+/// run, and removing it would destroy the only copy of the work. The error
+/// names the staged index. A directory that appears on the index's name
+/// mid-run and never goes is refused by the commit's probe, before any
+/// rename - which, for a fresh create, is still a KEEP (`CreateTrail::
+/// commit`); the re-create twin below is the case that removes.
+#[test]
+fn a_final_rename_that_keeps_failing_destroys_nothing() {
+    let t = Tmp::new("rename-stuck");
+    let members = vec![t.write("a.bin", &payload(30_000, 3))];
+    let control = on_write_phase(t.0.clone(), |dir| {
+        std::fs::create_dir(dir.join("set.par2")).unwrap();
+        std::fs::write(dir.join("set.par2").join("keep"), b"x").unwrap();
+    });
+    let e = create_into_exact_controlled(
+        &t.0,
+        &members,
+        "set",
+        Some(2048),
+        4,
+        CreatePlan::ENGINE,
+        None,
+        &control,
+    )
+    .expect_err("an index that cannot take its name must fail the create");
+    let on_disk = listing(&t.0);
+    let staged: Vec<&String> = on_disk
+        .iter()
+        .filter(|n| n.starts_with(".set.par2."))
+        .collect();
+    assert_eq!(
+        staged.len(),
+        1,
+        "the finished index was removed: {on_disk:?}"
+    );
+    assert!(
+        e.to_string().contains(staged[0].as_str()),
+        "the error does not name the staged index: {e}"
+    );
+    assert!(
+        on_disk.iter().any(|n| n.starts_with("set.vol")),
+        "the finished volumes were removed: {on_disk:?}"
+    );
+    assert_eq!(
+        std::fs::read(t.0.join("set.par2").join("keep")).unwrap(),
+        b"x"
+    );
+}
+
+/// ...and the same failure through the test seam - the index rename itself
+/// refused after its probe passed - keeps the fresh set as well.
+#[test]
+fn a_fresh_create_whose_index_rename_fails_keeps_its_finished_set() {
+    let t = Tmp::new("rename-fresh-seam");
+    let members = vec![t.write("a.bin", &payload(30_000, 3))];
+    control::rename_faults::fail_onto(&t.0.join("set.par2"));
+    let r = create_into_exact(&t.0, &members, "set", Some(2048), 4, CreatePlan::ENGINE);
+    control::rename_faults::clear();
+    let e = r.expect_err("an index rename that fails must fail the create");
+    let on_disk = listing(&t.0);
+    let staged: Vec<&String> = on_disk
+        .iter()
+        .filter(|n| n.starts_with(".set.par2."))
+        .collect();
+    assert_eq!(
+        staged.len(),
+        1,
+        "the finished index was removed: {on_disk:?}"
+    );
+    assert!(e.to_string().contains(staged[0].as_str()), "{e}");
+    assert_eq!(
+        on_disk.iter().filter(|n| n.starts_with("set.vol")).count(),
+        3,
+        "the finished volumes were removed: {on_disk:?}"
+    );
+}
+
+/// The RE-CREATE twin: the previous set's index is the one file the commit
+/// would replace (the new volumes' names are all new, so only the index is
+/// staged), its rename is refused, and nothing has moved - so this run's
+/// files go and the previous set is exactly as it was.
+#[test]
+fn a_re_create_whose_index_rename_fails_leaves_the_previous_set_whole() {
+    let reference = CreatePlan::ENGINE.with_naming(VolumeNaming::Reference { std_naming: false });
+    let t = Tmp::new("rename-recreate-seam");
+    let members = recreate_members(&t, 21);
+    let before = previous_set(&t, &members, 5, reference);
+    control::rename_faults::fail_onto(&t.0.join("set.par2"));
+    let r = create_into_exact(&t.0, &members, "set", Some(2048), 40, reference);
+    control::rename_faults::clear();
+    r.expect_err("an index rename that fails must fail the create");
+    assert_previous_set_whole(&t, &before, "re-create, index rename refused");
+}
+
+// ---- an overwriting RE-CREATE that does not finish ----------------------
+//
+// The handoff's E4 (9 Nov 2026 parfast sweep): the old set's recovery
+// VOLUMES were truncated by a re-create's opens and then unlinked by its
+// failure cleanup. Every test here holds the WHOLE previous set - index and
+// every volume - to its bytes, and the directory to no leftover.
+
+/// Every file in `dir` with its bytes, hidden ones included - the whole of
+/// what a create could have touched.
+fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            let b = std::fs::read(e.path()).unwrap();
+            (n, b)
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// [`snapshot`] without the members, which a failing test rewrites on
+/// purpose: the SET's files and anything hidden.
+fn set_snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    snapshot(dir)
+        .into_iter()
+        .filter(|(n, _)| n.ends_with(".par2") || n.starts_with('.'))
+        .collect()
+}
+
+/// Two members, so the create takes a NON-fused route (the fused arm wants
+/// one large member) and reads every member twice - which is what lets a
+/// member written mid-create fail it at the END, after its volumes are
+/// down.
+fn recreate_members(t: &Tmp, seed: u8) -> Vec<Member> {
+    vec![
+        t.write("a.bin", &payload(60_000, seed)),
+        t.write("b.bin", &payload(23_000, seed.wrapping_add(1))),
+    ]
+}
+
+/// The previous set, written by an ordinary create, and its snapshot.
+fn previous_set(
+    t: &Tmp,
+    members: &[Member],
+    rows: usize,
+    plan: CreatePlan,
+) -> Vec<(String, Vec<u8>)> {
+    create_into_exact(&t.0, members, "set", Some(2048), rows, plan).expect("the previous set");
+    let before = set_snapshot(&t.0);
+    assert!(
+        before.len() > 3,
+        "the previous set is too small to prove anything"
+    );
+    before
+}
+
+/// A control whose sink runs `act` ONCE, at the first WRITE report after a
+/// volume has really been written (`done > 0`), and records whether any of
+/// this run's staging files were on disk at that moment - the proof that
+/// the re-create was writing replacements for the previous set's files
+/// when it was stopped, and so that the case reached what it is about.
+fn on_a_written_volume(
+    dir: PathBuf,
+    gate: Option<std::sync::Arc<crate::par2repair::PauseGate>>,
+    act: impl Fn() + Send + Sync + 'static,
+) -> (
+    control::CreateControl,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let staged_seen = Arc::new(AtomicBool::new(false));
+    let once = AtomicBool::new(false);
+    let seen = staged_seen.clone();
+    let sink = move |phase: control::CreatePhase, done: u64, _total: u64| {
+        if phase != control::CreatePhase::Write || done == 0 || once.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let staging = std::fs::read_dir(&dir).unwrap().flatten().any(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with(".set.vol") && n.ends_with(".tmp")
+        });
+        seen.store(staging, Ordering::SeqCst);
+        act();
+    };
+    (
+        control::CreateControl::new(Some(Arc::new(sink)), gate),
+        staged_seen,
+    )
+}
+
+/// The previous set's every file byte-identical, and nothing of the run
+/// left - the invariant, asserted the one way for every case below.
+fn assert_previous_set_whole(t: &Tmp, before: &[(String, Vec<u8>)], what: &str) {
+    let after = set_snapshot(&t.0);
+    let names = |v: &[(String, Vec<u8>)]| v.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+    assert_eq!(
+        names(&after),
+        names(before),
+        "{what}: the directory's set files are not the previous set's (a staging \
+         file left, a volume gone, or a new one left behind)"
+    );
+    for ((n, a), (_, b)) in after.iter().zip(before) {
+        assert!(
+            a == b,
+            "{what}: {n} is not byte-identical to the previous set's"
+        );
+    }
+}
+
+/// A FAILED overwriting re-create - a member written while it ran, refused
+/// at the end, after every volume was down - leaves the previous index and
+/// every previous volume byte-identical. The same plan both times, so every
+/// name of the new set is a name of the old one and every file is staged:
+/// the exact shape of the measured loss.
+#[test]
+fn a_failed_re_create_keeps_every_previous_volume_and_index_byte_identical() {
+    let t = Tmp::new("recreate-fail");
+    let members = recreate_members(&t, 3);
+    for m in &members {
+        backdate(&m.path);
+    }
+    let before = previous_set(&t, &members, 16, CreatePlan::ENGINE);
+    let victim = members[0].path.clone();
+    let (control, staged_seen) = on_a_written_volume(t.0.clone(), None, move || {
+        // Same length, new bytes, a new mtime: the end-of-create check
+        // refuses it (`scan::first_changed`).
+        std::fs::write(&victim, payload(60_000, 99)).unwrap();
+    });
+    let e = create_into_exact_controlled(
+        &t.0,
+        &members,
+        "set",
+        Some(2048),
+        16,
+        CreatePlan::ENGINE,
+        None,
+        &control,
+    )
+    .expect_err("a re-create over a member that changed must fail");
+    assert!(
+        e.to_string().contains("changed"),
+        "it failed, but not on the injected change: {e}"
+    );
+    assert!(
+        staged_seen.load(std::sync::atomic::Ordering::SeqCst),
+        "no staging file existed while the volumes were written, so this re-create never \
+         wrote a replacement and proves nothing"
+    );
+    assert_previous_set_whole(&t, &before, "failed re-create");
+}
+
+/// ...and a CANCELLED one, the user's own stop, likewise - cancelled once a
+/// volume has really been written.
+#[test]
+fn a_cancelled_re_create_keeps_every_previous_volume_and_index_byte_identical() {
+    let t = Tmp::new("recreate-cancel");
+    let members = recreate_members(&t, 5);
+    let before = previous_set(&t, &members, 16, CreatePlan::ENGINE);
+    std::fs::write(&members[1].path, payload(23_000, 77)).unwrap();
+    let gate = crate::par2repair::PauseGate::new();
+    let g = gate.clone();
+    let (control, staged_seen) = on_a_written_volume(t.0.clone(), Some(gate), move || g.cancel());
+    let e = create_into_exact_controlled(
+        &t.0,
+        &members,
+        "set",
+        Some(2048),
+        16,
+        CreatePlan::ENGINE,
+        None,
+        &control,
+    )
+    .expect_err("a cancelled re-create must not report success");
+    assert!(matches!(e, Par2GenError::Cancelled), "{e:?}");
+    assert!(staged_seen.load(std::sync::atomic::Ordering::SeqCst));
+    assert_previous_set_whole(&t, &before, "cancelled re-create");
+}
+
+/// ...and one that PANICS - the unwind guard, not `settle`, is what runs.
+#[test]
+fn a_panicking_re_create_keeps_every_previous_volume_and_index_byte_identical() {
+    let t = Tmp::new("recreate-panic");
+    let members = recreate_members(&t, 7);
+    let before = previous_set(&t, &members, 16, CreatePlan::ENGINE);
+    std::fs::write(&members[1].path, payload(23_000, 78)).unwrap();
+    let (control, staged_seen) = on_a_written_volume(t.0.clone(), None, || {
+        panic!("a sink that panics mid-create");
+    });
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        create_into_exact_controlled(
+            &t.0,
+            &members,
+            "set",
+            Some(2048),
+            16,
+            CreatePlan::ENGINE,
+            None,
+            &control,
+        )
+    }));
+    assert!(
+        r.is_err(),
+        "the create did not unwind, so the guard was never reached"
+    );
+    assert!(staged_seen.load(std::sync::atomic::Ordering::SeqCst));
+    assert_previous_set_whole(&t, &before, "panicking re-create");
+}
+
+/// ...and on the FUSED route - one large member whose recovery fits one
+/// batch, where the fold's own reader does the hashing - CANCELLED once a
+/// volume is down. Forced onto that arm for this thread through
+/// `scan::FUSE_FOR_TESTS` (the shipped gate wants hundreds of megabytes),
+/// and the arm is PROVEN rather than assumed: only a non-fused create
+/// reports member hashing as `Verify` (`control`'s module doc).
+#[test]
+fn a_cancelled_fused_re_create_keeps_every_previous_volume_and_index_byte_identical() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Fused;
+    impl Drop for Fused {
+        fn drop(&mut self) {
+            scan::FUSE_FOR_TESTS.with(|f| f.set(false));
+        }
+    }
+    scan::FUSE_FOR_TESTS.with(|f| f.set(true));
+    let _fused = Fused;
+    let bs = 1u64 << 20;
+    let t = Tmp::new("recreate-fused");
+    let members = vec![t.write("m.bin", &payload(12 << 20, 41))];
+    create_into_exact(&t.0, &members, "set", Some(bs), 3, CreatePlan::ENGINE).unwrap();
+    let before = set_snapshot(&t.0);
+    assert!(before.len() >= 3, "{before:?}");
+    std::fs::write(&members[0].path, payload(12 << 20, 42)).unwrap();
+
+    let gate = crate::par2repair::PauseGate::new();
+    let g = gate.clone();
+    let hashed = std::sync::Arc::new(AtomicBool::new(false));
+    let h = hashed.clone();
+    let staged_seen = std::sync::Arc::new(AtomicBool::new(false));
+    let seen = staged_seen.clone();
+    let dir = t.0.clone();
+    let sink = move |phase: control::CreatePhase, done: u64, _total: u64| {
+        if phase == control::CreatePhase::Verify && done > 0 {
+            h.store(true, Ordering::SeqCst);
+        }
+        if phase == control::CreatePhase::Write && done > 0 && !g.is_cancelled() {
+            let staged = std::fs::read_dir(&dir).unwrap().flatten().any(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.starts_with(".set.vol") && n.ends_with(".tmp")
+            });
+            seen.store(staged, Ordering::SeqCst);
+            g.cancel();
+        }
+    };
+    let control = control::CreateControl::new(Some(std::sync::Arc::new(sink)), Some(gate));
+    let e = create_into_exact_controlled(
+        &t.0,
+        &members,
+        "set",
+        Some(bs),
+        3,
+        CreatePlan::ENGINE,
+        None,
+        &control,
+    )
+    .expect_err("a cancelled fused re-create must not report success");
+    assert!(matches!(e, Par2GenError::Cancelled), "{e:?}");
+    assert!(
+        !hashed.load(Ordering::SeqCst),
+        "the create reported Verify progress, so it took a NON-fused route and this proves \
+         nothing about the fused one"
+    );
+    assert!(
+        staged_seen.load(Ordering::SeqCst),
+        "no volume was staged when the cancel landed"
+    );
+    assert_previous_set_whole(&t, &before, "cancelled fused re-create");
+}
+
+/// The drop-in CLI's naming over a DIFFERENTLY sliced previous set - the
+/// measured shape (`-r5` then `-r30`): the old set's names and the new
+/// set's do not coincide at all now that the engine writes the final names
+/// (`VolumeNaming`), so the previous set must come through a cancel whole,
+/// and come through a SUCCESS untouched too, its stale volumes left where
+/// they were (par2cmdline leaves them; nothing here starts deleting them).
+#[test]
+fn a_differently_sliced_previous_set_survives_a_cancel_and_a_success() {
+    let reference = CreatePlan::ENGINE.with_naming(VolumeNaming::Reference { std_naming: false });
+    let t = Tmp::new("recreate-sliced");
+    let members = recreate_members(&t, 9);
+    let before = previous_set(&t, &members, 5, reference);
+    let gate = crate::par2repair::PauseGate::new();
+    let g = gate.clone();
+    let (control, _) = on_a_written_volume(t.0.clone(), Some(gate), move || g.cancel());
+    create_into_exact_controlled(
+        &t.0,
+        &members,
+        "set",
+        Some(2048),
+        40,
+        reference,
+        None,
+        &control,
+    )
+    .expect_err("cancelled");
+    assert_previous_set_whole(&t, &before, "cancelled re-sliced re-create");
+
+    let names = create_into_exact(&t.0, &members, "set", Some(2048), 40, reference).unwrap();
+    assert!(listing(&t.0).iter().all(|n| !n.starts_with('.')));
+    let after: std::collections::HashMap<String, Vec<u8>> = snapshot(&t.0).into_iter().collect();
+    for (n, b) in &before {
+        if names.contains(n) {
+            continue;
+        }
+        assert_eq!(
+            after.get(n),
+            Some(b),
+            "{n}, a stale volume of the previous set, was touched"
+        );
+    }
+    assert_eq!(parse(&read_all(&t.0, &names)).recovery_blocks_seen, 40);
+}
+
+/// A re-create that SUCCEEDS writes exactly what a fresh create of the same
+/// inputs writes: the same names, the same bytes, nothing else - for both
+/// namings, over a previous set of the same shape (every file replaced).
+#[test]
+fn a_successful_re_create_writes_exactly_what_a_fresh_create_writes() {
+    for naming in [
+        VolumeNaming::Engine,
+        VolumeNaming::Reference { std_naming: false },
+        VolumeNaming::Reference { std_naming: true },
+    ] {
+        let plan = CreatePlan::ENGINE.with_naming(naming);
+        let over = Tmp::new("recreate-ok-over");
+        let fresh = Tmp::new("recreate-ok-fresh");
+        let old = recreate_members(&over, 11);
+        previous_set(&over, &old, 16, plan);
+        let new_over = recreate_members(&over, 12);
+        let new_fresh = recreate_members(&fresh, 12);
+        let a = create_into_exact(&over.0, &new_over, "set", Some(2048), 16, plan).unwrap();
+        let b = create_into_exact(&fresh.0, &new_fresh, "set", Some(2048), 16, plan).unwrap();
+        assert_eq!(
+            a, b,
+            "{naming:?}: the re-create named its files differently"
+        );
+        assert_eq!(
+            snapshot(&over.0),
+            snapshot(&fresh.0),
+            "{naming:?}: the re-created directory is not the fresh one"
+        );
+    }
+}
+
+/// A rename that fails AFTER others have landed stops there and destroys
+/// NOTHING, and says what is left: the volumes already replaced are the new
+/// set's, the index (renamed last) is still the previous one, and the new
+/// index is still under its staging name, which the error names. The test
+/// seam fails exactly that last rename after its probe has passed.
+#[test]
+fn a_rename_that_fails_midway_destroys_nothing_and_names_what_is_left() {
+    let t = Tmp::new("recreate-midway");
+    let members = recreate_members(&t, 13);
+    let before = previous_set(&t, &members, 16, CreatePlan::ENGINE);
+    let old_index = std::fs::read(t.0.join("set.par2")).unwrap();
+    std::fs::write(&members[1].path, payload(23_000, 79)).unwrap();
+    control::rename_faults::fail_onto(&t.0.join("set.par2"));
+    let r = create_into_exact(&t.0, &members, "set", Some(2048), 16, CreatePlan::ENGINE);
+    control::rename_faults::clear();
+    let e = r.expect_err("a commit whose index rename failed must fail the create");
+    assert_eq!(
+        std::fs::read(t.0.join("set.par2")).unwrap(),
+        old_index,
+        "the index is renamed LAST, so the previous one must still be in place"
+    );
+    let staged: Vec<String> = listing(&t.0)
+        .into_iter()
+        .filter(|n| n.starts_with(".set.par2."))
+        .collect();
+    assert_eq!(
+        staged.len(),
+        1,
+        "the finished new index was removed: {:?}",
+        listing(&t.0)
+    );
+    assert!(
+        e.to_string().contains(&staged[0]),
+        "the error does not name it: {e}"
+    );
+    // The volumes landed: every one is a NEW volume, and none was removed.
+    let after: std::collections::HashMap<String, Vec<u8>> = snapshot(&t.0).into_iter().collect();
+    for (n, b) in before.iter().filter(|(n, _)| n.starts_with("set.vol")) {
+        let now = after.get(n).unwrap_or_else(|| panic!("{n} was removed"));
+        assert_ne!(
+            now, b,
+            "{n} was not replaced, so the commit stopped earlier than claimed"
+        );
+    }
+}
+
+/// ...while the FIRST rename failing has moved nothing, so it is a commit
+/// that never started: the run's own files go and the previous set is
+/// exactly as it was.
+#[test]
+fn a_first_rename_that_fails_leaves_the_previous_set_whole() {
+    let t = Tmp::new("recreate-first-rename");
+    let members = recreate_members(&t, 15);
+    let before = previous_set(&t, &members, 16, CreatePlan::ENGINE);
+    std::fs::write(&members[1].path, payload(23_000, 80)).unwrap();
+    // The volumes are renamed in name order, so this one is first.
+    let first = before
+        .iter()
+        .map(|(n, _)| n.clone())
+        .filter(|n| n.starts_with("set.vol"))
+        .min()
+        .unwrap();
+    control::rename_faults::fail_onto(&t.0.join(&first));
+    let r = create_into_exact(&t.0, &members, "set", Some(2048), 16, CreatePlan::ENGINE);
+    control::rename_faults::clear();
+    r.expect_err("a commit whose first rename failed must fail the create");
+    assert_previous_set_whole(&t, &before, "first rename refused");
+}
+
+/// A VOLUME of the previous set that the run may not replace (read-only)
+/// is refused at the START, before anything is written - the volume
+/// twin of `an_index_the_run_may_not_write_is_refused_before_anything_is_written`.
+/// And one made read-only DURING the run is refused at the commit's probe,
+/// with the previous set whole.
+#[cfg(unix)]
+#[test]
+fn a_previous_volume_the_run_may_not_replace_is_refused_and_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new("recreate-readonly-volume");
+    let members = recreate_members(&t, 17);
+    let before = previous_set(&t, &members, 16, CreatePlan::ENGINE);
+    let vol = t.0.join(
+        before
+            .iter()
+            .map(|(n, _)| n.clone())
+            .find(|n| n.starts_with("set.vol"))
+            .unwrap(),
+    );
+    std::fs::set_permissions(&vol, std::fs::Permissions::from_mode(0o444)).unwrap();
+    if std::fs::OpenOptions::new().write(true).open(&vol).is_ok() {
+        return; // root: permissions do not bind
+    }
+    std::fs::write(&members[1].path, payload(23_000, 81)).unwrap();
+    let e = create_into_exact(&t.0, &members, "set", Some(2048), 16, CreatePlan::ENGINE)
+        .expect_err("a read-only previous volume must refuse the re-create");
+    assert!(
+        matches!(&e, Par2GenError::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::PermissionDenied),
+        "{e:?}"
+    );
+    assert_previous_set_whole(&t, &before, "read-only volume, up front");
+
+    // DURING the run: writable at the start, read-only by the commit.
+    std::fs::set_permissions(&vol, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let v = vol.clone();
+    let (control, _) = on_a_written_volume(t.0.clone(), None, move || {
+        std::fs::set_permissions(&v, std::fs::Permissions::from_mode(0o444)).unwrap();
+    });
+    create_into_exact_controlled(
+        &t.0,
+        &members,
+        "set",
+        Some(2048),
+        16,
+        CreatePlan::ENGINE,
+        None,
+        &control,
+    )
+    .expect_err("a volume made read-only mid-run must refuse the commit");
+    assert_previous_set_whole(&t, &before, "read-only volume, mid-run");
+}
+
+/// A LEFTOVER staging file - what a `kill -9` of an earlier run leaves -
+/// neither breaks the next create nor leaks into it, and is NEVER OPENED:
+/// the create succeeds, every leftover is byte-identical (it may be another
+/// live process's), and the set the next reader scans is the new one alone.
+///
+/// The leftovers are planted on the very names this process is about to
+/// mint - its own pid and the next thousand staging sequence numbers, so
+/// creates on other threads advancing the counter meanwhile still leave a
+/// collision -
+/// beside a dead pid's, so the exclusive staging open is what is tested
+/// rather than the luck of a pid that differs.
+#[test]
+fn a_leftover_staging_file_does_not_break_or_leak_into_the_next_create() {
+    let t = Tmp::new("staging-leftover");
+    let members = recreate_members(&t, 19);
+    previous_set(&t, &members, 8, CreatePlan::ENGINE);
+    let pid = std::process::id();
+    let next = control::staging_seq_for_tests();
+    let mut junk: Vec<(String, Vec<u8>)> = vec![
+        (".set.par2.99999-0.tmp".into(), payload(700, 1)),
+        (".set.vol000+01.par2.99999-1.tmp".into(), payload(900, 2)),
+    ];
+    // A thousand: far past what the other tests' creates in this process
+    // mint meanwhile (the counter is process-wide, and a 16-wide band was
+    // MEASURED to miss under the parallel lib run, passing this test for the
+    // wrong reason), and inside the door's cap on passing taken names over.
+    for n in next..next + 1024 {
+        junk.push((format!(".set.par2.{pid}-{n}.tmp"), payload(64, n as u8)));
+        junk.push((
+            format!(".set.vol000+01.par2.{pid}-{n}.tmp"),
+            payload(80, n as u8),
+        ));
+    }
+    for (n, b) in &junk {
+        std::fs::write(t.0.join(n), b).unwrap();
+    }
+    std::fs::write(&members[0].path, payload(60_000, 20)).unwrap();
+    let names = create_into_exact(&t.0, &members, "set", Some(2048), 8, CreatePlan::ENGINE)
+        .expect("a re-create beside leftovers on its own next staging names");
+    for (n, b) in &junk {
+        assert_eq!(&std::fs::read(t.0.join(n)).unwrap(), b, "{n} was opened");
+    }
+    assert_eq!(
+        listing(&t.0).iter().filter(|n| n.starts_with('.')).count(),
+        junk.len(),
+        "the run left a staging file of its own"
+    );
+    assert_eq!(parse(&read_all(&t.0, &names)).files.len(), 2);
+    // The directory's own reader ignores the leftovers too.
+    let status = crate::par2repair::repair_dir(&t.0).expect("verify the directory");
+    assert!(
+        matches!(status, crate::par2repair::RepairStatus::NoDamage),
+        "{status:?}"
+    );
+}
+
+/// An existing index the run may not write - read-only here, held open
+/// without write sharing on Windows - is refused at the START, before a
+/// volume is written, as the truncating open used to refuse it. Staging
+/// would otherwise find out only at the final rename, or silently replace
+/// a read-only file.
+#[cfg(unix)]
+#[test]
+fn an_index_the_run_may_not_write_is_refused_before_anything_is_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new("readonly-index");
+    let members = vec![t.write("a.bin", &payload(30_000, 3))];
+    let index = t.0.join("set.par2");
+    std::fs::write(&index, b"the previous index").unwrap();
+    std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o444)).unwrap();
+    if std::fs::OpenOptions::new().write(true).open(&index).is_ok() {
+        // Running as root: permissions do not bind, so nothing to refuse.
+        return;
+    }
+    let before = listing(&t.0);
+    let e = create_into_exact(&t.0, &members, "set", Some(2048), 4, CreatePlan::ENGINE)
+        .expect_err("a read-only index must refuse the create");
+    assert!(
+        matches!(&e, Par2GenError::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::PermissionDenied),
+        "{e:?}"
+    );
+    assert_eq!(listing(&t.0), before, "the refused create wrote something");
+    assert_eq!(std::fs::read(&index).unwrap(), b"the previous index");
+}
+
+/// A28: a batch of more volumes than `MAX_VOLUME_WRITERS` is written by
+/// that many writers at most, each holding one volume open at a time. One
+/// thread and one descriptor per volume died on EMFILE past macOS's 256 for
+/// a GUI app. A set of many one-slice volumes, all in one batch.
+#[test]
+fn a_batch_of_many_volumes_spawns_a_bounded_number_of_writers() {
+    let t = Tmp::new("many-volumes");
+    let members = vec![t.write("a.bin", &payload(60_000, 5))];
+    let rows = volwrite::MAX_VOLUME_WRITERS * 3 / 2;
+    let names = create_into_exact(
+        &t.0,
+        &members,
+        "set",
+        Some(512),
+        rows,
+        CreatePlan::ENGINE.with_max_blocks_per_volume(Some(1)),
+    )
+    .unwrap();
+    assert_eq!(names.len(), rows + 1, "one volume per recovery slice");
+    assert_eq!(parse(&read_all(&t.0, &names)).recovery_blocks_seen, rows);
+    let most = volwrite::writers_for_tests::most(&t.0);
+    assert!(
+        (1..=volwrite::MAX_VOLUME_WRITERS).contains(&most),
+        "{most} writers for {rows} volumes"
+    );
+}
+
+/// ...and the stripe-first arm, which holds EVERY volume open for its whole
+/// run, refuses a layout past the same bound and leaves it to the batched
+/// writer. The control is the same shape with a handful of volumes, which
+/// it admits - otherwise the refusal would be read off some other gate.
+#[test]
+fn stripe_first_leaves_a_many_volume_layout_to_the_batched_writer() {
+    if matches!(std::env::var("NZBFAST_NTT").as_deref(), Ok("0") | Ok("off"))
+        || std::env::var("NZBFAST_CREATE_STRIPE_FIRST").as_deref() == Ok("0")
+    {
+        return;
+    }
+    let bs = 4096;
+    let (slices, rows) = ntt_range::floor_shape_for_tests(bs);
+    assert!(
+        stripe_first::admissible(2, 8, false, bs, slices, 0, rows).is_some(),
+        "the control shape is refused, so the case below proves nothing"
+    );
+    assert_eq!(
+        stripe_first::admissible(
+            2,
+            volwrite::MAX_VOLUME_WRITERS + 1,
+            false,
+            bs,
+            slices,
+            0,
+            rows
+        ),
+        None
+    );
+}

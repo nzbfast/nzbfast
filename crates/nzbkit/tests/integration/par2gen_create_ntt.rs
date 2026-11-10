@@ -600,3 +600,233 @@ fn the_band_pass_over_copies_plans_every_row_once_across_several_batches() {
     );
     repairs_real_damage(&t, "bands");
 }
+
+/// A PANIC in a stripe-first transform worker crashes the create; it does
+/// not hang it.
+///
+/// The workers meet the driver at two `Barrier`s per chunk, and a worker
+/// that unwound out of the transform left the barrier one party short: the
+/// driver waited on the end gate forever and `std::thread::scope` then
+/// waited on the driver, so a bug that should have been a crash was a
+/// wedged job with its bar frozen (parfast sweep, 9 Nov 2026). The worker
+/// now catches its panic, still reaches the gate, and the driver re-raises
+/// it once every worker has been released.
+///
+/// And the run's files go with it: a panic never reaches the trail's
+/// `settle`, so until the unwind guard the staged index and every volume -
+/// still carrying the all-zero placeholder critical block, under ordinary
+/// `<base>.vol*.par2` names a verify's sibling scan picks up - were left.
+///
+/// The panic is planted through `ntt_range`'s test door, keyed to this
+/// create's own directory so no other test's create can see it; the shape
+/// is the stripe-first fixture above, for that test's reasons.
+#[test]
+fn a_panicking_stripe_first_worker_crashes_the_create_rather_than_hanging_it() {
+    let _arms = Arms::take();
+    struct Unpin;
+    impl Drop for Unpin {
+        fn drop(&mut self) {
+            ntt_range::pin_stripe_worker_panic_for_tests(None);
+        }
+    }
+    let _unpin = Unpin;
+    let (slices, rows) = ntt_range::floor_shape_for_tests(BS as usize);
+    let plan = CreatePlan {
+        volumes: VolumePlan::Even(8),
+        ..CreatePlan::ENGINE
+    };
+    pin_accum_budget_for_tests((rows / 4) as u64 * BS);
+    let t = Tmp::new("stripefirst-panic");
+    // The control: the same shape really takes stripe-first, so a panic
+    // below is that arm's and not some other route's.
+    let (_, cold) = arm(&t, "plain", slices, rows, plan);
+    assert_eq!(
+        cold, 1,
+        "the fixture did not take stripe-first ({cold} plans) - re-size it, do not delete the \
+         assertion"
+    );
+
+    let dir = t.0.join("panics");
+    std::fs::create_dir_all(&dir).unwrap();
+    let members = fixture(&dir, slices);
+    let before: Vec<String> = names_in(&dir);
+    ntt_range::pin_stripe_worker_panic_for_tests(Some(&dir));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let run_dir = dir.clone();
+    let worker = std::thread::spawn(move || {
+        let dir = run_dir;
+        let r = std::panic::catch_unwind(|| {
+            create_into_exact(&dir, &members, "set", Some(BS), rows, plan)
+        });
+        let _ = tx.send(r.is_err());
+    });
+    let panicked = rx
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .expect("a create whose transform worker panicked never returned - it is wedged");
+    assert!(panicked, "the worker's panic was swallowed into a result");
+    worker.join().expect("the create thread");
+    assert_eq!(
+        names_in(&dir),
+        before,
+        "a create that panicked left its staged index or placeholder volumes behind"
+    );
+}
+
+/// Every name in `dir`, hidden ones included, sorted.
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+/// Every SET file in `dir` (the index, the volumes and anything hidden),
+/// with its bytes - what a re-create must leave exactly as it was.
+fn set_files_in(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    names_in(dir)
+        .into_iter()
+        .filter(|n| n.starts_with("set.") || n.starts_with('.'))
+        .map(|n| {
+            let b = std::fs::read(dir.join(&n)).unwrap();
+            (n, b)
+        })
+        .collect()
+}
+
+/// A STRIPE-FIRST re-create that does not finish leaves the previous set
+/// whole, and one that does writes what a fresh create writes.
+///
+/// The route that matters most here: stripe-first lays EVERY volume out
+/// before its transform starts (`stripe_first::lay_out_volumes`), so for
+/// the whole of a long transform every volume of the new set is open - and
+/// until 9 Nov 2026 an overwriting re-create had truncated every previous
+/// volume of the same name by then (the 9 Nov 2026 parfast sweep handoff,
+/// E4). The same plan both times, so every name collides and every file is
+/// staged; the fixture and the budget pin are the stripe-first test's,
+/// and `cold == 1` proves this route ran both the first create and the
+/// finished re-create.
+#[test]
+fn a_stripe_first_re_create_keeps_the_previous_set_until_it_is_whole() {
+    use nzbkit::par2gen::control::{CreateControl, CreatePhase};
+    use nzbkit::par2gen::{Par2GenError, create_into_exact_controlled};
+    use nzbkit::par2repair::{PauseGate, ProgressSink};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let _arms = Arms::take();
+    struct Unpin;
+    impl Drop for Unpin {
+        fn drop(&mut self) {
+            ntt_range::pin_stripe_worker_panic_for_tests(None);
+        }
+    }
+    let _unpin = Unpin;
+    let (slices, rows) = ntt_range::floor_shape_for_tests(BS as usize);
+    let plan = CreatePlan {
+        volumes: VolumePlan::Even(8),
+        ..CreatePlan::ENGINE
+    };
+    pin_accum_budget_for_tests((rows / 4) as u64 * BS);
+    let t = Tmp::new("stripefirst-recreate");
+    let dir = t.0.join("set");
+    std::fs::create_dir_all(&dir).unwrap();
+    let members = fixture(&dir, slices);
+    let cold0 = ntt_range::cold_builds_for_tests();
+    create_into_exact(&dir, &members, "set", Some(BS), rows, plan).unwrap();
+    assert_eq!(
+        ntt_range::cold_builds_for_tests() - cold0,
+        1,
+        "the previous set did not take stripe-first - re-size the fixture, do not delete the \
+         assertion"
+    );
+    let before = set_files_in(&dir);
+    // New bytes, same shape: every name of the new set is one of the old.
+    let changed = payload((slices - 1) * BS as usize, 99);
+    std::fs::write(&members[0].path, &changed).unwrap();
+
+    // CANCELLED once the transform is sized - every volume laid out by then.
+    struct CancelOnFold {
+        gate: Arc<PauseGate>,
+        dir: PathBuf,
+        staged_seen: AtomicBool,
+    }
+    impl ProgressSink for CancelOnFold {
+        fn progress(&self, phase: CreatePhase, _done: u64, _total: u64) {
+            if phase == CreatePhase::Fold && !self.gate.is_cancelled() {
+                let staged = names_in(&self.dir)
+                    .iter()
+                    .any(|n| n.starts_with(".set.vol") && n.ends_with(".tmp"));
+                self.staged_seen.store(staged, Ordering::SeqCst);
+                self.gate.cancel();
+            }
+        }
+    }
+    let gate = PauseGate::new();
+    let sink = Arc::new(CancelOnFold {
+        gate: gate.clone(),
+        dir: dir.clone(),
+        staged_seen: AtomicBool::new(false),
+    });
+    let progress: Arc<dyn ProgressSink> = sink.clone();
+    let e = create_into_exact_controlled(
+        &dir,
+        &members,
+        "set",
+        Some(BS),
+        rows,
+        plan,
+        None,
+        &CreateControl::new(Some(progress), Some(gate)),
+    )
+    .expect_err("a cancelled stripe-first re-create must not report success");
+    assert!(matches!(e, Par2GenError::Cancelled), "{e:?}");
+    assert!(
+        sink.staged_seen.load(Ordering::SeqCst),
+        "no volume was staged when the cancel landed, so this did not reach the laid-out \
+         volumes it is about"
+    );
+    assert_eq!(
+        set_files_in(&dir),
+        before,
+        "a cancelled re-create changed the previous set"
+    );
+
+    // PANICKING in the transform: the unwind guard, not `settle`.
+    ntt_range::pin_stripe_worker_panic_for_tests(Some(&dir));
+    let r =
+        std::panic::catch_unwind(|| create_into_exact(&dir, &members, "set", Some(BS), rows, plan));
+    ntt_range::pin_stripe_worker_panic_for_tests(None);
+    assert!(
+        r.is_err(),
+        "the planted worker panic did not unwind the create"
+    );
+    assert_eq!(
+        set_files_in(&dir),
+        before,
+        "a panicking re-create changed the previous set"
+    );
+
+    // FINISHED: exactly the set a fresh create of the same inputs writes.
+    let cold0 = ntt_range::cold_builds_for_tests();
+    let names = create_into_exact(&dir, &members, "set", Some(BS), rows, plan).unwrap();
+    assert_eq!(
+        ntt_range::cold_builds_for_tests() - cold0,
+        1,
+        "not stripe-first"
+    );
+    let fresh = t.0.join("fresh");
+    std::fs::create_dir_all(&fresh).unwrap();
+    let fresh_members = fixture(&fresh, slices);
+    std::fs::write(&fresh_members[0].path, &changed).unwrap();
+    let fresh_names =
+        create_into_exact(&fresh, &fresh_members, "set", Some(BS), rows, plan).unwrap();
+    assert_eq!(names, fresh_names);
+    assert_eq!(
+        set_files_in(&dir),
+        set_files_in(&fresh),
+        "the finished re-create is not the fresh create"
+    );
+}

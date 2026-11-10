@@ -1631,6 +1631,139 @@ fn ntt_divergence_falls_back_to_fold_and_records() {
     FAST_PAR_TRIPPED.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Parfast sweep A26: the breaker is the RETRY's verdict. An NTT attempt
+/// that fails whole-file verification and a fold retry that fails it too
+/// is the SET's answer - the two paths are bit-identical - so it must not
+/// trip the process-wide breaker or log a divergence, and only a fold
+/// retry that SUCCEEDS where the transform failed may. Driven through the
+/// wrapper itself with scripted attempts, so the verdict of each attempt
+/// is chosen rather than engineered out of a fixture.
+#[test]
+fn only_a_fold_retry_that_succeeds_trips_the_ntt_breaker() {
+    let _g = NTT_STATE.lock_ok();
+    let scripted = |second: fn() -> Result<(), RepairError>| {
+        FAST_PAR_TRIPPED.store(false, std::sync::atomic::Ordering::Relaxed);
+        let _ = take_ntt_divergences();
+        let mut calls = 0usize;
+        let out = run_with_ntt_fallback(SyndromePath::Auto, |path, probe| {
+            calls += 1;
+            if calls == 1 {
+                probe.used = true;
+                probe.context = "a26-scripted".into();
+                Err(RepairError::VerifyFailed("m.bin".into()))
+            } else {
+                assert!(matches!(path, SyndromePath::Fold), "the retry is the fold");
+                second()
+            }
+        });
+        let logged = take_ntt_divergences()
+            .into_iter()
+            .filter(|d| d.context == "a26-scripted")
+            .count();
+        (out, calls, fast_par_tripped(), logged)
+    };
+
+    let (out, calls, tripped, logged) = scripted(|| Err(RepairError::VerifyFailed("m.bin".into())));
+    assert!(matches!(out, Err(RepairError::VerifyFailed(_))), "{out:?}");
+    assert_eq!(calls, 2, "the fold retry still runs");
+    assert!(
+        !tripped,
+        "a set the fold ALSO fails is not an NTT divergence and must not take the NTT away \
+         from every later repair in the process"
+    );
+    assert_eq!(logged, 0, "nor is it logged as one");
+
+    let (out, _, tripped, logged) = scripted(|| Err(RepairError::Cancelled));
+    assert!(matches!(out, Err(RepairError::Cancelled)), "{out:?}");
+    assert!(
+        !tripped && logged == 0,
+        "a retry that never answered is no evidence"
+    );
+
+    let (out, _, tripped, logged) = scripted(|| Ok(()));
+    assert!(out.is_ok(), "{out:?}");
+    assert!(
+        tripped,
+        "the fold succeeding where the NTT failed IS the divergence"
+    );
+    assert_eq!(logged, 1, "and it is logged once");
+
+    // THE PANIC ARM trips whatever the fold does: a panic under the
+    // transform is a transform bug, and a fold retry that fails too (here
+    // the set's own verify failure) must not leave the breaker off for
+    // the next Auto repair to hit the same panic.
+    FAST_PAR_TRIPPED.store(false, std::sync::atomic::Ordering::Relaxed);
+    let _ = take_ntt_divergences();
+    let mut calls = 0usize;
+    let out: Result<(), RepairError> = run_with_ntt_fallback(SyndromePath::Auto, |_, probe| {
+        calls += 1;
+        if calls == 1 {
+            probe.selected = true;
+            probe.context = "a26-panic".into();
+            panic!("scripted NTT panic");
+        }
+        Err(RepairError::VerifyFailed("m.bin".into()))
+    });
+    assert!(matches!(out, Err(RepairError::VerifyFailed(_))), "{out:?}");
+    assert!(
+        fast_par_tripped(),
+        "an NTT panic trips the breaker even when the fold retry fails too"
+    );
+    let logged = take_ntt_divergences()
+        .into_iter()
+        .filter(|d| d.context == "a26-panic" && d.panicked)
+        .count();
+    assert_eq!(logged, 1, "and it is logged as a panic");
+
+    FAST_PAR_TRIPPED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Parfast sweep A27, on the MAPPED driver (the download pipeline's
+/// in-place repair): a singular selection reselects from spare rows.
+/// Global slices 0 and 2 have input logs 1 and 4, so exponents 0 and
+/// 21,845 are a singular pair over them; 30,000 is the spare that is not.
+#[test]
+fn the_mapped_driver_reselects_past_a_singular_selection() {
+    let (files, bs, _, pristine) = mapped_fixture(&[(0, 0), (0, 2)]);
+    let mut slices: Vec<Vec<u8>> = Vec::new();
+    for d in &pristine {
+        for c in d.chunks(bs) {
+            let mut v = c.to_vec();
+            v.resize(bs, 0);
+            slices.push(v);
+        }
+    }
+    let recovery: Vec<(u32, Vec<u8>)> = [0u32, 21_845, 30_000]
+        .iter()
+        .map(|&e| (e, generate_recovery(&slices, bs, e)))
+        .collect();
+    let io = MemIo::new(
+        files
+            .iter()
+            .zip(&pristine)
+            .map(|((_, present), d)| {
+                let mut v = d.clone();
+                for (i, &p) in present.iter().enumerate() {
+                    if !p {
+                        let end = ((i + 1) * bs).min(v.len());
+                        v[i * bs..end].fill(0);
+                    }
+                }
+                v
+            })
+            .collect(),
+        None,
+    );
+    let n = repair_mapped_with_path(&files, bs, &recovery, &io, false, SyndromePath::Fold)
+        .unwrap_or_else(|e| panic!("a spare independent row must repair this set: {e}"));
+    assert_eq!(n, 2);
+    assert_eq!(
+        io.snapshot(),
+        pristine,
+        "the reselected repair is byte-exact"
+    );
+}
+
 /// The daemon's "fast par mode" setting reaches the dispatcher, and
 /// the trip-breaker overrides it; the explicit NttForce test hook
 /// ignores both (it models the env escape hatch's precedence).

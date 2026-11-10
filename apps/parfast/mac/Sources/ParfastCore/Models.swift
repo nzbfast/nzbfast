@@ -684,6 +684,24 @@ public enum JobSpec: Codable, Hashable {
         }
     }
 
+    /// The set or output name a queue row, a progress title and a notification
+    /// use, without its folder. The Windows app's `JobSpec.DisplayName()`, the
+    /// same rule arm for arm, so the two hosts name a job alike. Empty when the
+    /// spec names nothing.
+    public var displayName: String {
+        let path: String
+        switch self {
+        case .create(let s): path = s.output
+        case .verify(let s): path = s.par2
+        case .repairSet(let s): path = s.par2
+        case .checksumCreate(let s): path = s.output
+        case .checksumVerify(let s): path = s.file
+        // A posting set's name is already one path component, not a path.
+        case .postingSet(let s): return s.name
+        }
+        return path.isEmpty ? "" : (path as NSString).lastPathComponent
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Key.self)
         switch try c.decode(JobKind.self, forKey: .kind) {
@@ -881,19 +899,35 @@ public struct JobResult: Codable, Hashable {
     /// ADDED 25 Oct 2026: a posting set's route and its two halves' files.
     /// Absent for every other kind.
     public var posting: PostingResult?
+    /// ADDED 17 Sep 2026 (API.md, `result.warnings`): what the job could not
+    /// take in - a folder it could not read, a link it did not follow, an item
+    /// that is not an ordinary file. Omitted when empty. Never an error, but a
+    /// Done with these beside it is not a plain Done: on a checksum create
+    /// what is left out is never checked, and the verify that reads the file
+    /// back reports clean over the gap. This app decoded none of it until the
+    /// 9 Nov 2026 sweep (A36), so a create that left files out read as Done.
+    public var warnings: [String]?
 
     public init(repaired_files: Int? = nil, purged: Bool? = nil,
                 written: [WrittenFile]? = nil, checksum: ChecksumResult? = nil,
-                posting: PostingResult? = nil) {
+                posting: PostingResult? = nil, warnings: [String]? = nil) {
         self.repaired_files = repaired_files
         self.purged = purged
         self.written = written
         self.checksum = checksum
         self.posting = posting
+        self.warnings = warnings
     }
+
+    /// The warnings, or none. The one question the views ask.
+    public var leftOut: [String] { warnings ?? [] }
 }
 
 public struct CoreError: Codable, Hashable, Error {
+    /// A plain String, deliberately not an enum: the core adds codes
+    /// (`internal`, `not_utf8`, `output_is_a_source`, `duplicate_name` on
+    /// 9 Nov 2026), and an unknown one must still decode so its `message`,
+    /// which is what the user is shown, gets through.
     public var code: String
     public var message: String
     public init(code: String, message: String) {
@@ -923,7 +957,15 @@ public struct JobSnapshot: Codable, Hashable, Identifiable {
     /// two checksum kinds, which have no CLI equivalent.
     public var command: String?
     /// The title the UI puts on the job: a set name, an output name, a file.
-    /// Derived by the core from the spec; the app never has to re-derive it.
+    ///
+    /// The core has SENT this since 9 Nov 2026, always, possibly empty for a
+    /// job restored from an old store. Before that it had no such field, so
+    /// against the engine it decoded as nil and only `MockCore` filled it -
+    /// the queue's Name column and every notification body were blank on a
+    /// real build (sweep finding A37). The core's value wins when it is not
+    /// empty; otherwise `AppModel.refresh` fills it from the spec the app
+    /// submitted (`JobSpec.displayName`) or the survey's set name, so a view
+    /// can keep reading this one field against an older core too.
     public var title: String?
 
     public init(id: Int64, kind: JobKind, state: JobState, phase: JobPhase? = nil,
@@ -1211,4 +1253,70 @@ public struct CoreSettings: Codable, Hashable {
     public var log_tail_lines: Int = 500
 
     public init() {}
+
+    /// `self` (the core's settings as they stand NOW) with exactly the fields
+    /// that differ between `old` and `new` taken from `new`, and every other
+    /// field left as the core has it.
+    ///
+    /// WHY A FIELD DIFF AND NOT A WHOLE-STRUCT WRITE (sweep finding A30).
+    /// `pf_settings_set` is a plain REPLACE (`Session::set_settings`), and two
+    /// fields of this struct are changed behind the Settings pane's back:
+    /// `concurrency` by the queue's stepper (`pf_queue_set_concurrency`) and
+    /// `post_queue_action` by "When finished" (`pf_queue_set_post_action`),
+    /// both of which write the core's settings in place. This app read the
+    /// struct ONCE at launch and wrote that copy back whole on every toggle,
+    /// so changing any setting put the concurrency back to its launch value
+    /// and brought back a "Shut down when finished" the user had cleared, or
+    /// dropped one they had set. A field-level diff also keeps two editors
+    /// of the SAME group apart: the progress sheet's "Notify me" and the
+    /// Settings window's purge default are both in `general`, and a
+    /// group-level merge would let one window's stale copy of the other's
+    /// field win.
+    ///
+    /// Done over the encoded JSON so a field added to the core and to this
+    /// struct tomorrow is covered with no edit here. A key present in `old`
+    /// and absent in `new` is an optional set back to nil, and is removed.
+    ///
+    /// If the diff cannot be computed the answer is `self` - the core's
+    /// settings unchanged, so the edit is lost and nothing is written - and
+    /// never `new`, which would be the whole stale struct this exists to stop.
+    public func applyingChanges(from old: CoreSettings, to new: CoreSettings) -> CoreSettings {
+        guard old != new else { return self }
+        guard var base = Self.jsonObject(self),
+              let before = Self.jsonObject(old),
+              let after = Self.jsonObject(new) else { return self }
+        Self.merge(into: &base, old: before, new: after)
+        guard let data = try? JSONSerialization.data(withJSONObject: base),
+              let merged = try? CoreJSON.decoder.decode(CoreSettings.self, from: data)
+        else { return self }
+        return merged
+    }
+
+    private static func jsonObject(_ value: CoreSettings) -> [String: Any]? {
+        guard let data = try? CoreJSON.encoder.encode(value) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private static func merge(into base: inout [String: Any],
+                              old: [String: Any], new: [String: Any]) {
+        for key in Set(old.keys).union(new.keys) {
+            let before = old[key], after = new[key]
+            if let beforeGroup = before as? [String: Any],
+               let afterGroup = after as? [String: Any] {
+                var group = base[key] as? [String: Any] ?? [:]
+                merge(into: &group, old: beforeGroup, new: afterGroup)
+                base[key] = group
+            } else if !same(before, after) {
+                base[key] = after
+            }
+        }
+    }
+
+    private static func same(_ a: Any?, _ b: Any?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case (let a as NSObject, let b as NSObject): return a.isEqual(b)
+        default: return false
+        }
+    }
 }

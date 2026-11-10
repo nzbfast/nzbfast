@@ -270,3 +270,35 @@ fn the_partition_is_stable_within_each_class() {
         "each class keeps its own ascending path order"
     );
 }
+
+/// Two existing targets on ONE file object (a hard link between members)
+/// where one is identified: that object is the identified target's file
+/// and is never a candidate, under EITHER target's spelling. The lookup
+/// was a plain map that kept the last target per object, so with the
+/// unidentified one last its spelling slipped through (parfast sweep
+/// follow-up, 9 Nov 2026). The control: the unidentified target alone
+/// keeps its own spelling, which is a candidate on purpose.
+#[test]
+fn a_file_object_shared_by_two_targets_is_judged_against_both() {
+    let dir = &tmpdir("shared-object");
+    write(&dir.join("a.bin"), b"identified member bytes");
+    std::fs::hard_link(dir.join("a.bin"), dir.join("b.bin")).unwrap();
+    let unidentified_b = || {
+        let mut b = tree_target(dir, "b.bin", 23, false);
+        b.exists = true;
+        b
+    };
+    let a = tree_target(dir, "a.bin", 23, true);
+    let (got, _) = candidates(dir, &[], &[a, unidentified_b()]);
+    assert!(
+        names(dir, &got).is_empty(),
+        "an identified target's file object leaked through a sibling's spelling: {:?}",
+        names(dir, &got)
+    );
+    let (alone, _) = candidates(dir, &[], &[unidentified_b()]);
+    assert!(
+        names(dir, &alone).contains(&"b.bin".to_string()),
+        "an unidentified target's own spelling stays a candidate: {:?}",
+        names(dir, &alone)
+    );
+}

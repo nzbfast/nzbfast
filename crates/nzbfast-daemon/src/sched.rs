@@ -255,12 +255,29 @@ const TICK_SLACK_MINUTES: u64 = 5;
 
 /// What one scheduler tick should do, given where the cursor was and
 /// what both clocks now say. Pure; the loop in `tasks::spawn_scheduler`
-/// is nothing but this plus the two effects.
+/// is [`sched_step`] plus the effects it returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tick {
     /// Ordinary catch-up: walk every minute in `(last, now]` and fire
     /// each entry that matches, one-shots included.
     Advance,
+    /// The local clock ran AHEAD of real time - a DST spring forward, or
+    /// a timezone moved east. The minutes it skipped never happened, so
+    /// their rules do not fire; the last `span` local minutes ending at
+    /// `now` DID elapse, and are walked exactly as [`Tick::Advance`]
+    /// walks, one-shots included. This is what fires the 03:00 resume on
+    /// the night 02:00 becomes 03:00: the loop ticks every 30 s, so the
+    /// jump arrives with one real minute boundary in it, and the landing
+    /// minute is that minute.
+    Jump { span: u32 },
+    /// The local clock went BACK while real time went forward - a DST
+    /// fall back, or a timezone moved west. Every local minute between
+    /// `now` and the cursor has already been walked once, so the cursor
+    /// stays where it is and nothing fires until local time passes it
+    /// again. Without this the repeated hour fired a second time,
+    /// one-shots included (a `quota_reset` at 01:30 reset twice, a 01:15
+    /// pause re-paused a queue the user had resumed in between).
+    Hold,
     /// The local clock did not advance the way real time did, or so much
     /// real time passed that walking it would replay a backlog. Move the
     /// cursor to `now` and reconcile the STANDING state implied by the
@@ -281,22 +298,30 @@ pub enum Tick {
 /// cannot tell the two apart - unix seconds can, because a DST step does
 /// not move them.
 ///
-/// The three ways a tick is NOT an ordinary advance:
+/// Real time is counted in MINUTE BOUNDARIES crossed (`now_utc / 60 -
+/// last_utc / 60`), not in whole minutes of seconds elapsed. The loop
+/// ticks every 30 s, so seconds-over-sixty is 0 on nearly every tick,
+/// and a spring forward read as "no real time passed" fired nothing at
+/// all - not even the rule at the landing minute. Every UTC offset in
+/// use is a whole number of minutes, so a boundary crossed in real time
+/// is a local minute that really began.
+///
+/// The ways a tick is NOT an ordinary advance:
 ///
 /// * the absolute clock went backwards - a real clock step, and nothing
-///   elapsed to replay (`span` is 0);
+///   elapsed to replay (`Reconcile`, `span` 0);
 /// * more than [`MAX_REPLAY_MINUTES`] of real time passed - a suspend,
-///   or a daemon that lost its scheduler thread to a stall;
+///   or a daemon that lost its scheduler thread to a stall (`Reconcile`);
+/// * local time went back by no more than [`MAX_REPLAY_MINUTES`] while
+///   real time went forward - a DST fall back, which shows up as a
+///   `forward` of nearly a whole week (`Hold`);
 /// * local time ran further forward than real time did - a DST spring
-///   forward (+1h in a minute) or a fall back, which shows up as a
-///   `forward` of nearly a whole week.
+///   forward, +1h in one tick (`Jump`).
 pub fn classify_tick(last: u32, now: u32, last_utc: u64, now_utc: u64) -> Tick {
-    let elapsed = now_utc.saturating_sub(last_utc) / 60;
+    let elapsed = (now_utc / 60).saturating_sub(last_utc / 60);
     let forward = u64::from((now + WEEK_MINUTES - last) % WEEK_MINUTES);
-    if now_utc < last_utc
-        || elapsed > u64::from(MAX_REPLAY_MINUTES)
-        || forward > elapsed + TICK_SLACK_MINUTES
-    {
+    let backward = u64::from((last + WEEK_MINUTES - now) % WEEK_MINUTES);
+    if now_utc < last_utc || elapsed > u64::from(MAX_REPLAY_MINUTES) {
         // The window is measured in REAL minutes, capped at a week:
         // past that every rule has fired at least once and the bounded
         // window is the unbounded state anyway.
@@ -304,7 +329,67 @@ pub fn classify_tick(last: u32, now: u32, last_utc: u64, now_utc: u64) -> Tick {
             span: elapsed.min(u64::from(WEEK_MINUTES)) as u32,
         };
     }
+    if forward > elapsed + TICK_SLACK_MINUTES {
+        if backward <= u64::from(MAX_REPLAY_MINUTES) {
+            return Tick::Hold;
+        }
+        // `elapsed` is under `forward` here, so the walk stays inside
+        // the minutes the local clock actually passed through.
+        return Tick::Jump {
+            span: elapsed as u32,
+        };
+    }
     Tick::Advance
+}
+
+/// One thing a scheduler tick asks the daemon to do, in order.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SchedEffect {
+    /// A rule firing at its minute - [`apply_action`] it.
+    Fire(SchedAction),
+    /// A discontinuity reconciled: apply the standing state, and log the
+    /// line whether or not anything was owed.
+    Reconcile {
+        span: u32,
+        paused: Option<bool>,
+        limit: Option<u64>,
+    },
+}
+
+/// One scheduler tick, whole and pure: where the cursor moves to, how
+/// the tick was classified, and what to apply. `tasks::spawn_scheduler`
+/// is this plus the effects, so a test can drive a night at the loop's
+/// real 30 s cadence across a DST change without a clock.
+pub fn sched_step(
+    entries: &[SchedEntry],
+    last: u32,
+    now: u32,
+    last_utc: u64,
+    now_utc: u64,
+) -> (u32, Tick, Vec<SchedEffect>) {
+    let tick = classify_tick(last, now, last_utc, now_utc);
+    let mut out = Vec::new();
+    let mut cursor = match tick {
+        Tick::Advance => last,
+        Tick::Jump { span } => (now + WEEK_MINUTES - span) % WEEK_MINUTES,
+        Tick::Hold => return (last, tick, out),
+        Tick::Reconcile { span } => {
+            let (paused, limit) = catch_up_state(entries, now, span);
+            out.push(SchedEffect::Reconcile {
+                span,
+                paused,
+                limit,
+            });
+            return (now, tick, out);
+        }
+    };
+    while cursor != now {
+        cursor = (cursor + 1) % WEEK_MINUTES;
+        for e in entries.iter().filter(|e| e.fires_at(cursor)) {
+            out.push(SchedEffect::Fire(e.action.clone()));
+        }
+    }
+    (now, tick, out)
 }
 
 /// Minutes from `now` (a minute-of-week) until the schedule's next

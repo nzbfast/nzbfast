@@ -40,7 +40,9 @@ public static class PowerActions
                     return SetSuspendState(hibernate: false, forceCritical: false, wakeupEventsDisabled: false);
 
                 case PostQueueAction.Shutdown:
-                    Process.Start(new ProcessStartInfo("shutdown.exe", "/s /t 60")
+                    // By ABSOLUTE path, from System32, never the bare name: the
+                    // search order would otherwise get a say in which binary runs.
+                    Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "shutdown.exe"), "/s /t 60")
                     {
                         UseShellExecute = false,
                         CreateNoWindow = true,

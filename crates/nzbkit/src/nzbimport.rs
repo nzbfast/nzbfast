@@ -26,6 +26,17 @@ use crate::nzb::Nzb;
 /// thousand-segment "nzb" from buffering gigabytes.
 pub const MAX_POSTED_NZB: u64 = 32 << 20;
 
+/// Encoded bytes [`fetch_posted_nzb`] will read for one object before it
+/// gives up, summed over every part. yEnc's worst case escapes every
+/// byte (2x) and a CRLF every 128 columns adds under 2%, so no object
+/// that decodes under [`MAX_POSTED_NZB`] can need more than this - and
+/// without it the cap was applied only AFTER each part was fetched and
+/// decoded, so a hostile "nzb" of many huge articles was read in full,
+/// one wire-capped body at a time, before any of them was refused. One
+/// article past the line is still read (the NNTP layer's own body cap
+/// bounds that one); the next is not.
+const MAX_POSTED_NZB_ENCODED: u64 = 3 * MAX_POSTED_NZB;
+
 /// Minimum matching payload message-ids before an imported title may
 /// claim a row. Two is the floor that defeats accidental collisions;
 /// three also prices out lazy seeding (an attacker must know - i.e.
@@ -88,12 +99,27 @@ pub async fn fetch_posted_nzb(
     let mut out: Vec<u8> = Vec::new();
     // (offset, len) of every placed part, for the hole check.
     let mut placed: Vec<(u64, u64)> = Vec::with_capacity(segs.len());
+    // Encoded bytes read so far; see `MAX_POSTED_NZB_ENCODED`.
+    let mut fetched = 0u64;
+    // The object size every part declares (`=ybegin size=`). See the
+    // length check after the coverage walk.
+    let mut declared: Option<u64> = None;
     for (_, mid) in segs {
         let body = conn
             .body(mid)
             .await?
             .ok_or_else(|| NzbImportError::Missing(mid.clone()))?;
+        // Before the decode, so the refused part costs no second copy.
+        fetched = fetched.saturating_add(body.len() as u64);
+        if fetched > MAX_POSTED_NZB_ENCODED {
+            return Err(NzbImportError::TooBig);
+        }
         let dec = crate::yenc::decode(&body)?;
+        // Every part of one object declares the same size; two that
+        // disagree are not parts of one object.
+        if *declared.get_or_insert(dec.file_size) != dec.file_size {
+            return Err(NzbImportError::Holes);
+        }
         // Both the declared file size and the part offset are
         // poster-controlled: cap BEFORE any allocation grows to match.
         if dec.file_size > MAX_POSTED_NZB
@@ -124,6 +150,16 @@ pub async fn fetch_posted_nzb(
         cursor = off + len;
     }
     if cursor != out.len() as u64 {
+        return Err(NzbImportError::Holes);
+    }
+    // ...and [0, len) must be the WHOLE object. The coverage walk above
+    // proves the parts tile what they cover, not that they cover what
+    // was posted: `segs` is complete only per the INDEX, whose total is
+    // the subject's `(x/y)`, so a subject claiming fewer parts than the
+    // yEnc headers do yielded a gap-free PREFIX - truncated XML, which
+    // is exactly the "parses cleanly minus some files" case that walk
+    // exists to refuse. A missing `size=` (0) has nothing to compare.
+    if declared.is_some_and(|d| d > 0 && d != cursor) {
         return Err(NzbImportError::Holes);
     }
     // Gzip sniff: 0x1f 0x8b. Inflate under the same ceiling -
@@ -364,6 +400,69 @@ mod tests {
         assert!(!quorum(3, 7)); // under half of the row
         assert!(!quorum(3, 1000)); // seeded ids in a big row
         assert!(quorum(600, 1000));
+    }
+
+    /// A gap-free PREFIX of a posted NZB is not the posted NZB.
+    ///
+    /// The coverage walk proved the parts tiled [0, len) and nothing
+    /// more: `segs` is complete per the index, whose total is the
+    /// subject's `(x/y)`, so a subject claiming one part of an object
+    /// the yEnc headers say has two handed back the first half - and
+    /// the cut can land on a file boundary, parsing cleanly minus files.
+    ///
+    /// NEGATIVE CONTROL, run: drop the `declared` length check and the
+    /// first fetch returns the truncated half instead of `Holes`.
+    #[tokio::test]
+    async fn a_posted_nzb_shorter_than_its_declared_size_is_refused() {
+        use crate::mock::{Chaos, MockServer};
+        let xml = nzb_xml(&[(r#"a yEnc (1/1)"#, &["a@x"]), (r#"b yEnc (1/1)"#, &["b@x"])]);
+        let half = xml.len() / 2;
+        let size = xml.len() as u64;
+        let mut articles = std::collections::HashMap::new();
+        articles.insert(
+            "<p1@x>".to_string(),
+            crate::yenc::encode("x.nzb", size, Some((1, 2)), 1, &xml[..half]),
+        );
+        articles.insert(
+            "<p2@x>".to_string(),
+            crate::yenc::encode("x.nzb", size, Some((2, 2)), half as u64 + 1, &xml[half..]),
+        );
+        // A part declaring a different object size cannot be a part of
+        // this one.
+        articles.insert(
+            "<odd@x>".to_string(),
+            crate::yenc::encode(
+                "x.nzb",
+                size + 7,
+                Some((2, 2)),
+                half as u64 + 1,
+                &xml[half..],
+            ),
+        );
+        let srv = MockServer::start(articles, Chaos::default()).await;
+        let (mut conn, _) = Connection::connect(&srv.server_config()).await.unwrap();
+
+        let got = fetch_posted_nzb(&mut conn, &[(1, "<p1@x>".to_string())]).await;
+        assert!(
+            matches!(got, Err(NzbImportError::Holes)),
+            "a prefix must be refused, got {:?}",
+            got.map(|b| b.len())
+        );
+        let got = fetch_posted_nzb(
+            &mut conn,
+            &[(1, "<p1@x>".to_string()), (2, "<odd@x>".to_string())],
+        )
+        .await;
+        assert!(matches!(got, Err(NzbImportError::Holes)));
+        // The whole object still assembles, byte for byte.
+        let got = fetch_posted_nzb(
+            &mut conn,
+            &[(1, "<p1@x>".to_string()), (2, "<p2@x>".to_string())],
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, xml);
+        conn.quit().await;
     }
 
     #[test]

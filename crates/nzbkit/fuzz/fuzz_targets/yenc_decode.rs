@@ -124,8 +124,15 @@ fn select_kernel() {
 /// divergences behind it.
 /// - a lone `.` line is the NNTP article terminator, stripped before decode
 ///   is ever called; mid-body it ends the SIMD decode but not the oracle's.
-/// - a payload line ending in a bare `=` is malformed yEnc; the oracle
-///   ignores it, rapidyenc consumes the following CR.
+/// - a payload line ending in a bare `=` (an ODD run of `=`) that is
+///   followed by another PAYLOAD line is malformed yEnc; the oracle ignores
+///   it, rapidyenc consumes the following CR. Narrowed on 9 Nov 2026 (B14):
+///   this used to skip EVERY line ending in `=`, which hid the case that
+///   matters - a lone `=` on the line before `=yend` - and with it a real
+///   divergence (rapidyenc wrote one extra byte, so a whole article was
+///   refused). The SIMD path now takes that byte back when the next line
+///   is a `=y` control line, so those inputs are compared again, and so is
+///   an even run (`==`), which is a complete escape pair on both decoders.
 /// - MIXED line endings (some CRLF, some bare LF) in one body: rapidyenc's
 ///   state machine only recognises `\r\n` as a line break, so after a bare
 ///   LF it neither stops at a `=y…` control line nor unstuffs a leading
@@ -141,9 +148,22 @@ fn hits_documented_deviation(data: &[u8]) -> bool {
     if has_crlf && has_bare_lf {
         return true;
     }
-    data.split(|&b| b == b'\n').any(|l| {
-        let l = l.strip_suffix(b"\r").unwrap_or(l);
-        l == b"." || l.last() == Some(&b'=')
+    let lines: Vec<&[u8]> = data
+        .split(|&b| b == b'\n')
+        .map(|l| l.strip_suffix(b"\r").unwrap_or(l))
+        .collect();
+    lines.iter().enumerate().any(|(i, &l)| {
+        if l == b"." {
+            return true;
+        }
+        let lone = l.iter().rev().take_while(|&&b| b == b'=').count() % 2 == 1;
+        // The next line opening a `=y` control line (one stuffed dot
+        // allowed, as rapidyenc allows it) is the closed case.
+        let next_is_control = lines.get(i + 1).is_some_and(|n| {
+            let n = n.strip_prefix(b".").unwrap_or(n);
+            n.starts_with(b"=y")
+        });
+        lone && !next_is_control
     })
 }
 

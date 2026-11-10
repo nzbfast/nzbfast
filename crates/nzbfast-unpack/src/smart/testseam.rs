@@ -154,3 +154,10 @@ pub fn force_temp_trash(v: bool) {
 pub fn force_trash_unresponsive(v: bool) {
     super::TRASH_UNRESPONSIVE.store(v, std::sync::atomic::Ordering::Relaxed);
 }
+
+/// The reason a TIMED-OUT recoverable delete is stored under (F15), built
+/// by the same function production uses, so a test a crate away can file
+/// a kept-files notice for one without copying the wording.
+pub fn timed_out_trash_reason() -> String {
+    super::refusal("timed out").to_string()
+}

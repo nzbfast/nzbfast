@@ -71,6 +71,8 @@ use std::{
 pub use archive::*;
 pub use block::*;
 pub use encryption::Password;
+#[cfg(feature = "aes256")]
+pub use encryption::aes256_sha256_key_iv;
 pub use error::Error;
 pub use reader::{ArchiveReader, BlockDecoder};
 pub use time::NtTime;

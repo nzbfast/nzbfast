@@ -2210,6 +2210,88 @@ fn socks5_and_bind_ip_round_trip_without_echoing_the_proxy_password() {
     drop(d);
 }
 
+/// TODO 358 item 14: the HTTP CONNECT proxy rides the same three-field
+/// editor contract as SOCKS5 above (password never echoed, blank keeps
+/// it), a save may not fill BOTH proxies, switching kinds with the
+/// password box blank keeps the credential, and the kill switch's
+/// verdict on `bind_ip` is echoed for the server card - null for an
+/// address that is up, the dial's own sentence for one that is not.
+#[test]
+fn http_proxy_round_trips_and_the_kill_switch_state_is_echoed() {
+    let dir = scratch("httpproxy");
+    let d = serve(&dir);
+    let srv = |port: u16| -> serde_json::Value {
+        settings_block(port)["servers"]
+            .as_array()
+            .expect("servers array")
+            .iter()
+            .find(|s| s["host"] == "news.tunnel.example")
+            .expect("saved server echoed")
+            .clone()
+    };
+    let save = |body: &str| http_post(d.port, "/api?mode=server_save&output=json", body);
+    let disk = || std::fs::read_to_string(dir.join("config.json")).unwrap();
+
+    let saved = save(
+        r#"{"index":-1,"server":{"host":"news.tunnel.example","port":563,"connections":8,
+            "bind_ip":"127.0.0.1","socks5":"","http_proxy":"127.0.0.1:8080",
+            "http_proxy_user":"hpu","http_proxy_pass":"hpsecret"}}"#,
+    );
+    assert!(saved.contains("\"status\":true"), "save failed: {saved}");
+    let s = srv(d.port);
+    assert_eq!(s["http_proxy"], "127.0.0.1:8080", "address only: {s}");
+    assert_eq!(s["http_proxy_user"], "hpu", "{s}");
+    assert_eq!(s["has_http_proxy_pass"], true, "presence flag only: {s}");
+    assert_eq!(s["socks5"], "", "{s}");
+    assert!(s["bind_ip_down"].is_null(), "loopback is up: {s}");
+    assert!(
+        !serde_json::Value::Object(settings_block(d.port))
+            .to_string()
+            .contains("hpsecret"),
+        "the proxy password must never reach the UI"
+    );
+    assert!(disk().contains("hpu:hpsecret@127.0.0.1:8080"), "{}", disk());
+
+    // Both boxes filled is refused, and nothing of it is stored.
+    let both = save(
+        r#"{"index":0,"server":{"host":"news.tunnel.example","port":563,"connections":8,
+            "socks5":"127.0.0.1:1080","http_proxy":"127.0.0.1:8080"}}"#,
+    );
+    assert!(
+        both.contains("\"status\":false") && both.contains("not both"),
+        "{both}"
+    );
+    assert!(!disk().contains("127.0.0.1:1080"), "{}", disk());
+
+    // Switch to SOCKS5 with the password box blank: the credential moves
+    // with it, and the HTTP spec is gone.
+    let switched = save(
+        r#"{"index":0,"server":{"host":"news.tunnel.example","port":563,"connections":8,
+            "socks5":"127.0.0.1:1080","socks5_user":"hpu","socks5_pass":"",
+            "http_proxy":"","http_proxy_user":"hpu","http_proxy_pass":""}}"#,
+    );
+    assert!(switched.contains("\"status\":true"), "{switched}");
+    let on_disk = disk();
+    assert!(on_disk.contains("hpu:hpsecret@127.0.0.1:1080"), "{on_disk}");
+    assert!(!on_disk.contains("http_proxy"), "{on_disk}");
+
+    // A bind address on no interface (TEST-NET-1): the card is told, in
+    // the dial's own words.
+    let down = save(
+        r#"{"index":0,"server":{"host":"news.tunnel.example","port":563,"connections":8,
+            "bind_ip":"192.0.2.77"}}"#,
+    );
+    assert!(down.contains("\"status\":true"), "{down}");
+    let s = srv(d.port);
+    let why = s["bind_ip_down"].as_str().unwrap_or_else(|| panic!("{s}"));
+    assert!(
+        why.starts_with("kill switch: bind address 192.0.2.77"),
+        "{why}"
+    );
+
+    drop(d);
+}
+
 /// TODO §20c: a feed url embeds the indexer's API key, and `get_config`
 /// used to ship it whole to the browser. It is masked now - and the
 /// thing that makes masking possible at all is the feed `id`, because

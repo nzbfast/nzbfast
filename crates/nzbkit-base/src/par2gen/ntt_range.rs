@@ -110,6 +110,43 @@ pub fn pin_transform_off_for_tests(off: bool) {
     TRANSFORM_OFF.store(off, Ordering::Relaxed);
 }
 
+/// Test door: make the stripe-first transform workers of a create writing
+/// into `dir` PANIC at the start of their next chunk (`Some(dir)`), or stop
+/// (`None`). The one way to reach the worker's panic arm, which exists so a
+/// bug in the transform crashes the create instead of hanging it on a
+/// barrier (`stripe_first::run`).
+///
+/// KEYED BY THE OUTPUT DIRECTORY, so only the arming test's own create can
+/// observe it: other tests in a one-process run of the same binary run
+/// stripe-first creates without taking any serializer, and a bare flag
+/// would panic theirs. Read once per chunk per worker, never per stripe,
+/// and one relaxed load unless a test has armed it. See
+/// [`cold_builds_for_tests`].
+#[doc(hidden)]
+pub fn pin_stripe_worker_panic_for_tests(dir: Option<&std::path::Path>) {
+    let mut g = STRIPE_WORKER_PANIC_DIR
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    *g = dir.map(std::path::Path::to_path_buf);
+    STRIPE_WORKER_PANIC.store(g.is_some(), Ordering::Relaxed);
+}
+
+static STRIPE_WORKER_PANIC: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static STRIPE_WORKER_PANIC_DIR: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+
+/// [`pin_stripe_worker_panic_for_tests`]'s pin, for a worker of a create
+/// writing into `dir`.
+pub(super) fn stripe_worker_panic_pinned(dir: &std::path::Path) -> bool {
+    STRIPE_WORKER_PANIC.load(Ordering::Relaxed)
+        && STRIPE_WORKER_PANIC_DIR
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_deref()
+            == Some(dir)
+}
+
 /// Test door: force this process's TRANSFORM off the mapped input path
 /// (`true`) and onto the copied resident windows, or back to the shipped
 /// dispatch (`false`). Read by `par2gen::map_inputs_enabled`, ahead of

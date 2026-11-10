@@ -66,6 +66,12 @@ pub(super) struct LineCapPlan {
     /// two candidates are indistinguishable in the result, and the
     /// result was the only thing on the record.
     pub(super) curve_fleet: usize,
+    /// 9 Nov 2026: what `line_cap` would have been when it is a RECALLED
+    /// fleet, 0 = not recalled (`PoolConfig::line_cap_recall_from`).
+    pub(super) recall_from: usize,
+    /// 9 Nov 2026: the step-back hold this run starts under, 0 = none
+    /// (`PoolConfig::line_cap_hold`).
+    pub(super) hold: usize,
 }
 
 /// TODO 208 item 1: the fleet cap (`nzbkit::pool::linecap` has the
@@ -110,19 +116,40 @@ pub(super) struct LineCapPlan {
 /// `build_fleet`'s own map. Resolving here costs one read for all
 /// three, and means the three answers cannot come from two different
 /// versions of the file.
+///
+/// 9 Nov 2026: `recall` is the `(fleet, hold)` the last job on this
+/// line left (`linecarry::Stored::recall`, already filtered for the line
+/// and for age; `(0, 0)` off the daemon). On an automatic cap the seed
+/// starts at the recalled fleet when it is bigger than what the curve
+/// and the carry ask for, so the next job skips the climb the last one
+/// paid for, and the run checks the line for itself once it is up
+/// (`nzbkit::pool::linecap::recall_check`). The hold is handed on for
+/// the governor to climb under. A typed fleet takes neither: it pinned
+/// the rule.
 pub(super) fn line_cap_plan(
     config: &Path,
     anchor_bps: u64,
     anchor_measured: bool,
     carry_bps: u64,
     levels: Vec<u32>,
+    recall: (usize, usize),
 ) -> LineCapPlan {
     let setting = crate::conntune::line_cap_setting(config);
     let env = std::env::var("NZBFAST_LINE_CAP").ok();
-    let line_cap =
+    let resolved =
         crate::conntune::line_cap_resolve(env.as_deref(), setting, anchor_bps, carry_bps);
     let line_cap_auto = crate::conntune::line_cap_auto_resolve(env.as_deref(), setting);
+    let (recall_fleet, recall_hold) = match line_cap_auto && resolved > 0 {
+        true => recall,
+        false => (0, 0),
+    };
+    let (line_cap, recall_from) = match recall_fleet > resolved {
+        true => (recall_fleet, resolved),
+        false => (resolved, 0),
+    };
     LineCapPlan {
+        recall_from,
+        hold: recall_hold,
         line_cap,
         line_cap_auto,
         // Asked only where it means something. A typed fleet - from the

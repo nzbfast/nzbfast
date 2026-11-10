@@ -36,6 +36,18 @@
 //!   further than `LINE_CAP_MAX_FLEET`, which is where the in-run arm
 //!   would have walked anyway.
 //!
+//! **And since 9 Nov 2026 the same file remembers the FLEET** - the
+//! count the last job's line cap settled at, and the step-back point if
+//! it had to back off - so the next job on the same line starts there
+//! rather than climbing again, and does not climb into a step-back it
+//! already measured. That half is filtered harder than the carry,
+//! because a fleet that is wrong in the UP direction is the one §208
+//! measured costing a slow line: it is recalled only on a MEASURED
+//! anchor within a quarter of the one it was learned on, for a week,
+//! and the hold for a day ([`Stored::recall`]); and the run checks the
+//! line itself once the fleet is up (`linecap::recall_check`). A CLI
+//! run has none of it, as it has no carry.
+//!
 //! It is read at job build (`get::fleet`, through the hub) and written
 //! by the 1 s ticker that already drives `linkpeak` - so a job that
 //! runs for a minute has banked its carry long before it ends, and a
@@ -77,6 +89,81 @@ pub struct Stored {
     /// Unix time of the last change, for the curious reading the file.
     #[serde(default)]
     pub checked: u64,
+    /// 9 Nov 2026: the fleet the last job with a line-cap verdict
+    /// SETTLED at (`LiveStats::line_cap_settled`), 0 = none. Newest
+    /// overwrites, for the carry's reason above.
+    #[serde(default)]
+    pub fleet: usize,
+    /// The link anchor that job sized from, bytes/s: the line the fleet
+    /// was learned on. See [`Stored::recall`].
+    #[serde(default)]
+    pub fleet_anchor_bps: u64,
+    /// Unix time `fleet` was last banked.
+    #[serde(default)]
+    pub fleet_checked: u64,
+    /// The step-back ceiling a job left (`LiveStats::line_cap_hold`),
+    /// 0 = none.
+    #[serde(default)]
+    pub hold: usize,
+    /// Unix time the hold was FIRST seen at its value. Not refreshed by a
+    /// job that merely carried it forward, so it expires on its own clock
+    /// and the line gets re-tested.
+    #[serde(default)]
+    pub hold_checked: u64,
+}
+
+/// How long a banked fleet may be recalled for: the connection knee's
+/// own re-probe appointment (`conntune::STALE_SECS`), which is the
+/// repo's figure for how long a per-line connection count stays true.
+pub const RECALL_MAX_AGE_SECS: u64 = crate::conntune::STALE_SECS;
+
+/// How long a step-back is held across jobs. A day, so a line that
+/// stopped punishing a bigger fleet is re-tested by the next day's first
+/// job; what the re-test costs is the one step-back it measured before
+/// (a few seconds), against holding a fleet too small for ever.
+pub const HOLD_MAX_AGE_SECS: u64 = 86_400;
+
+/// How far today's anchor may sit from the one a fleet was learned on
+/// before the memory is not about this line, percent either way.
+pub const RECALL_ANCHOR_PCT: u64 = 25;
+
+impl Stored {
+    /// What the next job may start from: `(fleet, hold)`, 0 = none.
+    ///
+    /// Only on a MEASURED anchor within [`RECALL_ANCHOR_PCT`] of the one
+    /// the fleet was learned on, because a fleet is a fact about a LINE
+    /// and the anchor is the only evidence the daemon has of which line
+    /// it is on - a typed line speed says nothing about where the last
+    /// fleet came from. A fleet older than [`RECALL_MAX_AGE_SECS`] and a
+    /// hold older than [`HOLD_MAX_AGE_SECS`] are dropped. The fleet never
+    /// comes back above the hold: the hold is the fleet that hurt less.
+    /// The run checks the line for itself once it is up
+    /// (`nzbkit::pool::linecap::recall_check`), so this filter is the
+    /// first of two.
+    pub fn recall(&self, anchor_bps: u64, measured: bool, now: u64) -> (usize, usize) {
+        let near = |a: u64| {
+            let lo = a as u128 * (100 - RECALL_ANCHOR_PCT) as u128;
+            let hi = a as u128 * (100 + RECALL_ANCHOR_PCT) as u128;
+            let x = anchor_bps as u128 * 100;
+            a > 0 && x >= lo && x <= hi
+        };
+        if !measured || !near(self.fleet_anchor_bps) {
+            return (0, 0);
+        }
+        let hold = match now.saturating_sub(self.hold_checked) <= HOLD_MAX_AGE_SECS {
+            true => self.hold,
+            false => 0,
+        };
+        let fleet = match now.saturating_sub(self.fleet_checked) <= RECALL_MAX_AGE_SECS {
+            true => self.fleet,
+            false => 0,
+        };
+        let fleet = match hold {
+            0 => fleet,
+            h => fleet.min(h),
+        };
+        (fleet, hold)
+    }
 }
 
 /// The daemon-facing store: one number behind a lock, plus load and a
@@ -88,6 +175,11 @@ pub struct LineCarry {
     /// and for the same reason: a write that failed must stay dirty, or
     /// a value that never changes again is never persisted at all.
     save: Mutex<(Option<Instant>, bool)>,
+    /// The pool whose fleet verdict was last banked. In memory only, and
+    /// a `Weak` so it can never keep a finished job's pool alive - and so
+    /// its allocation cannot be reused by the next job's pool while this
+    /// is held, which is what makes `ptr_eq` an honest "same job" test.
+    fleet_pool: Mutex<std::sync::Weak<nzbkit::pool::LiveStats>>,
 }
 
 impl LineCarry {
@@ -99,6 +191,7 @@ impl LineCarry {
             stored: Mutex::new(stored),
             path,
             save: Mutex::new((None, false)),
+            fleet_pool: Mutex::new(std::sync::Weak::new()),
         }
     }
 
@@ -106,6 +199,60 @@ impl LineCarry {
     /// 0 = none, which is `fleet_for_carry`'s own "no opinion".
     pub fn carry_bps(&self) -> u64 {
         self.stored.lock_ok().carry_bps
+    }
+
+    /// What the next job may start from; see [`Stored::recall`].
+    pub fn recall(&self, anchor_bps: u64, measured: bool) -> (usize, usize) {
+        self.stored
+            .lock_ok()
+            .recall(anchor_bps, measured, unix_now())
+    }
+
+    /// One second of the line cap's verdicts (9 Nov 2026): the fleet this
+    /// job's pool settled at, the step-back hold it is under, and the
+    /// anchor the job sized from. `settled == 0` is no verdict and changes
+    /// nothing, so a job that never reached one keeps the last job's
+    /// memory. Returns true when the stored values moved.
+    ///
+    /// `fresh` says this verdict is a new MEASUREMENT - the first one a
+    /// job's pool delivered - rather than the same pool's verdict read
+    /// again. Only a fresh verdict or a changed value moves the fleet's
+    /// clock: the ticker keeps reading the last job's `LiveStats` for as
+    /// long as the daemon sits idle (`hub.pool_live` is only replaced at
+    /// the next job), and until 9 Nov 2026 every one of those re-reads
+    /// re-stamped the clock, so [`RECALL_MAX_AGE_SECS`] never bit while
+    /// the daemon stayed up and a month-idle daemon recalled a month-old
+    /// fleet.
+    pub fn observe_fleet(&self, settled: usize, hold: usize, anchor_bps: u64, fresh: bool) -> bool {
+        if settled == 0 || anchor_bps == 0 {
+            return false;
+        }
+        let now = unix_now();
+        let changed = {
+            let mut st = self.stored.lock_ok();
+            let before = (st.fleet, st.fleet_anchor_bps, st.hold);
+            st.fleet = settled;
+            st.fleet_anchor_bps = anchor_bps;
+            if hold != st.hold {
+                st.hold = hold;
+                st.hold_checked = now;
+            }
+            // The fleet's own clock moves on a fresh verdict (a job's
+            // pool measuring it) or a changed one; the hold's moves only
+            // when the hold does, so a job carrying it forward cannot keep
+            // it alive. Neither moves for a finished job's verdict read
+            // again by the idle ticker.
+            let moved = before != (st.fleet, st.fleet_anchor_bps, st.hold);
+            if fresh || moved {
+                st.fleet_checked = now;
+            }
+            moved
+        };
+        if changed {
+            self.save.lock_ok().1 = true;
+        }
+        self.flush_if_due();
+        changed
     }
 
     /// One observation from the ticker: the running best this job's
@@ -124,16 +271,20 @@ impl LineCarry {
                 false
             } else {
                 st.carry_bps = carry_bps;
-                st.checked = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                st.checked = unix_now();
                 true
             }
         };
         if changed {
             self.save.lock_ok().1 = true;
         }
+        self.flush_if_due();
+        changed
+    }
+
+    /// Persist when dirty and [`SAVE_MIN_SECS`] has passed since the last
+    /// write.
+    fn flush_if_due(&self) {
         let due = {
             let save = self.save.lock_ok();
             save.1
@@ -144,7 +295,6 @@ impl LineCarry {
         if due {
             self.flush();
         }
-        changed
     }
 
     /// Write the current value out, clearing the dirty bit only on a
@@ -163,19 +313,62 @@ impl LineCarry {
     }
 }
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// One second of observation, from the ticker `linkpeak::spawn` already
 /// runs. Rides that loop rather than opening a second one: the two read
 /// the same job's state a second apart and nothing here is worth a task
 /// of its own.
 pub fn feed(d: &super::daemon::Daemon) {
-    let carry = d
-        .hub
-        .pool_live
-        .lock_ok()
+    use std::sync::atomic::Ordering::Relaxed;
+    // The anchor the runner stamped for THIS job, which is the line its
+    // fleet was learned on. A typed anchor banks nothing: `recall` would
+    // never hand it back.
+    //
+    // Read BEFORE the pool, and that order is the whole of a rule. At a
+    // job start the runner clears `pool_live` and only then restamps the
+    // anchor (`reset_hub_for_job`), so a pool read here that is still the
+    // last job's was read before that clear, and an anchor read before
+    // the pool cannot be the next job's. Read the other way round, a
+    // tick landing between the two halves banked the last job's fleet
+    // against the next job's line (9 Nov 2026 sweep).
+    let anchor = d.hub.line_anchor_bps.load(Relaxed);
+    let measured = d.hub.line_anchor_measured.load(Relaxed);
+    let live = d.hub.pool_live.lock_ok().clone();
+    let (carry, settled, hold) = live
         .as_ref()
-        .map(|l| l.line_carry_bps.load(std::sync::atomic::Ordering::Relaxed))
-        .unwrap_or(0);
+        .map(|l| {
+            (
+                l.line_carry_bps.load(Relaxed),
+                l.line_cap_settled.load(Relaxed),
+                l.line_cap_hold.load(Relaxed),
+            )
+        })
+        .unwrap_or((0, 0, 0));
     d.line_carry.observe(carry);
+    if let Some(l) = live.as_ref()
+        && measured
+        && settled != 0
+        && anchor != 0
+    {
+        // Fresh only the first time THIS pool's verdict is banked: every
+        // later tick over the same pool - including the whole idle spell
+        // after its job ended - is the same measurement read again.
+        let fresh = {
+            let mut seen = d.line_carry.fleet_pool.lock_ok();
+            let first = !std::sync::Weak::ptr_eq(&seen, &std::sync::Arc::downgrade(l));
+            if first {
+                *seen = std::sync::Arc::downgrade(l);
+            }
+            first
+        };
+        d.line_carry.observe_fleet(settled, hold, anchor, fresh);
+    }
 }
 
 #[cfg(test)]
@@ -306,6 +499,134 @@ mod tests {
                 "carry {c} seeded past the ceiling"
             );
         }
+    }
+
+    const TEN_GIG: u64 = 1_250_000_000;
+
+    fn banked(fleet: usize, hold: usize, at: u64) -> Stored {
+        Stored {
+            fleet,
+            fleet_anchor_bps: TEN_GIG,
+            fleet_checked: at,
+            hold,
+            hold_checked: at,
+            ..Stored::default()
+        }
+    }
+
+    /// 9 Nov 2026: a banked fleet comes back only for the line it was
+    /// learned on, as the daemon can tell lines apart: a MEASURED anchor
+    /// within a quarter of the banked one.
+    #[test]
+    fn a_fleet_is_recalled_only_on_the_line_it_was_learned_on() {
+        let st = banked(100, 0, 1_000);
+        assert_eq!(st.recall(TEN_GIG, true, 1_000), (100, 0));
+        assert_eq!(st.recall(TEN_GIG * 4 / 5, true, 1_000), (100, 0));
+        assert_eq!(st.recall(TEN_GIG, false, 1_000), (0, 0), "a typed line");
+        assert_eq!(st.recall(TEN_GIG / 2, true, 1_000), (0, 0), "another line");
+        assert_eq!(st.recall(TEN_GIG * 2, true, 1_000), (0, 0), "another line");
+        assert_eq!(Stored::default().recall(TEN_GIG, true, 1_000), (0, 0));
+    }
+
+    /// The fleet keeps for the knee's week and the hold for a day, so a
+    /// line that stopped punishing a bigger fleet is re-tested; and the
+    /// fleet never comes back above the hold.
+    #[test]
+    fn a_hold_expires_before_the_fleet_and_bounds_it() {
+        let st = banked(100, 50, 0);
+        assert_eq!(st.recall(TEN_GIG, true, 10), (50, 50));
+        assert_eq!(st.recall(TEN_GIG, true, HOLD_MAX_AGE_SECS + 1), (100, 0));
+        assert_eq!(st.recall(TEN_GIG, true, RECALL_MAX_AGE_SECS + 1), (0, 0));
+    }
+
+    /// A job carrying the hold forward does not keep it alive: only a NEW
+    /// hold value restarts its clock. And it all survives a restart.
+    #[test]
+    fn a_carried_hold_keeps_its_first_seen_clock() {
+        let (dir, lc) = store("hold");
+        assert!(
+            !lc.observe_fleet(0, 0, TEN_GIG, true),
+            "no verdict is no change"
+        );
+        assert!(lc.observe_fleet(50, 50, TEN_GIG, true));
+        let first = lc.stored.lock_ok().hold_checked;
+        lc.stored.lock_ok().hold_checked = first - 1_000;
+        lc.observe_fleet(50, 50, TEN_GIG, true);
+        assert_eq!(lc.stored.lock_ok().hold_checked, first - 1_000);
+        lc.flush();
+        let again = LineCarry::load(dir.join("linecarry.json"));
+        assert_eq!(again.recall(TEN_GIG, true), (50, 50));
+        // A job with no hold clears it.
+        assert!(again.observe_fleet(100, 0, TEN_GIG, true));
+        assert_eq!(again.recall(TEN_GIG, true), (100, 0));
+    }
+
+    /// End to end across a job boundary: the pool's verdict, banked by
+    /// the ticker against the anchor the runner stamped for the job.
+    #[test]
+    fn job_two_starts_where_job_one_settled() {
+        let dir = scratch("settled");
+        let d = crate::testutil::test_daemon(&dir);
+        let live = nzbkit::pool::LiveStats::for_servers(&[]);
+        live.line_cap_settled
+            .store(100, std::sync::atomic::Ordering::Relaxed);
+        *d.hub.pool_live.lock_ok() = Some(live);
+        d.hub
+            .line_anchor_bps
+            .store(TEN_GIG, std::sync::atomic::Ordering::Relaxed);
+        feed(&d);
+        assert_eq!(
+            d.line_carry.recall(TEN_GIG, true),
+            (0, 0),
+            "a typed anchor banks nothing"
+        );
+        d.hub
+            .line_anchor_measured
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        feed(&d);
+        assert_eq!(d.line_carry.recall(TEN_GIG, true), (100, 0));
+    }
+
+    /// 9 Nov 2026 sweep: the ticker goes on reading the LAST job's pool
+    /// for as long as the daemon sits idle, and that is the same verdict
+    /// read again, not a fresh measurement - so it must not keep the
+    /// fleet young. Simulated by backdating the bank past the recall age
+    /// and feeding again over the same pool: the fleet must expire. A
+    /// NEW job's pool settling at the same count is a fresh measurement
+    /// and does renew it.
+    #[test]
+    fn an_idle_reread_of_the_last_jobs_verdict_does_not_keep_it_fresh() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let dir = scratch("idlefresh");
+        let d = crate::testutil::test_daemon(&dir);
+        let job = |settled: usize| {
+            let live = nzbkit::pool::LiveStats::for_servers(&[]);
+            live.line_cap_settled.store(settled, Relaxed);
+            live
+        };
+        d.hub.line_anchor_bps.store(TEN_GIG, Relaxed);
+        d.hub.line_anchor_measured.store(true, Relaxed);
+        *d.hub.pool_live.lock_ok() = Some(job(100));
+        feed(&d);
+        assert_eq!(d.line_carry.recall(TEN_GIG, true), (100, 0));
+        // A week and a bit of idle ticks later.
+        let aged = unix_now() - RECALL_MAX_AGE_SECS - 60;
+        d.line_carry.stored.lock_ok().fleet_checked = aged;
+        feed(&d);
+        assert_eq!(
+            d.line_carry.stored.lock_ok().fleet_checked,
+            aged,
+            "an idle re-read of a finished job's verdict re-stamped its clock"
+        );
+        assert_eq!(
+            d.line_carry.recall(TEN_GIG, true),
+            (0, 0),
+            "a fleet older than the recall age must not come back"
+        );
+        // The next job measures the same fleet: that IS fresh evidence.
+        *d.hub.pool_live.lock_ok() = Some(job(100));
+        feed(&d);
+        assert_eq!(d.line_carry.recall(TEN_GIG, true), (100, 0));
     }
 
     #[test]

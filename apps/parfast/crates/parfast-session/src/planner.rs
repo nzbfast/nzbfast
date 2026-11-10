@@ -257,6 +257,9 @@ pub fn expand_sources(
     base: Option<&Path>,
     rules: SourceRules,
 ) -> Result<Expansion, PlanError> {
+    // An empty base strips from every path and so names each member by
+    // its whole path; it means "no base", as it does in `options_for`.
+    let base = base.filter(|b| !b.as_os_str().is_empty());
     let mut out: Vec<PlannedMember> = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut left_out = LeftOut::default();
@@ -485,6 +488,120 @@ fn add(
     Ok(())
 }
 
+/// The members a PAR2 create actually takes, out of an expansion, and a
+/// line for each kind it leaves out.
+///
+/// The create drops two kinds of file on its own, as the reference does:
+/// an EMPTY file ("Skipping 0 byte file" - PAR2 has nothing to protect
+/// in one) and, under an explicit `-B`, a file outside it ("Ignoring out
+/// of basepath source file"). The pane counted both, in its file count,
+/// its block grid and its volume sizes, and the run then wrote a set
+/// without them (9 Nov 2026 sweep, planner B1). Both sides now take the
+/// members from here, so the pane draws the set the create writes and
+/// says what it left out.
+///
+/// The basepath test is the create's own shape - the CANONICAL paths,
+/// since that is what `parfast::create`'s `within` compares - so a base
+/// reached through a symlink agrees with the run.
+pub fn par2_members(
+    spec: &CreateSpec,
+    members: Vec<PlannedMember>,
+) -> Result<(Vec<PlannedMember>, Vec<String>), PlanError> {
+    let explicit_base = (spec.path_mode == PathMode::Relative)
+        .then_some(spec.base_path.as_deref())
+        .flatten()
+        .filter(|b| !b.as_os_str().is_empty())
+        .map(identity);
+    let (mut empty, mut outside, mut outside_dir) = (0u64, 0u64, 0u64);
+    let mut kept: Vec<PlannedMember> = members
+        .into_iter()
+        .filter(|m| {
+            if m.length == 0 {
+                empty += 1;
+            }
+            m.length != 0
+        })
+        .collect();
+    // Where the create will look for each member's name: an explicit
+    // `-B`, the `-B` Basename mode is given (every member under it by
+    // construction), or - with none - the folder the `.par2` is written
+    // in, OUTSIDE which the create now ignores a source ("Ignoring out of
+    // basepath source file"). That last case is Relative mode with no
+    // base path, and Basename sources that share no folder (two drives, a
+    // UNC share beside a local disk); the pane counted those members and
+    // the run dropped them. Compared on resolved paths, as the create
+    // compares them.
+    let basename = (spec.path_mode == PathMode::Basename)
+        .then(|| basename_base(&spec.output, &kept))
+        .flatten();
+    let out_dir = match spec.output.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let anchor = match (&explicit_base, &basename) {
+        (Some(b), _) => Some((b.clone(), true)),
+        (None, Some(_)) => None,
+        (None, None) => Some((identity(&out_dir), false)),
+    };
+    if let Some((anchor, explicit)) = &anchor {
+        kept.retain(|m| {
+            let inside = identity(&m.path).starts_with(anchor);
+            if !inside {
+                if *explicit {
+                    outside += 1;
+                } else {
+                    outside_dir += 1;
+                }
+            }
+            inside
+        });
+    }
+    // Each member under the name the create will store: its bare name
+    // whenever Basename members share one folder, else its path below
+    // the base or the output folder - see `basename_base`, which
+    // `options_for` reads for these same members. Relative mode with a
+    // base keeps the name `expand_sources` gave it, which is that strip.
+    if explicit_base.is_none() {
+        let base = (spec.path_mode == PathMode::Basename)
+            .then(|| basename_base(&spec.output, &kept))
+            .flatten()
+            .map(|(b, _)| b);
+        for m in &mut kept {
+            m.name = stored_name(&spec.output, base.as_deref(), &m.path);
+        }
+    }
+    let mut said = Vec::new();
+    if empty > 0 {
+        said.push(format!(
+            "{empty} empty file(s) are not protected: a PAR2 set has nothing to protect in a \
+             file with no bytes, and the create skips them"
+        ));
+    }
+    if outside > 0 {
+        said.push(format!(
+            "{outside} file(s) are outside the base path and are not protected; choose a base \
+             path that holds every source"
+        ));
+    }
+    if outside_dir > 0 {
+        said.push(format!(
+            "{outside_dir} file(s) are outside the folder the recovery set is written to and \
+             are not protected; write the set into a folder that holds every source, or set \
+             a base path"
+        ));
+    }
+    if kept.is_empty() {
+        return Err(PlanError::new(
+            "no_sources",
+            match said.first() {
+                Some(why) => format!("nothing left to protect: {why}"),
+                None => "no files to protect".to_string(),
+            },
+        ));
+    }
+    Ok((kept, said))
+}
+
 /// The `parfast::cli::Options` this spec means, and the warnings the
 /// translation produced.
 ///
@@ -528,8 +645,14 @@ pub fn options_for(
         no_clobber: !spec.overwrite,
         ..Default::default()
     };
+    // An EMPTY base path is no base path. Sent as-is it spelt a bare
+    // `-B` on the line, which the parser then read the NEXT argument
+    // into.
     if spec.path_mode == PathMode::Relative {
-        o.basepath = spec.base_path.clone();
+        o.basepath = spec.base_path.clone().filter(|b| !b.as_os_str().is_empty());
+    } else if let Some((b, warning)) = basename_base(&spec.output, members) {
+        o.basepath = Some(b);
+        warnings.extend(warning);
     }
     // An untouched Comment field is the absence of a comment and not an
     // empty one, so the run and the copied command line both omit it.
@@ -599,6 +722,92 @@ pub fn options_for(
     Ok((o, warnings))
 }
 
+/// The `-B` a BASENAME-mode create needs, when it needs one, and the
+/// note to show with it.
+///
+/// # Why Basename mode can need a base path at all
+///
+/// The create stores each member's name relative to `-B` and, with no
+/// `-B`, relative to the folder the `.par2` is written in. A member under
+/// NEITHER was stored under its raw path (`/abs/a.bin`, joined as
+/// `//abs/a.bin`), and since the CLI's own A6 fix (9 Nov 2026) it is
+/// IGNORED instead, the reference's "Ignoring out of basepath source
+/// file" - so a set written into a different folder from its sources,
+/// the ordinary GUI shape, would protect nothing and fail at exit 3. This
+/// pane names every member by its basename, so the run is given the base
+/// that makes the create store exactly that:
+///
+/// * every member under the output folder: `None`, the reference's own
+///   default, and the line stays as it always was. Each is stored by its
+///   path below the output folder - its bare name when it sits right in
+///   it, `sub/a.bin` when it sits in a subfolder - which is what a verify
+///   of that `.par2` from that folder resolves. (A `-B sub` here stored
+///   `a.bin`, and the verify then looked for `/out/a.bin` and called the
+///   member missing.)
+/// * every member in ONE folder that is not under it: that folder, so
+///   each is stored by its name alone - what Basename promises - wherever
+///   the set is written.
+/// * members in several folders, some outside it: their nearest common
+///   folder, so each is stored by its path below that, and a note says
+///   so. No single `-B` can store bare names for files in different
+///   folders, and the create takes no per-file name.
+///
+/// [`par2_members`] renames the pane's members to match ([`stored_name`]),
+/// so the preview's names - and the packet sizes built on them - are the
+/// run's. `None` too when the members share no folder at all (two Windows
+/// drives), which no `-B` can answer.
+fn basename_base(output: &Path, members: &[PlannedMember]) -> Option<(PathBuf, Option<String>)> {
+    let out_dir = output.parent().unwrap_or(Path::new(""));
+    let mut parents = members.iter().filter_map(|m| m.path.parent());
+    let first = parents.next()?.to_path_buf();
+    let mut common = first.clone();
+    let mut several = false;
+    for p in parents {
+        if p != first {
+            several = true;
+        }
+        while !p.starts_with(&common) {
+            if !common.pop() {
+                return None;
+            }
+        }
+    }
+    if members.iter().all(|m| m.path.strip_prefix(out_dir).is_ok()) {
+        return None;
+    }
+    if !several {
+        return Some((first, None));
+    }
+    if common.as_os_str().is_empty() {
+        return None;
+    }
+    let note = format!(
+        "these files are in more than one folder, so each is stored by its path below {} \
+         rather than by its name alone",
+        common.display()
+    );
+    Some((common, Some(note)))
+}
+
+/// The name the create stores for `path`: its path below `base` (the
+/// `-B` [`basename_base`] chose) or, with none, below the output folder,
+/// `/`-joined as the create joins it. The basename when neither strips,
+/// which `basename_base` never leaves to happen.
+fn stored_name(output: &Path, base: Option<&Path>, path: &Path) -> String {
+    let out_dir = output.parent().unwrap_or(Path::new(""));
+    match path.strip_prefix(base.unwrap_or(out_dir)) {
+        Ok(rel) => rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+        Err(_) => path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    }
+}
+
 /// The block size and block count this spec resolves to - the two
 /// numbers every other number below depends on.
 fn grid(o: &parfast::cli::Options, lengths: &[u64]) -> (u64, u64, Option<u64>) {
@@ -620,7 +829,15 @@ fn apply_scheme(
     // head on top of the slice itself - the writer's own 68, read out
     // of `par2gen` rather than restated as a literal.
     let per_block = block_size.saturating_add(68);
+    // `-n` above the recovery count is a REFUSAL in the create ("Too many
+    // recovery files specified", exit 3), not a clamp - so a count this
+    // pane would lay out happily had to be resolved here, where the pane
+    // and the run both read it, or the preview drew a set the run then
+    // refused (9 Nov 2026 sweep, A38). No recovery blocks means no
+    // volumes at all, so no `-n`; more files than blocks is one block
+    // per file, said out loud.
     match &spec.volumes {
+        VolumeSpec::None if recovery == 0 => {}
         VolumeSpec::None => o.recovery_files = Some(1),
         VolumeSpec::Uniform {
             files,
@@ -643,11 +860,18 @@ fn apply_scheme(
             // `-u` with no count is the variable plan's OWN count made
             // equal-sized, which is what `recovery_file_count` answers
             // when `recovery_files` is None.
-            if n == 0 {
+            if n == 0 || recovery == 0 {
                 o.uniform = true;
             } else {
-                o.recovery_files =
-                    Some(n.clamp(1, u64::from(parfast::help::MAX_RECOVERY_FILES)) as u32);
+                let mut n = n.clamp(1, u64::from(parfast::help::MAX_RECOVERY_FILES));
+                if n > recovery {
+                    warnings.push(format!(
+                        "{n} recovery files were asked for and the set has {recovery} \
+                         recovery block(s), so it gets {recovery} file(s) of one block each"
+                    ));
+                    n = recovery;
+                }
+                o.recovery_files = Some(n as u32);
             }
         }
         VolumeSpec::Pow2 => {}
@@ -691,6 +915,7 @@ pub fn preview(spec: &CreateSpec) -> Result<PlanPreview, PlanError> {
         spec.base_path.as_deref(),
         SourceRules::Par2,
     )?;
+    let (members, dropped) = par2_members(spec, members)?;
     // EVERYTHING the create is told is in here, and nothing is added to
     // it below: `runner::run_create` builds its argv from this same
     // call, so a switch this pane resolved on its own would be a switch
@@ -702,6 +927,7 @@ pub fn preview(spec: &CreateSpec) -> Result<PlanPreview, PlanError> {
     // user should press Create at all, and a pane that shows it fourth
     // under three notes about `-r` has published it without saying it.
     let mut warnings = left_out.lines();
+    warnings.extend(dropped);
     warnings.extend(translation_warnings);
     let lengths: Vec<u64> = members.iter().map(|m| m.length).collect();
     let (block_size, block_count, _raised) = grid(&o, &lengths);
@@ -756,25 +982,17 @@ pub fn preview(spec: &CreateSpec) -> Result<PlanPreview, PlanError> {
     let recovery_bytes = recovery.saturating_mul(block_size);
     let total_bytes: u64 = planned.iter().map(|f| f.bytes).sum();
 
-    // `plan_files` answers in the ENGINE's fixed-width spelling, and the
-    // create renames afterwards - to par2cmdline's measured widths, or
-    // to the spec's `vol<first>-<last>` under `--std-naming`. So the
-    // names go through the create's own rule, or this pane would list
-    // files the user never sees. (It did, for every set whose widths
-    // the rename narrowed: the pane said `set.vol000+01.par2` and the
-    // disk said `set.vol00+1.par2`.)
-    let final_names = parfast::create::final_volume_names(
-        &base,
-        &planned.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
-        o.first_block,
-        recovery,
-        o.std_naming,
-    );
+    // `plan_files` answers in the plan's own naming, which `create_plan`
+    // sets to the reference's (`par2gen::VolumeNaming::Reference`), so these
+    // ARE the names the create writes. Until 9 Nov 2026 the engine wrote its
+    // fixed widths and the create renamed afterwards, and this pane mapped
+    // the list through `parfast::create::final_volume_names` to match (it
+    // once said `set.vol000+01.par2` where the disk said `set.vol00+1.par2`);
+    // the engine names the files itself now, through the same rule.
     let files = planned
         .iter()
-        .zip(final_names)
-        .map(|(f, name)| PlannedFile {
-            name,
+        .map(|f| PlannedFile {
+            name: f.name.clone(),
             size: f.bytes,
             blocks: f.blocks as u64,
             efficiency_pct: pct(f.blocks as u64 * block_size, f.bytes),
@@ -2095,5 +2313,167 @@ mod tests {
             base_name(Path::new("/abs/\u{e9}\u{20ac}\u{20ac}")),
             "\u{e9}\u{20ac}\u{20ac}"
         );
+    }
+
+    /// A6: Basename mode with the set written somewhere else is given
+    /// the source folder as `-B`, so the run stores the bare names the
+    /// pane shows; with the set beside its sources nothing changes.
+    #[test]
+    fn a_basename_set_written_elsewhere_gets_its_source_folder_as_base() {
+        let d = tmp("basename-elsewhere");
+        let src = d.join("src");
+        let out = d.join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let mut spec = spec_over(&src, &[("a.bin", 9_000), ("b.bin", 4_000)]);
+        let beside = preview(&spec).expect("beside");
+        assert!(!beside.command.contains("-B"), "{}", beside.command);
+        spec.output = out.join("set.par2");
+        let members = expand_sources(&spec.sources, spec.path_mode, None, SourceRules::Par2)
+            .unwrap()
+            .members;
+        let (o, warnings) = options_for(&spec, &members).expect("options");
+        assert_eq!(o.basepath.as_deref(), Some(src.as_path()));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // Two folders: their common folder, said out loud.
+        std::fs::create_dir_all(src.join("deeper")).unwrap();
+        std::fs::write(src.join("deeper/c.bin"), vec![3u8; 100]).unwrap();
+        spec.sources.push(Source {
+            path: src.join("deeper/c.bin"),
+            recursive: false,
+        });
+        let members = expand_sources(&spec.sources, spec.path_mode, None, SourceRules::Par2)
+            .unwrap()
+            .members;
+        let (o, warnings) = options_for(&spec, &members).expect("options");
+        assert_eq!(o.basepath.as_deref(), Some(src.as_path()));
+        assert!(
+            warnings.iter().any(|w| w.contains("more than one folder")),
+            "{warnings:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Planner B2: an EMPTY base path is no base path - never a bare
+    /// `-B` that would swallow the next argument.
+    #[test]
+    fn an_empty_base_path_spells_no_dash_b() {
+        let d = tmp("empty-base");
+        let mut spec = spec_over(&d, &[("a.bin", 9_000)]);
+        spec.path_mode = PathMode::Relative;
+        spec.base_path = Some(PathBuf::new());
+        let p = preview(&spec).expect("preview");
+        assert!(!p.command.contains(" -B"), "{}", p.command);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A38: a volume count the create would REFUSE is resolved before
+    /// either side sees it - none at all with no recovery blocks, and no
+    /// more files than blocks.
+    #[test]
+    fn a_volume_count_the_create_refuses_is_resolved_for_both_sides() {
+        let d = tmp("volcount");
+        let mut spec = spec_over(&d, &[("a.bin", 64_000)]);
+        spec.block = Some(BlockSpec::Size { size: 4_096 });
+        spec.recovery = Some(RecoverySpec::Count { count: 0 });
+        spec.volumes = VolumeSpec::None;
+        let members = expand_sources(&spec.sources, spec.path_mode, None, SourceRules::Par2)
+            .unwrap()
+            .members;
+        let (o, _) = options_for(&spec, &members).expect("options");
+        assert_eq!(
+            o.recovery_files, None,
+            "-n1 over no recovery blocks is refused"
+        );
+        spec.recovery = Some(RecoverySpec::Count { count: 4 });
+        spec.volumes = VolumeSpec::Uniform {
+            files: Some(30),
+            blocks_per_file: None,
+            file_size: None,
+        };
+        let (o, warnings) = options_for(&spec, &members).expect("options");
+        assert_eq!(o.recovery_files, Some(4));
+        assert!(
+            warnings.iter().any(|w| w.contains("30 recovery files")),
+            "{warnings:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Planner B1: the empty files the create skips are not counted by
+    /// the pane either, and it says so.
+    #[test]
+    fn empty_files_are_left_out_of_the_preview_and_said() {
+        let d = tmp("empties");
+        let spec = spec_over(&d, &[("a.bin", 9_000), ("empty.bin", 0)]);
+        let p = preview(&spec).expect("preview");
+        assert_eq!(p.source_files, 1, "{p:?}");
+        assert!(
+            p.warnings.iter().any(|w| w.contains("1 empty file")),
+            "{:?}",
+            p.warnings
+        );
+        assert!(!p.command.contains("empty.bin"), "{}", p.command);
+        let only_empty = spec_over(&d, &[("empty.bin", 0)]);
+        assert_eq!(
+            preview(&only_empty).expect_err("nothing to protect").code,
+            "no_sources"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Review item 3: sources all in a SUBFOLDER of the output folder
+    /// keep the reference's default - no `-B`, stored as `sub/a.bin` -
+    /// because that is what a verify of the set from its own folder
+    /// resolves. And the pane names them that way too.
+    #[test]
+    fn sources_in_a_subfolder_of_the_output_keep_their_folder_in_the_name() {
+        let d = tmp("subfolder");
+        let sub = d.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let mut spec = spec_over(&sub, &[("a.bin", 9_000), ("b.bin", 4_000)]);
+        spec.output = d.join("set.par2");
+        let members = expand_sources(&spec.sources, spec.path_mode, None, SourceRules::Par2)
+            .unwrap()
+            .members;
+        let (kept, said) = par2_members(&spec, members).expect("members");
+        assert!(said.is_empty(), "{said:?}");
+        let names: Vec<&str> = kept.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["sub/a.bin", "sub/b.bin"]);
+        let (o, _) = options_for(&spec, &kept).expect("options");
+        assert_eq!(o.basepath, None, "no -B: the reference's default");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Review item 4a: Relative mode with NO base path, over sources
+    /// outside the output folder, which the create now ignores - the pane
+    /// leaves them out too and says so, or refuses when nothing is left.
+    #[test]
+    fn relative_without_a_base_leaves_out_what_the_create_ignores() {
+        let d = tmp("relative-nobase");
+        let (src, out) = (d.join("src"), d.join("out"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let mut spec = spec_over(&src, &[("far.bin", 9_000)]);
+        std::fs::write(out.join("near.bin"), vec![1u8; 5_000]).unwrap();
+        spec.sources.push(Source {
+            path: out.join("near.bin"),
+            recursive: false,
+        });
+        spec.output = out.join("set.par2");
+        spec.path_mode = PathMode::Relative;
+        let p = preview(&spec).expect("preview");
+        assert_eq!(p.source_files, 1, "{p:?}");
+        assert!(
+            p.warnings
+                .iter()
+                .any(|w| w.contains("outside the folder the recovery set")),
+            "{:?}",
+            p.warnings
+        );
+        assert!(!p.command.contains("far.bin"), "{}", p.command);
+        spec.sources.pop();
+        assert_eq!(preview(&spec).expect_err("nothing left").code, "no_sources");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

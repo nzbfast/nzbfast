@@ -2118,6 +2118,25 @@ mod noset;
 use noset::settle_without_set;
 pub(super) use noset::{fetch_matched_deferred, reclaim_par2_named_payload};
 
+/// The RAR volumes in `out_dir` the recovery-record rung is about to
+/// judge, by their out_dir-relative name, lowercased - read BEFORE the
+/// rung runs, so the answer is the population the rung itself walked.
+///
+/// Same listing the rung takes (`rarfix::collect_rar_volumes`), so a file
+/// is in this set exactly when the rung's extraction attempt could have
+/// spoken for it. An unreadable directory is the empty set, which is the
+/// safe direction for both readers: each then has to find another proof
+/// for every damaged file. Here with the parent, beside
+/// `conflicting_unvouched`, for the reason that one stayed: both settle
+/// arms run the rung and both ask this (read-only sweep A2, 9 Nov 2026).
+fn rr_volume_names(out_dir: &Path) -> std::collections::HashSet<String> {
+    crate::rarfix::collect_rar_volumes(out_dir)
+        .unwrap_or_default()
+        .iter()
+        .map(|p| nzbkit::disk::out_name_of(out_dir, p).to_lowercase())
+        .collect()
+}
+
 /// The slots whose bytes two articles of the post CONTRADICTED, with no
 /// recovery set to adjudicate the disagreement - phrased as the refusal,
 /// or `None` when there are none.

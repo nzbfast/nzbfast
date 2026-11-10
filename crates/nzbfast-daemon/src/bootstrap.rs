@@ -394,6 +394,50 @@ pub fn load_settings(path: &std::path::Path) -> serde_json::Map<String, Value> {
         .unwrap_or_default()
 }
 
+/// Read a saved LIST setting one entry at a time.
+///
+/// `serde_json::from_value::<Vec<T>>` is all-or-nothing: one entry this
+/// build cannot read (a hand edit, a field an older or newer release
+/// spelt differently) discarded the whole list, the daemon came up with
+/// none of it, and the next save from the page that now showed an empty
+/// list persisted the loss. This keeps every entry that reads and names
+/// each one that does not, as `entry N: <why>`, for the caller to log
+/// under its own target. `Err` only when the value is not a list at all,
+/// which leaves the caller's current value alone exactly as before.
+pub fn saved_entries<T: serde::de::DeserializeOwned>(
+    v: &Value,
+) -> Result<(Vec<T>, Vec<String>), String> {
+    let arr = v.as_array().ok_or("not a list")?;
+    let mut good = Vec::with_capacity(arr.len());
+    let mut bad = Vec::new();
+    for (i, e) in arr.iter().enumerate() {
+        match serde_json::from_value::<T>(e.clone()) {
+            Ok(t) => good.push(t),
+            Err(err) => bad.push(format!("entry {i}: {err}")),
+        }
+    }
+    Ok((good, bad))
+}
+
+/// [`saved_entries`] for a saved MAP setting (`cat_meta`): one value
+/// this build cannot read costs that key, never the whole map.
+pub fn saved_map_entries<T: serde::de::DeserializeOwned>(
+    v: &Value,
+) -> Result<(std::collections::HashMap<String, T>, Vec<String>), String> {
+    let obj = v.as_object().ok_or("not an object")?;
+    let mut good = std::collections::HashMap::with_capacity(obj.len());
+    let mut bad = Vec::new();
+    for (k, e) in obj {
+        match serde_json::from_value::<T>(e.clone()) {
+            Ok(t) => {
+                good.insert(k.clone(), t);
+            }
+            Err(err) => bad.push(format!("{k:?}: {err}")),
+        }
+    }
+    Ok((good, bad))
+}
+
 /// Persist several related settings in one atomic rewrite. `Value::Null`
 /// removes a key. Returning false lets multi-step live state avoid
 /// recording a completion marker that never reached disk.
@@ -435,7 +479,9 @@ pub(super) fn update_settings(
     // read-modify-write so concurrent saves can't drop each other's keys.
     static IO: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _g = IO.lock_ok();
-    let mut map = load_settings(path);
+    let Some(mut map) = load_settings_for_update(path) else {
+        return false;
+    };
     f(&mut map);
     match serde_json::to_string_pretty(&Value::Object(map)) {
         Ok(text) => {
@@ -450,6 +496,44 @@ pub(super) fn update_settings(
             error!(target: "settings", "serialize: {e}");
             false
         }
+    }
+}
+
+/// The read half of [`update_settings`], which unlike [`load_settings`]
+/// may say NO. A reader can degrade to an empty map; a writer that does
+/// the same rewrites settings.json as that empty map plus one key, which
+/// is every other setting gone in one atomic rename. So `None` - refuse
+/// the save, keep the file - whenever the store is there and could not
+/// be read as an object: a read error on the file AND its `.bak` (a
+/// permission flip, an I/O error on a failing disk), or a file that is
+/// valid JSON but not an object.
+///
+/// `load_json_with_backup` answering `None` is "no data" only when the
+/// file is now genuinely absent: a fresh start, a deliberate reset, or
+/// an unparseable file it has already set aside as `.corrupt` (the bytes
+/// are kept there, and the next load would see an absent file anyway).
+fn load_settings_for_update(path: &std::path::Path) -> Option<serde_json::Map<String, Value>> {
+    match crate::persist::load_json_with_backup(path) {
+        Some(Value::Object(map)) => Some(map),
+        Some(_) => {
+            error!(
+                target: "settings",
+                "{} is not a JSON object - not saving over it; fix or remove the file",
+                path.display()
+            );
+            None
+        }
+        None => match std::fs::symlink_metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(serde_json::Map::new()),
+            _ => {
+                error!(
+                    target: "settings",
+                    "{} could not be read - not saving over it",
+                    path.display()
+                );
+                None
+            }
+        },
     }
 }
 
@@ -1366,4 +1450,69 @@ pub fn apply_saved_settings(opts: &mut ServeOpts, path: &std::path::Path) {
     }
     // "schedule" and "feeds" (JSON text) are handled in serve(): they
     // need parsing and the daemon to exist.
+}
+
+#[cfg(test)]
+mod update_settings_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-update-settings-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A16: a settings.json that is valid JSON but not an object loaded
+    /// as `{}`, and the next save wrote `{}` plus one key over it.
+    #[test]
+    fn a_non_object_settings_file_refuses_the_save() {
+        let dir = scratch("non-object");
+        let p = dir.join("settings.json");
+        std::fs::write(&p, br#"[{"host": "news.example"}]"#).unwrap();
+        assert!(!save_settings(&p, &[("speed", json!(1))]));
+        assert_eq!(
+            std::fs::read(&p).unwrap(),
+            br#"[{"host": "news.example"}]"#.to_vec()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A16: a read error on settings.json with no readable `.bak` made the
+    /// next save an atomic wipe of every other setting.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_settings_file_refuses_the_save() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("unreadable");
+        let p = dir.join("settings.json");
+        let body = br#"{"servers_note": "keep me", "speed": 0}"#;
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads through 0o000, so there is nothing to test there.
+        if std::fs::read(&p).is_ok() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        assert!(!save_settings(&p, &[("speed", json!(1))]));
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), body.to_vec());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ...and the paths that must keep saving: a fresh start, and an
+    /// ordinary file.
+    #[test]
+    fn a_fresh_or_ordinary_settings_file_still_saves() {
+        let dir = scratch("ordinary");
+        let p = dir.join("settings.json");
+        assert!(save_settings(&p, &[("a", json!(1))]));
+        assert!(save_settings(&p, &[("b", json!(2))]));
+        let m = load_settings(&p);
+        assert_eq!((m.get("a"), m.get("b")), (Some(&json!(1)), Some(&json!(2))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

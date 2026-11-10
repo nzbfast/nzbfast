@@ -49,6 +49,17 @@ const MOVER_MAX_CONCURRENT: usize = 3;
 #[cfg(any(test, feature = "test-support"))]
 pub static TEST_MOVE_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 
+/// Test seam: `mover_process` trips it between its first check of the
+/// record and raising its `moving` marker, so a test can land a retry or
+/// a delete in the window the re-verify after the marker exists for.
+/// Keyed by nzo_id, the shape `daemon_park::PARK_GEN_BARRIER` takes for
+/// the reason it gives: an unkeyed two-party barrier is a hang for any
+/// other test whose move wanders into it.
+#[cfg(test)]
+pub(crate) static MOVER_FENCE_BARRIER: Mutex<
+    Option<(String, Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
+> = Mutex::new(None);
+
 /// The device behind `root`, as a lane key. `None` when it cannot be
 /// resolved at all, which the caller turns into the shared lane.
 #[cfg(unix)]
@@ -546,6 +557,17 @@ impl Daemon {
             }
             (g.nzo_id.clone(), g.out_dir.clone(), g.category.clone())
         };
+        #[cfg(test)]
+        {
+            let seam = MOVER_FENCE_BARRIER
+                .lock_ok()
+                .clone()
+                .filter(|(k, _, _)| *k == id);
+            if let Some((_, open, release)) = seam {
+                open.wait();
+                release.wait();
+            }
+        }
         // Same fence as recategorize and redrive: deletes and retries
         // stand off while files are in flight.
         if !self.moving.lock_ok().insert(id.clone()) {
@@ -557,7 +579,29 @@ impl Daemon {
                 self.0.moving.lock_ok().remove(&self.1);
             }
         }
-        let _fence = Fence(self.clone(), id);
+        let _fence = Fence(self.clone(), id.clone());
+        // ...and the predicates above once more, now that the marker is
+        // up. A fence raised AFTER its check is not a fence: retry and
+        // both history deletes sample `moving` under the history lock and
+        // take the record out under that same hold (review H7), so one
+        // that sampled in the gap between the check above and the insert
+        // found no marker, pulled the record out of history and re-queued
+        // it - and this move then relocated a directory a live re-download
+        // was writing into, or the payload of a record the user had just
+        // deleted (9 Nov 2026 sweep). `history_change_cat` re-verifies
+        // after raising its marker for exactly this reason; this is the
+        // mover taking the same protocol. History before the record, the
+        // order every other reader takes the pair in.
+        let still_owed = {
+            let h = self.history.lock_ok();
+            h.iter().any(|x| Arc::ptr_eq(x, job)) && {
+                let g = job.lock_ok();
+                g.move_pending && g.state == JobState::Completed && !g.tombstone && !g.finalizing
+            }
+        };
+        if !still_owed {
+            return false;
+        }
         // Test-only: a move with visible width, so a test can watch the
         // lanes overlap (and the fleet cap hold) on a machine with one
         // volume, where every real move is an instant rename.

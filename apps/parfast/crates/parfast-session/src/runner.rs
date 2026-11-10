@@ -155,6 +155,16 @@ pub struct Publisher {
     /// An `Arc` rather than a `Box` so [`Publisher::ring`] can take a
     /// handle to it and let go of this mutex BEFORE calling - see there.
     wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// When the job started running, set by [`run`]. Every update made
+    /// while the job is running or paused stamps `elapsed_ms` from it.
+    ///
+    /// Until 9 Nov 2026 only the verify's per-member hook and the final
+    /// update wrote `elapsed_ms`, so a create, a repair or a posting set
+    /// showed "0.0 s" elapsed for its whole run however long it took -
+    /// found driving the mac app over a 24 GiB create. Stamped here
+    /// rather than in each progress sink, so a sink added tomorrow
+    /// cannot forget it.
+    started: Mutex<Option<Instant>>,
 }
 
 impl Publisher {
@@ -162,7 +172,13 @@ impl Publisher {
         Arc::new(Publisher {
             snapshot: Mutex::new(snapshot),
             wake: Mutex::new(None),
+            started: Mutex::new(None),
         })
+    }
+
+    /// The job began running at `at`; see the field.
+    pub fn mark_started(&self, at: Instant) {
+        *self.started.lock().unwrap_or_else(|p| p.into_inner()) = Some(at);
     }
 
     pub fn set_wake(&self, f: Option<Box<dyn Fn() + Send + Sync>>) {
@@ -191,8 +207,17 @@ impl Publisher {
     /// that is not reentrant. Cancelling a queued job was the shortest
     /// route to it.
     pub fn update_quiet(&self, f: impl FnOnce(&mut JobSnapshot)) {
+        // Read before the snapshot lock, so the two are never nested.
+        let started = *self.started.lock().unwrap_or_else(|p| p.into_inner());
         let mut s = self.snapshot.lock().unwrap_or_else(|p| p.into_inner());
         f(&mut s);
+        // Only while the job is live: the final update writes the job's
+        // own figure with the state, and a finished job's clock stops.
+        if let Some(t) = started
+            && matches!(s.state, JobState::Running | JobState::Paused)
+        {
+            s.elapsed_ms = s.elapsed_ms.max(t.elapsed().as_millis() as u64);
+        }
     }
 
     pub fn ring(&self) {
@@ -390,7 +415,10 @@ pub struct Job {
 
 /// Run one job to completion on the calling thread.
 pub fn run(job: &Job) {
+    #[cfg(test)]
+    run_seam(job);
     let started = Instant::now();
+    job.publisher.mark_started(started);
     job.publisher.update(|s| {
         s.state = JobState::Running;
         s.phase = Phase::Scanning;
@@ -436,8 +464,11 @@ pub fn run(job: &Job) {
     // and it says which in its exit code. Labelling a sealed set
     // "Cancelled" left a complete, valid recovery set on disk that the
     // job named none of and that API.md forbids the host to offer to
-    // clean up. So an outcome may now declare itself the engine's, and
-    // exactly one does - see `Outcome::committed` and the create.
+    // clean up. So an outcome may now declare itself the engine's - see
+    // `Outcome::committed`. Three do: a sealed create, a finished posting
+    // set (both halves on disk and named), and a repair that completed
+    // (9 Nov 2026 sweep, A9's GUI twin: every member renamed in, which a
+    // Cancel cannot take back either).
     let state = final_state(job.control.is_cancelled(), &outcome);
     job.publisher.update(|s| {
         s.state = state;
@@ -458,6 +489,76 @@ pub fn run(job: &Job) {
             s.phase_text = "Cancelled".to_string();
         }
     });
+}
+
+/// A hook a test installs to stand at the top of [`run`] - to make one
+/// job panic, which nothing reachable from a spec does on purpose. Each
+/// hook is handed the job and must return at once for any job it does
+/// not recognise: the seam is process-global and `cargo test` runs this
+/// whole lib in one process (see `queue::PERSIST_SEAM` for the same
+/// rule). A LIST, so two tests standing in one seam at once never
+/// replace each other's hook.
+#[cfg(test)]
+pub(crate) static RUN_SEAM: Seam = Seam::new();
+
+/// A test-only list of hooks at one named moment in a job. See
+/// [`RUN_SEAM`] and [`REPAIR_RETURNED_SEAM`].
+#[cfg(test)]
+pub(crate) struct Seam(Mutex<Vec<SeamHook>>);
+
+#[cfg(test)]
+pub(crate) type SeamHook = Arc<dyn Fn(&Job) + Send + Sync>;
+
+#[cfg(test)]
+impl Seam {
+    const fn new() -> Seam {
+        Seam(Mutex::new(Vec::new()))
+    }
+
+    /// Install `f` until the returned guard drops.
+    pub(crate) fn add(&'static self, f: SeamHook) -> SeamGuard {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(Arc::clone(&f));
+        SeamGuard {
+            seam: self,
+            hook: f,
+        }
+    }
+
+    fn fire(&self, job: &Job) {
+        // Cloned out and the lock released first: a hook may panic, and
+        // one that did while this was held would poison every other
+        // test's seam.
+        let hooks: Vec<SeamHook> = self.0.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        for h in hooks {
+            h(job);
+        }
+    }
+}
+
+/// Removes its hook from its [`Seam`] when dropped.
+#[cfg(test)]
+pub(crate) struct SeamGuard {
+    seam: &'static Seam,
+    hook: SeamHook,
+}
+
+#[cfg(test)]
+impl Drop for SeamGuard {
+    fn drop(&mut self) {
+        self.seam
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|h| !Arc::ptr_eq(h, &self.hook));
+    }
+}
+
+#[cfg(test)]
+fn run_seam(job: &Job) {
+    RUN_SEAM.fire(job);
 }
 
 /// The state a finished job REPORTS, which is its own outcome unless a
@@ -713,6 +814,9 @@ fn run_repair(job: &Job, spec: &RepairSpec, started: Instant) -> Outcome {
     );
     let mut sink = sink_for(job);
     let command = verify_command_line(&opts, true);
+    // What the set says about itself, read NOW: a `-p` repair deletes the
+    // index this comes from, and the engine's survey carries none of it.
+    let described = describe_set(&spec.par2);
     job.publisher.update(|s| {
         s.command = command;
         s.phase = Phase::Hashing;
@@ -730,9 +834,24 @@ fn run_repair(job: &Job, spec: &RepairSpec, started: Instant) -> Outcome {
             Some(Arc::new(RepairProgress::new(job.publisher.clone()))),
             Some(job.control.engine_gate()),
         ),
+        par2: &spec.par2,
+        described: described.as_ref(),
     };
     let code = parfast::repair::run_watched(&opts, &mut sink, &watch);
-    if job.control.is_cancelled() {
+    // The window a late Cancel lands in, named for the test that stands
+    // in it - see `REPAIR_RETURNED_SEAM`.
+    #[cfg(test)]
+    repair_returned_seam(job);
+    // THE EXIT CODE DECIDES, for the create's reason (`run_create_banded`
+    // carries the whole argument). A repair whose engine honoured a
+    // cancel never answers success - `repair::run_watched` turns it into
+    // "repair possible" - so `EXIT_SUCCESS` means every member was made
+    // whole and renamed in, and the purge (if asked) has run. This read
+    // the cancel FLAG first, so a Cancel that landed after the engine's
+    // last poll reported a completed repair as Cancelled with no result:
+    // repaired files on disk, backups consumed, recovery files possibly
+    // purged, and a job saying nothing happened.
+    if code != parfast::EXIT_SUCCESS && job.control.is_cancelled() {
         return Outcome::cancelled();
     }
     // The map the watch captured before the fold, brought forward. A
@@ -772,6 +891,7 @@ fn run_repair(job: &Job, spec: &RepairSpec, started: Instant) -> Outcome {
                 ]]
             };
         }
+        describe_model(m, &spec.par2, described.as_ref(), repaired);
     }
     let state = if repaired {
         JobState::Done
@@ -797,8 +917,22 @@ fn run_repair(job: &Job, spec: &RepairSpec, started: Instant) -> Outcome {
             )
         }),
         survey: model,
-        committed: false,
+        // A completed repair is finished work a late cancel may not
+        // unmake, for the reason given at the exit-code check above.
+        committed: repaired,
     }
+}
+
+/// See the call site in [`run_repair`]: a test's hook into the moment
+/// the engine has returned and the runner has not yet read the cancel
+/// flag, which is sub-millisecond and cannot be raced from outside. Same
+/// rules as [`RUN_SEAM`].
+#[cfg(test)]
+pub(crate) static REPAIR_RETURNED_SEAM: Seam = Seam::new();
+
+#[cfg(test)]
+fn repair_returned_seam(job: &Job) {
+    REPAIR_RETURNED_SEAM.fire(job);
 }
 
 /// Is `name` a file of the recovery set based on `base`? The index
@@ -815,12 +949,29 @@ fn run_repair(job: &Job, spec: &RepairSpec, started: Instant) -> Outcome {
 /// `.par2` / `.vol` parts in any case, because the index keeps the case
 /// the user typed (`set.PAR2`) while `parfast::create` strips that
 /// suffix case-blind (Gemini sweep H9).
+///
+/// The volume part must be a real volume's SHAPE - `vol`, digits, `+` or
+/// `-`, digits - and not merely start with `vol`. The prefix test claimed
+/// `Show.Vol.1.par2` and `Show.volume.par2` for a set called `Show`,
+/// which the written-file report then listed as this job's output and
+/// the posting set's overwrite path DELETED (9 Nov 2026 sweep, A40).
 fn set_member(base: &str, name: &str) -> bool {
     let Some(rest) = name.strip_prefix(base) else {
         return false;
     };
     let rest = rest.to_ascii_lowercase();
-    rest == ".par2" || (rest.starts_with(".vol") && rest.ends_with(".par2"))
+    if rest == ".par2" {
+        return true;
+    }
+    let Some(span) = rest
+        .strip_prefix(".vol")
+        .and_then(|r| r.strip_suffix(".par2"))
+    else {
+        return false;
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    span.split_once(['+', '-'])
+        .is_some_and(|(first, second)| digits(first) && digits(second))
 }
 
 /// The first file of `output`'s recovery set already on disk, if any.
@@ -870,7 +1021,16 @@ fn run_create_banded(job: &Job, spec: &CreateSpec, band: (f64, f64)) -> Outcome 
     // may have changed, and a folder that became unreadable since the
     // pane was drawn would otherwise reach nobody. See
     // `planner::LeftOut`.
-    let coverage = left_out.lines();
+    let mut coverage = left_out.lines();
+    // ...and what the create itself will leave out, taken from the same
+    // function the preview reads, so the run's members are the pane's.
+    let members = match planner::par2_members(spec, members) {
+        Ok((m, dropped)) => {
+            coverage.extend(dropped);
+            m
+        }
+        Err(e) => return Outcome::failed(e.code, e.message),
+    };
     if !coverage.is_empty() {
         let mut early = sink_for(job);
         for line in &coverage {
@@ -1008,10 +1168,12 @@ fn run_create_banded(job: &Job, spec: &CreateSpec, band: (f64, f64)) -> Outcome 
             committed: false,
         };
     }
-    // What is ON DISK, not what was planned: the reference renames its
-    // volumes to par2cmdline's field widths after the writer has
-    // finished, so the planned names are the engine's and these are the
-    // user's.
+    // What is ON DISK, not what was planned. Since 9 Nov 2026 the engine
+    // writes par2cmdline's names itself (`par2gen::VolumeNaming`), so the
+    // two agree; the directory is still the authority, because it is what
+    // the user will see. `set_member` matches no staging name
+    // (`.<name>.<pid>-<n>.tmp`), so a leftover of a killed run is never
+    // reported as this job's output.
     let dir = spec
         .output
         .parent()
@@ -1042,9 +1204,9 @@ fn run_create_banded(job: &Job, spec: &CreateSpec, band: (f64, f64)) -> Outcome 
         error: None,
         survey: None,
         // The engine sealed this set. See the exit-code comment above:
-        // this is the ONE outcome in this file a late cancel may not
-        // rewrite, because it is the one whose work is all-or-nothing
-        // and already finished.
+        // a late cancel may not rewrite it, because its work is
+        // all-or-nothing and already finished. (It was the ONE such
+        // outcome when this was written; `run`'s comment lists the rest.)
         committed: true,
     }
 }
@@ -1097,6 +1259,10 @@ struct FoldWatch<'a> {
     /// parks the engine and one Cancel press is seen by its loops -
     /// there is no second copy of either bit.
     control: par2repair::RepairControl,
+    /// The set's own description, for the picture drawn mid-repair - see
+    /// [`describe_model`].
+    par2: &'a std::path::Path,
+    described: Option<&'a (u64, Vec<(String, u64)>)>,
 }
 
 /// The engine's progress, as the one bar and the one sentence a host
@@ -1457,7 +1623,8 @@ impl parfast::repair::RepairWatch for FoldWatch<'_> {
     }
     fn before_fold(&self, survey: &parfast::verify::Survey) -> bool {
         let ms = self.started.elapsed().as_millis() as u64;
-        let model = model_from_counts(survey);
+        let mut model = model_from_counts(survey);
+        describe_model(&mut model, self.par2, self.described, false);
         self.job.publisher.update(|s| {
             s.phase = Phase::Solving;
             s.phase_text = format!(
@@ -1518,6 +1685,83 @@ fn model_from_counts(survey: &parfast::verify::Survey) -> SurveyModel {
         },
         files,
         block_runs: runs,
+    }
+}
+
+/// The block size and each member's declared length, from the CRITICAL
+/// packets of the set's index file alone (framed by seeking, as
+/// `parfast::verify` frames a volume, so no parity byte is read). `None`
+/// when the index is missing or will not parse; the repair then reports
+/// what the engine's survey has and nothing more.
+fn describe_set(par2: &std::path::Path) -> Option<(u64, Vec<(String, u64)>)> {
+    use nzbkit::par2::{self, Par2Set};
+    let file = std::fs::File::open(par2).ok()?;
+    let len = file.metadata().ok()?.len();
+    let critical = match par2::sparse_frame(&file, len) {
+        Some(frame) => frame.bytes,
+        None => std::fs::read(par2).ok()?,
+    };
+    let set = Par2Set::parse(&[&critical]).ok()?;
+    Some((
+        set.block_size,
+        set.files
+            .iter()
+            .map(|f| (f.name.clone(), f.length))
+            .collect(),
+    ))
+}
+
+/// Fill what a repair's survey ([`model_from_counts`]) cannot know: the
+/// set's name and folder, its block size, each member's size and, once
+/// the repair completed, every member's block count.
+///
+/// Without this the window drew a finished repair with a blank title, a
+/// "0 bytes" block size and "0 bytes" beside every file - found driving
+/// the mac app against the real engine on 9 Nov 2026; the mock filled
+/// them, so nothing had shown it.
+fn describe_model(
+    m: &mut SurveyModel,
+    par2: &std::path::Path,
+    described: Option<&(u64, Vec<(String, u64)>)>,
+    repaired: bool,
+) {
+    if m.set_name.is_empty() {
+        m.set_name = par2
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+    }
+    if m.folder.is_empty() {
+        m.folder = par2
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+    }
+    let Some((block_size, members)) = described else {
+        return;
+    };
+    if m.block_size == 0 {
+        m.block_size = *block_size;
+    }
+    for f in &mut m.files {
+        let Some((_, length)) = members.iter().find(|(n, _)| *n == f.name) else {
+            continue;
+        };
+        if f.size == 0 {
+            f.size = *length;
+        }
+        let blocks = if *block_size == 0 {
+            0
+        } else {
+            length.div_ceil(*block_size) as usize
+        };
+        // Only once the repair completed: before then the block map is
+        // built from the engine's counts, which say nothing of a whole
+        // member's blocks, and a row must not claim blocks the map lacks.
+        if repaired && f.blocks_total == 0 {
+            f.blocks_total = blocks;
+            f.blocks_ok = blocks;
+        }
     }
 }
 
@@ -1763,8 +2007,15 @@ mod checksums {
     }
 
     pub(super) fn verify(job: &Job, spec: &ChecksumVerifySpec, started: Instant) -> Outcome {
-        let text = match std::fs::read_to_string(&spec.file) {
-            Ok(t) => t,
+        // BYTES, then decoded: `read_to_string` refused a UTF-16 file and
+        // read a UTF-8 BOM into the first name. See `checksum::decode_text`.
+        let text = match std::fs::read(&spec.file) {
+            Ok(b) => match checksum::decode_text(&b) {
+                Ok(t) => t,
+                Err(e) => {
+                    return Outcome::failed(e.code, format!("{}: {e}", spec.file.display()));
+                }
+            },
             Err(e) => return Outcome::failed("io", format!("{}: {e}", spec.file.display())),
         };
         let hint = spec
@@ -1807,6 +2058,11 @@ mod checksums {
         let clean = tally.mismatch == 0 && tally.missing == 0;
         // Read off before the tally is moved into the result below.
         let (mismatch, missing) = (tally.mismatch, tally.missing);
+        // Held to `log_tail_lines` like every other log line (`sink_for`):
+        // the rows are all in `result.checksum.entries` anyway, and a
+        // 100,000-entry manifest put 100,000 lines into a snapshot the
+        // host re-reads at every wake.
+        let cap = job.settings.log_tail_lines.max(1);
         job.publisher.update(|s| {
             s.log_tail.extend(rows.iter().map(|r| {
                 format!(
@@ -1819,6 +2075,8 @@ mod checksums {
                     }
                 )
             }));
+            let over = s.log_tail.len().saturating_sub(cap);
+            s.log_tail.drain(..over);
         });
         Outcome {
             state: if clean {
@@ -1974,6 +2232,27 @@ mod tests {
         }
         for name in ["Movie.mkv", "movie.par2", "Movie2.par2", "Movie.par2.bak"] {
             assert!(!set_member(&base, name), "{name} is not one of the set's");
+        }
+    }
+
+    /// A40: a name that merely STARTS with `.vol` is not a volume. The
+    /// prefix test claimed every one of these for a set called `Show`,
+    /// and the posting set's overwrite path deletes what this claims.
+    #[test]
+    fn only_a_real_volume_shape_is_a_set_member() {
+        for name in [
+            "Show.Vol.1.par2",
+            "Show.volume.par2",
+            "Show.vol.par2",
+            "Show.vol+1.par2",
+            "Show.vol1+.par2",
+            "Show.vol1x2.par2",
+            "Show.vol1+2+3.par2",
+        ] {
+            assert!(!set_member("Show", name), "{name} is not a volume");
+        }
+        for name in ["Show.vol0+1.par2", "Show.vol00+01.par2", "Show.vol3-7.par2"] {
+            assert!(set_member("Show", name), "{name} is a volume");
         }
     }
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2347,6 +2626,40 @@ mod tests {
     /// other half. What did change is WHEN the writes may draw: they
     /// now wait for the fold, so the fold is run to full below before
     /// the write is asked for.
+    /// A running job's progress updates carry the time it has run. The
+    /// create and repair sinks never wrote `elapsed_ms`, so the window
+    /// read "0.0 s" for the whole of a 24 GiB create (found driving the
+    /// mac app, 9 Nov 2026). And a finished job's clock stops: an update
+    /// after the end must not move it.
+    #[test]
+    fn a_running_jobs_updates_carry_its_elapsed_time() {
+        use par2repair::ProgressSink;
+        let p = Publisher::new(JobSnapshot::queued(
+            1,
+            JobKind::Create,
+            "2026-11-09T00:00:00Z".into(),
+            false,
+        ));
+        let began = Instant::now()
+            .checked_sub(std::time::Duration::from_millis(2_500))
+            .expect("an instant 2.5 s ago");
+        p.mark_started(began);
+        p.update(|s| s.state = JobState::Running);
+        let sink = CreateProgress::new(Arc::clone(&p), (0.0, 1.0));
+        sink.progress(par2repair::RepairPhase::Verify, 1, 2);
+        assert!(p.get().elapsed_ms >= 2_500, "{:?}", p.get().elapsed_ms);
+        let repair = RepairProgress::new(Arc::clone(&p));
+        repair.progress(par2repair::RepairPhase::Fold, 1, 2);
+        assert!(p.get().elapsed_ms >= 2_500, "{:?}", p.get().elapsed_ms);
+
+        p.update(|s| {
+            s.state = JobState::Done;
+            s.elapsed_ms = 7;
+        });
+        p.update(|s| s.low_priority = true);
+        assert_eq!(p.get().elapsed_ms, 7, "a finished job's clock moved");
+    }
+
     #[test]
     fn a_creates_hash_and_fold_share_one_span_and_the_writes_are_the_last_tenth() {
         use par2repair::ProgressSink;

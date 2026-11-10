@@ -522,7 +522,9 @@ const RESERVED: [&str; 8] = [
 /// the corpus writes is exactly the eight this table allows, and the
 /// count of `<file>`-to-`<group>`, `<file>`-to-`<segment>`, foreign
 /// wrappers of core children, second roots and non-`<nzb>` roots is
-/// ZERO in all 270. Nothing here was loosened, on evidence.
+/// ZERO in all 270. Nothing here was loosened, on evidence. (One edge
+/// was added later, on field evidence the census lacked: `<meta>`
+/// directly under `<nzb>`, issue 121 - see the arm.)
 ///
 /// The sample's own weakness, stated because a census that implies
 /// coverage it lacks is worse than none: 253 of the 270 are one
@@ -543,6 +545,16 @@ fn child_ctx(parent: Ctx, local: &str, is_core: bool) -> Option<Ctx> {
         (Ctx::Nzb, "head") => Some(Ctx::Head),
         (Ctx::Nzb, "file") => Some(Ctx::File),
         (Ctx::Head, "meta") => Some(Ctx::Meta),
+        // A FIELD dialect the 2026-08-30 census below did not contain:
+        // one indexer writes its category `<meta>` straight under the
+        // root, after a `<head>` holding the password (issue 121, via
+        // NZBHydra2). It was refused, so every grab from that indexer
+        // failed while SABnzbd took the same documents. A `<meta>` names
+        // no file, so reading it wherever the root holds it cannot lose
+        // one; it lands in the same list as a `<head>` meta, in document
+        // order, so a `<head>` written first still supplies the password.
+        // `<meta>` anywhere deeper is still refused.
+        (Ctx::Nzb, "meta") => Some(Ctx::Meta),
         (Ctx::File, "groups") => Some(Ctx::Groups),
         (Ctx::File, "segments") => Some(Ctx::Segments),
         (Ctx::Groups, "group") => Some(Ctx::Group),

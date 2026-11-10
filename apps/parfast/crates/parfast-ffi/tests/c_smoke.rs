@@ -87,8 +87,14 @@ fn the_whole_life_cycle_through_the_c_abi() {
         std::fs::write(dir.join(name), payload(len, seed)).expect("fixture");
     }
 
-    let c_dir =
-        std::ffi::CString::new(dir.to_string_lossy().as_ref()).expect("a temp path holds no NUL");
+    // FORWARD SLASHES for the C side, which splices this directory into
+    // JSON with `snprintf` and no escaping: a Windows path's backslashes
+    // are invalid JSON escapes there, the spec does not parse and the
+    // preview answers NULL at step 3. Windows' file APIs take `/` as a
+    // separator, so the same directory reaches the engine either way.
+    // Green on unix only until first run on Windows (9 Nov 2026).
+    let c_dir = std::ffi::CString::new(dir.to_string_lossy().replace('\\', "/"))
+        .expect("a temp path holds no NUL");
     // SAFETY: `c_dir` is a live NUL-terminated string for the duration
     // of the call, which is the C function's only precondition.
     let step = unsafe { pf_smoke_run(c_dir.as_ptr()) };

@@ -56,6 +56,18 @@ pub(super) fn plan_mapped_repair(
     set_scope: Option<(&[Option<usize>], usize)>,
 ) -> Option<MappedPlan> {
     use nzbkit::par2repair::{MAX_INPUT_SLICES, MAX_REPAIR_DIM};
+    // A recovery member the Main packet lists but no usable FileDesc
+    // describes is ABSENT from `set.files`, and `set.files` is the
+    // global slice index space: this plan lays members onto slice
+    // numbers by walking it in order, so one dropped member shifts every
+    // later member's slices and the solve rebuilds garbage into the
+    // holes (9 Nov 2026 sweep, A6). The disk driver refuses the same set
+    // by name ("No details available for recoverable file number N");
+    // decline here so the caller falls back to it and the job fails
+    // with that reason instead of a doomed in-place solve.
+    if !set.undescribed.is_empty() {
+        return None;
+    }
     // Gate: every set file must be one of
     //  - verified/damaged with a sane ledger, DAMAGED only if mapped or
     //    plain-patchable (a clean plain file was always fine - read_at
@@ -310,6 +322,7 @@ mod scope_tests {
             recovery_set_id: [0u8; 16],
             block_size: 4096,
             files,
+            undescribed: Vec::new(),
             nonrecovery: Vec::new(),
             recovery_blocks_seen: 0,
         }
@@ -325,6 +338,35 @@ mod scope_tests {
             length: 4096,
             prefix_md5: None,
         }
+    }
+
+    /// 9 Nov 2026 sweep, A6: a set whose Main packet lists a recovery
+    /// member no FileDesc describes has a hole in `files`, which is the
+    /// slice index space this plan walks. It must decline outright - the
+    /// same inputs with the member described still plan, which is what
+    /// shows the decline is about the undescribed member and nothing
+    /// else.
+    #[test]
+    fn a_set_with_an_undescribed_member_is_never_planned_in_place() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-mapundesc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ex = nzbkit::extract::Extractor::new(&dir, 8, true);
+        let reports = vec![(7usize, report("shared.bin"))];
+        let slot_sets: Vec<Option<usize>> = vec![None, None, None, None, None, None, None, Some(1)];
+
+        let whole = pset(vec![pfile("shared.bin", 4096)]);
+        assert!(
+            plan_mapped_repair(&whole, 4096, &ex, &reports, &[], Some((&slot_sets, 1))).is_some(),
+            "control: the fully described set plans"
+        );
+        let mut holed = pset(vec![pfile("shared.bin", 4096)]);
+        holed.undescribed = vec![(0, [9u8; 16])];
+        assert!(
+            plan_mapped_repair(&holed, 4096, &ex, &reports, &[], Some((&slot_sets, 1))).is_none(),
+            "a member missing from the slice space must send the job to the disk driver"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Read-only sweep finding 9 (31 Aug 2026): a report belonging to

@@ -992,6 +992,79 @@ fn redirect_to(req: tiny_http::Request, where_to: &str) {
     let _ = req.respond(resp);
 }
 
+/// How many /api bodies may be read at once BEFORE their caller has
+/// shown any credential (bug sweep 9 Nov 2026, section C).
+///
+/// SAB parity forces that read: NZBDonkey and NZB Unity send
+/// `apikey` as a form field with nothing in the query, so the body has to
+/// be read to find the key (see the router's note above `handle_api`).
+/// The body budget bounds the MEMORY such reads hold, and tiny_http's
+/// rate floor (8 KiB/s after a 30 s grace, an hour at most) bounds how
+/// slow one may be - but nothing bounded how many WORKERS they hold, so
+/// eight peers each trickling 8 KiB/s pinned all eight and the dashboard,
+/// the *arrs and the tray all stopped getting answers, with no key
+/// needed. Half the pool is the ceiling: a caller whose credential is in
+/// the query, in a signed-in session, or on a keyless install never
+/// queues here, so the other half always stays free for them. A fifth
+/// concurrent key-in-body upload is refused at once rather than parked,
+/// because a parked request holds its worker exactly as the read did.
+const PREAUTH_BODY_READERS: usize = 4;
+
+/// A counted slot under [`PREAUTH_BODY_READERS`]: held for the length of
+/// the read and released on drop, whichever way the handler leaves.
+struct PreauthPool(std::sync::atomic::AtomicUsize);
+struct PreauthSlot(&'static PreauthPool);
+impl PreauthPool {
+    fn try_take(&'static self, max: usize) -> Option<PreauthSlot> {
+        use std::sync::atomic::Ordering;
+        self.0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < max).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| PreauthSlot(self))
+    }
+}
+impl Drop for PreauthSlot {
+    fn drop(&mut self) {
+        self.0.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+static PREAUTH_POOL: PreauthPool = PreauthPool(std::sync::atomic::AtomicUsize::new(0));
+
+/// Has this request already shown a credential the body cannot change?
+/// The query wins over a form field (`params.entry(..).or_insert`), so a
+/// valid key there is final, as are a keyless install and a signed-in
+/// session (cookie, CSRF token and same-site, the checks the full
+/// decision below makes). Only for the gate above - authorisation is
+/// still decided after the body, against the key as of the decision.
+fn credentialed_before_body(
+    req: &tiny_http::Request,
+    d: &Daemon,
+    params: &std::collections::HashMap<String, String>,
+) -> bool {
+    let apikey = d.apikey.lock_ok().clone();
+    let nzbkey = d.nzbkey.lock_ok().clone();
+    if apikey.is_none() && nzbkey.is_none() {
+        return true;
+    }
+    let given = params.get("apikey").map(String::as_str);
+    let key_ok = |k: &Option<String>| {
+        k.as_deref()
+            .is_some_and(|k| given.is_some_and(|g| ct_eq(g, k)))
+    };
+    if key_ok(&apikey) || key_ok(&nzbkey) {
+        return true;
+    }
+    matches!(
+        d.sessions.check(
+            session_id(req, d).as_deref(),
+            nzbfast_daemon::websession::csrf_header(req).as_deref(),
+        ),
+        nzbfast_daemon::websession::SessionCheck::Ok
+    ) && api::config::same_site_only(req).is_ok()
+}
+
 fn handle_api(
     req: tiny_http::Request,
     d: &Arc<Daemon>,
@@ -1060,6 +1133,29 @@ fn handle_api(
             // No mode in the query and not a form: nothing
             // can dispatch, so nothing needs a large body.
             None => API_BODY_DEFAULT,
+        };
+        // Held until the body is read and parsed; see PREAUTH_BODY_READERS.
+        let _preauth_slot = if credentialed_before_body(&req, d, &params) {
+            None
+        } else {
+            match PREAUTH_POOL.try_take(PREAUTH_BODY_READERS) {
+                Some(slot) => Some(slot),
+                None => {
+                    let _ = req.respond(with_cors(
+                        json_resp(json!({
+                            "status": false,
+                            "error": "too many uploads without an API key at once - try again",
+                        }))
+                        .with_status_code(503)
+                        .with_header(
+                            tiny_http::Header::from_bytes(&b"Retry-After"[..], &b"5"[..])
+                                .expect("static header"),
+                        ),
+                        cors,
+                    ));
+                    return;
+                }
+            }
         };
         {
             let (raw, hold) = read_body_capped_hold(req.as_reader(), cap);
@@ -1960,6 +2056,26 @@ mod tests {
         assert_eq!(api_body_cap("wall_art"), 10 << 20);
         assert_eq!(api_body_cap("queue"), API_BODY_DEFAULT);
         assert_eq!(api_body_cap(""), 1 << 20);
+    }
+
+    /// Uncredentialed body reads hold at most their share of the worker
+    /// pool, and a slot comes back when its holder goes, however it goes
+    /// (bug sweep 9 Nov 2026, section C).
+    #[test]
+    fn preauth_body_readers_are_capped_and_released() {
+        static POOL: PreauthPool = PreauthPool(std::sync::atomic::AtomicUsize::new(0));
+        let held: Vec<_> = (0..PREAUTH_BODY_READERS)
+            .map(|_| POOL.try_take(PREAUTH_BODY_READERS).expect("under the cap"))
+            .collect();
+        assert!(
+            POOL.try_take(PREAUTH_BODY_READERS).is_none(),
+            "one past the cap is refused"
+        );
+        drop(held);
+        assert!(
+            POOL.try_take(PREAUTH_BODY_READERS).is_some(),
+            "drop releases"
+        );
     }
 
     /// The header names and values, spelled out.

@@ -42,8 +42,13 @@ pub fn restore_job_settings(
     settings_path: &Path,
 ) {
     if let Some(v) = saved.get("smart_folders") {
-        match serde_json::from_value::<Vec<crate::smart::Rule>>(v.clone()) {
-            Ok(list) => *daemon.smart_folders.lock_ok() = list,
+        match saved_entries::<crate::smart::Rule>(v) {
+            Ok((list, bad)) => {
+                for e in bad {
+                    warn!(target: "smart", "ignoring one saved smart_folders {e}");
+                }
+                *daemon.smart_folders.lock_ok() = list;
+            }
             Err(e) => warn!(target: "smart", "ignoring saved smart_folders: {e}"),
         }
     }
@@ -72,9 +77,27 @@ pub fn restore_job_settings(
         daemon.finish.set_delay_secs(v);
     }
     if let Some(v) = saved.get("cleanup_exts") {
-        match serde_json::from_value::<Vec<String>>(v.clone()) {
-            Ok(list) => *daemon.cleanup_exts.lock_ok() = list,
+        match saved_entries::<String>(v) {
+            Ok((list, bad)) => {
+                for e in bad {
+                    warn!(target: "cleanup", "ignoring one saved cleanup_exts {e}");
+                }
+                *daemon.cleanup_exts.lock_ok() = list;
+            }
             Err(e) => warn!(target: "cleanup", "ignoring saved cleanup_exts: {e}"),
+        }
+    }
+    // An absent key keeps the default list; a saved EMPTY list is the
+    // user turning the check off, and is restored as exactly that.
+    if let Some(v) = saved.get("refuse_exts") {
+        match saved_entries::<String>(v) {
+            Ok((list, bad)) => {
+                for e in bad {
+                    warn!(target: "cleanup", "ignoring one saved refuse_exts {e}");
+                }
+                *daemon.refuse_exts.lock_ok() = list;
+            }
+            Err(e) => warn!(target: "cleanup", "ignoring saved refuse_exts: {e}"),
         }
     }
     // SAB/NZBGet-parity passwords file. A saved path (adopted from a
@@ -196,10 +219,13 @@ pub fn restore_job_settings(
         daemon.watch_move_rejected.store(on, Ordering::Relaxed);
     }
     if let Some(v) = saved.get("cat_meta") {
-        match serde_json::from_value::<std::collections::HashMap<String, crate::daemon::CatMeta>>(
-            v.clone(),
-        ) {
-            Ok(m) => *daemon.cat_meta.lock_ok() = m,
+        match saved_map_entries::<crate::daemon::CatMeta>(v) {
+            Ok((m, bad)) => {
+                for e in bad {
+                    warn!(target: "config", "ignoring one saved cat_meta entry {e}");
+                }
+                *daemon.cat_meta.lock_ok() = m;
+            }
             Err(e) => warn!(target: "config", "ignoring saved cat_meta: {e}"),
         }
     }
@@ -232,8 +258,13 @@ pub fn restore_job_settings(
     // here so a hand-edited settings.json can't smuggle a reserved
     // or duplicate slug into the classifier.
     if let Some(v) = saved.get("custom_categories") {
-        match serde_json::from_value::<Vec<nzbkit::categories::CustomCategory>>(v.clone()) {
-            Ok(mut list) => {
+        match saved_entries::<nzbkit::categories::CustomCategory>(v) {
+            Ok((mut list, bad)) => {
+                // Same reasoning one level down: an entry this build
+                // cannot read costs that entry, not the list.
+                for e in &bad {
+                    warn!(target: "cats", "ignoring one saved custom_categories {e}");
+                }
                 // A slug that only became reserved in a LATER release
                 // must not cost the user every OTHER category they set
                 // up: validation rejects the list as a whole, and the
@@ -246,7 +277,9 @@ pub fn restore_job_settings(
                          to {to:?} so your other categories still load"
                     );
                 }
-                if !renamed.is_empty() {
+                // ...and the migration is written back only when nothing
+                // was dropped, or the save would persist the drop.
+                if !renamed.is_empty() && bad.is_empty() {
                     save_settings(settings_path, &[("custom_categories", json!(&list))]);
                 }
                 match nzbkit::categories::validate(&list) {
@@ -269,7 +302,7 @@ pub fn restore_job_settings(
     }
     match saved.get("index_interest_groups") {
         Some(v) => {
-            if let Ok(groups) = serde_json::from_value::<Vec<String>>(v.clone()) {
+            if let Ok((groups, _)) = saved_entries::<String>(v) {
                 *daemon.index_interest_groups.lock_ok() = groups;
             }
         }
@@ -311,8 +344,13 @@ pub fn restore_job_settings(
         *daemon.failure_link.lock_ok() = v.to_string();
     }
     if let Some(v) = saved.get("notify_targets") {
-        match serde_json::from_value::<Vec<crate::notify::Target>>(v.clone()) {
-            Ok(list) => *daemon.notify_targets.lock_ok() = list,
+        match saved_entries::<crate::notify::Target>(v) {
+            Ok((list, bad)) => {
+                for e in bad {
+                    warn!(target: "notify", "ignoring one saved notify_targets {e}");
+                }
+                *daemon.notify_targets.lock_ok() = list;
+            }
             Err(e) => warn!(target: "notify", "ignoring saved notify_targets: {e}"),
         }
     }
@@ -334,8 +372,13 @@ pub fn restore_job_settings(
             .store(n.min(crate::giveup::MAX_STEMS as u64), Ordering::Relaxed);
     }
     if let Some(v) = saved.get("arr_instances") {
-        match serde_json::from_value::<Vec<giveup::ArrInstance>>(v.clone()) {
-            Ok(list) => *daemon.arr_instances.lock_ok() = list,
+        match saved_entries::<giveup::ArrInstance>(v) {
+            Ok((list, bad)) => {
+                for e in bad {
+                    warn!(target: "giveup", "ignoring one saved arr_instances {e}");
+                }
+                *daemon.arr_instances.lock_ok() = list;
+            }
             Err(e) => warn!(target: "giveup", "ignoring saved arr_instances: {e}"),
         }
     }
@@ -862,8 +905,11 @@ pub fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::M
             daemon.history_enforce_retention();
         }
     }
+    // The setter's 0-720 hours, re-applied for the reason the give-up
+    // threshold's note above gives: a hand-edited value never meets the
+    // setter, and the scheduler's `hrs * 3600` overflows on a big one.
     if let Some(v) = saved.get("bench_interval").and_then(Value::as_u64) {
-        daemon.bench_interval.store(v, Ordering::Relaxed);
+        daemon.bench_interval.store(v.min(720), Ordering::Relaxed);
     }
 }
 
@@ -1365,8 +1411,13 @@ pub fn seed_index_gates(
 pub fn seed_watchlist(settings_path: &Path) -> Mutex<Vec<nzbfast_meta::watchlist::WatchItem>> {
     let mut items = Vec::new();
     if let Some(v) = load_settings(settings_path).get("watchlist") {
-        match serde_json::from_value(v.clone()) {
-            Ok(l) => items = l,
+        match saved_entries(v) {
+            Ok((l, bad)) => {
+                for e in bad {
+                    warn!(target: "watch", "ignoring one saved watchlist {e}");
+                }
+                items = l;
+            }
             Err(e) => warn!(target: "watch", "ignoring saved watchlist setting: {e}"),
         }
     }
@@ -1633,6 +1684,83 @@ mod watchlist_seed_tests {
         let bad = dir.join("bad.json");
         std::fs::write(&bad, r#"{"watchlist":"not a list"}"#).unwrap();
         assert!(seed_watchlist(&bad).lock_ok().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One watchlist entry this build cannot read costs that entry, not
+    /// the list: the all-or-nothing parse seeded nothing, and the next
+    /// save from the (now empty) page persisted the loss.
+    #[test]
+    fn one_unreadable_watchlist_entry_keeps_the_others() {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-seedwl-part-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.json");
+        std::fs::write(
+            &p,
+            r#"{"watchlist":[{"id":7,"kind":"tv","title":"Wanted Show","seasons":"",
+                 "episodes":"","min_quality":"any","target_quality":"1080p","enabled":true},
+                 {"id":"not a number"}]}"#,
+        )
+        .unwrap();
+        let got = seed_watchlist(&p);
+        let ids: Vec<_> = got.lock_ok().iter().map(|i| i.id).collect();
+        assert_eq!(ids, vec![7]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The restore path's lists, the same way: a bad smart-folder rule, a
+    /// bad cat_meta value and a bad notify target each drop alone.
+    #[test]
+    fn one_unreadable_entry_in_a_restored_list_drops_alone() {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-restore-part-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = crate::testutil::test_daemon(&dir);
+        let saved = json!({
+            "smart_folders": [{"name": "keep", "match": "x"}, {"name": 5}],
+            "cleanup_exts": ["nfo", 7, "sfv"],
+            "cat_meta": {"tv": {}, "movies": "junk"},
+        });
+        restore_job_settings(&d, saved.as_object().unwrap(), &dir.join("settings.json"));
+        let names: Vec<_> = d
+            .smart_folders
+            .lock_ok()
+            .iter()
+            .map(|r| r.name.clone())
+            .collect();
+        assert_eq!(names, vec!["keep".to_string()]);
+        assert_eq!(
+            *d.cleanup_exts.lock_ok(),
+            vec!["nfo".to_string(), "sfv".to_string()]
+        );
+        {
+            let cats = d.cat_meta.lock_ok();
+            assert!(cats.contains_key("tv") && !cats.contains_key("movies"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `bench_interval` restored through the setter's 0-720 hour range:
+    /// a hand-edited value used to stand, and `hrs * 3600` overflowed.
+    #[test]
+    fn a_restored_bench_interval_is_clamped_like_the_setter() {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-restore-bench-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = crate::testutil::test_daemon(&dir);
+        let saved = json!({"bench_interval": u64::MAX});
+        restore_ui_and_index_settings(&d, saved.as_object().unwrap());
+        assert_eq!(d.bench_interval.load(Ordering::Relaxed), 720);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

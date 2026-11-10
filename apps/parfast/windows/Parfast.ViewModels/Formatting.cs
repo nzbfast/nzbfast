@@ -131,6 +131,16 @@ public static class Fmt
     /// 4k. Returns null when it cannot be read, so the field can show the
     /// error rather than silently substituting a number.
     /// </summary>
+    /// <remarks>
+    /// A COMMA IS A THOUSANDS SEPARATOR ONLY WHERE ONE CAN BE, and anything else
+    /// with a comma in it is refused. The first spelling stripped every comma, so
+    /// "1,5 MiB" - a decimal comma, which is how most of Europe writes one and a
+    /// half - became 15 MiB with no error. The app shows sizes with a point
+    /// (<see cref="Bytes"/> is invariant), so "1,048,576" still reads as grouped
+    /// digits; "1,5" is ambiguous and gets the field's error rather than a guess.
+    /// A product past <see cref="long.MaxValue"/> is refused too: the cast was
+    /// unchecked and wrapped to a negative or nonsense size.
+    /// </remarks>
     public static long? ParseSize(string? text)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -138,7 +148,7 @@ public static class Fmt
             return null;
         }
 
-        var s = text.Trim().Replace(",", string.Empty, StringComparison.Ordinal);
+        var s = text.Trim();
         var multiplier = 1L;
         var digits = s;
 
@@ -152,10 +162,51 @@ public static class Fmt
             }
         }
 
-        return double.TryParse(digits, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
-               && value >= 0
-            ? (long)(value * multiplier)
-            : null;
+        if (digits.Contains(',', StringComparison.Ordinal))
+        {
+            if (!IsGroupedThousands(digits))
+            {
+                return null;
+            }
+
+            digits = digits.Replace(",", string.Empty, StringComparison.Ordinal);
+        }
+
+        if (!double.TryParse(digits, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
+            || !double.IsFinite(value)
+            || value < 0)
+        {
+            return null;
+        }
+
+        // (double)long.MaxValue rounds UP to 2^63, so >= is the comparison that
+        // keeps every accepted product representable.
+        var bytes = value * multiplier;
+        return bytes >= long.MaxValue ? null : (long)bytes;
+    }
+
+    /// <summary>
+    /// True when every comma in <paramref name="digits"/> separates a group of
+    /// exactly three digits: one to three digits first, then ",ddd" groups, then
+    /// at most a decimal point and a fraction. "1,048,576" and "1,500.5" pass;
+    /// "1,5", "15,00" and "1.5,000" do not.
+    /// </summary>
+    private static bool IsGroupedThousands(string digits)
+    {
+        var point = digits.IndexOf('.', StringComparison.Ordinal);
+        var whole = point < 0 ? digits : digits[..point];
+        if (point >= 0 && digits[point..].Contains(',', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var groups = whole.Split(',');
+        if (groups[0].Length is < 1 or > 3 || !groups[0].All(char.IsAsciiDigit))
+        {
+            return false;
+        }
+
+        return groups.Skip(1).All(g => g.Length == 3 && g.All(char.IsAsciiDigit));
     }
 
     // Longest suffix first: "MiB" must be tried before "M", or "1MiB" parses as

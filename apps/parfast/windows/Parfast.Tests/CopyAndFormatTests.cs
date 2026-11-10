@@ -206,6 +206,49 @@ public class CopyAndFormatTests
         // create a set with a four byte block size.
         Assert.Null(Fmt.ParseSize(text));
 
+    [Theory]
+    [InlineData("1,500 KiB", 1536000)]
+    [InlineData("1,500.5", 1500)]
+    [InlineData("1,048,576 bytes", 1048576)]
+    public void AGroupedThousandsCommaStillReads(string text, long expected) =>
+        Assert.Equal(expected, Fmt.ParseSize(text));
+
+    [Theory]
+    // A decimal comma used to have its comma stripped: "1,5 MiB" read as 15 MiB.
+    [InlineData("1,5 MiB")]
+    [InlineData("15,00")]
+    [InlineData("1.5,000")]
+    [InlineData(",500")]
+    [InlineData("1,,000")]
+    // Past long.MaxValue the unchecked cast wrapped instead of refusing.
+    [InlineData("99999999999 GiB")]
+    [InlineData("1e300")]
+    [InlineData("Infinity")]
+    public void AnAmbiguousOrOversizedSizeIsRefused(string text) =>
+        Assert.Null(Fmt.ParseSize(text));
+
+    [Theory]
+    [InlineData(@"D:\x\a\one.bin", @"D:\x\b\two.bin", @"D:\x")]
+    [InlineData("/data/a/one.bin", "/data/b/two.bin", "/data")]
+    // The root used to be dropped: "server\share\a" is a relative path.
+    [InlineData(@"\\server\share\a\one.bin", @"\\server\share\a\two.bin", @"\\server\share\a")]
+    [InlineData(@"\\server\share\a\one.bin", @"\\server\share\b\two.bin", @"\\server\share")]
+    [InlineData(@"\\?\C:\long\one.bin", @"\\?\C:\long\two.bin", @"\\?\C:\long")]
+    [InlineData(@"\\?\UNC\server\share\a\one.bin", @"\\?\UNC\server\share\b\two.bin", @"\\?\UNC\server\share")]
+    // A bare "C:" is the current folder on C:, not its root.
+    [InlineData(@"C:\one.bin", @"C:\two.bin", @"C:\")]
+    public void TheCommonParentKeepsItsRoot(string a, string b, string expected) =>
+        Assert.Equal(expected, CreateViewModel.CommonParent([a, b]));
+
+    [Theory]
+    // Two shares on one server have no common FOLDER: "\\server" names none.
+    [InlineData(@"\\server\one\a.bin", @"\\server\two\b.bin")]
+    [InlineData(@"\\?\C:\a.bin", @"\\?\D:\b.bin")]
+    [InlineData(@"\\server\share\a.bin", @"C:\share\b.bin")]
+    [InlineData(@"C:\a\x.bin", @"D:\a\y.bin")]
+    public void PathsWithNoCommonFolderHaveNoParent(string a, string b) =>
+        Assert.Null(CreateViewModel.CommonParent([a, b]));
+
     [Fact]
     public void EveryBlockColourIsOpaque()
     {

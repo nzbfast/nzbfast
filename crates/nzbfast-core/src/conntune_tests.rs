@@ -1365,10 +1365,13 @@ fn reopen_leaves_settled_knees_alone() {
 /// PROVENANCE. Since 12 Oct 2026 it does not: the cold-start probe
 /// walks ANY automatic fleet past the first ceiling once one of its own
 /// rungs has paid, so every auto cap spawns the second ceiling's room.
-/// The shard layout is held separately (`linecap::shard_basis`).
+/// The shard layout is held separately (`linecap::shard_basis`), and
+/// since 8 Nov 2026 the room is unbounded (each server spawns to its own
+/// ceiling in `line_cap_spawn_slots`), because the probe may walk to the
+/// primaries' whole grant (`linecap::probe_ceiling`).
 #[test]
 fn only_an_auto_cap_gets_room_to_grow_into() {
-    let supply_max = nzbkit::pool::linecap::LINE_CAP_SUPPLY_MAX_FLEET;
+    let supply_max = usize::MAX;
     let max = nzbkit::pool::linecap::LINE_CAP_MAX_FLEET;
     for cap in [
         nzbkit::pool::linecap::LINE_CAP_DEFAULT_FLEET,

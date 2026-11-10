@@ -269,18 +269,39 @@ struct RootView: View {
     // MARK: - Drop
 
     private func load(_ providers: [NSItemProvider]) {
-        var paths: [String] = []
+        let collected = DroppedPaths()
         let group = DispatchGroup()
         for provider in providers {
             group.enter()
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                if let url, url.isFileURL { paths.append(url.path) }
+                if let url, url.isFileURL { collected.append(url.path) }
                 group.leave()
             }
         }
         group.notify(queue: .main) {
-            app.open(paths: paths.sorted())
+            app.open(paths: collected.sorted())
         }
+    }
+}
+
+/// The paths a drop resolves to, collected from `loadObject` completions.
+///
+/// Those completions run on arbitrary queues, several at once for a
+/// multi-file drop, and they appended to one captured local `[String]` with
+/// nothing between them - a data race on the array's storage, which can lose
+/// a path or corrupt the buffer (sweep finding A35). Every touch goes through
+/// the lock now; the read happens after the group drains, but takes the lock
+/// too so the class is correct on its own terms.
+final class DroppedPaths: @unchecked Sendable {
+    private let lock = NSLock()
+    private var paths: [String] = []
+
+    func append(_ path: String) {
+        lock.withLock { paths.append(path) }
+    }
+
+    func sorted() -> [String] {
+        lock.withLock { paths.sorted() }
     }
 }
 

@@ -506,8 +506,15 @@ pub fn report(shape: &Shape) -> String {
     for seam in SEAMS {
         let arm = (seam.arm)(shape).unwrap_or("n/a (shape does not say)");
         let p = &seam.provenance;
-        let cover = if p.covers.is_empty() {
+        // `is_crossover` decides the capability label, NOT an empty
+        // `covers`: a crossover nobody has measured on any class (the
+        // duplicate-collapse seam, today) has an empty `covers` too, and
+        // this used to print it as "capability test, no threshold" - the
+        // one label that tells the reader there is nothing to go stale.
+        let cover = if !seam.is_crossover {
             "capability test, no threshold".to_string()
+        } else if p.covers.is_empty() {
+            "UNMEASURED - a threshold with no recorded round on any class".to_string()
         } else if p.covers.contains(&class) {
             format!("measured on this class {} {}", p.measured_at, p.measured_on)
         } else {
@@ -873,6 +880,34 @@ mod tests {
         assert!(
             !text.contains("n/a"),
             "a complete shape still abstained:\n{text}"
+        );
+    }
+
+    /// Only a seam that is NOT a crossover may be labelled a capability
+    /// test. An unmeasured crossover (empty `covers`) was printed as one,
+    /// which is the label that says nothing can go stale (parfast sweep,
+    /// 9 Nov 2026).
+    #[test]
+    fn only_a_capability_seam_is_labelled_a_capability_test() {
+        let text = report(&Shape::default());
+        for seam in SEAMS {
+            let line = text
+                .lines()
+                .find(|l| l.contains(&format!(" {} ", seam.id)))
+                .unwrap_or_else(|| panic!("{} missing from the report:\n{text}", seam.id));
+            assert_eq!(
+                line.contains("capability test"),
+                !seam.is_crossover,
+                "{}: is_crossover = {} but the report says `{line}`",
+                seam.id,
+                seam.is_crossover
+            );
+        }
+        assert!(
+            SEAMS
+                .iter()
+                .any(|s| s.is_crossover && s.provenance.covers.is_empty()),
+            "no unmeasured crossover is left to exercise the arm this pins - repoint the test"
         );
     }
 }

@@ -160,6 +160,16 @@ pub(super) struct CryptoState {
     /// where a verified file's miss is a hard error: an unprovable set
     /// that fails its checksum is the wrong password, not damage.
     pub(super) pw_verified: bool,
+    /// The password `key` was derived from, for the finish gate of a
+    /// SPLIT entry, whose keyed-checksum fold has to be derived at finish
+    /// from the tail piece's own record. Never the extractor-wide cell at
+    /// that point: the candidate probe overwrites it whenever it unlocks
+    /// ANOTHER archive in the same job (`apply_probed_password`), and a
+    /// fold keyed off the other archive's password false-failed an intact
+    /// verified file as damage (TODO 358 sweep, lane 3 item 2). None only
+    /// for a state built outside `crypto_for` (tests), which falls back
+    /// to the cell.
+    pub(super) password: Option<std::sync::Arc<str>>,
     /// Output name + shared sink for the resume-journal events.
     pub(super) out_name: String,
     pub(super) events: CryptoEventSink,
@@ -280,6 +290,7 @@ impl CryptoState {
             track_plain: track_plain || expect_crc.is_some(),
             expect_crc,
             pw_verified,
+            password: None,
             out_name,
             events,
             st: Mutex::new(CryptoSt::default()),
@@ -1641,6 +1652,17 @@ impl Extractor {
         let Some(keys) = c.derive(pw) else {
             return false;
         };
+        // A 7z member (TODO 358 item 9) only ever reaches a mapper from
+        // a container whose encrypted header this password's twin
+        // decrypted, and its record carries the key that proof derived.
+        // So the route needs no finish adjudication: the current
+        // password either IS that one, or it changed under the set (a
+        // second encrypted set in the job re-keyed the extractor) and
+        // the member must not decrypt under it. No resume `E` fact is
+        // ever written for one, so `resumed` cannot be set here.
+        if matches!(c, EntryCrypt::SevenZ(_)) {
+            return c.check_verifies(&keys);
+        }
         // A RESUMED plaintext-once file must still prove the password:
         // the restore re-encrypted local plaintext with it, and a
         // different password would have keyed those bytes differently
@@ -1811,7 +1833,7 @@ impl Extractor {
         // adjudicate against the tail's stored value once every volume
         // is in.
         let expect_crc = crc_gate(file_crc.filter(|_| !split_after), &c, &keys);
-        let cs = Arc::new(CryptoState::new(
+        let mut cs = CryptoState::new(
             keys.aes.clone(),
             keys.iv,
             unp,
@@ -1820,7 +1842,9 @@ impl Extractor {
             pw_verified,
             key.clone(),
             inner.crypto_events.clone(),
-        ));
+        );
+        cs.password = Some(pw.clone());
+        let cs = Arc::new(cs);
         // Resume facts, and ONLY for a file a resumed run could prove the
         // password of: the `E` grammar is RAR5-shaped (RAR4's 8-byte salt
         // and SHA-1 schedule do not fit it), and a restore that

@@ -1627,6 +1627,7 @@ impl<'a> DecoderSession<'a> {
                 Err(error)
                     if counting.written == 0
                         && file.unpacked_size <= self.buffered_decode_limit
+                        && file.packed_size() <= self.buffered_decode_limit
                         && is_streaming_filter_bail(&error) => {}
                 other => return other,
             }
@@ -1683,18 +1684,10 @@ impl<'a> DecoderSession<'a> {
         // (every ordinary WinRAR one) cannot reach this: it takes the
         // `Err` arm of that helper. So the check is exactly the one the
         // digests would have made if there were any - the length the
-        // header itself declares.
-        if file.data_crc32.is_none()
-            && file.hash.is_none()
-            && decoded.data.len() as u64 != file.unpacked_size
-        {
-            return Err(file.entry_error(
-                "verifying",
-                Error::InvalidHeader(
-                    "RAR 5 member carries no integrity record and decoded short of its                      declared unpacked size",
-                ),
-            ));
-        }
+        // header itself declares. The pooled worker
+        // (`decode_pooled_member`) makes the same check through the same
+        // helper since 9 Nov 2026 (sweep A12): it had been left out.
+        refuse_undigested_length_mismatch(file, &decoded.data)?;
         if solid_archive {
             // Verified and final: reclaim the window buffer's dead front.
             self.decoder.commit_member();
@@ -1791,7 +1784,18 @@ const STREAMING_PREFERRED_MIN: u64 = 4 * 1024 * 1024;
 
 impl FileHeader {
     fn should_stream_decode(&self, buffered_decode_limit: u64) -> bool {
-        !self.is_stored() && self.unpacked_size > buffered_decode_limit.min(STREAMING_PREFERRED_MIN)
+        // nzbfast: the PACKED size too. The buffered branch reads the whole
+        // packed range into memory (`packed_data_with_password`), and a
+        // header may pair a small unpacked size with any packed size, so the
+        // routing on unpacked size alone let a member read gigabytes of
+        // packed bytes into one `Vec`. A conforming compressed member's
+        // packed size is within a few blocks of its unpacked size, so this
+        // only reroutes members whose packed size already passes the whole
+        // buffered limit. (9 Nov 2026 sweep, section C; nzbfast-local
+        // change, see vendor/rars/VENDORING.md.)
+        !self.is_stored()
+            && (self.unpacked_size > buffered_decode_limit.min(STREAMING_PREFERRED_MIN)
+                || self.packed_size() > buffered_decode_limit)
     }
 }
 
@@ -4010,10 +4014,33 @@ impl Drop for StopOnDrop<'_> {
     }
 }
 
+/// The serial buffered branch of `write_file_to` and the pooled worker's
+/// shared last check: a member with neither a FILE CRC32 nor a BLAKE2sp
+/// must still decode to exactly its declared `unpacked_size`, because
+/// `map_truncated_unverified_payload` turns a truncated decode of such a
+/// member into an empty `Ok`. See the comment at the serial call site.
+/// (nzbfast-local change, 9 Nov 2026; see vendor/rars/VENDORING.md.)
+fn refuse_undigested_length_mismatch(file: &FileHeader, data: &[u8]) -> Result<()> {
+    if file.data_crc32.is_none() && file.hash.is_none() && data.len() as u64 != file.unpacked_size
+    {
+        return Err(file.entry_error(
+            "verifying",
+            Error::InvalidHeader(
+                "RAR 5 member carries no integrity record and decoded short of its declared unpacked size",
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Decode + verify one pooled member on a worker. Mirrors the serial
 /// buffered branch of `write_file_to` for a non-solid member: fresh decoder,
-/// integrity check, and the LzNoFilters retry against a fresh checkpoint
-/// when the filtered output fails verification.
+/// integrity check, the LzNoFilters retry against a fresh checkpoint when
+/// the filtered output fails verification, and the declared-length check
+/// for a member with no digest. That last one was missing here until
+/// 9 Nov 2026 (sweep A12), so a truncated digest-less member decoded on
+/// the pool was written out empty and reported extracted - the twin of
+/// the serial defect fixed on 21 Sep 2026.
 #[cfg(feature = "parallel")]
 fn decode_pooled_member(
     archive: &Archive,
@@ -4032,8 +4059,8 @@ fn decode_pooled_member(
     let decoded = file
         .decoded_data_with_decoder(archive, &mut decoder, password, reader_cache)
         .map_err(|error| file.entry_error("decoding", error))?;
-    match file.verify_integrity_with_keys(&decoded.data, decoded.keys.as_ref()) {
-        Ok(()) => Ok(decoded.data),
+    let data = match file.verify_integrity_with_keys(&decoded.data, decoded.keys.as_ref()) {
+        Ok(()) => decoded.data,
         Err(filtered_error) => {
             let mut unfiltered_decoder = fresh_decoder();
             let unfiltered = file
@@ -4047,9 +4074,11 @@ fn decode_pooled_member(
                 .map_err(|error| file.entry_error("decoding", error))?;
             file.verify_integrity_with_keys(&unfiltered.data, unfiltered.keys.as_ref())
                 .map_err(|_| file.entry_error("verifying", filtered_error))?;
-            Ok(unfiltered.data)
+            unfiltered.data
         }
-    }
+    };
+    refuse_undigested_length_mismatch(file, &data)?;
+    Ok(data)
 }
 
 #[cfg(feature = "parallel")]
@@ -4387,6 +4416,10 @@ where
                                 // integrity record yields no bytes at all), and crediting
                                 // the shorter length would leak the difference until the
                                 // feeder parked forever on a budget that never drains.
+                                // (nzbfast, 9 Nov 2026: that particular member is now
+                                // refused by `decode_pooled_member`, sweep A12, and never
+                                // reaches here - but the credit stays keyed to the charge,
+                                // which is the invariant, whatever a member decodes to.)
                                 state.0 = state.0.saturating_sub(plan.order[seq].unpacked_size);
                                 drop(state);
                                 cvar.notify_all();
@@ -6440,6 +6473,20 @@ mod tests {
         assert_eq!(out, data);
     }
 
+    /// nzbfast, 9 Nov 2026 sweep: the buffered branch reads the whole
+    /// packed range, so a small declared unpacked size with a huge packed
+    /// size must route to the streaming decoder, which reads incrementally.
+    #[test]
+    fn a_member_whose_packed_size_passes_the_buffered_limit_streams() {
+        let mut file = plain_file(b"a.bin", b"", None);
+        file.compression_info = 1 << 7; // method 1: a stored member takes neither branch
+        file.unpacked_size = 16;
+        file.block.data_size = Some(BUFFERED_DECODE_LIMIT);
+        assert!(!file.should_stream_decode(BUFFERED_DECODE_LIMIT));
+        file.block.data_size = Some(BUFFERED_DECODE_LIMIT + 1);
+        assert!(file.should_stream_decode(BUFFERED_DECODE_LIMIT));
+    }
+
     #[test]
     fn streaming_filtered_members_extract_in_stream() {
         let mut data = Vec::new();
@@ -7105,6 +7152,41 @@ mod tests {
         file
     }
 
+    /// `count` real compressed members of `member` bytes each, every one
+    /// small enough for the pool. The two budget tests below used
+    /// `truncated_pooled_file` for this until 9 Nov 2026 (sweep A12): those
+    /// members decode short with no digest, which the pooled worker now
+    /// refuses as the serial walk does, so an extraction over them stops
+    /// at the first member instead of reaching the budget or the opener.
+    #[cfg(feature = "parallel")]
+    fn decodable_pooled_archive(count: usize, member: u64) -> Archive {
+        let names: Vec<Vec<u8>> = (0..count)
+            .map(|index| format!("m{index}.bin").into_bytes())
+            .collect();
+        let payload: Vec<u8> = (0..member).map(|i| b'a' + (i % 7) as u8).collect();
+        let entries: Vec<_> = names
+            .iter()
+            .map(|name| CompressedEntry {
+                name,
+                data: &payload,
+                mtime: None,
+                attributes: 0x20,
+                host_os: 3,
+            })
+            .collect();
+        let bytes = Rar50Writer::new(WriterOptions::new(
+            crate::ArchiveVersion::Rar50,
+            crate::FeatureSet::default(),
+        ))
+        .compressed_entries(&entries)
+        .finish()
+        .unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        assert!(archive.files().all(|file| !file.is_stored()
+            && !file.should_stream_decode(BUFFERED_DECODE_LIMIT)));
+        archive
+    }
+
     #[test]
     #[cfg(feature = "parallel")]
     fn member_pool_batches_do_not_reserve_another_workers_byte_share() {
@@ -7354,15 +7436,7 @@ mod tests {
         let count = (POOL_INFLIGHT_BUDGET / member + 2) as usize;
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let blocks = (0..count)
-                .map(|index| {
-                    Block::File(truncated_pooled_file(
-                        format!("m{index}.bin").as_bytes(),
-                        member,
-                    ))
-                })
-                .collect();
-            let volumes = vec![archive_with_blocks(blocks, Vec::new())];
+            let volumes = vec![decodable_pooled_archive(count, member)];
             // Deliberate panic inside the coordinator, standing in for any of
             // open / Write / inline decode blowing up. AssertUnwindSafe: the
             // borrows do not outlive the catch.
@@ -7389,23 +7463,19 @@ mod tests {
     #[test]
     #[cfg(feature = "parallel")]
     fn pooled_members_that_decode_short_still_release_their_budget() {
-        // Enough members to charge the whole in-flight budget and one more,
-        // every one of them decoding to nothing. Crediting the decoded length
-        // rather than the charged size leaves the budget full forever, so the
-        // feeder parks and the extraction never finishes.
+        // Enough members to charge the whole in-flight budget and one more.
+        // Crediting the decoded length rather than the charged size leaves
+        // the budget full forever, so the feeder parks and the extraction
+        // never finishes. Until 9 Nov 2026 every member here decoded to
+        // NOTHING (`truncated_pooled_file`), which is the case that told the
+        // two credits apart; such a member is now refused (sweep A12), so
+        // the second half below holds the pool to returning that refusal
+        // without deadlocking, and the first to draining a full budget.
         let member = BUFFERED_DECODE_LIMIT;
         let count = (POOL_INFLIGHT_BUDGET / member + 1) as usize;
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let blocks = (0..count)
-                .map(|index| {
-                    Block::File(truncated_pooled_file(
-                        format!("m{index}.bin").as_bytes(),
-                        member,
-                    ))
-                })
-                .collect();
-            let volumes = vec![archive_with_blocks(blocks, Vec::new())];
+            let volumes = vec![decodable_pooled_archive(count, member)];
             let mut opened = 0usize;
             let outcome = extract_volumes_to(
                 &volumes,
@@ -7424,6 +7494,30 @@ mod tests {
                 .expect("pooled extraction deadlocked"),
             Ok(count)
         );
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let blocks = (0..count)
+                .map(|index| {
+                    Block::File(truncated_pooled_file(
+                        format!("m{index}.bin").as_bytes(),
+                        member,
+                    ))
+                })
+                .collect();
+            let volumes = vec![archive_with_blocks(blocks, Vec::new())];
+            let outcome = extract_volumes_to(
+                &volumes,
+                crate::ArchiveReadOptions::default(),
+                |_meta| -> Result<Box<dyn Write>> { Ok(Box::new(Vec::new())) },
+            );
+            let _ = done_tx.send(outcome.map_err(|error| error.to_string()));
+        });
+        let refused = done_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("pooled extraction deadlocked on a refused member")
+            .expect_err("a short digest-less member must be refused");
+        assert!(refused.contains("declared unpacked size"), "{refused}");
     }
 
     /// The four member kinds a concurrent walk distinguishes, in one
@@ -8137,6 +8231,55 @@ mod tests {
         // The control: the untouched member still extracts.
         let mut good = Vec::new();
         whole.write_to(&archive, None, &mut good).unwrap();
+        assert_eq!(good, data);
+    }
+
+    /// 9 Nov 2026 sweep, A12: the pooled worker is the serial branch's
+    /// twin and had no declared-length check, so the same truncated
+    /// digest-less member came back `Ok(empty)` from it.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn a_digestless_member_that_decodes_short_on_the_pool_is_refused() {
+        let data: Vec<u8> = (0..40u32)
+            .flat_map(|i| format!("compressible line {}\n", i % 7).into_bytes())
+            .collect();
+        let bytes = Rar50Writer::new(WriterOptions {
+            target: crate::ArchiveVersion::Rar50,
+            features: crate::FeatureSet::store_only(),
+            compression_level: None,
+            dictionary_size: None,
+            entropy: crate::Entropy::Os,
+            hash_record: crate::rar50::HashRecord::Crc32Only,
+            optimal_parse: false,
+            adaptive_entropy_blocks: true,
+            write_policy: None,
+            tokenizer_horizon_choice: false,
+            level_five_fallbacks: true,
+            recovery_fold_threads: None,
+        })
+        .compressed_entries(&[CompressedEntry {
+            name: b"short.bin",
+            data: &data,
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+        }])
+        .finish()
+        .unwrap();
+        let archive = Archive::parse(&bytes).unwrap();
+        let whole = archive.files().next().unwrap().clone();
+        let mut file = whole.clone();
+        file.data_crc32 = None;
+        file.hash = None;
+        let r = file.block.data_range.clone();
+        file.block.data_range = r.start..(r.start + (r.end - r.start) / 2);
+        file.block.data_size = Some((file.block.data_range.len()) as u64);
+
+        let mut cache = crate::source::RangeReaderCache::default();
+        let err = decode_pooled_member(&archive, &file, None, u64::MAX, &mut cache)
+            .expect_err("a short pooled decode with no digest must not report success");
+        assert!(format!("{err}").contains("declared unpacked size"), "{err}");
+        let good = decode_pooled_member(&archive, &whole, None, u64::MAX, &mut cache).unwrap();
         assert_eq!(good, data);
     }
 

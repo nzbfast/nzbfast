@@ -18,8 +18,11 @@ use tracing::{info, warn};
 // carries nowhere else - plus, on daemon runs, a password the user
 // typed mid-download (mode=set_password → the hub's owner-tagged
 // cell; C2 step 1). Only a check-VERIFIED candidate is returned;
-// the tried-set is keyed by (salt, value) so a value that failed one
-// set's check is still tested against a second set's - which is also
+// the tried-set is keyed by (archive key, value) - a RAR5 set's salt,
+// or a digest of a header-encrypted 7z's header coder, which the
+// extractor's 7z worker probes through this same hook (TODO 358 item
+// 9) - so a value that failed one set's check is still tested against
+// a second set's - which is also
 // what lets a corrected password typed after a wrong one get its
 // turn. Check-less sets never park (try_pw_await gates on a
 // well-formed check), so an unverifiable typed password can never
@@ -133,38 +136,24 @@ pub(super) fn install_password_probe(
                 },
             );
         }
-        let mut tried = tried.lock_ok();
-        for c in cands {
-            if !tried.insert((probe.salt, c.value.clone())) {
-                continue;
+        let won = sweep_candidates(&mut tried.lock_ok(), cands, probe, || {
+            t0.elapsed() > PW_PROBE_BUDGET
+        });
+        if let Some(c) = won {
+            info!(
+                target: "password",
+                "🔑 archive password found in {} (in-stream probe)",
+                c.source
+            );
+            // A verified key means nobody needs to be asked - and the
+            // winner is parked for finalize to record onto the Job (the
+            // volumes decrypt one-pass, so the completion path never
+            // meets them).
+            if let Some(h) = hub_pw.as_ref() {
+                *h.password_wanted.lock_ok() = None;
+                *h.password_found.lock_ok() = Some((owner.clone(), c.value.clone()));
             }
-            // Same KDF-depth gate as the 2nd-pass harvest: only the
-            // operator's own password may pay for a hostile-depth
-            // KDF, and no candidate sweep may exceed the wall-clock
-            // budget - a crafted post can stuff sidecars with
-            // thousands of lines.
-            if !kdf_candidate_allowed(probe.lg2_count, c.structured) {
-                continue;
-            }
-            if t0.elapsed() > PW_PROBE_BUDGET {
-                break;
-            }
-            if probe.verify(&c.value) == nzbkit::rar::PwVerdict::Verified {
-                info!(
-                    target: "password",
-                    "🔑 archive password found in {} (in-stream probe)",
-                    c.source
-                );
-                // A verified key means nobody needs to be asked -
-                // and the winner is parked for finalize to record
-                // onto the Job (the volumes decrypt one-pass, so
-                // the completion path never meets them).
-                if let Some(h) = hub_pw.as_ref() {
-                    *h.password_wanted.lock_ok() = None;
-                    *h.password_found.lock_ok() = Some((owner.clone(), c.value.clone()));
-                }
-                return Some(c.value);
-            }
+            return Some(c.value);
         }
         // The probe only fires when an encrypted set is BLOCKED on a
         // password, so a fruitless sweep IS the live "this download
@@ -175,6 +164,52 @@ pub(super) fn install_password_probe(
         }
         None
     }));
+}
+
+/// One probe invocation's walk over the candidates, in order: the first
+/// one the archive itself VERIFIES, or None.
+///
+/// `tried` remembers (archive key, value) pairs across invocations so a
+/// value is not paid for twice against one archive - and a pair goes in
+/// ONLY once its verify has actually run and refused. A candidate this
+/// sweep did not test must stay untried (TODO 358 sweep, lane 3 item 3):
+///
+/// * the one in hand when the wall-clock budget runs out was recorded
+///   before the break and never verified, so no later probe ever tested
+///   it - one candidate silently dropped per budget-limited sweep;
+/// * one the KDF-depth gate skipped as an UNSTRUCTURED guess was burned
+///   too, so the same value arriving later as a structured one - the
+///   operator typing it mid-download, or adding it to the passwords file
+///   - was skipped as already tried, though nothing had tried it.
+///
+/// `over_budget` is asked before each verify.
+fn sweep_candidates(
+    tried: &mut std::collections::HashSet<([u8; 16], String)>,
+    cands: Vec<PwCandidate>,
+    probe: &dyn nzbkit::rar::CandidateCheck,
+    over_budget: impl Fn() -> bool,
+) -> Option<PwCandidate> {
+    let key = probe.tried_key();
+    for c in cands {
+        if tried.contains(&(key, c.value.clone())) {
+            continue;
+        }
+        // Same KDF-depth gate as the 2nd-pass harvest: only the
+        // operator's own password may pay for a hostile-depth KDF, and no
+        // candidate sweep may exceed the wall-clock budget - a crafted
+        // post can stuff sidecars with thousands of lines.
+        if !kdf_candidate_allowed(probe.kdf_depth(), c.structured) {
+            continue;
+        }
+        if over_budget() {
+            break;
+        }
+        if probe.verify(&c.value) == nzbkit::rar::PwVerdict::Verified {
+            return Some(c);
+        }
+        tried.insert((key, c.value.clone()));
+    }
+    None
 }
 
 // Crash resume (placement journal). Two modes:
@@ -1053,5 +1088,95 @@ mod fed_fold_tests {
         assert!(matches!(Fed::Crypto(Vec::new()).fold(h()), Fed::No));
         assert!(matches!(Fed::Placed(Vec::new()).fold(Persist::No), Fed::No));
         assert!(matches!(Fed::No.fold(p()), Fed::No));
+    }
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    use super::{PwCandidate, sweep_candidates};
+    use nzbkit::rar::{CandidateCheck, PwVerdict};
+
+    /// An archive whose only right answer is `right`, at a KDF depth the
+    /// harvested-candidate gate refuses (2^24), counting the verifies it
+    /// was asked for.
+    struct Fake {
+        right: &'static str,
+        depth: u8,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CandidateCheck for Fake {
+        fn kdf_depth(&self) -> u8 {
+            self.depth
+        }
+        fn tried_key(&self) -> [u8; 16] {
+            [7; 16]
+        }
+        fn verify(&self, c: &str) -> PwVerdict {
+            self.asked.lock().unwrap().push(c.to_string());
+            if c == self.right {
+                PwVerdict::Verified
+            } else {
+                PwVerdict::Rejected
+            }
+        }
+    }
+
+    fn cand(v: &str, structured: bool) -> PwCandidate {
+        PwCandidate {
+            value: v.to_string(),
+            source: "test".into(),
+            structured,
+        }
+    }
+
+    /// TODO 358 sweep, lane 3 item 3, the budget half: the candidate in
+    /// hand when the wall-clock budget runs out was never verified, so
+    /// the NEXT probe must still try it - it used to be recorded as tried
+    /// before the budget break and dropped for good.
+    #[test]
+    fn the_candidate_cut_off_by_the_budget_is_tried_next_time() {
+        let probe = Fake {
+            right: "second",
+            depth: 19,
+            asked: Default::default(),
+        };
+        let mut tried = Default::default();
+        let calls = std::cell::Cell::new(0);
+        // Budget runs out on the second candidate.
+        let over = || {
+            calls.set(calls.get() + 1);
+            calls.get() > 1
+        };
+        let cands = || vec![cand("first", false), cand("second", false)];
+        assert!(sweep_candidates(&mut tried, cands(), &probe, over).is_none());
+        assert_eq!(*probe.asked.lock().unwrap(), ["first"]);
+        let won = sweep_candidates(&mut tried, cands(), &probe, || false);
+        assert_eq!(won.map(|c| c.value).as_deref(), Some("second"));
+        // "first" WAS refused, so it is not paid for again.
+        assert_eq!(*probe.asked.lock().unwrap(), ["first", "second"]);
+    }
+
+    /// The KDF half: a value the depth gate skipped as an unstructured
+    /// guess was never tried, so the same value arriving later as the
+    /// operator's own (typed mid-download, or added to the passwords
+    /// file) must still be verified.
+    #[test]
+    fn a_kdf_skipped_guess_is_not_burned_for_the_operator() {
+        let probe = Fake {
+            right: "Release.Name",
+            depth: 24,
+            asked: Default::default(),
+        };
+        let mut tried = Default::default();
+        let first = vec![cand("Release.Name", false)];
+        assert!(sweep_candidates(&mut tried, first, &probe, || false).is_none());
+        assert!(
+            probe.asked.lock().unwrap().is_empty(),
+            "the gate skipped it"
+        );
+        let typed = vec![cand("Release.Name", true)];
+        let won = sweep_candidates(&mut tried, typed, &probe, || false);
+        assert_eq!(won.map(|c| c.value).as_deref(), Some("Release.Name"));
     }
 }

@@ -44,8 +44,17 @@ struct QueueView: View {
                         .width(min: 180, ideal: 300)
 
                         TableColumn(S.commonStatus) { job in
-                            Text(stateText(job))
-                                .foregroundStyle(stateColour(job))
+                            // A Done that left something out (A36) is drawn
+                            // in the warning colour with the core's sentences
+                            // on hover, rather than as a plain green Done.
+                            if job.state == .done, let left = job.result?.leftOut, !left.isEmpty {
+                                Label(stateText(job), systemImage: "exclamationmark.triangle")
+                                    .foregroundStyle(T.statusWarn)
+                                    .help(left.joined(separator: "\n"))
+                            } else {
+                                Text(stateText(job))
+                                    .foregroundStyle(stateColour(job))
+                            }
                         }
                         .width(120)
 

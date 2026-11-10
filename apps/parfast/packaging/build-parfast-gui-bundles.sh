@@ -144,7 +144,6 @@ MAC_APP_DIR=apps/parfast/mac
 WIN_APP_DIR=apps/parfast/windows
 # The same path as the remote spells it, for the PowerShell half.
 WIN_APP_DIR_WIN=${WIN_APP_DIR//\//\\}
-WIN_ISS_WIN=${WIN_ISS//\//\\}
 # Moved under apps/parfast on 12 Sep 2026 (chip C, b641ffea23): with the
 # script in packaging/ the pre-commit leak scan reported it as a public
 # file shipping verbatim, which decision D2a forbids. This is a path this
@@ -153,6 +152,10 @@ WIN_ISS_WIN=${WIN_ISS//\//\\}
 # missing for ever and the ISCC call would have named a file that is not
 # there.
 WIN_ISS=apps/parfast/windows/packaging/parfast-gui.iss
+# (A `WIN_ISS_WIN` backslash spelling of this sat ABOVE it until 9 Nov 2026,
+# read before WIN_ISS was set and used by nothing. bash 3.2 lets that pass
+# under `set -u`; a newer bash stops the whole script on it as an unbound
+# variable. Removed rather than moved: no step reads it.)
 # The detached cargo workspace holding parfast-session and parfast-ffi.
 # Reached by manifest path and never by a `-p` line from the root.
 FFI_MANIFEST=apps/parfast/Cargo.toml
@@ -274,6 +277,25 @@ build_mac() {
     # double-clicks it.
     codesign --verify --deep --strict "$app" \
         || { echo "✗ $app fails signature verification" >&2; exit 1; }
+
+    # And assert that it is the ENGINE build. make-app.sh builds the MockCore
+    # demo, with no error, whenever NO_FFI=1 is in the environment or the
+    # detached workspace is absent - and `--skip-build` packages whatever app
+    # is lying in build/ - so nothing here stopped a demo whose every figure
+    # is made up from shipping as a release (sweep, section B). The demo
+    # build never references the C ABI at all, so the session constructor
+    # FfiCore calls is the cheapest proof: present as a defined text symbol
+    # in the engine build, absent in the demo. `strip -S` in make-app.sh
+    # removes only the debug map, so the symbol survives it.
+    #
+    # Captured FIRST, never piped into `grep -q`: grep -q exits on its first
+    # match, nm then dies of SIGPIPE writing the rest, and under pipefail the
+    # pipeline is 141 - which rejected every GOOD engine build as a demo.
+    local syms
+    syms=$(nm "$exe" 2>/dev/null) || syms=""
+    grep -qE ' T _pf_session_new$' <<<"$syms" || {
+        echo "✗ $exe does not link the engine (no pf_session_new): a MockCore demo build" >&2
+        exit 1; }
 
     work=$(mktemp -d); inner="$work/parfast-gui-$VERSION-macos"
     mkdir -p "$inner"

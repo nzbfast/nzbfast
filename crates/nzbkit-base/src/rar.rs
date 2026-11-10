@@ -115,6 +115,116 @@ pub enum EntryCrypt {
     /// of any kind - a wrong password is only caught by a whole-file
     /// checksum after decryption.
     Rar4(Rar4Crypt),
+    /// 7z (7zAES): AES-256-CBC keyed by iterated SHA-256. Never parsed
+    /// out of a RAR header - the one-pass 7z direct map builds these
+    /// for the members of a header-encrypted (`-mhe`) stored set, whose
+    /// decrypted end header is what proved the password (TODO 358 item
+    /// 9, `extract::sevenz_map`).
+    SevenZ(SevenZCrypt),
+}
+
+/// 7zAES parameters for ONE stored folder of a 7z container, plus the
+/// proof that a password opened the container.
+///
+/// 7z has no stored password check like RAR5's, but a header-encrypted
+/// (`-mhe`) container carries something just as good: its end header is
+/// AES-encrypted and CRC-checked, so a password that decrypts it to a
+/// header that passes its CRC is the archive's password, and 7-Zip keys
+/// every folder with that same password. [`Self::proven`] records that
+/// fact as the key it derives for THIS folder, and
+/// [`EntryCrypt::check_verifies`] answers yes only for that key - so if
+/// the extractor's password later changes (a second encrypted set in the
+/// same job) the member stops verifying instead of decrypting under the
+/// wrong key.
+///
+/// The stream shape is RAR's: one continuous CBC stream per member,
+/// starting at the folder's coder IV, its ciphertext padded to 16 only at
+/// the very end (`pack size = align16(unpack size)`). That holds only for
+/// a folder carrying ONE member; the map refuses a folder with several,
+/// whose later members start mid-chain.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SevenZCrypt {
+    /// The folder's 7zAES coder properties verbatim: the work-factor
+    /// power, the salt and the IV, in sevenz-rust2's own encoding.
+    pub props: Vec<u8>,
+    proof: Option<SevenZProof>,
+}
+
+/// What [`SevenZCrypt::proven`] derived, cached so the per-span route
+/// check does not pay the KDF again (`2^19` SHA-256 rounds at 7-Zip's
+/// default, against a one-entry cache in the library that any other 7z in
+/// the process evicts).
+#[derive(Clone, PartialEq, Eq)]
+struct SevenZProof {
+    /// SHA-256 over the properties and the password's UTF-16 bytes - the
+    /// cache key. Never the password itself.
+    fingerprint: [u8; 32],
+    key: [u8; 32],
+    iv: [u8; 16],
+}
+
+impl std::fmt::Debug for SevenZCrypt {
+    /// Hand-written so a `{:?}` of a mapper entry can never print a key.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SevenZCrypt")
+            .field("props", &self.props)
+            .field("proven", &self.proof.is_some())
+            .finish()
+    }
+}
+
+impl SevenZCrypt {
+    /// Parameters with no proof attached: [`EntryCrypt::check_verifies`]
+    /// answers no for every key.
+    pub fn unproven(props: Vec<u8>) -> SevenZCrypt {
+        SevenZCrypt { props, proof: None }
+    }
+
+    /// Parameters for a folder of a container whose encrypted header
+    /// `password` has already DECRYPTED (the caller's claim - nothing here
+    /// can check it). Derives the folder's key once. `None` when the
+    /// library refuses the derivation: an empty password, a malformed
+    /// property block, or a work factor above its cap.
+    pub fn proven(props: Vec<u8>, password: &str) -> Option<SevenZCrypt> {
+        let (key, iv) =
+            sevenz_rust2::aes256_sha256_key_iv(&props, &sevenz_rust2::Password::from(password))
+                .ok()?;
+        let fingerprint = Self::fingerprint(&props, password);
+        Some(SevenZCrypt {
+            props,
+            proof: Some(SevenZProof {
+                fingerprint,
+                key,
+                iv,
+            }),
+        })
+    }
+
+    fn fingerprint(props: &[u8], password: &str) -> [u8; 32] {
+        use sha2::Digest as _;
+        let mut h = sha2::Sha256::new();
+        h.update((props.len() as u64).to_le_bytes());
+        h.update(props);
+        h.update(sevenz_rust2::Password::from(password).as_slice());
+        h.finalize().into()
+    }
+
+    fn derive(&self, password: &str) -> Option<rarcrypt::EntryKeys> {
+        let (key, iv) = match &self.proof {
+            Some(p) if p.fingerprint == Self::fingerprint(&self.props, password) => (p.key, p.iv),
+            _ => sevenz_rust2::aes256_sha256_key_iv(
+                &self.props,
+                &sevenz_rust2::Password::from(password),
+            )
+            .ok()?,
+        };
+        Some(rarcrypt::EntryKeys {
+            aes: rarcrypt::AesKey::Aes256(key),
+            iv,
+            hash_key: None,
+            psw_check: None,
+        })
+    }
 }
 
 impl EntryCrypt {
@@ -123,13 +233,14 @@ impl EntryCrypt {
     pub fn rar5(&self) -> Option<&Rar5Crypt> {
         match self {
             EntryCrypt::Rar5(c) => Some(c),
-            EntryCrypt::Rar4(_) => None,
+            EntryCrypt::Rar4(_) | EntryCrypt::SevenZ(_) => None,
         }
     }
 
     /// Derive this entry's key material from `password`. `None` only for a
-    /// hostile RAR5 iteration count; RAR4's round count is fixed by the
-    /// format, so it cannot be attacked this way.
+    /// hostile RAR5 iteration count (or a 7z work factor or property block
+    /// the library refuses); RAR4's round count is fixed by the format, so
+    /// it cannot be attacked this way.
     pub fn derive(&self, password: &str) -> Option<rarcrypt::EntryKeys> {
         match self {
             EntryCrypt::Rar5(c) => {
@@ -150,6 +261,7 @@ impl EntryCrypt {
                     psw_check: None,
                 })
             }
+            EntryCrypt::SevenZ(c) => c.derive(password),
         }
     }
 
@@ -166,7 +278,9 @@ impl EntryCrypt {
     /// "did not reject" as "verified" would wave a wrong password
     /// through (see `entry_blocker`).
     ///
-    /// Always false for RAR4, which stores no check value of any kind.
+    /// Always false for RAR4, which stores no check value of any kind. For
+    /// 7z it is the header-decrypt proof: true exactly for the key
+    /// [`SevenZCrypt::proven`] derived (see that type).
     ///
     /// False does NOT mean the password is wrong - it means nothing here
     /// can vouch for it before the data is decrypted, so the caller must
@@ -174,8 +288,14 @@ impl EntryCrypt {
     /// decrypting in place, and require a whole-file checksum to pass
     /// before publishing.
     pub fn check_verifies(&self, keys: &rarcrypt::EntryKeys) -> bool {
-        let EntryCrypt::Rar5(c) = self else {
-            return false;
+        let c = match self {
+            EntryCrypt::Rar5(c) => c,
+            EntryCrypt::Rar4(_) => return false,
+            EntryCrypt::SevenZ(c) => {
+                return c.proof.as_ref().is_some_and(|p| {
+                    keys.aes == rarcrypt::AesKey::Aes256(p.key) && keys.iv == p.iv
+                });
+            }
         };
         let Some(psw_check) = keys.psw_check else {
             return false;
@@ -418,6 +538,42 @@ pub enum PwVerdict {
     Rejected,
     /// No stored check (or a hostile KDF count): can't decide pre-decrypt.
     Indeterminate,
+}
+
+/// Something a candidate password can be tested against before any data
+/// is decrypted - the argument the extractor's in-stream candidate probe
+/// hands its hook. Two shapes implement it: a RAR5 archive's stored check
+/// ([`CryptProbe`]) and a header-encrypted 7z container's encrypted end
+/// header (`extract::sevenz`), where "verified" means the header decrypted
+/// to bytes that pass its CRC. One hook, one candidate harvest, one
+/// try-order, whichever format blocked.
+pub trait CandidateCheck: Send + Sync {
+    /// Base-2 log of the key derivation's work per candidate, as the
+    /// archive declares it - what the hook's KDF-depth gate judges a
+    /// harvested candidate against. RAR5's PBKDF2 `lg2_count`; 7z's
+    /// SHA-256 work-factor power.
+    fn kdf_depth(&self) -> u8;
+    /// Identifies the archive's key schedule, so a hook can remember
+    /// which candidates it already spent against THIS archive and still
+    /// try them against a different one. RAR5's salt; for 7z a digest of
+    /// the header coder's salt and IV (7-Zip writes no salt by default,
+    /// so the salt alone would make every 7z look the same).
+    fn tried_key(&self) -> [u8; 16];
+    /// Test one candidate. `Verified` must mean the archive itself
+    /// vouched for it - never a guess.
+    fn verify(&self, candidate: &str) -> PwVerdict;
+}
+
+impl CandidateCheck for CryptProbe {
+    fn kdf_depth(&self) -> u8 {
+        self.lg2_count
+    }
+    fn tried_key(&self) -> [u8; 16] {
+        self.salt
+    }
+    fn verify(&self, candidate: &str) -> PwVerdict {
+        CryptProbe::verify(self, candidate)
+    }
 }
 
 impl VolumeMapper {
@@ -1799,12 +1955,23 @@ fn parse_v5_body(hdr: &[u8], base: u64, envelope: u64) -> BlockResult {
             let mut crypt = None;
             let mut hash = None;
             if extra_size > 0 {
-                let ex_start = hdr.len().saturating_sub(extra_size as usize);
+                // Both sizes are attacker-declared u64 vints, so they are
+                // widened rather than cast: `as usize` TRUNCATES on a
+                // 32-bit target, where `2^32 + 10` read as 10 - an extra
+                // area starting ten bytes from the end, and a record of
+                // `2^32 + 5` passing the body bound below as a 5-byte
+                // record and lifting crypt parameters or a digest out of
+                // bytes the 64-bit build rejects. Saturated to
+                // `usize::MAX`, an oversized figure fails every bound
+                // here on every target alike.
+                let width = |v: u64| usize::try_from(v).unwrap_or(usize::MAX);
+                let ex_start = hdr.len().saturating_sub(width(extra_size));
                 let mut q = ex_start;
                 while q < hdr.len() {
                     let Some((rec_size, n)) = vint(&hdr[q..]) else {
                         break;
                     };
+                    let rec_size = width(rec_size);
                     let rec_start = q + n;
                     if rec_start >= hdr.len() {
                         break;
@@ -1816,18 +1983,15 @@ fn parse_v5_body(hdr: &[u8], base: u64, envelope: u64) -> BlockResult {
                     // must be >= tn AND fit within the header; without the lower
                     // bound a crafted rec_size < tn makes the slice start exceed
                     // its end and panics.
-                    let body_ok =
-                        rec_size as usize >= tn && rec_size as usize <= hdr.len() - rec_start;
+                    let body_ok = rec_size >= tn && rec_size <= hdr.len() - rec_start;
                     if rec_type == 0x01 {
                         encrypted = true;
                         if body_ok {
-                            crypt = parse_crypt_record(
-                                &hdr[rec_start + tn..rec_start + rec_size as usize],
-                            );
+                            crypt = parse_crypt_record(&hdr[rec_start + tn..rec_start + rec_size]);
                         }
                     } else if rec_type == 0x02 && body_ok {
                         // FHEXTRA_HASH: hash_type vint then the raw digest.
-                        let body = &hdr[rec_start + tn..rec_start + rec_size as usize];
+                        let body = &hdr[rec_start + tn..rec_start + rec_size];
                         if let Some((htype, hn)) = vint(body) {
                             hash = Some((htype, body[hn..].to_vec()));
                         }
@@ -1836,10 +2000,10 @@ fn parse_v5_body(hdr: &[u8], base: u64, envelope: u64) -> BlockResult {
                     // (release profile: no overflow checks) and mapped q
                     // onto itself - an infinite loop holding the
                     // extractor's global lock. Bound it instead.
-                    if rec_size as usize > hdr.len() - rec_start {
+                    if rec_size > hdr.len() - rec_start {
                         break;
                     }
-                    q = rec_start + rec_size as usize;
+                    q = rec_start + rec_size;
                 }
             }
 

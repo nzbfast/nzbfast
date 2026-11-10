@@ -314,6 +314,12 @@ pub(super) fn apply_setting_tail(
             *d.cleanup_exts.lock_ok() = list.clone();
             (true, json!(list))
         }
+        "refuse_exts" => {
+            // TODO 358 item 13: comma list of extensions; empty = off.
+            let list = crate::exerefuse::parse_refuse_exts(v);
+            *d.refuse_exts.lock_ok() = list.clone();
+            (true, json!(list))
+        }
         "password_file" => set_password_file(d, name, v)?,
         "password_prompt" => set_password_prompt(d, name, v)?,
         "unpack_eat_volumes" => set_unpack_eat_volumes(d, name, v)?,

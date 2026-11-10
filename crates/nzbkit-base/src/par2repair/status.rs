@@ -343,12 +343,26 @@ pub(super) fn publishable(f: &FileRepair, t: &Target, ctx: &DirContext) -> bool 
 /// some (see [`publishable`]'s "mechanical consequence"), so a shortfall
 /// never reaches that arm, and a bare `Err` IS this ruling's
 /// non-shortfall answer.
+///
+/// # A CANCEL IS NOT A FAILED PUBLISH (parfast sweep A7, 9 Nov 2026)
+///
+/// It used to be: every error under a shortfall was ruled a member that
+/// did not land, `Cancelled` included, so a cancel raised during the
+/// patch of a SHORT set cost one member and the call went on - every
+/// other staged member was verified and renamed in, and the caller got
+/// `Ok(Unrepairable)` for a repair its user had stood down. That breaks
+/// the [`RepairError::Cancelled`] contract on both halves: the caller
+/// reported a verdict where it owed "cancelled", and a cancel during the
+/// patch is documented to rename NOTHING in. None of the three reasons
+/// above reaches a cancel - it is not a courtesy write failing, it is
+/// the caller withdrawing the whole call - so it propagates on either
+/// arm, and every call site's error path removes the staged temps.
 pub(super) fn publish_failed(
     shortfall: Option<usize>,
     name: &str,
     e: RepairError,
 ) -> Result<(), RepairError> {
-    if shortfall.is_none() {
+    if shortfall.is_none() || matches!(e, RepairError::Cancelled) {
         return Err(e);
     }
     warn!(

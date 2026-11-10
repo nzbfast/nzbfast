@@ -220,20 +220,61 @@ impl SideCancel {
     /// Same shape, same reason as the prefetch watcher this replaces
     /// (review 5 Aug M3) - 250 ms is well inside a user's patience and
     /// costs one timer per volume.
+    ///
+    /// The ticker is stopped by a drop guard, not by a line after the
+    /// `await`: a caller that drops this future part-way (a `select!`,
+    /// a timeout, an aborted task) never reaches that line, and the
+    /// ticker - a spawned task, so nothing else owns it - then ran every
+    /// 250 ms for the life of the runtime, holding the job's latch and
+    /// pool control with it.
     pub async fn guard<T>(&self, fut: impl std::future::Future<Output = T>) -> T {
+        struct AbortOnDrop(tokio::task::JoinHandle<()>);
+        impl Drop for AbortOnDrop {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
         let flag = self.flag.clone();
         let ctl = self.ctl.clone();
-        let watcher = tokio::spawn(async move {
+        let _watcher = AbortOnDrop(tokio::spawn(async move {
             loop {
                 if flag.load(std::sync::atomic::Ordering::Acquire) {
                     ctl.abort();
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
-        });
-        let out = fut.await;
-        watcher.abort();
-        out
+        }));
+        fut.await
+    }
+}
+
+#[cfg(test)]
+mod side_cancel_guard_tests {
+    use super::*;
+
+    /// A guarded fetch dropped part-way must take its ticker with it.
+    ///
+    /// The ticker holds a clone of the latch, so the latch's strong
+    /// count is the witness: back to one means the task is gone.
+    /// NEGATIVE CONTROL, run: with the abort as a plain statement after
+    /// `fut.await`, the count stays at two and the wait times out.
+    #[tokio::test]
+    async fn a_dropped_guard_stops_its_ticker() {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sc = SideCancel::over(flag.clone());
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            sc.guard(std::future::pending::<()>()),
+        )
+        .await;
+        assert!(dropped.is_err(), "the pending fetch must time out");
+        // `abort` is asynchronous: give the runtime a moment to reap it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while Arc::strong_count(&flag) > 2 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // Two owners left: this test's `flag` and the handle's own.
+        assert_eq!(Arc::strong_count(&flag), 2, "the ticker outlived its guard");
     }
 }
 
@@ -536,6 +577,16 @@ pub struct StreamHub {
     /// curve's planned 150 Mbit. Stays 0 on a CLI run and on a prefetch
     /// sidecar's fresh hub.
     pub line_carry_bps: std::sync::atomic::AtomicU64,
+    /// 9 Nov 2026: the fleet the last job on this line SETTLED at, and
+    /// the step-back ceiling it left, 0 = none. Written by the runner at
+    /// every job start beside `line_carry_bps`, out of the same
+    /// `linecarry` store, already filtered for the line and for age
+    /// (`linecarry::Stored::recall`), and read by the fleet build: the
+    /// seed starts at the first and holds the second. Both stay 0 on a
+    /// CLI run and on a prefetch sidecar's fresh hub.
+    pub line_recall_fleet: std::sync::atomic::AtomicUsize,
+    /// The step-back half of `line_recall_fleet`'s pair; see there.
+    pub line_recall_hold: std::sync::atomic::AtomicUsize,
     /// The `live_tune` setting, mirrored here by the daemon (settings
     /// apply + restart restore) because the pool build in get/fleet.rs
     /// reaches the hub, not the daemon. False on a CLI run and on a
@@ -643,6 +694,15 @@ pub struct StreamHub {
     /// (has_password, retry reuse), keeping the file's promise that a
     /// password that works is kept on that download.
     pub password_found: std::sync::Mutex<Option<(String, String)>>,
+    /// Item 15 (TODO 358, D4): per owner, the archive sets a run that
+    /// finished GOOD left packed outside the main payload - a sample, a
+    /// subtitle pack, a second archive that failed alone. Keyed by
+    /// owner rather than one tagged cell because post-processing tails
+    /// overlap the next job's download (§129), so a single cell reset at
+    /// the Downloading transition would be emptied under a tail still
+    /// about to read it. The engine writes (or removes) its own key at
+    /// the end of every unpack tail; the daemon's finalize takes it.
+    pub not_delivered: std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
     /// Live "this download wants a password" signal, owner-tagged like
     /// `late_password`: set when the in-stream probe ran out of
     /// candidates for an encrypted set, cleared when one verifies (or at
@@ -1388,7 +1448,12 @@ impl SeekCtl {
         start: u64,
         len: u64,
     ) -> Option<bool> {
-        let ids = self.map_span_ids(name, file_size, &[(start, start + len)]);
+        // Saturating: `start` is a reader's position in a file whose
+        // size the poster declared, and N6-11 (below) shows that size
+        // reaching `u64::MAX`. The plain add panicked in a debug build
+        // on a range request near the end of such a file, and wrapped in
+        // release to `start >= end`, which maps nothing and reads "live".
+        let ids = self.map_span_ids(name, file_size, &[(start, start.saturating_add(len))]);
         if ids.is_empty() {
             return Some(true);
         }
@@ -1616,6 +1681,20 @@ mod extreme_ladder_tests {
             observed_by_name: std::sync::RwLock::new(Default::default()),
         };
         (dir, ctl)
+    }
+
+    /// A deliverability check at the far end of a `u64::MAX`-declared
+    /// file answers instead of overflowing. NEGATIVE CONTROL, run: with
+    /// a plain `start + len` this panics (attempt to add with overflow).
+    #[test]
+    fn span_deliverable_at_the_end_of_a_saturated_file_does_not_overflow() {
+        let (_ladder, s) = seek(vec![arts(3, u64::MAX)]);
+        // An unmapped name reads live (`Some(true)`); what is under test
+        // is that the bounds are formed at all, which happens first.
+        assert_eq!(
+            s.span_deliverable("x", u64::MAX, u64::MAX - 1, 1 << 20),
+            Some(true)
+        );
     }
 
     #[test]

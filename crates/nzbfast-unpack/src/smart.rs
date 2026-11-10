@@ -65,7 +65,11 @@ fn de_size<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
             if s.trim().is_empty() {
                 return Ok(0);
             }
-            crate::sizes::parse_size(s).ok_or_else(|| E::custom(format!("bad size {s:?}")))
+            // A FILE size, so a lowercase `b` is bytes: `parse_size` reads
+            // "100mb" as megabits, which is right for a line speed and made
+            // a smart-folder size rule bite at an eighth of what it said
+            // (9 Nov 2026 sweep, A19).
+            crate::sizes::parse_byte_size(s).ok_or_else(|| E::custom(format!("bad size {s:?}")))
         }
     }
     d.deserialize_any(V)
@@ -309,6 +313,17 @@ fn ext_of(p: &Path) -> String {
 /// that carries a name (`.mkv`, `.cbz`) is judged on that name and is
 /// never opened by this path.
 ///
+/// That paragraph was wrong on both counts, and the bug sweep of 9 Nov
+/// 2026 found the hole it hid. `is_container` also sniffs a numbered
+/// part, `sevenz_archive_part` sniffs EVERY name, and the extractor
+/// treats any [`nzbkit::extract::archive_sniff_eligible`] name with RAR
+/// magic as an archive - so an obfuscated volume that kept a meaningless
+/// extension (`<hash>.dat`) was an archive to the ladder that failed on
+/// it and clutter to this guard, which deleted it. The RAR sniff now asks
+/// that same eligibility question, which keeps everything the old
+/// no-extension test kept (an extensionless name is always eligible) and
+/// still never opens a file whose name says it is payload content.
+///
 /// `zip_parts` is the directory's zip membership from [`zip_part_set`],
 /// because some parts cannot answer for themselves: see there.
 ///
@@ -325,7 +340,7 @@ fn is_packed_archive(
     split_parts: &std::collections::HashSet<PathBuf>,
 ) -> bool {
     crate::archname::looks_like_named_rar(p)
-        || (p.extension().is_none() && crate::archname::rar_magic(p))
+        || (nzbkit::extract::archive_sniff_eligible(p) && crate::archname::rar_magic(p))
         || crate::archname::sevenz_archive_part(p)
         || zip_parts.contains(p)
         || split_parts.contains(p)
@@ -869,6 +884,69 @@ fn cleanup_inner(dir: &Path, exts: &[String], spare_archives: bool) -> (usize, u
     (removed, par2)
 }
 
+/// Every real file under `dir` whose extension is on `exts`, for the
+/// executable refusal (TODO 358 item 13, decision D2).
+///
+/// Bare extensions only, matched on the file's own lowercased extension:
+/// the list is `refuse_exts`, which the setter already reduces to bare
+/// extensions, so a pattern entry here would be inert rather than wide.
+///
+/// DEEPER than the cleanup sweeps' one level, and that is deliberate.
+/// Those DELETE what they reach on a heuristic, so they stay shallow; this
+/// is a refusal, and an executable two folders down a film's archive is
+/// exactly as much the malware shape as one at the top. Bounded at the
+/// same depth `prune_empty_dirs` walks, and it never follows a symlink
+/// (see [`is_real_dir`]), so it cannot leave the job's own tree.
+/// Sorted, so the reason a job fails with names the same file every time.
+pub fn refused_files(dir: &Path, exts: &[String]) -> Vec<PathBuf> {
+    fn walk(d: &Path, exts: &[String], depth: u32, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(d) else { return };
+        for path in rd.flatten().map(|e| e.path()) {
+            if is_real_dir(&path) {
+                if depth < PRUNE_MAX_DEPTH {
+                    walk(&path, exts, depth + 1, out);
+                }
+            } else if is_real_file(&path) {
+                let ext = path
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                    .unwrap_or_default();
+                if !ext.is_empty() && exts.contains(&ext) {
+                    out.push(path);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if !exts.is_empty() {
+        walk(dir, exts, 0, &mut out);
+    }
+    out.sort();
+    out
+}
+
+/// Take the files [`refused_files`] found out of the job's folder, the
+/// way the cleanup sweep takes its own (the Trash when cleanup is set to
+/// use it, permanently otherwise), so a refused executable is never left
+/// beside the media where it would be published with it. A file the Trash
+/// will not take stays where it is, as it does for every sweep; the job
+/// is failed either way. Returns how many went.
+pub fn remove_refused(dir: &Path, files: &[PathBuf]) -> usize {
+    let recoverable = cleanup_recoverable();
+    let staging = trash_staging_dir(dir);
+    let mut removed = 0;
+    for path in files {
+        match remove_swept_file(path, recoverable, staging.as_deref()) {
+            Ok(_) => {
+                info!(target: "cleanup", "removed refused executable {}", path.display());
+                removed += 1;
+            }
+            Err(e) => warn!(target: "cleanup", "{}: {e}", path.display()),
+        }
+    }
+    removed
+}
+
 /// Recoverable delete for anything that came out of a user's download.
 ///
 /// The cleanup passes used to call `remove_file` directly, so a file the
@@ -1129,6 +1207,18 @@ enum TrashVerdict {
     Refused(String),
 }
 
+/// The opening of every timed-out recoverable delete's reason. One copy:
+/// [`refusal`] writes it and [`kept_reason_may_still_finish`] reads it.
+const TRASH_MAY_STILL_FINISH: &str = "the Trash did not answer in time";
+
+/// Whether a delete's kept-files reason (a `FilesGone::Kept` string, as
+/// stored on the notice) describes a Trash call that TIMED OUT rather
+/// than one that was refused - i.e. the files may still be on their way
+/// to the Trash. The dashboard picks its sentence from this (F15).
+pub fn kept_reason_may_still_finish(why: &str) -> bool {
+    why.contains(TRASH_MAY_STILL_FINISH)
+}
+
 /// The error a refused recoverable delete comes back as. Worded to be
 /// READ: a user who asked for recoverable deletes needs to know why their
 /// files are still there and what to change, not just that something
@@ -1140,7 +1230,30 @@ enum TrashVerdict {
 /// deferred-trash drain and the watch-folder ingest all log
 /// `<path>: <this>` - so the path came out twice in a row on every line,
 /// and the notice repeats it a third time in its own sentence.
+///
+/// A TIMEOUT is not a refusal, and is worded as what it is (F15). It
+/// opens with [`TRASH_MAY_STILL_FINISH`], which is how the kept-files
+/// notice tells the two apart once the reason is only a string
+/// ([`kept_reason_may_still_finish`]). The
+/// bounded call that gave up is still running on its own thread - an
+/// AppleEvent has no cancel - so Finder or the volume can still finish
+/// the move after we stopped waiting. "Would not take it" told a user on
+/// a slow volume the files were staying, and they then found them gone;
+/// the honest sentence is that the move may yet happen, and where to look.
 fn refusal(why: &str) -> std::io::Error {
+    if looks_like_a_trash_timeout(why) {
+        return std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "{TRASH_MAY_STILL_FINISH} ({why}). The move can still finish \
+                 after nzbfast stopped waiting, so the files may already be in \
+                 the Trash, or get there shortly. Look in the Trash before \
+                 deleting them again. If the Trash keeps not answering, turn \
+                 off \"Deleted files go to the Trash\" in Settings to remove \
+                 files outright."
+            ),
+        );
+    }
     std::io::Error::other(format!(
         "the Trash would not take it ({why}). If something else has the \
          files open - a virus scanner or a backup tool often does, for a \
@@ -1312,13 +1425,17 @@ fn trash_attempt(path: &Path) -> TrashVerdict {
             // no trash at all) stay per-path: they are instant and the
             // next file may live somewhere else entirely.
             if looks_like_a_trash_timeout(&e) {
+                // Not `first_refusal_hint`: that says the files are being
+                // LEFT, and a call that timed out may still move them
+                // (F15). The reason `refusal` builds says so instead.
                 warn!(
                     target: "cleanup",
                     "the Trash is not responding (headless session?) - \
                      not asking it again this run"
                 );
+            } else {
+                first_refusal_hint();
             }
-            first_refusal_hint();
             TrashVerdict::Refused(e)
         }
     }
@@ -2251,7 +2368,7 @@ use feature::largest_video;
 // was 3,264 lines - over the gate's own ceiling - so the split is by
 // topic: filing and the mover in `tests`, sweeping and renaming in
 // `sweep_rename_tests`, with what both need in `testkit`.
-mod sample;
+pub(crate) mod sample;
 pub use sample::skippable_samples;
 use sample::{is_deletable_sample, is_sample_named};
 mod audioname;

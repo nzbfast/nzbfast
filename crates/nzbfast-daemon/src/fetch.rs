@@ -58,6 +58,15 @@ pub struct Fetched {
     // expectation is unfulfilled under cfg(test).
     #[allow(dead_code)]
     pub category: String,
+    /// `X-DNZB-Password`, when the indexer sends one: the archive
+    /// password it holds for this release, or empty. Unlike `category`
+    /// this one IS used, because it decides nothing about where a
+    /// download goes - it is one more candidate to try against an
+    /// encrypted set, and a wrong one costs a failed unlock attempt and
+    /// nothing else. It rides into the add at the same rung as the NZB's
+    /// own `<meta type="password">` (see `Daemon::resolve_add_identity`
+    /// for the order), and it is a secret: never log it.
+    pub password: String,
     /// Every address the REQUESTED url's netloc resolved to during this
     /// fetch (not the redirect chain's). A caller whose body supplies
     /// further links - the RSS poller, whose feed body names item links
@@ -191,6 +200,17 @@ pub(super) fn dnzb(resp: &ureq::http::Response<ureq::Body>, name: &str) -> Strin
         .to_string()
 }
 
+/// The archive password out of an `X-DNZB-Password` header value, or
+/// None. A header present but blank counts as absent, exactly as it
+/// does for the failure link, so an indexer that always sends the
+/// header and fills it only for passworded releases does not hand every
+/// other job an empty-string password that `has_password` would then
+/// report.
+pub fn dnzb_password(value: &str) -> Option<String> {
+    let v = value.trim();
+    (!v.is_empty()).then(|| v.to_string())
+}
+
 /// The failure-report link out of the two spellings in the wild.
 /// `X-DNZB-Failure` is what indexers actually send (it is the header
 /// NZBGet's own FailureLink reads, via the `*DNZB:Failure` parameter);
@@ -316,7 +336,7 @@ pub(super) const FETCH_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) fn fetch_head(
     url: &str,
     origin: Option<&SourceOrigin>,
-) -> Result<(ureq::http::Response<ureq::Body>, String, String)> {
+) -> Result<(ureq::http::Response<ureq::Body>, DnzbHeaders)> {
     // Deliberately case-SENSITIVE, unlike every other scheme test in this
     // file. `HTTPS://host/...` passes `failure_link_allowed` and
     // `supplied_link_scheme_ok` (both `eq_ignore_ascii_case`) and dies
@@ -387,7 +407,45 @@ pub(super) fn fetch_head(
         &dnzb(&resp, "X-DNZB-FailureLink"),
     );
     let category = dnzb(&resp, "X-DNZB-Category");
-    Ok((resp, failure_link, category))
+    let password = dnzb_password(&dnzb(&resp, "X-DNZB-Password")).unwrap_or_default();
+    Ok((
+        resp,
+        DnzbHeaders {
+            failure_link,
+            category,
+            password,
+        },
+    ))
+}
+
+/// The three `X-DNZB-*` headers [`fetch_head`] reads off a response.
+/// A struct rather than a wider tuple: all three are `String`s, so a
+/// positional tuple lets two of them swap and still compile - and one
+/// of them is a password.
+pub(super) struct DnzbHeaders {
+    pub failure_link: String,
+    pub category: String,
+    pub password: String,
+}
+
+/// By hand, so the password never reaches a log line or a test's panic
+/// message through `{:?}` (`expect_err` on a [`fetch_head`] result
+/// prints the `Ok` side, which is this).
+impl std::fmt::Debug for DnzbHeaders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DnzbHeaders")
+            .field("failure_link", &self.failure_link)
+            .field("category", &self.category)
+            .field(
+                "password",
+                &if self.password.is_empty() {
+                    ""
+                } else {
+                    "<set>"
+                },
+            )
+            .finish()
+    }
 }
 
 /// Fetch a link the USER supplied (addurl, /watch, a failure link that
@@ -413,7 +471,14 @@ fn fetch_url_inner(url: &str, origin: Option<&SourceOrigin>) -> Result<Fetched> 
     // body will supply further links (the RSS poller) needs the answer
     // even though the fetch itself may be plain `fetch_url`.
     let (head, addrs) = witness_resolution(&url_netloc(url), || fetch_head(url, origin));
-    let (resp, failure_link, category) = head?;
+    let (
+        resp,
+        DnzbHeaders {
+            failure_link,
+            category,
+            password,
+        },
+    ) = head?;
     let filename =
         content_disposition_filename(&dnzb(&resp, "Content-Disposition")).unwrap_or_default();
     // Refuse an oversized body BEFORE reading it, when the server was
@@ -442,6 +507,7 @@ fn fetch_url_inner(url: &str, origin: Option<&SourceOrigin>) -> Result<Fetched> 
         host: url_host(url),
         https: url.starts_with("https://"),
         category,
+        password,
         filename,
         addrs,
     })

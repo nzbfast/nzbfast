@@ -579,7 +579,9 @@ pub fn history_page(d: &Daemon, q: &HistQuery, summary: bool) -> (Vec<Value>, us
     // Same question for "Clear failed": Failed and not password-locked. A
     // Failed row can carry `password_required` too - `settle_locked_failure`
     // sets it when an unpack failed for want of a password nobody has
-    // supplied yet - and that row is the only thing offering the 🔑, so
+    // supplied yet, and since TODO 358 (9 Nov 2026) every completed
+    // download whose set is locked with no password files Failed with it
+    // - and that row is the only thing offering the 🔑, so
     // `plan_history_delete`'s value=failed sweep spares it exactly as
     // value=completed spares a locked Completed row.
     let mut clearable_failed = 0usize;
@@ -997,6 +999,45 @@ pub fn published_failed_map(d: &Daemon) -> std::collections::HashMap<String, boo
         .collect()
 }
 
+/// Item 15 (TODO 358, D4): [`Job::not_delivered`] as a row PUBLISHES
+/// it - only on a row whose published word is Completed, because the
+/// list means "the main payload landed and these did not", and a Failed
+/// row (or a Completed one that was retried and failed) has no main
+/// payload to measure against. An additive key, so a SAB or NZBGet
+/// client that does not know it ignores it, and the status word every
+/// *arr acts on is untouched: Completed stays Completed.
+fn not_delivered_published<'a>(j: &'a Job, status: &str) -> &'a [String] {
+    if status == "Completed" && j.state == JobState::Completed {
+        &j.not_delivered
+    } else {
+        &[]
+    }
+}
+
+/// SAB's `script_line` for a Completed row that left something packed:
+/// the one free-text slot a Completed history item has. The zip-sidecar
+/// sentence is kept word for word when that is all there is to say.
+fn packed_script_line(j: &Job, not_delivered: &[String]) -> String {
+    let only_sidecar = not_delivered.is_empty()
+        || (not_delivered.len() == 1 && not_delivered[0] == j.unpack_blocked_by);
+    if !j.unpack_blocked_by.is_empty() && only_sidecar {
+        return format!(
+            "{} could not be unpacked: it is damaged, encrypted, or uses \
+             a compression method this build does not carry. The verified \
+             archive is in the output folder.",
+            j.unpack_blocked_by
+        );
+    }
+    if not_delivered.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Not delivered (outside the main payload, left packed in the output \
+         folder): {}",
+        not_delivered.join(", ")
+    )
+}
+
 fn history_summary(d: &Daemon, j: &Job) -> Value {
     let (deleted, status) = sab_history_status_published(j);
     json!({
@@ -1066,6 +1107,7 @@ fn history_summary(d: &Daemon, j: &Job) -> Value {
         "bad_blocks": j.bad_blocks,
         "verify_blocks": j.verify_blocks,
         "unpack_blocked_by": j.unpack_blocked_by,
+        "not_delivered": not_delivered_published(j, status),
         "move_split": j.move_split,
         "move_failed": j.move_failed,
         "move_attempts": j.move_attempts,
@@ -1358,6 +1400,9 @@ fn history_row(d: &Daemon, j: &Job, held: &[crate::altcand::HeldSpare]) -> Value
             // free-text slot a Completed history item has, and one
             // existing clients already surface beside the status.
             "unpack_blocked_by": j.unpack_blocked_by,
+            // Item 15 (D4): what this Completed job did NOT deliver,
+            // outside its main payload. See `not_delivered_published`.
+            "not_delivered": not_delivered_published(j, status),
             // UX §18: the move to the completed folder stopped part
             // way and the payload is in TWO directories - this one
             // and `storage`. Its own key beside `unpack_blocked_by`
@@ -1514,16 +1559,7 @@ fn history_row(d: &Daemon, j: &Job, held: &[crate::altcand::HeldSpare]) -> Value
                         .saturating_sub(j.elapsed_secs.round() as i64)
                         .max(0) as u64
                 }),
-            "script_line": if j.unpack_blocked_by.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "{} could not be unpacked: it is damaged, encrypted, or uses \
-                     a compression method this build does not carry. The verified \
-                     archive is in the output folder.",
-                    j.unpack_blocked_by
-                )
-            },
+            "script_line": packed_script_line(j, not_delivered_published(j, status)),
         })
     }
 }

@@ -481,6 +481,40 @@ fn rar5_volume_inner_at(
     service: &[u8],
     next_volume: bool,
 ) -> Vec<u8> {
+    let mut out = rar5_volume_open(vol_no);
+    for &(name, total, piece, before, after, crc) in pieces {
+        out.extend_from_slice(&rar5_store_file_header(
+            name,
+            total,
+            piece.len() as u64,
+            crc,
+            before,
+            after,
+        ));
+        out.extend_from_slice(piece);
+    }
+    if !service.is_empty() {
+        // Service header body: file-style flags, unpacked size,
+        // attributes, compression info, host os, name ("RR").
+        let mut body = Vec::new();
+        vint(0, &mut body);
+        vint(service.len() as u64, &mut body);
+        vint(0, &mut body);
+        vint(0, &mut body);
+        vint(0, &mut body);
+        vint(2, &mut body);
+        body.extend_from_slice(b"RR");
+        block_v5(3, 0x02, &body, service, &mut out);
+    }
+    // End of archive (type 5) with end-flags body (0 = last volume,
+    // 0x0001 = another volume of this set follows).
+    out.extend_from_slice(&rar5_end_block(next_volume));
+    out
+}
+
+/// The signature and main archive header every volume of this family
+/// opens with.
+fn rar5_volume_open(vol_no: VolNum) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(super::SIG5);
     // Main archive header (type 1): archive flags vint; volume sets
@@ -501,47 +535,74 @@ fn rar5_volume_inner_at(
         VolNum::None => vint(0x00, &mut main_body),
     }
     block_v5(1, 0, &main_body, &[], &mut out);
-    for &(name, total, piece, before, after, crc) in pieces {
-        let mut body = Vec::new();
-        // File flags: no mtime, not dir; 0x04 when a data CRC rides.
-        vint(if crc.is_some() { 0x04 } else { 0 }, &mut body);
-        vint(total, &mut body); // unpacked size
-        vint(0, &mut body); // attributes
-        if let Some(c) = crc {
-            body.extend_from_slice(&c.to_le_bytes());
-        }
-        vint(0, &mut body); // compression info: method 0 = store
-        vint(0, &mut body); // host os
-        vint(name.len() as u64, &mut body);
-        body.extend_from_slice(name.as_bytes());
-        let mut hflags = 0x02; // data area present
-        if before {
-            hflags |= 0x08;
-        }
-        if after {
-            hflags |= 0x10;
-        }
-        block_v5(2, hflags, &body, piece, &mut out);
-    }
-    if !service.is_empty() {
-        // Service header body: file-style flags, unpacked size,
-        // attributes, compression info, host os, name ("RR").
-        let mut body = Vec::new();
-        vint(0, &mut body);
-        vint(service.len() as u64, &mut body);
-        vint(0, &mut body);
-        vint(0, &mut body);
-        vint(0, &mut body);
-        vint(2, &mut body);
-        body.extend_from_slice(b"RR");
-        block_v5(3, 0x02, &body, service, &mut out);
-    }
-    // End of archive (type 5) with end-flags body (0 = last volume,
-    // 0x0001 = another volume of this set follows).
-    let mut end_body = Vec::new();
-    vint(u64::from(next_volume), &mut end_body);
-    block_v5(5, 0, &end_body, &[], &mut out);
     out
+}
+
+/// One store-mode file block's HEADER, declaring `data_len` bytes of
+/// data area that the caller writes after it.
+fn rar5_store_file_header(
+    name: &str,
+    total: u64,
+    data_len: u64,
+    crc: Option<u32>,
+    before: bool,
+    after: bool,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    // File flags: no mtime, not dir; 0x04 when a data CRC rides.
+    vint(if crc.is_some() { 0x04 } else { 0 }, &mut body);
+    vint(total, &mut body); // unpacked size
+    vint(0, &mut body); // attributes
+    if let Some(c) = crc {
+        body.extend_from_slice(&c.to_le_bytes());
+    }
+    vint(0, &mut body); // compression info: method 0 = store
+    vint(0, &mut body); // host os
+    vint(name.len() as u64, &mut body);
+    body.extend_from_slice(name.as_bytes());
+    let mut hflags = 0x02; // data area present
+    if before {
+        hflags |= 0x08;
+    }
+    if after {
+        hflags |= 0x10;
+    }
+    hdr_v5(2, hflags, &body, &[], data_len)
+}
+
+/// Volume `vol_no` of `of` of a single-member store set, as the bytes
+/// BEFORE and AFTER its data area: `head ++ data ++ tail` is byte for
+/// byte what [`rar5_volume_n_crc_of_layout`] builds for the one piece
+/// `(name, total, data, before, after, crc)` under
+/// [`Rar5Crc::FinalFragment`] (`rar::tests` pins that).
+///
+/// For a fixture too big to build. Every other builder here takes the
+/// data as a slice, so a 4 GB volume costs 4 GB of RAM to describe; the
+/// frame is a few dozen bytes and the caller supplies the data area
+/// however it likes - the volume-size ladder in
+/// `crates/nzbfast/tests/e2e_ladder` generates it per article on the
+/// mock's side ([`crate::mock::Chaos::lazy`]) and never holds a volume.
+///
+/// `crc` is what an archiver stamps on the FINAL fragment (the whole
+/// unpacked file's CRC32) and is dropped on any piece with `after` set,
+/// which is the archiver's placement.
+#[expect(clippy::too_many_arguments)]
+pub fn rar5_store_frame(
+    name: &str,
+    total: u64,
+    data_len: u64,
+    crc: Option<u32>,
+    before: bool,
+    after: bool,
+    vol_no: u64,
+    of: u64,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut head = rar5_volume_open(VolNum::Implied(vol_no));
+    let crc = place_crc(Rar5Crc::FinalFragment, after, crc);
+    head.extend_from_slice(&rar5_store_file_header(
+        name, total, data_len, crc, before, after,
+    ));
+    (head, rar5_end_block(vol_no + 1 < of))
 }
 
 /// HOSTILE fixture: a single-file store RAR5 volume whose file block

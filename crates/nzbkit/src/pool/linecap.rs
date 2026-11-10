@@ -264,6 +264,30 @@ pub const LINE_CAP_MAX_FLEET: usize = 50;
 /// section 2).
 pub const LINE_CAP_SUPPLY_MAX_FLEET: usize = 100;
 
+/// The cold-start probe's ceiling once a rung has PAID (`probe_step`'s
+/// `proven`): every connection the PRIMARY servers' accounts sell
+/// (`seed_primary_grant`), and never below [`LINE_CAP_MAX_FLEET`]. 0 =
+/// no claim, which holds it at the first ceiling.
+///
+/// **Why not [`LINE_CAP_SUPPLY_MAX_FLEET`]** (8 Nov 2026). That backstop
+/// bounds the SUPPLY arm, which sizes a fleet from `line / carry`
+/// arithmetic, and it sits where the measured evidence ran out. The
+/// probe does not do arithmetic: every rung it takes past the first
+/// ceiling has to PAY (the added sockets carrying half the average of
+/// the ones before), and since the same day the step-back undoes a raise
+/// the line punishes on every run. So the only bound it needs is what
+/// the accounts sell. GitHub #103's reporter had 100 + 50 on two
+/// primaries and SABnzbd ran both full at 334 MB/s, where the backstop
+/// held nzbfast to 100 at 279.
+///
+/// **Primaries only.** A fill server (any above the fleet's lowest level)
+/// exists for articles the primaries refuse; its connections idle on a
+/// healthy post, and the same reporter's cap-off runs (every connection
+/// of all four servers) took 308-313 s against the capped 194 s.
+pub fn probe_ceiling(primary_grant: usize) -> usize {
+    primary_grant.max(LINE_CAP_MAX_FLEET)
+}
+
 /// TODO 275 item 7: the ceiling the supply arm may clamp to on THIS
 /// fleet - [`LINE_CAP_MAX_FLEET`] unless the line anchor was MEASURED,
 /// and never more than the fleet's own `grant`.
@@ -739,9 +763,18 @@ pub fn fleet_step(
 pub const LINE_CAP_PROBE_MIN_BPS: u64 = 250_000_000;
 
 /// The cold-start probe's gate on a run with NO line anchor at all, in
-/// bytes/s (400 Mbit). Still an achieved rate and still four times the
-/// 99 Mbit line §208 measured the cap winning on, so that regime never
+/// bytes/s (200 Mbit). Still an achieved rate and still twice the 99
+/// Mbit line §208 measured the cap winning on, so that regime never
 /// opens it.
+///
+/// **It was 400 Mbit until 8 Nov 2026**, and that left GitHub #103's
+/// class open one step lower: a socket-bound fleet whose 25 seed sockets
+/// carry ~13 Mbit each (a jittery path, a far provider) reads ~320 Mbit
+/// on any line, never meets the gate, and runs pinned at 25. The
+/// loopback jitter-dial cell (`research/LINECAP-FAST-JUMP-2026-11-08.md`)
+/// ran 104 s there against 29 s with the cap off. What 200 Mbit buys,
+/// and what it costs a full line between 200 and 400 Mbit, is in
+/// `research/LINECAP-COLD-GATE-2026-11-08.md`.
 ///
 /// **Why a cold run gets a lower gate** (24 Oct 2026, GitHub #103). A
 /// gate on the FLEET's rate is a gate on seed x per-socket carry, and a
@@ -757,19 +790,23 @@ pub const LINE_CAP_PROBE_MIN_BPS: u64 = 250_000_000;
 /// line look identical at one fleet size, and only the probe's pay test
 /// tells them apart, so a cold run has to let it ask.
 ///
-/// **What it lets in, priced.** A cold run on a FULL line between 400
-/// Mbit and 2 Gbit now meets the probe. On a flat reading it gets the
-/// first rung (25 -> 35) and stops, since a line the seed fills cannot
-/// pay. A REAL run can go one rung further: the seed's dwell ends while
-/// the 1 s half-life rate is still climbing, so the baseline reads low
-/// and the next rung looks paid. On the loopback rig a full 920 Mbit
-/// line read 710 Mbit on 25 sockets and 885 on 35, and walked to 50;
-/// the first ceiling bounds it there. §208 measured what extra sockets
+/// **What it lets in, priced.** A cold run on a FULL line between 200
+/// Mbit (400 before 8 Nov 2026) and 2 Gbit meets the probe. On a flat reading it gets the
+/// first rung (25 -> 50 since 8 Nov 2026, 25 -> 35 before) and stops,
+/// since a line the seed fills cannot pay. Under the old 1.4x rung a
+/// REAL run could go one rung further: the seed's dwell ends while the
+/// 1 s half-life rate is still climbing, so the baseline reads low and
+/// the next rung looks paid. On the loopback rig a full 920 Mbit line
+/// read 710 Mbit on 25 sockets and 885 on 35, and walked to 50, which
+/// is where the 2x rung now lands in one step; the first ceiling bounds
+/// it there either way. §208 measured what extra sockets
 /// cost on a full line exactly: the drain tail grows by `added sockets
 /// x window x article size / line rate` (the §208 floor ladder, almost
 /// to the second at every rung), so 25 sockets
-/// x 4 x ~0.75 MB is ~0.6 s at 1 GbE and ~1.5 s at 400 Mbit, once per
-/// job, and only until the install has a line anchor. The rig measured
+/// x 4 x ~0.75 MB is ~0.6 s at 1 GbE, ~1.5 s at 400 Mbit and ~3 s at
+/// 200 Mbit, once per job, and only until the install has a line
+/// anchor (what the 200-400 Mbit band actually paid is in the 8 Nov
+/// note above). The rig measured
 /// none of it: 27.9 s on both arms, twice. The same rig's #103 shape
 /// (4 MB/s a socket, no line limit) went 48.0 s -> 30.7 s, and a 99
 /// Mbit line was untouched (35.7 s both arms, the probe never fired). ANY anchor, typed or measured, keeps
@@ -777,13 +814,22 @@ pub const LINE_CAP_PROBE_MIN_BPS: u64 = 250_000_000;
 /// against, so an install that knows its line is full (GH #62's
 /// line-bound fleets) is exactly as it was, and the supply arm is what
 /// grows the ones that are not.
-pub const LINE_CAP_PROBE_COLD_MIN_BPS: u64 = 50_000_000;
+pub const LINE_CAP_PROBE_COLD_MIN_BPS: u64 = 25_000_000;
 
 /// How long a fleet holds before the probe reads what it bought, in ms.
 /// Added slots have to dial and the now-rate (1 s half-life) has to
 /// catch up with them: at 2 s it shows ~75% of a step, and
 /// [`LINE_CAP_PROBE_PAY_PCT`] leaves room for the other 25%.
 pub const LINE_CAP_PROBE_SETTLE_MS: u64 = 2_000;
+
+/// The seed's own dwell, in ms: the probe's FIRST judgement, which has no
+/// rung below it to compare and so reads only the gate. A reading taken
+/// while the now-rate (1 s half-life) is still climbing can only read
+/// LOW, so a shorter dwell can only keep a gate shut that a longer one
+/// would open, never open one it would keep shut. 8 Nov 2026: the seed's
+/// 2 s dwell was most of what a cold run on a fast line still lost to
+/// the cap being off (`research/LINECAP-FAST-JUMP-2026-11-08.md`).
+pub const LINE_CAP_PROBE_FIRST_SETTLE_MS: u64 = 1_000;
 
 /// The longest the cold-start probe waits for a rung's sockets to come
 /// up before judging it on the ones that did, in ms. Slots dial
@@ -839,13 +885,18 @@ pub struct Probe {
     paid: bool,
 }
 
-/// The rung the probe tries after `fleet`: 1.4x, rounded UP to a rung,
-/// so a 25-socket seed tries 35 and then 50. That is two probes to the
-/// first ceiling rather than five, because each probe costs a
-/// [`LINE_CAP_PROBE_SETTLE_MS`] dwell, and on a 7 s job five of them
-/// would be the whole job.
+/// The rung the probe tries after `fleet`: 2x, rounded UP to a rung, so
+/// a 25-socket seed tries 50 and then, once that has paid, 100. Each
+/// probe costs a [`LINE_CAP_PROBE_SETTLE_MS`] dwell on 1 s ticks, so
+/// about 2-2.5 s a rung. It was 1.4x until 8 Nov 2026 (25 -> 35 -> 50 ->
+/// 70 -> 100, four judged rungs), and on a 10 GbE bench box a cold CLI
+/// tv4 (7 GB, 9 s) reached 50 at about 6 s and never left it: 9.5 s
+/// against 7.5 with the cap off. A rung that does not pay still latches where it stands, so a line
+/// that is full costs at most one rung of extra sockets, as before;
+/// the rung is just wider. The A/B is in
+/// `research/LINECAP-PROBE-DOUBLING-2026-11-08.md`.
 fn probe_next(fleet: usize) -> usize {
-    (fleet * 7 / 5).div_ceil(LINE_CAP_RUNG) * LINE_CAP_RUNG
+    (fleet * 2).div_ceil(LINE_CAP_RUNG) * LINE_CAP_RUNG
 }
 
 /// One tick of the cold-start probe ([`Probe`]): returns the fleet to
@@ -887,9 +938,11 @@ fn probe_next(fleet: usize) -> usize {
 ///   the sockets already fill gets at most one rung of over-provisioning.
 /// * **It never shrinks the fleet** and never reads the anchor, so a
 ///   typed line speed cannot drive it.
-/// * **It reads only this run's own gauge**: nothing it measures is
-///   banked or carried into another job except through the carry and
-///   the anchor, which already existed.
+/// * **It reads only this run's own gauge.** What it hands on to the
+///   next job is the carry, the anchor and, since 9 Nov 2026, the fleet
+///   it stopped at (`LiveStats::line_cap_settled`), which the daemon
+///   recalls only on the same measured line and which the next run
+///   checks for itself ([`recall_check`]).
 pub fn probe_step(
     p: Probe,
     fleet: usize,
@@ -932,7 +985,11 @@ pub fn probe_step(
         true => LINE_CAP_PROBE_MIN_BPS,
         false => LINE_CAP_PROBE_COLD_MIN_BPS,
     };
-    if waited < LINE_CAP_PROBE_SETTLE_MS || !settled || now_bps < gate {
+    let settle = match p.base {
+        None => LINE_CAP_PROBE_FIRST_SETTLE_MS,
+        Some(_) => LINE_CAP_PROBE_SETTLE_MS,
+    };
+    if waited < settle || !settled || now_bps < gate {
         return (fleet, p);
     }
     if let Some((r0, d0)) = p.base {
@@ -955,12 +1012,35 @@ pub fn probe_step(
     // Reaching this line with a baseline means the rung just judged
     // paid. `max` so a caller handing a `proven` under `ceiling` can
     // never make the probe stricter than the first step was.
-    let paid = p.paid || p.base.is_some();
+    //
+    // And a SEED already moving [`LINE_CAP_PROBE_MIN_BPS`] counts as
+    // paid on its first judgement (8 Nov 2026), so it goes straight to
+    // `proven` rather than through the first ceiling. That gate is the
+    // one an anchored run needs before it may probe at all, an achieved
+    // rate no line §208 protects can show, so it is the same provenance
+    // the second ceiling asks of a measured anchor. What a jump that was
+    // WRONG costs is bounded by the step-back check ([`regret_step`]),
+    // which since the same day watches cold runs too: a jump that cuts
+    // the rate is undone within its window.
+    let fast_seed = p.base.is_none() && now_bps >= LINE_CAP_PROBE_MIN_BPS;
+    let paid = p.paid || p.base.is_some() || fast_seed;
     let bound = match paid {
         true => proven.max(ceiling),
         false => ceiling,
     };
-    let next = probe_next(fleet).min(bound);
+    // A fast seed goes to the bound in ONE step: a rung judged on a
+    // line already moving 2 Gbit is a 2 s dwell the job pays for an
+    // answer the gate has already given.
+    //
+    // The jump stops at [`LINE_CAP_SUPPLY_MAX_FLEET`] even when the
+    // primaries' grant is larger (8 Nov 2026, [`probe_ceiling`]): the
+    // 2 Gbit gate says the line is fast, not that it needs 300 sockets,
+    // and §208's 10 GbE knee was flat on wall from 50 to 360 while cpu
+    // rose 2.3x. Past 100 every rung has to pay.
+    let next = match fast_seed {
+        true => bound.min(LINE_CAP_SUPPLY_MAX_FLEET.max(fleet)),
+        false => probe_next(fleet).min(bound),
+    };
     if next <= fleet {
         return (fleet, Probe { done: true, ..p });
     }
@@ -1122,6 +1202,55 @@ pub fn regret_step(
     }
 }
 
+/// The recalled-seed check (9 Nov 2026): is a run that STARTED at the
+/// fleet the last job on this line settled at still on a line that
+/// earns it? `None` = not judged yet, `Some(true)` = keep it,
+/// `Some(false)` = fall back to the curve's own seed.
+///
+/// A recalled seed skips the climb, so it is the one raise this
+/// governor makes without a reading of its own behind it. The daemon
+/// only recalls on a MEASURED anchor within a quarter of the one the
+/// memory was banked on (`linecarry::Stored::recall`), but an anchor
+/// learns down slowly, so a laptop that moved from a fast line to a slow
+/// one can still be handed last night's fleet. This is the run's own
+/// check of that: once the fleet is up and has dwelt
+/// [`LINE_CAP_PROBE_FIRST_SETTLE_MS`] (the probe's first-judgement
+/// test), a line moving under [`LINE_CAP_PROBE_COLD_MIN_BPS`] is one the
+/// probe would never have climbed on at all, so the run goes back to the
+/// seed the curve would have given it. That is the regime §208 measured
+/// a big fleet costing on (99 Mbit), and the gate is the one that
+/// already keeps the probe out of it.
+///
+/// `since` is when the recalled fleet began its dwell, ms on the pool
+/// clock. `now_bps == 0` is no evidence, as for every arm.
+pub fn recall_check(
+    since: u64,
+    now: u64,
+    now_bps: u64,
+    dialling: usize,
+    connected: usize,
+) -> Option<bool> {
+    let waited = now.saturating_sub(since);
+    if now_bps == 0 || dialling == 0 || waited < LINE_CAP_PROBE_FIRST_SETTLE_MS {
+        return None;
+    }
+    // A slow line can be told from a fleet still connecting without
+    // waiting for the rest of it: if the sockets that ARE up, each carrying
+    // what they carry now, could not reach the gate even with every
+    // admitted socket up, more sockets cannot be what the line is short
+    // of. Waiting cost the first job on a changed line its whole queue
+    // (200 sockets took every article by 2.9 s, judged at ~6 s).
+    let projected = (now_bps as u128) * (dialling as u128) / (connected.max(1) as u128);
+    if connected > 0 && projected < LINE_CAP_PROBE_COLD_MIN_BPS as u128 {
+        return Some(false);
+    }
+    let settled = connected >= dialling || waited >= LINE_CAP_PROBE_MAX_DWELL_MS;
+    if !settled {
+        return None;
+    }
+    Some(now_bps >= LINE_CAP_PROBE_COLD_MIN_BPS)
+}
+
 /// How many spawned slots the I/O shard layout should be sized for
 /// (`get::shard_count`'s input), given the fleet as built.
 ///
@@ -1217,6 +1346,26 @@ pub fn level_share(fleet: usize, levels: &[u32], level: u32) -> usize {
         return fill;
     }
     server_share(fleet.saturating_sub(n_fill * fill), levels.len() - n_fill).max(equal)
+}
+
+/// Divide `pool` sockets over servers whose own ceilings are `ceilings`,
+/// filling the smallest first: each takes the equal share of what is
+/// left (rounded up, as [`server_share`] rounds) or its ceiling,
+/// whichever is less, so what a small account cannot take goes to the
+/// rest. Never hands a server past its ceiling; if `pool` exceeds every
+/// ceiling together the excess goes nowhere. With every ceiling at or
+/// above `pool / n` it is the equal split.
+pub fn water_fill(pool: usize, ceilings: &[usize]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..ceilings.len()).collect();
+    order.sort_by_key(|&i| ceilings[i]);
+    let mut out = vec![0; ceilings.len()];
+    let mut left = pool;
+    for (k, &i) in order.iter().enumerate() {
+        let give = left.div_ceil(ceilings.len() - k).min(ceilings[i]);
+        out[i] = give;
+        left = left.saturating_sub(give);
+    }
+    out
 }
 
 /// GH #103: the share a server gets once the queue has gone dry, and
@@ -1367,6 +1516,9 @@ pub(super) struct LineCap {
     /// second ceiling is bounded by. 0 = no claim, which holds the
     /// ceiling at [`LINE_CAP_MAX_FLEET`].
     grant: usize,
+    /// The part of `grant` the PRIMARY servers hold
+    /// ([`seed_primary_grant`]): what [`probe_ceiling`] is bounded by.
+    primary_grant: usize,
     /// TODO 275 item 10: the consumer's held-span ceiling in bytes
     /// (`PoolConfig::holds_cap`), against which the live gauge is read
     /// each tick. 0 = no claim, and the growth gate is inert.
@@ -1393,6 +1545,14 @@ pub(super) struct LineCap {
     /// never contended: the tick's CAS lets one caller a second in.
     probe: std::sync::Mutex<Probe>,
     regret: std::sync::Mutex<Regret>,
+    /// 9 Nov 2026: the curve's own seed when `cap` is a RECALLED one
+    /// ([`seed_recall_from`]), 0 = not recalled. What [`recall_check`]
+    /// falls back to.
+    recall_from: usize,
+    /// When the recalled fleet's dwell began (u64::MAX = no tick yet),
+    /// and whether [`recall_check`] has answered. Latched once answered.
+    recall_since: AtomicU64,
+    recall_done: AtomicBool,
 }
 
 impl LineCap {
@@ -1407,12 +1567,44 @@ impl LineCap {
     /// works it at a few sockets. The seed spawns the parked slots for
     /// it ([`fill_tail_share`] is the spawn rule too), so the raise has
     /// somewhere to land.
+    ///
+    /// **And a primary gets what another primary cannot take** (8 Nov
+    /// 2026): the primaries this governor steers pool their
+    /// [`level_share`]s and [`water_fill`] it up to each one's own
+    /// ceiling, so a smaller account's unused slice goes to the others
+    /// instead of being stranded. On GitHub #103's fleet at 150 the
+    /// equal split gave frugal 70 of its 100 while newsdemon could take
+    /// only 50 (`research/LINECAP-WATERFILL-SPLIT-2026-11-08.md`). Where
+    /// no such primary's ceiling is under its share this is exactly
+    /// `level_share`, so every all-equal fleet a §208 round measured
+    /// divides as it did. Fill servers and servers with no target (a
+    /// pinned one) keep `level_share` as before.
     fn share(&self, fleet: usize, si: usize) -> usize {
-        let level = self.levels.get(si).copied().unwrap_or(0);
-        match self.tail.load(Ordering::Relaxed) {
-            true => fill_tail_share(fleet, &self.levels, level),
-            false => level_share(fleet, &self.levels, level),
+        let base = |i: usize| {
+            let level = self.levels.get(i).copied().unwrap_or(0);
+            match self.tail.load(Ordering::Relaxed) {
+                true => fill_tail_share(fleet, &self.levels, level),
+                false => level_share(fleet, &self.levels, level),
+            }
+        };
+        let top = self.levels.iter().min().copied();
+        let steered = |i: usize| {
+            self.levels.get(i).copied() == top && matches!(self.targets.get(i), Some(Some(_)))
+        };
+        if !steered(si) {
+            return base(si);
         }
+        let primaries: Vec<usize> = (0..self.levels.len()).filter(|&i| steered(i)).collect();
+        let pool: usize = primaries.iter().map(|&i| base(i)).sum();
+        let ceilings: Vec<usize> = primaries
+            .iter()
+            .map(|&i| self.targets[i].as_ref().map_or(0, |(_, c)| *c))
+            .collect();
+        let alloc = water_fill(pool, &ceilings);
+        primaries
+            .iter()
+            .position(|&i| i == si)
+            .map_or_else(|| base(si), |p| alloc[p])
     }
 
     /// The value the SEED left on server `si`'s target: [`level_share`]
@@ -1464,6 +1656,7 @@ impl LineCap {
                 .unwrap_or(0),
             anchor_measured: seed_anchor_measured(servers),
             grant: seed_uncapped(servers),
+            primary_grant: seed_primary_grant(servers),
             // MAX-folded like the cap and the anchor: it is a
             // whole-process budget, so every server carries the same
             // number and a fleet that stamped none contributes no
@@ -1486,7 +1679,19 @@ impl LineCap {
             sheds: AtomicU64::new(0),
             raises: AtomicU64::new(0),
             probe: std::sync::Mutex::new(Probe::default()),
-            regret: std::sync::Mutex::new(Regret::default()),
+            // A step-back the last job on this line made is held from
+            // the start, never under the seed: the hold bounds a climb and
+            // is not a reason to shrink a fleet the seed already chose.
+            regret: std::sync::Mutex::new(Regret {
+                hold: match seed_hold(servers) {
+                    0 => 0,
+                    h => h.max(cap),
+                },
+                ..Regret::default()
+            }),
+            recall_from: seed_recall_from(servers),
+            recall_since: AtomicU64::new(u64::MAX),
+            recall_done: AtomicBool::new(false),
         }
     }
 }
@@ -1546,6 +1751,43 @@ pub(super) fn seed_auto(servers: &[(ServerConfig, PoolConfig)]) -> bool {
 /// own allowance.
 pub(super) fn seed_uncapped(servers: &[(ServerConfig, PoolConfig)]) -> usize {
     servers.iter().map(|(_, c)| c.line_cap_uncapped).sum()
+}
+
+/// [`seed_uncapped`] over the PRIMARY servers only: the ones at the
+/// fleet's lowest level, which [`level_share`] treats as primaries for
+/// the same reason (the pool's tiering is relative). The bound on
+/// [`probe_ceiling`].
+pub(super) fn seed_primary_grant(servers: &[(ServerConfig, PoolConfig)]) -> usize {
+    let Some(top) = servers.iter().map(|(s, _)| s.level).min() else {
+        return 0;
+    };
+    servers
+        .iter()
+        .filter(|(s, _)| s.level == top)
+        .map(|(_, c)| c.line_cap_uncapped)
+        .sum()
+}
+
+/// The curve's own seed when this fleet's seed is a RECALLED one
+/// (`PoolConfig::line_cap_recall_from`), 0 = not recalled. MAX-folded
+/// like [`seed_cap`], which it sits beside.
+pub(super) fn seed_recall_from(servers: &[(ServerConfig, PoolConfig)]) -> usize {
+    servers
+        .iter()
+        .map(|(_, c)| c.line_cap_recall_from)
+        .max()
+        .unwrap_or(0)
+}
+
+/// The step-back ceiling the last job on this line left
+/// (`PoolConfig::line_cap_hold`), 0 = none. MAX-folded. One fold for the
+/// governor and the gauge, for [`seed_cap`]'s reason.
+pub(super) fn seed_hold(servers: &[(ServerConfig, PoolConfig)]) -> usize {
+    servers
+        .iter()
+        .map(|(_, c)| c.line_cap_hold)
+        .max()
+        .unwrap_or(0)
 }
 
 /// TODO 312 item 7: a STALE auto-tune knee holding ONE server under its
@@ -1732,6 +1974,10 @@ impl Shared {
             Some(l) => refused && !l.line_cap_refused.swap(true, Ordering::Relaxed),
             None => false,
         };
+        // Set when the step-back check undoes a raise this tick: the one
+        // shrink an anchorless run may make, because it rests on this
+        // run's own before-and-after and not on a line estimate.
+        let mut stepped_back = false;
         if lc.auto {
             // A trained peak is what the fleet has been SEEN to move;
             // the anchor is what a previous job saw. Both are lower
@@ -1846,7 +2092,7 @@ impl Shared {
             // exactly as they take back `durable`.
             let proven_durable = match refused {
                 true => LINE_CAP_MAX_FLEET,
-                false => supply_ceiling(true, lc.grant),
+                false => probe_ceiling(lc.primary_grant),
             };
             let holds_ok = holds_allow_growth(
                 crate::memgauge::cur(crate::memgauge::Sub::Holds),
@@ -1860,6 +2106,22 @@ impl Shared {
                 true => proven_durable,
                 false => LINE_CAP_MAX_FLEET,
             };
+            // A step-back hold - this run's own, or the one the last job on
+            // this line left (9 Nov 2026) - is the ceiling for EVERY arm,
+            // not a clamp after them: an arm still asking past it moves the
+            // probe's rung each tick, so the probe re-times for ever and
+            // never reaches a verdict. Never under the fleet in force: a
+            // hold bounds a climb and shrinks nothing.
+            let hold = match lc.regret.lock_ok().hold {
+                0 => usize::MAX,
+                h => h.max(cap),
+            };
+            let (ceiling, proven, proven_durable) = (
+                ceiling.min(hold),
+                proven.min(hold),
+                proven_durable.min(hold),
+            );
+            let durable = durable.min(hold);
             // The ceiling this run will keep is the probe's once it has
             // paid, and the gauge must say so, or `whyslow` convicts a
             // cap that is walking to it.
@@ -1912,8 +2174,9 @@ impl Shared {
             // rung the curve has just raised is timed afresh rather
             // than judged on a dwell it did not have. It is never
             // below `curve`.
-            let want = {
+            let (want, probe_stopped) = {
                 let mut probe = lc.probe.lock_ok();
+                let was_done = probe.done;
                 let (want, next) = probe_step(
                     *probe,
                     curve,
@@ -1926,30 +2189,83 @@ impl Shared {
                     lc.anchor_bps > 0,
                 );
                 *probe = next;
-                want
+                (want, next.done && !was_done)
             };
-            // The step-back check, only where a fleet can be lowered at
-            // all: a run with no line anchor never sheds (`allow_shed`
-            // below), and there the probe's own pay test is the judge.
-            let (want, stepped) = match lc.anchor_bps > 0 {
-                false => (want, None),
-                true => {
-                    let mut regret = lc.regret.lock_ok();
-                    let before = *regret;
-                    let (w, next) = regret_step(
-                        *regret,
-                        cap,
-                        want,
-                        now,
-                        now_bps,
-                        dialling,
-                        connected,
-                        holds_ok && !refused,
-                    );
-                    *regret = next;
-                    (w, (next.hold != before.hold).then_some(before.before))
+            // The step-back check, on every automatic run (8 Nov 2026;
+            // anchored runs only before). It compares this run's rate
+            // after its own raise with the best it read since, so it
+            // needs no line estimate, and an anchorless run is exactly
+            // the one whose probe now makes the widest raise.
+            let (want, stepped) = {
+                let mut regret = lc.regret.lock_ok();
+                let before = *regret;
+                let (w, next) = regret_step(
+                    *regret,
+                    cap,
+                    want,
+                    now,
+                    now_bps,
+                    dialling,
+                    connected,
+                    holds_ok && !refused,
+                );
+                *regret = next;
+                (w, (next.hold != before.hold).then_some(before.before))
+            };
+            stepped_back = stepped.is_some();
+            // 9 Nov 2026: a run that started at a RECALLED fleet checks,
+            // once, that the line still earns it, and falls back to the
+            // curve's seed when it does not (`recall_check`). Rides the
+            // step-back's shed licence: like that undo, it rests on this
+            // run's own reading and not on a line estimate.
+            let mut want = want;
+            if lc.recall_from > 0 && !lc.recall_done.load(Ordering::Relaxed) {
+                let since = match lc.recall_since.load(Ordering::Relaxed) {
+                    u64::MAX => {
+                        lc.recall_since.store(now, Ordering::Relaxed);
+                        now
+                    }
+                    t => t,
+                };
+                // The RAW rate, tail or not: a small job on a recalled fleet
+                // can run dry within its first seconds, and a check that
+                // waited for a non-tail reading would never answer while the
+                // stale fleet stayed banked (measured: queue dry at 2.9 s of
+                // a 31 s job on 200 sockets of a 100 Mbit line). The tail
+                // only ever reads LOW, so the worst it can do is fall back
+                // to the seed the curve would have started at anyway.
+                let raw_bps = self.sat.now_rate(now).unwrap_or(0.0).max(0.0) as u64;
+                if let Some(keep) = recall_check(since, now, raw_bps, dialling, connected) {
+                    lc.recall_done.store(true, Ordering::Relaxed);
+                    if !keep && lc.recall_from < want {
+                        info!(
+                            "line cap: fleet {cap} -> {} (started at the fleet the last job \
+                             settled at, but the line is moving {:.0} Mbit; back to the seed)",
+                            lc.recall_from,
+                            raw_bps as f64 * 8.0 / 1e6,
+                        );
+                        want = lc.recall_from;
+                        stepped_back = true;
+                        // The probe times the seed afresh, as on any run.
+                        *lc.probe.lock_ok() = Probe::default();
+                        if let Some(l) = &self.live {
+                            l.line_cap_settled.store(want, Ordering::Relaxed);
+                        }
+                    }
                 }
-            };
+            }
+            // The verdicts the daemon banks for the next job on this line
+            // (`LiveStats::line_cap_settled`): the fleet a stopped probe
+            // or a step-back left the run at, and a step-back's hold.
+            if let Some(l) = &self.live {
+                if probe_stopped || stepped.is_some() {
+                    l.line_cap_settled.store(want, Ordering::Relaxed);
+                }
+
+                if stepped.is_some() {
+                    l.line_cap_hold.store(want, Ordering::Relaxed);
+                }
+            }
             if let Some(before) = stepped {
                 info!(
                     "line cap: fleet {cap} -> {want} (stepped back: the fleet moved {:.0} Mbit \
@@ -2038,7 +2354,9 @@ impl Shared {
         // above for the download that bought this. A raise the governor
         // has already made still gets handed to the targets, which is
         // the one thing an anchorless run may resize.
-        let allow_shed = lc.anchor_bps > 0;
+        // The step-back check's undo is the one exception: see
+        // `stepped_back` above.
+        let allow_shed = lc.anchor_bps > 0 || stepped_back;
         // GH #103: the queue-dry latch raises a fill tier's share (see
         // `LineCap::share`), and that raise is one an anchorless run may
         // make too: it shrinks nothing, and the slots it wakes were
@@ -2179,6 +2497,24 @@ impl Shared {
             sl.budget.store(want, Ordering::Relaxed);
         }
         Some(want)
+    }
+
+    /// The run's last word to the fleet memory (9 Nov 2026), called once
+    /// as the run ends: a job that ended before its probe stopped - every
+    /// short job on a fast line, which is the case the memory is for -
+    /// banks the fleet it was running, if the governor raised it on this
+    /// run's own evidence. Never over a verdict the run already gave.
+    pub(super) fn line_cap_finish(&self) {
+        let lc = &self.line_cap;
+        let cur = lc.cur.load(Ordering::Relaxed);
+        if !lc.auto || lc.cap == 0 || cur <= lc.cap {
+            return;
+        }
+        if let Some(l) = &self.live {
+            let _ =
+                l.line_cap_settled
+                    .compare_exchange(0, cur, Ordering::Relaxed, Ordering::Relaxed);
+        }
     }
 
     /// The ledger's fragment for the `[pool]` line: empty unless the

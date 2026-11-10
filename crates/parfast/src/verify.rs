@@ -719,7 +719,11 @@ fn load_sparse(
             let Some(e) = p.recovery_exponent.filter(|_| p.set_id == want) else {
                 continue;
             };
-            let v = exps.entry(e).or_insert(0);
+            // Keyed on the matrix ROW, as the parser's own count is
+            // (`par2::recovery_row`): an exponent and its alias 65535
+            // above it are one row, and a loader that counted them
+            // apart would promise a block the solve does not have.
+            let v = exps.entry(par2::recovery_row(e)).or_insert(0);
             *v = (*v).max(p.body_len.saturating_sub(4));
         }
         let name = display_name(&dir, path);
@@ -933,7 +937,8 @@ pub fn load_scanned(
             }
             if let Some(r) = p.recovery.filter(|_| p.set_id == want) {
                 let slice = usize::try_from(r.slice_len).unwrap_or(usize::MAX);
-                let e = exps.entry(r.exponent).or_insert(0);
+                // By matrix row, for the reason `load_sparse` gives.
+                let e = exps.entry(par2::recovery_row(r.exponent)).or_insert(0);
                 *e = (*e).max(slice);
             }
         }
@@ -1083,6 +1088,18 @@ fn siblings(dir: &Path, named: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
+    // The STEM is compared without case too, as the suffix always was.
+    // A byte-exact prefix meant `parfast r movie.par2` beside
+    // `Movie.vol00+01.par2` - one file name typed in another case, which
+    // a case-insensitive volume (Windows, default APFS) opens without
+    // complaint - loaded the index alone, counted zero recovery blocks
+    // and answered "Repair is not possible." (sweep A12, 9 Nov 2026).
+    // Folding everywhere rather than probing the volume costs nothing a
+    // probe would buy: what a sibling CONTRIBUTES is decided by set id
+    // in the loaders (another set's file is skipped whatever its name),
+    // so on a case-sensitive volume the only difference is that a
+    // same-set volume spelt in another case is loaded too.
+    let stem = stem.to_lowercase();
     let mut out: Vec<PathBuf> = rd
         .flatten()
         .map(|e| e.path())
@@ -1090,7 +1107,8 @@ fn siblings(dir: &Path, named: &Path) -> Vec<PathBuf> {
             let Some(n) = p.file_name().and_then(|s| s.to_str()) else {
                 return false;
             };
-            n.starts_with(&stem) && n.to_ascii_lowercase().ends_with(".par2")
+            let n = n.to_lowercase();
+            n.starts_with(&stem) && n.ends_with(".par2")
         })
         .collect();
     out.sort();
@@ -1608,13 +1626,18 @@ fn proven_bits(pass: &Pass1Out, blocks: usize) -> Vec<bool> {
     if pass.clean {
         return vec![true; blocks];
     }
-    let mut bits = vec![false; blocks];
-    if let Some(present) = pass.present.as_ref() {
-        for (b, &ok) in bits.iter_mut().zip(present.iter()) {
-            *b = ok;
-        }
+    // NO LONGER THAN THE ENGINE'S OWN BITMAP, never `blocks` long: a
+    // bitmap shorter than the slice count means "the rest unproven" to
+    // both readers (a count of `true`s, and the rolling scan's
+    // `proven`), and `blocks` comes from a wire-supplied FileDesc
+    // length. A crafted one beside a small file on disk made this a
+    // multi-exabyte `vec![false; blocks]` and aborted the verify on the
+    // allocation (sweep A19, 9 Nov 2026). `clean` above cannot be
+    // reached that way: it needs the declared prefix on disk.
+    match pass.present.as_ref() {
+        Some(present) => present.iter().take(blocks).copied().collect(),
+        None => Vec::new(),
     }
-    bits
 }
 
 /// Verify ONE member and print its `Opening` and `Target` lines. The
@@ -1677,23 +1700,31 @@ pub fn print_set_summary(loaded: &Loaded, sink: &mut Sink) {
     if !sink.shows(Level::Normal) {
         return;
     }
-    let total_bytes: u64 = loaded.set.files.iter().map(|f| f.length).sum();
+    // Saturating, not `sum()`: every length is a wire-supplied FileDesc
+    // field, and two crafted ones near `u64::MAX` overflowed the sum -
+    // a panic under overflow checks, a wrapped total without them.
+    let total_bytes: u64 = loaded
+        .set
+        .files
+        .iter()
+        .fold(0u64, |acc, f| acc.saturating_add(f.length));
     let blocks: u64 = if loaded.set.block_size == 0 {
         0
     } else {
-        loaded
-            .set
-            .files
-            .iter()
-            .map(|f| f.length.div_ceil(loaded.set.block_size))
-            .sum()
+        loaded.set.files.iter().fold(0u64, |acc, f| {
+            acc.saturating_add(f.length.div_ceil(loaded.set.block_size))
+        })
     };
     sink.line(Level::Normal, "");
+    // The count the Main packet DECLARES, undescribed members included,
+    // which is the reference's: it printed 3 where this printed 2 on a
+    // three-member set with one FileDesc stripped (17 Sep 2026). The
+    // block and byte totals below can only cover what is described.
     sink.line(
         Level::Normal,
         &format!(
             "There are {} recoverable files and {} other files.",
-            loaded.set.files.len(),
+            loaded.set.files.len() + loaded.set.undescribed.len(),
             loaded.set.nonrecovery.len()
         ),
     );
@@ -1720,6 +1751,17 @@ pub fn print_set_summary(loaded: &Loaded, sink: &mut Sink) {
 /// on, which is why the tail is a separate function.
 pub fn print_verdict(loaded: &Loaded, survey: &Survey, sink: &mut Sink) -> u8 {
     sink.line(Level::Terse, "");
+    // BEFORE the clean arm, which is the whole point: a member the Main
+    // packet declares with no usable FileDesc is not in `survey` at all,
+    // so a survey of the rest reads clean - and this printed "All files
+    // are correct", exited 0 and let `-p` purge the recovery files of a
+    // set with a member nothing had looked at (sweep A1, 9 Nov 2026).
+    // Exit 6 is the reference's for this condition (eFileIOError,
+    // measured against par2cmdline v1.3.0 on 17 Sep 2026,
+    // `research/SAB-PARFAST-METER-DROPIN-2026-09-17.md`).
+    if refuse_undescribed(loaded, sink) {
+        return crate::EXIT_FILE_IO_ERROR;
+    }
     if !survey.damaged() {
         sink.line(
             Level::Terse,
@@ -1745,6 +1787,28 @@ pub fn print_verdict(loaded: &Loaded, survey: &Survey, sink: &mut Sink) -> u8 {
         );
         crate::EXIT_REPAIR_NOT_POSSIBLE
     }
+}
+
+/// Say, in the reference's two sentences, that the set declares a
+/// recovery member nothing describes, and answer whether it did.
+///
+/// THE SENTENCES ARE THE ENGINE'S REPAIR REFUSAL, word for word
+/// (`par2repair`'s target walk), because a caller PARSES them: SABnzbd
+/// fails the job with any line containing "No details available for
+/// recoverable file" as the reason it shows. The ordinal is the member's
+/// real position in the Main packet's list, which is the engine's
+/// deliberate divergence from the reference's constant 1 and is argued
+/// at that site. On stderr, like the repair's line, so `-q -q` cannot
+/// silence the one line that explains a non-zero exit.
+pub fn refuse_undescribed(loaded: &Loaded, sink: &mut Sink) -> bool {
+    for (at, _) in &loaded.set.undescribed {
+        sink.err(&format!(
+            "No details available for recoverable file number {}.",
+            at + 1
+        ));
+        sink.err("Recovery will not be possible.");
+    }
+    !loaded.set.undescribed.is_empty()
 }
 
 /// The members the extra-file scan proved are sitting under another

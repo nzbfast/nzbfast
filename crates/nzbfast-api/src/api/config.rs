@@ -43,6 +43,15 @@ fn m_backup_import(
     Some({
         if req.method() != &tiny_http::Method::Post {
             json!({"status": false, "error": "POST required"})
+        } else if let Err(e) = same_site_only(req) {
+            // The bundle carries `apikey_file`, so this writes the same
+            // credential `mode=config&name=apikey` does and needs the
+            // same gate: on a keyless install a cross-site
+            // `enctype="text/plain"` form can POST a body that parses as
+            // a backup and install an attacker's key (bug sweep 9 Nov
+            // 2026). Callers with no `Sec-Fetch-*`/`Origin` are not
+            // browsers and keep working.
+            json!({"status": false, "error": e})
         } else {
             let raw = api_body.take().unwrap_or_default();
             let parsed = serde_json::from_slice::<Value>(&raw).ok();
@@ -388,6 +397,22 @@ fn m_get_config(
                             "socks5_user": super::super::servers::socks5_creds(s.socks5.as_deref()).0,
                             "has_socks5_pass":
                                 !super::super::servers::socks5_creds(s.socks5.as_deref()).1.is_empty(),
+                            // TODO 358 item 14: the HTTP CONNECT proxy,
+                            // same one-string shape and the same three-way
+                            // echo with the password masked.
+                            "http_proxy": super::super::servers::socks5_addr(s.http_proxy.as_deref()),
+                            "http_proxy_user":
+                                super::super::servers::socks5_creds(s.http_proxy.as_deref()).0,
+                            "has_http_proxy_pass":
+                                !super::super::servers::socks5_creds(s.http_proxy.as_deref()).1.is_empty(),
+                            // TODO 358 item 14: the kill switch's verdict
+                            // on `bind_ip` RIGHT NOW, read from the
+                            // interface table at render time so the
+                            // server card says so between jobs too, when
+                            // no dial has happened to fail. The dial's own
+                            // sentence, or null when it would not refuse.
+                            "bind_ip_down": nzbkit::nntp::route::bind_ip_down(s.bind_ip.as_deref())
+                                .map(|d| d.to_string()),
                             // TODO 313 item 8. Config-file only in this
                             // lane, deliberately: a setting is three
                             // places plus 27 i18n catalogues and 16
@@ -1242,10 +1267,23 @@ pub fn same_site_only(req: &tiny_http::Request) -> Result<(), String> {
     // "none" is a user-typed URL or a bookmark; "same-origin" is our own
     // dashboard. "cross-site" and "same-site" are both somebody else's
     // page - a sibling subdomain is not this daemon.
-    if let Some(site) = hv("Sec-Fetch-Site")
-        && !matches!(site.to_ascii_lowercase().as_str(), "same-origin" | "none")
+    let site = hv("Sec-Fetch-Site").map(|s| s.to_ascii_lowercase());
+    if let Some(site) = &site
+        && !matches!(site.as_str(), "same-origin" | "none")
     {
         return Err("a key can only be created from nzbfast's own pages".into());
+    }
+    // "same-origin" is the browser's own attestation that the page and
+    // the URL it asked for share an origin - the very thing the Origin
+    // vs Host comparison below approximates - and no page can forge a
+    // `Sec-` header. The approximation is what breaks behind a reverse
+    // proxy that rewrites `Host` (drops the public port, or sends its
+    // upstream address), so it is kept only for a browser that sent no
+    // `Sec-Fetch-Site` at all. `X-Forwarded-Host` is deliberately NOT
+    // consulted: it is an ordinary header, and trusting it here would
+    // need a trusted-proxy setting (bug sweep 9 Nov 2026, A19).
+    if site.as_deref() == Some("same-origin") {
+        return Ok(());
     }
     // Compare HOSTS, not whole URLs: the dashboard may be reached over
     // http or https through a reverse proxy, and the scheme the browser
@@ -1331,5 +1369,103 @@ mod tests {
         assert!(w.contains("revert"), "no durability warning: {v}");
         assert!(w.contains("password_file"), "{v}");
         assert!(w.contains("categories"), "{v}");
+    }
+
+    /// A19 (bug sweep 9 Nov 2026): behind a reverse proxy that rewrites
+    /// `Host`, a sign-in from the daemon's own page carried an Origin
+    /// that no longer matched and was refused with a 403. The browser's
+    /// `Sec-Fetch-Site: same-origin` already says what the comparison
+    /// was trying to establish, so it wins; the comparison still guards a
+    /// browser that sends no `Sec-Fetch-Site`, and cross-site still loses.
+    #[test]
+    fn same_site_trusts_the_browsers_same_origin_over_a_rewritten_host() {
+        use std::str::FromStr;
+        let req = |hdrs: &[(&str, &str)]| -> tiny_http::Request {
+            let mut t = tiny_http::TestRequest::new().with_method(tiny_http::Method::Post);
+            for (k, v) in hdrs {
+                t = t.with_header(tiny_http::Header::from_str(&format!("{k}: {v}")).unwrap());
+            }
+            t.into()
+        };
+        let proxied = [
+            ("Host", "example.com"),
+            ("Origin", "https://example.com:8443"),
+        ];
+        let mut with_sfs = proxied.to_vec();
+        with_sfs.push(("Sec-Fetch-Site", "same-origin"));
+        assert!(
+            same_site_only(&req(&with_sfs)).is_ok(),
+            "own page through a proxy"
+        );
+        assert!(
+            same_site_only(&req(&proxied)).is_err(),
+            "no Sec-Fetch-Site: the Origin/Host comparison still decides"
+        );
+        let mut cross = proxied.to_vec();
+        cross.push(("Sec-Fetch-Site", "cross-site"));
+        assert!(same_site_only(&req(&cross)).is_err());
+        // A forwarded host is not a credential: it does not rescue a
+        // mismatched Origin on its own.
+        let mut fwd = proxied.to_vec();
+        fwd.push(("X-Forwarded-Host", "example.com:8443"));
+        assert!(same_site_only(&req(&fwd)).is_err());
+        assert!(
+            same_site_only(&req(&[
+                ("Host", "127.0.0.1:6789"),
+                ("Origin", "http://127.0.0.1:6789"),
+                ("Sec-Fetch-Site", "none"),
+            ]))
+            .is_ok()
+        );
+        assert!(
+            same_site_only(&req(&[])).is_ok(),
+            "curl and the *arr clients"
+        );
+    }
+
+    /// `backup_import` writes `apikey_file`, so a cross-site browser
+    /// request must not reach it (bug sweep 9 Nov 2026, section C); a
+    /// non-browser POST still restores.
+    #[test]
+    fn a_cross_site_backup_import_writes_nothing() {
+        use std::str::FromStr;
+        let scratch = std::env::temp_dir().join(format!("nzbfast-bkimp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).unwrap();
+        let d = test_daemon(&scratch);
+        let cfg_path = scratch.join("nzbfast.toml");
+        let ctx = ApiCtx {
+            cfg_path: &cfg_path,
+            host_hdr: "",
+            base: "",
+            ua_hdr: "",
+            bootstrap_apikey: false,
+            via_add_only: false,
+        };
+        let body = br#"{"nzbfast_backup":1,"apikey_file":"attackerkey"}"#.to_vec();
+        let keyfile = scratch.join("apikey");
+        let mut req: tiny_http::Request = tiny_http::TestRequest::new()
+            .with_method(tiny_http::Method::Post)
+            .with_header(tiny_http::Header::from_str("Sec-Fetch-Site: cross-site").unwrap())
+            .into();
+        let v = m_backup_import(
+            &d,
+            &mut req,
+            &Default::default(),
+            &ctx,
+            &mut Some(body.clone()),
+        )
+        .unwrap();
+        assert_eq!(v["status"], false, "{v}");
+        assert!(!keyfile.exists(), "a cross-site import installed a key");
+
+        let mut req: tiny_http::Request = tiny_http::TestRequest::new()
+            .with_method(tiny_http::Method::Post)
+            .into();
+        let v = m_backup_import(&d, &mut req, &Default::default(), &ctx, &mut Some(body)).unwrap();
+        let written = std::fs::read_to_string(&keyfile).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&scratch);
+        assert_eq!(v["status"], true, "{v}");
+        assert_eq!(written, "attackerkey", "a scripted restore still works");
     }
 }

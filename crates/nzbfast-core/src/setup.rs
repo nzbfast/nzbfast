@@ -375,7 +375,19 @@ Enter the numbers you want, separated by commas (e.g. 1,3)."
     }
     let mut map = match crate::persist::load_json_with_backup(&settings) {
         Some(Value::Object(m)) => m,
-        _ => serde_json::Map::new(),
+        // Valid JSON that is not an object (`[]`, `null`) parses, so the
+        // guard above lets it through - and starting from an empty map
+        // here would save one key over whatever that file was meant to
+        // be. Refuse, as for an unreadable store (9 Nov 2026 sweep, A16).
+        Some(_) => {
+            println!(
+                "  (not recording your answer: {} is not a settings object - \
+                 fix or remove it first, then run setup again)",
+                settings.display()
+            );
+            return Ok(());
+        }
+        None => serde_json::Map::new(),
     };
     map.insert("index_interests".into(), Value::String(value.clone()));
     let text = serde_json::to_string_pretty(&Value::Object(map))?;

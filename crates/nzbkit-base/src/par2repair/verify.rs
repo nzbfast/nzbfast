@@ -557,6 +557,18 @@ fn fast_pass1(
         path, &mut f, file, bs as u64, disk_len, threads,
     )?;
     let all = !blocks.is_empty() && blocks.iter().all(|&b| b);
+    // Every block verified and only the head disagrees: the FileDesc's
+    // 16 KiB hash is an identification aid, not the integrity proof, so
+    // it cannot by itself call a byte-exact member damaged. Declined to
+    // the chain pass, whose whole-file MD5 decides - `crate::par2`'s
+    // `ifsc_only_attempt` declines the same shape for the same reason.
+    // Answering "damaged" here failed a byte-exact file, and a repair of
+    // it had nothing to write and then failed its own self-prove with
+    // `VerifyFailed` (9 Nov 2026 Fable sweep, PAR2 residue lead 2).
+    // Rare by construction, so the second read it costs is too.
+    if all && !head_ok {
+        return Ok(None);
+    }
     let clean = head_ok && all;
     Ok(Some(Pass1Out {
         exists: true,
@@ -582,7 +594,9 @@ pub fn blocks_match_fast(path: &Path, file: &Par2File, bs: usize) -> Result<bool
         return Ok(false);
     }
     if !crate::par2::verify_head(file, &mut f)? {
-        return Ok(false);
+        // The head hash identifies; it does not prove. A disagreeing
+        // head is settled by the whole-file MD5, as `fast_pass1` does.
+        return md5_matches(path, file);
     }
     let threads = crate::mem::cpu_workers().max(1);
     let blocks = crate::par2::verify_blocks_path_or_streaming(
@@ -1309,6 +1323,21 @@ impl ChunkSource {
     }
 }
 
+/// One `read`, retried while it reports `Interrupted`. A signal landing
+/// on a blocking read of an interruptible mount (NFS `intr`, FUSE) is
+/// EINTR, which std surfaces as that kind and leaves to the caller - so
+/// a bare `read` in a loop turned one stray signal into a failed repair
+/// (9 Nov 2026 Fable sweep, PAR2 residue lead 6). `crate::par2`'s
+/// verify module keeps its own copy of this for its own loops.
+pub(super) fn read_retry<R: Read>(r: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+    loop {
+        match r.read(buf) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
+    }
+}
+
 pub(super) fn read_full(f: &mut File, mut buf: &mut [u8]) -> std::io::Result<()> {
     while !buf.is_empty() {
         match f.read(buf) {
@@ -1354,21 +1383,31 @@ pub fn md5_matches(path: &Path, file: &Par2File) -> Result<bool, RepairError> {
 /// [`FINAL_READAHEAD_MIN_BYTES`]. `NZBFAST_VERIFY_READAHEAD=1|0` forces
 /// either way, as there. Off Windows the loop stays serial (the M3's
 /// read is ~40 ms per GiB).
-pub(super) fn hash_rest(
-    mut f: File,
-    remaining: u64,
-    mut hasher: Md5,
-) -> Result<[u8; 16], RepairError> {
+pub(super) fn hash_rest(f: File, remaining: u64, hasher: Md5) -> Result<[u8; 16], RepairError> {
     let chunk = ChunkSource::chunk_bytes(1 << 20);
     let readahead = match std::env::var("NZBFAST_VERIFY_READAHEAD").ok().as_deref() {
         Some("1") => true,
         Some("0") => false,
         _ => cfg!(windows) && remaining >= FINAL_READAHEAD_MIN_BYTES,
     };
+    hash_rest_with(f, hasher, chunk, readahead)
+}
+
+/// [`hash_rest`] with its two decisions taken by the caller: generic
+/// over the reader, and the reader-thread arm chosen explicitly, so a
+/// unit test can drive both arms over a reader that misbehaves the way
+/// a real file can (the environment knob is process-global, and a test
+/// that set it would race every other test in the one-process run).
+pub(super) fn hash_rest_with<R: Read + Send + 'static>(
+    mut f: R,
+    mut hasher: Md5,
+    chunk: usize,
+    readahead: bool,
+) -> Result<[u8; 16], RepairError> {
     if !readahead {
         let mut buf = vec![0u8; chunk];
         loop {
-            let n = f.read(&mut buf)?;
+            let n = read_retry(&mut f, &mut buf)?;
             if n == 0 {
                 break;
             }
@@ -1384,7 +1423,7 @@ pub(super) fn hash_rest(
     let reader = std::thread::spawn(move || {
         loop {
             let Ok(mut buf) = free.recv() else { return };
-            let r = f.read(&mut buf).map(|n| (buf, n));
+            let r = read_retry(&mut f, &mut buf).map(|n| (buf, n));
             let done = matches!(r, Ok((_, 0)) | Err(_));
             if tx.send(r).is_err() || done {
                 return;

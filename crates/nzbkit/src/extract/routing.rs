@@ -531,7 +531,10 @@ impl Extractor {
         let fname = sanitize_out_name(&key);
         let gkey = inner.slots[slot].group.clone();
         let mut out = fname;
-        Self::claim_name(inner, slot, &mut out);
+        // An archive member: a directory already at the name is taken
+        // (see `claim_name`), so it is renamed rather than halting the
+        // job on EISDIR.
+        Self::claim_name(inner, slot, &mut out, true);
         // `total` is the entry's declared `unpacked_size` - an untrusted
         // header vint. It stays the writer's `size` (resume truncation and
         // the reported extracted size both depend on it) but it does NOT
@@ -962,18 +965,22 @@ impl Extractor {
     /// TODO 118.2 (b): re-run the offset-0 sniff for a slot whose 7z head
     /// was parked awaiting a trusted size (`head_awaits_size`), now that
     /// the size is trusted. The head leaves the holds and goes through
-    /// [`Self::sniff_and_route`] exactly as it would have on arrival -
-    /// no article CRC, as with any re-fed hold - and whatever mode that
-    /// picks then drains the rest of the holds. Returns the sniff's
-    /// `rar` flag. A head that is no longer in the holds (a spill or a
-    /// settle drained it as plain) is nothing to re-sniff.
-    pub(super) fn resniff_parked_head(
-        &self,
-        inner: &mut Inner,
-        slot: usize,
-        jobs: &mut Vec<WriteJob>,
-        fwd: &mut Vec<FwdSpan>,
-    ) -> io::Result<bool> {
+    /// [`Self::sniff_and_route`] for its classification - no article
+    /// CRC, as with any re-fed hold - and whatever mode that picks then
+    /// drains the rest of the holds. Returns the sniff's `rar` flag. A
+    /// head that is no longer in the holds (a spill or a settle drained
+    /// it as plain) is nothing to re-sniff.
+    ///
+    /// NOT "exactly as on arrival", which is what this said until the
+    /// 9 Nov 2026 sweep's A1: the sniff queues its writes and forwards
+    /// as `(src_start, len)` into a sink, and the caller's sink is sliced
+    /// out of the CALLER's article once the lock drops - a different
+    /// article from this head. So the head routes into a sink of its own,
+    /// which is then performed here against the head's own bytes, the
+    /// way a drained hold's sink-less feed performs it: writes under the
+    /// lock, forwards queued owned, both reported as late placements so
+    /// the head's parked article still journals.
+    pub(super) fn resniff_parked_head(&self, inner: &mut Inner, slot: usize) -> io::Result<bool> {
         inner.slots[slot].head_awaits_size = false;
         let Some(i) = inner.slots[slot].holds.iter().position(|(o, _)| *o == 0) else {
             return Ok(false);
@@ -985,13 +992,73 @@ impl Extractor {
         };
         inner.slots[slot].pre_bytes = inner.slots[slot].pre_bytes.saturating_sub(len);
         let bytes = Self::reclaim_span(inner, span)?;
-        match self.sniff_and_route(inner, slot, 0, &bytes, jobs, fwd, false, None)? {
+        let (mut jobs, mut fwd) = (Vec::new(), Vec::new());
+        // Raised for the sniff as for any re-fed hold: a sub-span the
+        // routing re-holds belongs to the head's parked article, not to
+        // the caller's, so it must not mark the caller's span held.
+        let prev = inner.refeed_active;
+        inner.refeed_active = true;
+        let sniffed = self
+            .sniff_and_route(inner, slot, 0, &bytes, &mut jobs, &mut fwd, false, None)
+            .and_then(|s| {
+                Self::perform_head_queue(inner, slot, &bytes, &jobs, &fwd)?;
+                Ok(s)
+            });
+        inner.refeed_active = prev;
+        match sniffed? {
             Sniffed::Routed { rar } => {
                 self.drain_holds(inner, slot)?;
                 Ok(rar)
             }
             Sniffed::Parked | Sniffed::Discarded => Ok(false),
         }
+    }
+
+    /// Perform the queue [`Self::resniff_parked_head`] collected against
+    /// the head's OWN bytes, under the lock: the same writes and owned
+    /// forwards `extract_span`'s sink-less arm makes for a drained hold,
+    /// with the same late placements (`vol_off` is the job's offset in
+    /// the head, which starts at volume offset 0). Cold: once per parked
+    /// head.
+    fn perform_head_queue(
+        inner: &mut Inner,
+        slot: usize,
+        bytes: &[u8],
+        jobs: &[WriteJob],
+        fwd: &[FwdSpan],
+    ) -> io::Result<()> {
+        for j in jobs {
+            let part = &bytes[j.src_start..j.src_start + j.len];
+            match &j.crypto {
+                Some(cs) if j.repair => cs.patch(&j.writer, j.file_off, part)?,
+                Some(cs) => cs.ingest(&j.writer, j.file_off, part)?,
+                None if j.repair => j.writer.write_at(j.file_off, part)?,
+                None => j.writer.write_article_at(j.file_off, part)?,
+            }
+            inner.push_late(LatePlacement {
+                slot,
+                frag: Frag {
+                    file: out_name_of(&inner.out_dir, &j.writer.path),
+                    file_off: j.file_off,
+                    vol_off: j.src_start as u64,
+                    len: j.len as u64,
+                },
+                crypto: j.crypto.is_some(),
+            });
+        }
+        for f in fwd {
+            inner.pending_fwd.push(FwdJob {
+                parent_slot: slot,
+                vol_off: f.src_start as u64,
+                name: f.name.clone(),
+                size: f.size,
+                file_off: f.file_off,
+                bytes: bytes[f.src_start..f.src_start + f.len].to_vec(),
+                repair: f.repair,
+                refeed: true,
+            });
+        }
+        Ok(())
     }
 }
 

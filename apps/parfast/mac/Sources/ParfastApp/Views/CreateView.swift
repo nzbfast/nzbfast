@@ -70,7 +70,7 @@ struct CreateView: View {
                 }
                 Button(S.commonRemove) { model.removeSelected() }
                     .disabled(model.selection.isEmpty)
-                Button(S.createSourcesRefresh) { model.refreshSources() }
+                Button(S.createSourcesRefresh) { model.refreshSources(recomputingWith: app.core) }
             }
             .controlSize(.small)
         )) {

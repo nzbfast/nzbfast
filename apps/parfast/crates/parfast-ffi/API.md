@@ -31,6 +31,13 @@ level.
   last failure on that session; reading it does not clear it.
 - `pf_job_submit` answers a job id, which is always >= 1, or one of the
   negative codes above.
+- **A panic in the core never crosses the ABI** (9 Nov 2026). Since
+  Rust 1.81 an unwind reaching an `extern "C"` frame aborts the process,
+  so one bug in, say, the planner killed the app and every job in it.
+  Every `pf_*` that does work now contains it: an `int` call answers
+  `PF_ERR_REFUSED`, a `char *` call NULL, and `pf_last_error.code` is
+  `internal`. A JOB that panics on its worker thread finishes `failed`
+  with `error.code = "internal"`, and the queue goes on to the next job.
 - The session is thread-safe; every function may be called from any
   thread.
 - **The wake callback carries no data and may fire on any thread.** The
@@ -92,6 +99,27 @@ As section 4.5, in full. Notes on what the core does with it:
 - A directory source contributes the files directly in it, or the whole
   tree under it when `recursive`. Dot-files and `.par2` files are never
   members - the reference's own rule.
+- **An EMPTY file is never a member either, and is SAID** (9 Nov 2026).
+  The create skips it ("Skipping 0 byte file") and so does the preview
+  now, with a line in `warnings` and `result.warnings`; until then the
+  pane counted it and the run did not. Under `relative` with a
+  `base_path`, a source outside that base is left out and said the same
+  way, as the create ignores it. An empty `base_path` is no base path.
+- **`basename` means the bare name even when `output` is in another
+  folder** (9 Nov 2026). The create names a member relative to `-B`, or
+  to the `.par2`'s own folder; a member under neither was stored by its
+  raw ABSOLUTE path, and since the same day the create IGNORES it
+  instead (the reference's "Ignoring out of basepath source file"), so a
+  set written away from its sources - the ordinary GUI shape - would
+  protect nothing. Sources in ONE folder: the run is given that folder
+  as `-B` (shown on the copied command line) and stores bare names,
+  wherever `output` is. Sources in several folders, all under the
+  output folder: stored by their path below it, as the reference stores
+  a walk. Sources in several folders, some outside it: their nearest
+  common folder is the `-B`, each is stored by its path below it, and a
+  line in `warnings` says so - no single `-B` stores bare names for
+  files in different folders, and the create takes no per-file name.
+  The preview's sizes are built on the names the run stores.
 - A source that is not on disk is an ERROR (`missing_source`), not a
   silent omission: a job that quietly protects four of five named files
   is the worst outcome available. A named source that is neither a
@@ -134,7 +162,11 @@ As section 4.5, in full. Notes on what the core does with it:
   `overwrite:false`, a job that reports `done` destroyed nothing.
   `overwrite:true` is par2cmdline's own behaviour and the default of the
   `parfast` command line, which is why it is what the CLI does when
-  nothing asks otherwise.
+  nothing asks otherwise. Since 9 Nov 2026 it replaces the earlier set
+  only when the new one is finished: until then every file it would
+  replace is untouched, so a create with `overwrite:true` that is
+  cancelled or fails leaves the earlier set as it was (see "A cancelled
+  create leaves nothing of its own" below).
 - `recovery.percent` is rounded to a WHOLE percent, because that is
   what the reference's `-r` takes. The preview says so in `warnings`.
   Use `{"count":n}` for finer control.
@@ -206,7 +238,17 @@ As section 4.5, in full. Notes on what the core does with it:
 The FORMAT of a file being verified is decided by its CONTENT and not
 by its name: an SFV saved as `.md5` is an SFV, because where the digest
 sits is what a checker has to know. A file that mixes the two shapes is
-refused at the line that mixes them.
+refused at the line that mixes them. A line BOTH shapes can read (`<32
+hex> <8 hex>`, which is an SFV line for an obfuscated hex name as much
+as an MD5 line) takes the format the file's other lines settle on, then
+the extension's, and only then the digest-first reading (9 Nov 2026).
+
+The file may be UTF-8 with or without a byte-order mark, or UTF-16 with
+one. Anything else - including UTF-16 with NO byte-order mark, told by its NUL bytes - is refused with `error.code = "not_utf8"` (**ADDED**
+9 Nov 2026) rather than decoded by guesswork into rows of false
+`missing`. A verify's per-row `log_tail` lines are held to
+`log_tail_lines` like every other line; every row is in
+`result.checksum.entries`.
 
 ### posting_set
 
@@ -305,7 +347,12 @@ same files split by half are in `result.posting`:
 New error codes: `bad_spec` (the name, folder, level or volume size),
 `password_required` (above), `rar_failed` (the archive write), plus
 the create's own codes from the PAR2 half and `exists` / `io` as the
-other kinds use them.
+other kinds use them. Two more since 9 Nov 2026, both refused before
+anything is written or removed: `output_is_a_source` (a file under the
+set's names is also one of the sources - with `overwrite` on, this used
+to DELETE the source and then fail to open it), and `duplicate_name`
+(two sources would be stored in the archive under one name, which
+extract over each other).
 
 A recorded run of each route, real snapshots from the core and nothing
 a mock invented, is in `apps/parfast/shared/contract/posting-set-snapshots.json`
@@ -324,6 +371,7 @@ As section 4.5, with these additions:
 | `result.exit_code` | **ADDED** | The process exit code the equivalent `parfast` line would have returned. The CLI's dialect is the one thing a script user already knows, and a GUI that hides it makes its own behaviour unreproducible from a terminal. |
 | `result.warnings` | **ADDED** (17 Sep 2026) | What the job could not take in: a folder that could not be read, a link a walk did not follow, an item that is not an ordinary file. Omitted when empty. On the RESULT and not only on the preview because the walk happens AGAIN when the job runs, over a tree that may have changed - a folder that became unreadable since the pane was drawn would otherwise reach nobody. Never an error: show it beside Done. It matters most on a checksum CREATE, where what is not in the manifest is not checked and the verify that reads it back reports CLEAN over the gap. |
 | `command` | **ADDED** | The `parfast` command line equivalent to this job, for the Advanced pane's "show the equivalent command". Empty for the two checksum kinds, which have no CLI equivalent. |
+| `title` | **ADDED** (9 Nov 2026) | What the queue's Name column and a notification call the job: the output file of a create or checksum create, the `.par2` of a verify or repair, the checksum file of a checksum verify, the `name` of a posting set. Always sent. A job restored from a store takes it from its spec, so a store written before the field loads with names. |
 | `kind: "posting_set"` | **ADDED** enum value (25 Oct 2026) | The posting set, above. |
 | `result.posting` | **ADDED** (25 Oct 2026) | A posting set's route and its two halves' files - see `posting_set` above. Omitted for every other kind. |
 
@@ -384,6 +432,7 @@ exit code. So the mapping is exact and a host may rely on it:
 | `complete` | 0 - `!Survey::damaged()` |
 | `repairable` | 1 - damaged, and `Survey::repairable()` |
 | `unrepairable` | 2 - damaged, and not repairable |
+| `unrepairable` | 6 - a member the Main packet declares has no FileDesc ("No details available for recoverable file number N"), whatever the described members came to (9 Nov 2026) |
 
 `repaired` and `failed` are a REPAIR job's verdicts and do not appear on
 a verify; `verifying` is the pass in flight. Those predicates are what
@@ -426,10 +475,12 @@ paragraph said the opposite until 12 September 2026 - that the preview
 showed the engine's own fixed `vol000+001` and the CLI renamed afterwards
 - and that WAS true, and was a defect: the pane named files the user
 would never see, for every set whose widths the rename narrowed.
-`planner::preview` maps the plan through
-`parfast::create::final_volume_names`, which is the same rule
-`rename_volumes` applies to the bytes on disk, so the pane and
-`result.written` agree. The first field is as wide as
+Since 9 November 2026 there is no rename at all: the engine writes
+these names itself (`par2gen::VolumeNaming::Reference`, which
+`parfast::create::create_plan` selects) and `planner::preview` reads
+them off the same plan through the same rule (`par2gen::volume_names`,
+which `parfast::create::final_volume_names` also answers through), so
+the pane and `result.written` agree. The first field is as wide as
 `first_recovery_block + recovery_blocks`; the second is as wide as the
 largest COUNT in the set, or the first field's width under
 `std_naming`, where both fields are exponents.
@@ -517,15 +568,22 @@ are how it finds out.
   host therefore sees the writes once, at the end, and the last tenth
   can cross quickly on an arm where the writing was done alongside the
   folding. Nothing was added or removed: the same two fields carry it.
-- **A cancelled create leaves nothing.** Not "nothing since the last
-  volume" - nothing: the engine unlinks the index and every volume the
-  run wrote. That is the only honest outcome, because a volume is
-  written to its FINAL name with its critical packets patched in LAST,
-  so a partial set names no member and verifies against nothing. A set
-  the run was EXTENDING keeps every volume it already had; its index,
-  which every create rewrites, goes with the rest and a re-run writes
-  it again. So a host must not offer to clean up after a Cancel, and
-  must not report the partial files it can no longer see.
+- **A cancelled create leaves nothing of its own.** Not "nothing since
+  the last volume" - nothing: the engine unlinks the index and every
+  volume the run wrote. That is the only honest outcome, because a
+  partial set's critical packets are patched in LAST, so it names no
+  member and verifies against nothing. **And it leaves everything that
+  was there before** (9 Nov 2026): a file already under one of the run's
+  names - the previous set's index or volumes, when a create is re-run
+  over its own output - is never opened for write; the run writes its
+  replacement under a hidden staging name and renames it into place only
+  when the whole set is finished. So a cancelled or FAILED overwriting
+  create keeps the previous set byte-identical, index and volumes alike,
+  and a set the run was EXTENDING keeps every file it already had, its
+  index included. A host must not offer to clean up after a Cancel, and
+  must not report the partial files it can no longer see. (The posting
+  set is the exception: with Overwrite on it deletes the earlier set up
+  front, as documented under the posting job.)
 
   **A job reports `cancelled` only when the engine actually unwound,
   and that is what makes the promise above usable** (12 Sep 2026). A
@@ -695,7 +753,7 @@ it does not change the setting.
 | Field | Status | Why |
 |---|---|---|
 | `settings.performance.pair_large_creates` | **ADDED** (15 Sep 2026), default **true** | Start a second large single-file create beside a running one when the machine has the cores and the memory for both, WHATEVER `concurrency` says. A create over one large file is bound by one serial MD5 chain and leaves most of a big machine idle: two measured 11.5 s against 11.4 s for one on an M3 Ultra, so a queue of them finishes in about half the time. It makes NO single job faster - say that in any copy that mentions it. The rule (`parfast-session`'s `pairing` module): both jobs are one-file creates from exponent 0 with the same `performance` knobs; the running one's fold pacer has settled; half the machine less a core for each chain leaves each fold above the pacer's floor of two (so a 4-core machine, or `NZBFAST_CPU_WORKERS=4`, never pairs); a core for each chain plus the settled fold width twice over fits; and the engine says the second create still takes the paced single-file route in the memory budget the first has left. A create the rule refuses stays `queued` rather than starting and blocking, at any concurrency. From a spinning disk it buys nothing: under a one-disk read cap of 200 and 120 MB/s the pair tied the serial queue (0.98-1.00x of its wall, addendum 8 of `research/PARFAST-SINGLE-FILE-MD5-HEADROOM-2026-09-13.md`), and head seek, which that cap could not model, can only make it worse, so turn it off there. The paired job's `log_tail` carries a line saying it started beside another. |
-| `post_action_due` | **ADDED** | The queue has drained and the action has not been carried out. The session REPORTS the action; the HOST performs it, because sleeping or shutting down a machine is a platform call and a decision a human has to be able to stop. Call `pf_queue_clear_post_action` once you have dealt with it; it will not fall due again until a new job is submitted. |
+| `post_action_due` | **ADDED** | The queue has drained and the action has not been carried out. The session REPORTS the action; the HOST performs it, because sleeping or shutting down a machine is a platform call and a decision a human has to be able to stop. Call `pf_queue_clear_post_action` once you have dealt with it; it will not fall due again until a new job is submitted. An action chosen while the queue is ALREADY drained waits for the next batch (9 Nov 2026): picking "Shut down when done" before adding work used to shut the machine down at once, over jobs that had finished before it was chosen. An action chosen BEFORE the drain stays armed for it however often the settings are written back in between, and switching one action for another keeps it armed; only a change from `none` on an already drained queue waits. |
 
 Two functions outside section 4.5:
 
@@ -703,8 +761,13 @@ Two functions outside section 4.5:
 |---|---|---|
 | `pf_queue_clear_post_action` | **ADDED** | The other half of `post_action_due`. |
 | `pf_job_run_next` | **ADDED** | Section 5.5's "Run now": take this QUEUED job before anything else waiting, whatever its id. Refused for a job already running or finished. It does NOT interrupt what is running and does NOT raise the concurrency - on a serial queue the effect is that this job is started next. Raising the concurrency instead starts every job queued ahead of it too; resuming the selected job only lets the scheduler reach it in its own turn. |
-| `pf_queue_open_store` | **ADDED** | Persist the queue to a path the HOST names - it knows where an app's data directory is on its own platform and the core does not. Answers the number of jobs loaded. A store that cannot be parsed is reported and never deleted. A job that was `running` when the file was written comes back `interrupted`. |
+| `pf_queue_open_store` | **ADDED** | Persist the queue to a path the HOST names - it knows where an app's data directory is on its own platform and the core does not. Answers the number of jobs loaded. A store this build cannot use is REFUSED (`PF_ERR_REFUSED`, the reason in `pf_last_error`) and never deleted, in one of two ways (9 Nov 2026). Written by a NEWER build (its `version` is read on its own, so this holds even for a shape this build cannot parse): left exactly where it is and NOT used, so this session saves nothing and the newer build finds its queue intact. Unreadable for any other reason - zero length, torn, hand-edited: moved aside to `<path>.unreadable-<seconds>-<pid>`, which the message names, and a new queue is saved at the path from then on. Before this the path was armed before the parse and the next change renamed a fresh table over the file. Both hosts drop this error today; a host should SHOW it, since a refusal means the user's old queue is not on screen. A job that was `running` when the file was written, or when the session was freed, comes back `interrupted`. A store opened after jobs were submitted keeps them: a restored job whose id is taken gets a fresh one. |
 
 Jobs are listed in submission order. `pf_job_remove` accepts only a
 FINISHED job (`done`, `failed`, `cancelled`, `interrupted`); a running
-or queued one is refused, so a misclick cannot throw away work.
+or queued one is refused, so a misclick cannot throw away work. `pf_job_cancel` is the mirror image: it refuses a FINISHED job
+(`PF_ERR_NOT_FOUND`), which keeps its state and its result - a Cancel
+on a `done` repair used to rewrite it to `cancelled` with the result
+still attached. And a repair that COMPLETED reports `done` with its
+result even when a Cancel landed after the engine's last poll, as a
+sealed create already did (9 Nov 2026).

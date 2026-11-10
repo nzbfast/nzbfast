@@ -30,7 +30,8 @@ async fn ask(addr: SocketAddr, cmd: &str) -> (String, Vec<u8>) {
     // Only a 22x carries a block. A refusal does not, and the mock keeps
     // the connection open afterwards, so reading for one would hang
     // rather than fail.
-    if !status.starts_with("22") {
+    // STAT's 223 is status-only too, so it is excluded here.
+    if !status.starts_with("22") || status.starts_with("223") {
         return (status, Vec::new());
     }
 
@@ -156,4 +157,46 @@ fn a_real_file_round_trips_byte_exact() {
         rebuilt, data,
         "decoding every article back in order must reproduce the original file bytes"
     );
+}
+
+/// [`Chaos::lazy`] answers exactly what the stored map would have, for
+/// BODY and STAT alike, and a `None` from it is a refusal.
+///
+/// The ladder in `crates/nzbfast/tests/e2e_ladder` serves gigabytes
+/// through this and checks only the extracted payload, so a generator
+/// path that drifted from the stored one (a missing dot-stuff, a STAT
+/// that refused what BODY serves) would read there as a client defect.
+/// This pins the server half on its own.
+#[tokio::test]
+async fn a_lazy_source_serves_what_the_map_would() {
+    let mut stored = HashMap::new();
+    // 0..=255 repeating: every byte value, so a column-0 '.' and every
+    // critical escape is in the body.
+    let data: Vec<u8> = (0..40_000u32).map(|i| i as u8).collect();
+    let segs = make_file_articles("lazy.bin", &data, 40_000, "lazy", &mut stored);
+    let id = format!("<{}>", segs[0].0);
+    let from_map = MockServer::start(stored.clone(), Chaos::default()).await;
+    let lazy = MockServer::start(
+        HashMap::new(),
+        Chaos {
+            lazy: Some(LazyArticles::new(move |id| stored.get(id).cloned())),
+            ..Chaos::default()
+        },
+    )
+    .await;
+
+    let (map_status, map_block) = ask(from_map.addr, &format!("BODY {id}")).await;
+    let (lazy_status, lazy_block) = ask(lazy.addr, &format!("BODY {id}")).await;
+    assert_eq!(lazy_status, map_status);
+    assert_eq!(lazy_block, map_block, "the generator's body differs");
+
+    let (stat, _) = ask(lazy.addr, &format!("STAT {id}")).await;
+    assert!(
+        stat.starts_with("223 "),
+        "STAT refused a lazy article: {stat}"
+    );
+    let (gone, _) = ask(lazy.addr, "BODY <nope@mock>").await;
+    assert!(gone.starts_with("430"), "an unknown id must refuse: {gone}");
+    let (gone_stat, _) = ask(lazy.addr, "STAT <nope@mock>").await;
+    assert!(gone_stat.starts_with("430"), "{gone_stat}");
 }

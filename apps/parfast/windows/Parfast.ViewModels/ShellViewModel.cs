@@ -126,8 +126,6 @@ public sealed class ShellViewModel : Observable, IDisposable
         RevealCommand = new Command(() => _host.Reveal(RevealTarget() ?? string.Empty),
             () => RevealTarget() is not null);
 
-        ApplySettings();
-
         // Persist the queue where this platform keeps app data. The core has no
         // opinion about that path and says so, so the host names it.
         if (_host.QueueStorePath is { } store)
@@ -140,10 +138,59 @@ public sealed class ShellViewModel : Observable, IDisposable
                 // screen that explains what the user is looking at.
                 Mode = Mode.Queue;
             }
+            else if (loaded < 0)
+            {
+                // A store the core could not read is REPORTED, never passed over:
+                // ignoring the negative answer left the user looking at an empty
+                // queue with no word that their saved jobs and settings were not
+                // loaded. The host shows this once its window can show anything.
+                //
+                // THE CORE'S OWN SENTENCE, when it gives one, and nothing put in
+                // front of it. A refusal now means one of two different things
+                // (API.md, pf_queue_open_store): a store written by a NEWER build,
+                // left alone and not saved to; or an unreadable one MOVED ASIDE to
+                // a name the message gives, with a fresh queue saved from then on.
+                // A prefix of ours ("could not be read") is wrong for the first,
+                // and anything implying nothing is saved is wrong for the second.
+                // The generic line is only for a refusal that carries no reason.
+                var reason = core.LastError()?.Message;
+                QueueStoreError = string.IsNullOrEmpty(reason)
+                    ? Strings.Fill(Strings.ErrorReadFailed, "path", store)
+                    : reason;
+
+                // And at the top of the log drawer, beside the decode failures,
+                // so it outlives the dialog the host shows once.
+                _decodeErrors.Add(QueueStoreError);
+            }
         }
+
+        // AFTER the store, not before it: opening the store is what loads the
+        // saved settings, so the Settings screen's snapshot and the defaults
+        // applied to Create and Verify were both the core's factory defaults,
+        // and the first toggle then wrote those defaults over the saved ones
+        // (sweep 2026-11-09 A31).
+        Settings.Reload();
+        ApplySettings();
 
         _monitor.Refresh();
     }
+
+    /// <summary>
+    /// Why the saved queue could not be loaded, or null. Set once at startup; the
+    /// host shows it to the user.
+    /// </summary>
+    public string? QueueStoreError { get; }
+
+    /// <summary>
+    /// True when closing the window now would stop work: a job is running or
+    /// paused. Read fresh from the core rather than from the last snapshot, so a
+    /// job submitted a moment ago still counts.
+    /// </summary>
+    /// <remarks>
+    /// Waiting jobs do not count: they are persisted and come back as they were.
+    /// A running or paused one comes back Interrupted and has to start over.
+    /// </remarks>
+    public bool CloseNeedsConfirmation => _core.QueueSnapshot().Jobs.Any(j => j.IsActive);
 
     public VerifyViewModel Verify { get; }
 
@@ -468,12 +515,14 @@ public sealed class ShellViewModel : Observable, IDisposable
             // carries the phase rather than repeating it.
             var reason = job.Error?.Message ?? job.PhaseText;
             var title = job.State == JobState.Done
-                ? Strings.Fill(Strings.NotifyDoneTitle, "job", job.Name)
-                : Strings.Fill(Strings.NotifyFailed, "job", job.Name, "reason", reason);
+                ? Strings.Fill(Strings.NotifyDoneTitle, "job", job.DisplayTitle)
+                : Strings.Fill(Strings.NotifyFailed, "job", job.DisplayTitle, "reason", reason);
             _host.Notify(title, job.State == JobState.Done ? reason : string.Empty);
         }
 
-        if (Settings.AutoCloseProgress && job.State == JobState.Done)
+        // A job that finished WITH WARNINGS keeps its sheet open: closing it is
+        // how a line saying "this was left out" would go unread.
+        if (Settings.AutoCloseProgress && job.State == JobState.Done && job.Result?.Warnings is not { Count: > 0 })
         {
             Progress.Close();
         }

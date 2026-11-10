@@ -18,6 +18,21 @@ use super::*;
 /// [`Index::posted_nzb_candidates`].
 pub const NZBIMPORT_CURSOR: &str = "nzbimport_arrival_cursor";
 
+/// How long an INCOMPLETE posted `.nzb` holds the walk back.
+///
+/// The walk only returns complete rows, and its cursor is the
+/// `arrival_seq` of the last row settled - which is stamped once, at
+/// INSERT, and never moves. So a `.nzb` whose second article landed in a
+/// later scan batch than its first sat below the cursor by the time it
+/// completed, the moment any later posted NZB was walked, and was never
+/// visited at all (9 Nov 2026 sweep, section C). Inside this window an
+/// incomplete row is a wait, not a skip: the batch is cut just before
+/// it, so the cursor parks there until the row completes or ages out.
+/// Past it the row is presumed never to complete and is passed over,
+/// as before, which bounds what one lost article can cost the walk to
+/// this much lag rather than a stall.
+const POSTED_NZB_COMPLETION_GRACE_SECS: i64 = 3 * 3600;
+
 /// The pre-arrival_seq cursor key, a release id. Read once to seed
 /// [`NZBIMPORT_CURSOR`] on an upgrade, then never written again.
 const NZBIMPORT_CURSOR_LEGACY_ID: &str = "nzbimport_cursor";
@@ -111,32 +126,55 @@ impl Index {
         // converges, and the daemon's durable nzbimport_cursor advances
         // past them - a raw `nsegs >= total_parts` skipped those rows
         // here, and once backfilled they sat behind the cursor forever.
+        //
+        // A YOUNG incomplete row is selected too, flagged, and cuts the
+        // batch below: see [`POSTED_NZB_COMPLETION_GRACE_SECS`]. Old
+        // incomplete rows stay out in SQL, never dropped after the
+        // LIMIT, for the reason the decode note below gives - an empty
+        // batch reads as "caught up".
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
         let mut stmt = self.db.prepare_cached(
-            "SELECT r.id, r.arrival_seq, r.stem, r.grp, r.junk, f.segments, f.bytes
+            "SELECT r.id, r.arrival_seq, r.stem, r.grp, r.junk, f.segments, f.bytes,
+                    (CASE WHEN f.nsegs > 0 THEN f.nsegs
+                          ELSE seg_count(f.segments) END) >= f.total_parts AS done
                FROM releases r JOIN files f ON f.release_id = r.id
               WHERE r.arrival_seq > ?1
                 AND r.files = 1
                 AND lower(f.filename) LIKE '%.nzb'
-                AND (CASE WHEN f.nsegs > 0 THEN f.nsegs
-                          ELSE seg_count(f.segments) END) >= f.total_parts
+                AND (done OR r.first_seen > ?3)
               ORDER BY r.arrival_seq LIMIT ?2",
         )?;
-        let rows: Vec<(i64, i64, String, String, i64, SegRaw, i64)> = stmt
-            .query_map(rusqlite::params![after, limit as i64], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                ))
-            })?
+        type Row = (i64, i64, String, String, i64, SegRaw, i64, bool);
+        let rows: Vec<Row> = stmt
+            .query_map(
+                rusqlite::params![
+                    after,
+                    limit as i64,
+                    now.saturating_sub(POSTED_NZB_COMPLETION_GRACE_SECS)
+                ],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                    ))
+                },
+            )?
             .collect::<rusqlite::Result<_>>()?;
         Ok(rows
             .into_iter()
-            .filter_map(|(id, seq, stem, grp, junk, segraw, bytes)| {
+            // Cut at the first row still waiting on an article: the
+            // caller advances its cursor through every row it is handed,
+            // so handing it a later row is what used to bury this one.
+            .take_while(|row| row.7)
+            .filter_map(|(id, seq, stem, grp, junk, segraw, bytes, _)| {
                 // Stored as segcodec's compact form, or the older
                 // [[part, "<msgid>", bytes], ...] JSON. A row that fails
                 // both shapes is dropped AFTER the SQL LIMIT, and the
@@ -358,6 +396,64 @@ mod tests {
             ix.posted_nzb_candidates(cands[0].arrival_seq, 100)
                 .unwrap()
                 .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A posted `.nzb` whose articles straddle two scan batches must still
+    /// be walked once it completes.
+    ///
+    /// Its `arrival_seq` is stamped at INSERT, when it was 1 of 2. The
+    /// walk returned only complete rows, so the next posted NZB went out
+    /// instead, the caller advanced its cursor past both, and when part 2
+    /// arrived the completed row sat below the cursor forever. A young
+    /// incomplete row now cuts the batch, and the walk waits for it.
+    ///
+    /// NEGATIVE CONTROL, run: put back the complete-rows-only filter
+    /// (`AND done`, young rows not selected) and the first walk returns
+    /// `Later.Release.nzb`, the cursor passes `Split.Release.nzb`, and
+    /// the final assertion fails with nothing walked.
+    #[test]
+    fn a_posted_nzb_completing_in_a_later_batch_is_still_walked() {
+        let (dir, mut ix) = open_scratch("straddle");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        ix.ingest(
+            "a.b.test",
+            &[entry(r#""Split.Release.nzb" yEnc (1/2)"#, "p@x", "s1", 900)],
+            now,
+        )
+        .unwrap();
+        ix.ingest(
+            "a.b.test",
+            &[entry(r#""Later.Release.nzb" yEnc (1/1)"#, "q@x", "l1", 900)],
+            now,
+        )
+        .unwrap();
+        // The daemon's walk: advance through everything handed out.
+        let mut cursor = 0i64;
+        for c in ix.posted_nzb_candidates(cursor, 100).unwrap() {
+            cursor = c.arrival_seq;
+        }
+        // Part 2 lands in a later batch.
+        ix.ingest(
+            "a.b.test",
+            &[entry(r#""Split.Release.nzb" yEnc (2/2)"#, "p@x", "s2", 900)],
+            now,
+        )
+        .unwrap();
+        let walked: Vec<String> = ix
+            .posted_nzb_candidates(cursor, 100)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.stem)
+            .collect();
+        assert_eq!(
+            walked,
+            vec!["Split.Release.nzb", "Later.Release.nzb"],
+            "the completed row must not be left below the cursor ({cursor})"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -692,6 +692,15 @@ pub struct JobSnapshot {
     /// CLI equivalent.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
+    /// What the queue's Name column and a notification call this job:
+    /// [`JobSpec::subject`] - the set, the output file or the checksum
+    /// file. An ADDITION (9 Nov 2026): both hosts read a `title` the core
+    /// never sent, so the column was blank on the real core and filled
+    /// only by the mocks. Always present on the way out; `default` on the
+    /// way in, and a restored job takes it from its spec afresh, so a
+    /// store written before this field existed loads with names.
+    #[serde(default)]
+    pub title: String,
 }
 
 impl JobSnapshot {
@@ -714,6 +723,7 @@ impl JobSnapshot {
             result: None,
             error: None,
             command: String::new(),
+            title: String::new(),
         }
     }
 }

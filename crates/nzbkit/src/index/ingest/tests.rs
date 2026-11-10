@@ -754,3 +754,39 @@ fn ingest_cluster_search_synthesize() {
     assert_eq!(ix.stats().unwrap(), (1, 1));
     teardown(&dir, ix);
 }
+
+/// An OVER `:bytes` field is whatever the server says. The files write
+/// summed a file's part counts with a plain `sum()` and cast it `as
+/// i64`, so two counts near `u64::MAX` panicked a debug build (and
+/// wrapped in release) and one alone stored a negative size.
+///
+/// NEGATIVE CONTROL, run: put back `merged.values().map(|v| v.1).sum()`
+/// and `bytes as i64` and this panics with an arithmetic overflow.
+#[test]
+fn absurd_over_byte_counts_store_a_sane_file_size() {
+    let d = std::env::temp_dir().join(format!("nzbfast-absurd-bytes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let mut ix = Index::open(&d.join("index.db")).unwrap();
+    let subj = |n: u32| format!(r#""Absurd.Bytes.2026.part01.rar" yEnc ({n}/2)"#);
+    ix.ingest(
+        "alt.binaries.misc",
+        &[
+            entry(&subj(1), "p@x", "ab1", u64::MAX),
+            entry(&subj(2), "p@x", "ab2", u64::MAX),
+        ],
+        1000,
+    )
+    .unwrap();
+    let (fb, tb): (i64, i64) = ix
+        .db
+        .query_row(
+            "SELECT f.bytes, r.total_bytes FROM files f JOIN releases r ON r.id=f.release_id",
+            [],
+            |x| Ok((x.get(0)?, x.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(fb, file_bytes([u64::MAX]));
+    assert_eq!(tb, fb, "the release total is the one file's");
+    teardown(&d, ix);
+}

@@ -144,7 +144,8 @@ struct Parked {
 ///
 /// A fleet-wide goodbye is the same shape as the keepalive's fleet-wide
 /// ping, and needs the same treatment for the same reason. `quit` is
-/// bounded at 500 ms, so a black-holed path costs that per session and
+/// bounded (500 ms when this was measured; `nntp::quit_bound`, 150 ms by
+/// default since), so a black-holed path costs that per session and
 /// SERIALLY it multiplies: measured 8.0 s for 16 sessions on a mute peer,
 /// linear in the count. Production parks 64 PER SERVER, so one server
 /// costs 32 s and a six-server config over three minutes - more than
@@ -303,7 +304,16 @@ fn key(s: &ServerConfig) -> String {
     s.username.hash(&mut h);
     s.password.hash(&mut h);
     s.socks5.hash(&mut h);
+    // TODO 358: the HTTP proxy is a route exactly as `socks5` is. A
+    // parked DIRECT session handed out after a proxy was added would
+    // carry on bypassing it.
+    s.http_proxy.hash(&mut h);
     s.bind_ip.hash(&mut h);
+    // SO_RCVBUF is applied at the dial and never again, so a session
+    // parked before the setting moved would serve the job on the old
+    // window - a measured throughput knob (see the field's doc) that a
+    // change would then not reach until every parked session aged out.
+    s.rcvbuf.hash(&mut h);
     // §291: the preference decides which of the host's addresses the
     // socket is actually connected to, so a parked IPv4 session must not
     // be handed out after the server is flipped to prefer IPv6 - same
@@ -443,6 +453,22 @@ impl WarmPool {
         // always did, for the account it missed on.
         let k = key(server);
         self.touch(&k);
+        // The bind-address kill switch (TODO 358 item 14) guards every
+        // NEW dial; this is its checkout half. A session parked while the
+        // tunnel was up is not handed out once the server's bind address
+        // has gone down: the whole parked set for this identity is
+        // dropped (no QUIT - nothing more is written on a route that may
+        // now be the bare line), and the caller's fresh dial then refuses
+        // by name. One interface-table read, only for a server that
+        // names a `bind_ip`; an unreadable table reads as not-down, as
+        // the dial's own check fails open.
+        if crate::nntp::route::bind_ip_down(server.bind_ip.as_deref()).is_some() {
+            let dead = self.idle.lock().await.remove(&k).unwrap_or_default();
+            self.stats
+                .reaped
+                .fetch_add(dead.len() as u64, Ordering::Relaxed);
+            return None;
+        }
         loop {
             let mut candidate = {
                 let mut idle = self.idle.lock().await;
@@ -466,7 +492,7 @@ impl WarmPool {
                     // other exit here: a provider counting sessions
                     // rather than FINs holds a dropped one against the
                     // cap. It just answered, so the goodbye is one
-                    // round-trip, not the mute peer's 500 ms bound.
+                    // round-trip, not the mute peer's whole `quit` bound.
                     self.stats.reaped.fetch_add(1, Ordering::Relaxed);
                     candidate.conn.quit().await;
                 }
@@ -538,10 +564,11 @@ impl WarmPool {
     /// many keepalives answered - came back inside 15 s and touched. With
     /// `idle_release_secs` above `max_idle` (a supported setting: the
     /// floor is 60 s and there is no ceiling) that loop is deterministic
-    /// on a perfectly healthy provider, and `last_activity` is
-    /// POOL-WIDE while the policies are per key, so one reserved
-    /// server's refills deferred the release of every OTHER server's
-    /// parked fleet too. Both stand-down predicates read this one clock:
+    /// on a perfectly healthy provider, and `last_activity` was
+    /// POOL-WIDE then while the policies were per key (it is per account
+    /// now - see `Activity`), so one reserved server's refills deferred
+    /// the release of every OTHER server's parked fleet too. Both
+    /// stand-down predicates read this one clock:
     /// `release_if_idle` here, and `warmreserve`'s own `Released` arm.
     ///
     /// # This cannot trim a spare the moment it is parked
@@ -586,7 +613,7 @@ impl WarmPool {
         // airtight rather than merely likely: a park that passed the
         // check above and then waited here cannot slip past a `clear`
         // that took the lock first. The QUIT stays outside the guard,
-        // as everywhere else in this module - a mute provider's 500 ms
+        // as everywhere else in this module - a mute provider's bounded
         // goodbye held under it would stall every checkout.
         if !self.accepting() {
             drop(idle);
@@ -883,9 +910,25 @@ impl WarmPool {
         }
         while let Some(joined) = pings.join_next().await {
             match joined {
-                Ok((k, mut p, true)) if p.generation == self.generation.load(Ordering::Acquire) => {
+                Ok((k, mut p, true)) => {
                     p.fresh_at = Instant::now();
                     let mut idle = self.idle.lock().await;
+                    // The generation is read UNDER the map lock, because
+                    // that is where `clear` and `retain_servers` move it.
+                    // Read before the lock, a `clear` taking the lock in
+                    // between drained the map behind a check that had
+                    // already passed, and this put a superseded session
+                    // back into the fresh map - where it sat on a provider
+                    // slot until `take` or `max_idle` reaped it.
+                    if p.generation != self.generation.load(Ordering::Acquire) {
+                        // Alive but superseded while it pinged (see
+                        // `take`): say goodbye rather than drop it on the
+                        // cap.
+                        drop(idle);
+                        self.stats.reaped.fetch_add(1, Ordering::Relaxed);
+                        p.conn.quit().await;
+                        continue;
+                    }
                     let v = idle.entry(k).or_default();
                     if v.len() < self.per_server {
                         v.push(p);
@@ -894,12 +937,6 @@ impl WarmPool {
                         self.stats.evicted.fetch_add(1, Ordering::Relaxed);
                         p.conn.quit().await;
                     }
-                }
-                Ok((_, p, true)) => {
-                    // Alive but superseded while it pinged (see `take`):
-                    // say goodbye rather than drop it on the cap.
-                    self.stats.reaped.fetch_add(1, Ordering::Relaxed);
-                    p.conn.quit().await;
                 }
                 _ => {
                     self.stats.reaped.fetch_add(1, Ordering::Relaxed);
@@ -950,6 +987,40 @@ mod tests {
         );
     }
 
+    /// TODO 358: a parked session's identity includes the HTTP proxy it
+    /// was dialled through, so adding, changing or removing one cannot be
+    /// answered out of the pool with a session on the old route - a
+    /// parked DIRECT session handed out after a proxy is configured would
+    /// keep the traffic off the proxy the user just asked for.
+    #[test]
+    fn a_parked_session_is_not_reused_across_a_change_of_http_proxy() {
+        let base = bare_config("127.0.0.1:563".parse().expect("addr"));
+        let with = ServerConfig {
+            http_proxy: Some("127.0.0.1:8080".into()),
+            ..base.clone()
+        };
+        let other = ServerConfig {
+            http_proxy: Some("127.0.0.1:3128".into()),
+            ..base.clone()
+        };
+        assert_ne!(key(&base), key(&with), "adding a proxy must re-key");
+        assert_ne!(key(&with), key(&other), "changing it must re-key");
+    }
+
+    /// The receive buffer is the same kind of fact (9 Nov 2026 sweep,
+    /// A17): SO_RCVBUF is applied at the dial and never again, so a
+    /// session parked before the setting moved must not be handed out
+    /// after it.
+    #[test]
+    fn a_parked_session_is_not_reused_across_a_change_of_rcvbuf() {
+        let base = bare_config("127.0.0.1:119".parse().expect("addr"));
+        let tuned = ServerConfig {
+            rcvbuf: Some(4 << 20),
+            ..base.clone()
+        };
+        assert_ne!(key(&base), key(&tuned), "the receive buffer is set at dial");
+    }
+
     /// Points at a bare loopback listener, for the tests that need a peer
     /// they can kill, hold mute or answer on cue - none of which a
     /// MockServer will do.
@@ -970,6 +1041,7 @@ mod tests {
             block_account: false,
             bind_ip: None,
             socks5: None,
+            http_proxy: None,
             enabled: true,
             warm_pool: false,
             idle_release_secs: None,
@@ -1089,6 +1161,33 @@ mod tests {
     /// reach a multi-minute timeout without waiting out minutes.
     fn go_idle_for(pool: &WarmPool, d: Duration) {
         pool.rewind_activity(d);
+    }
+
+    /// TODO 358 kill switch: a session parked while the server's bind
+    /// address was up is not handed out once that address has gone down.
+    /// The dial-side check only guards NEW connections, so without this
+    /// the next job's checkout would carry on over a session whose route
+    /// the user said must stop when the tunnel does. TEST-NET-1 (RFC
+    /// 5737) is on no box, so it reads as down everywhere; the session
+    /// itself was dialled without a bind and parked under that key.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_parked_session_is_not_handed_out_once_its_bind_address_is_down() {
+        let (addr, live) = counting_provider();
+        let plain = bare_config(addr);
+        let bound = ServerConfig {
+            bind_ip: Some("192.0.2.77".into()),
+            ..plain.clone()
+        };
+        let pool = WarmPool::new(DEFAULT_MAX_IDLE, 8);
+        let (conn, _) = Connection::connect(&plain).await.unwrap();
+        pool.give(&bound, conn).await;
+        assert_eq!(pool.parked_for(&bound).await, 1);
+        assert!(
+            pool.take(&bound).await.is_none(),
+            "a session behind a downed bind address must not be checked out"
+        );
+        assert_eq!(pool.parked_for(&bound).await, 0, "and it is not kept");
+        assert_eq!(live_settles(&live, 0).await, 0, "the socket is closed");
     }
 
     /// The headline: an idle pool must hand the SOCKETS back, not merely
@@ -2287,6 +2386,14 @@ mod tests {
     /// `counting_provider` cannot tell a goodbye from a bare drop - both
     /// close the socket - and that difference is what this measures.
     fn quit_counting_provider() -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+        quit_counting_provider_slow(Duration::ZERO)
+    }
+
+    /// [`quit_counting_provider`] answering every DATE `delay` late, so a
+    /// test can act while a probe is out on the wire.
+    fn quit_counting_provider_slow(
+        delay: Duration,
+    ) -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
         use std::io::{BufRead, BufReader, Write as _};
         use std::sync::atomic::AtomicUsize;
 
@@ -2312,6 +2419,7 @@ mod tests {
                             let _ = s.write_all(b"205 bye\r\n");
                             break;
                         }
+                        std::thread::sleep(delay);
                         if s.write_all(b"111 20260731000000\r\n").is_err() {
                             break;
                         }
@@ -2355,5 +2463,50 @@ mod tests {
         pool.tick().await;
         assert_eq!(pool.idle_count().await, 0);
         assert_eq!(live_settles(&quits, 2).await, 2, "tick dropped it unQUIT");
+    }
+
+    /// Sweep 9 Nov 2026 (C): the keepalive's generation check ran BEFORE
+    /// it took the map lock, and `clear` moves the generation UNDER that
+    /// lock. A `clear` landing between the two drained the map behind a
+    /// check that had already passed, and the tick then put the
+    /// superseded session back into the fresh map. Driven here exactly:
+    /// the DATE is held out, the test takes the lock the way `clear`
+    /// does across the moment it answers, and moves the generation
+    /// before letting go.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_keepalive_crossing_a_clear_does_not_put_its_session_back() {
+        let (addr, quits) = quit_counting_provider_slow(Duration::from_millis(1000));
+        let sc = bare_config(addr);
+        let pool = WarmPool::new(DEFAULT_MAX_IDLE, 8);
+        let (conn, _) = Connection::connect(&sc).await.unwrap();
+        pool.give(&sc, conn).await;
+        for p in pool.idle.lock().await.values_mut().flatten() {
+            p.fresh_at -= KEEPALIVE_EVERY;
+        }
+        let ticker = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.tick().await })
+        };
+        // The tick has taken the session out to ping it.
+        for _ in 0..200 {
+            if pool.idle_count().await == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(pool.idle_count().await, 0, "the keepalive took it out");
+        // `clear`, stretched across the DATE's answer: lock, wait for the
+        // answer to land, supersede, release.
+        let idle = pool.idle.lock().await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        pool.generation.fetch_add(1, Ordering::AcqRel);
+        drop(idle);
+        ticker.await.unwrap();
+        assert_eq!(
+            pool.idle_count().await,
+            0,
+            "a session superseded while it pinged must not go back in the map"
+        );
+        assert_eq!(live_settles(&quits, 1).await, 1, "and it says goodbye");
     }
 }

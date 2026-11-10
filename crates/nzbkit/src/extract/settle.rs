@@ -331,7 +331,7 @@ impl Extractor {
 
     /// A slot's place in its set: its volume key and release stem, or
     /// None for a name that does not number a volume.
-    fn set_position(inner: &Inner, slot: usize) -> Option<(u64, String)> {
+    pub(super) fn set_position(inner: &Inner, slot: usize) -> Option<(u64, String)> {
         let name = &inner.slots[slot].name;
         let (num, _) = vol_sort_key(name);
         (num != u64::MAX).then(|| (num, release_stem(name)))

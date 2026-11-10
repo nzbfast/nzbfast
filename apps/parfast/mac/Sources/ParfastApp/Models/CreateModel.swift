@@ -167,10 +167,20 @@ final class CreateModel: ObservableObject {
         autofillFromSources()
     }
 
-    func refreshSources() {
+    /// Re-stat the sources and recompute the preview from them.
+    ///
+    /// The recompute is explicit because nothing else would trigger it: the
+    /// preview recomputes when `previewKey` moves, the key carries the
+    /// source PATHS, and a refresh re-reads the same paths - so a file that
+    /// grew, shrank or vanished since it was added kept its old preview, and
+    /// the Refresh button refreshed only the size column (sweep, section B).
+    /// A folder's contents are not in the key at all, so this is the only
+    /// way a changed folder reaches the preview.
+    func refreshSources(recomputingWith core: CoreClient) {
         let paths = sources.map(\.path)
         sources = []
         addSources(paths)
+        recompute(with: core)
     }
 
     /// Base folder and output name are derived from the sources the first

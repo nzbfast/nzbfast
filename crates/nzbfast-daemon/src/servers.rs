@@ -271,61 +271,124 @@ pub fn normalized_server(
         }
         None => {}
     }
-    if let Some(addr) = incoming
-        .get("socks5")
-        .and_then(Value::as_str)
-        .map(str::trim)
-    {
-        if addr.is_empty() {
-            ob.remove("socks5");
-        } else {
-            if addr.contains('@') {
-                // The address box is host:port only - a spec pasted whole
-                // would put the proxy password in the echoed field.
-                return Err("proxy address: put the user and password in their own boxes".into());
-            }
-            // Port 0 parses as a `u16` and is not a port anybody can
-            // connect to: accepted here it saved silently and then
-            // failed every connection through this provider with an OS
-            // error instead of a form message (review sweep 7, L5). The
-            // NNTP port above takes the same range.
-            if addr
-                .rsplit_once(':')
-                .and_then(|(h, p)| p.parse::<u16>().ok().filter(|p| *p > 0 && !h.is_empty()))
-                .is_none()
-            {
-                return Err("proxy address: expected host:port".into());
-            }
-            // Blank password keeps the stored one, exactly like the
-            // server password above: it never round-trips through the UI.
-            let (stored_user, stored_pass) = socks5_creds(ob.get("socks5").and_then(Value::as_str));
-            let user = incoming
-                .get("socks5_user")
-                .and_then(Value::as_str)
-                .map_or(stored_user.clone(), |v| v.trim().to_string());
-            let pass = match incoming.get("socks5_pass").and_then(Value::as_str) {
-                Some(p) if !p.is_empty() => p.to_string(),
-                // A cleared user means the credential is gone entirely,
-                // so the stored password must not survive it.
-                _ if user.is_empty() => String::new(),
-                _ => stored_pass,
-            };
-            ob.insert(
-                "socks5".into(),
-                json!(if user.is_empty() {
-                    addr.to_string()
-                } else {
-                    format!("{user}:{pass}@{addr}")
-                }),
-            );
-        }
+    // The two proxy options (M32's SOCKS5, TODO 358 item 14's HTTP
+    // CONNECT) share one stored shape and one form recombination,
+    // `merge_proxy`. The stored specs are read BEFORE either is touched:
+    // switching a server from one kind to the other with the password
+    // box left blank keeps the credential, the way a blank box keeps it
+    // everywhere else on this form.
+    let before = |k: &str| ob.get(k).and_then(Value::as_str).map(str::to_string);
+    let (was_socks, was_http) = (before("socks5"), before("http_proxy"));
+    merge_proxy(
+        ob,
+        incoming,
+        ProxyKeys::SOCKS5,
+        was_socks.as_deref().or(was_http.as_deref()),
+    )?;
+    merge_proxy(
+        ob,
+        incoming,
+        ProxyKeys::HTTP,
+        was_http.as_deref().or(was_socks.as_deref()),
+    )?;
+    if ob.contains_key("socks5") && ob.contains_key("http_proxy") {
+        // The dial refuses a row naming both (nntp's connect says why),
+        // so a save that would produce one is refused here, with a form
+        // message, instead of saving a provider that can never connect.
+        return Err("proxy: choose SOCKS5 or HTTP, not both".into());
     }
     Ok(o)
 }
 
-/// The `user`, `pass` halves of a stored SOCKS spec ("" when it has no
-/// credentials). Parsed exactly as `nntp::socks5_connect` parses it, so
-/// what the editor shows is what the connection will use.
+/// The three form keys one proxy kind is edited through, and the one
+/// stored key they recombine into.
+struct ProxyKeys {
+    stored: &'static str,
+    name_box: &'static str,
+    word_box: &'static str,
+}
+
+impl ProxyKeys {
+    const SOCKS5: ProxyKeys = ProxyKeys {
+        stored: "socks5",
+        name_box: "socks5_user",
+        word_box: "socks5_pass",
+    };
+    const HTTP: ProxyKeys = ProxyKeys {
+        stored: "http_proxy",
+        name_box: "http_proxy_user",
+        word_box: "http_proxy_pass",
+    };
+}
+
+/// Recombine one proxy kind's address, user and password boxes into its
+/// stored "host:port" / "user:pass@host:port" spec. An absent address
+/// key leaves the stored spec alone; a blank one removes it. `carried`
+/// is the spec whose credential a blank password box keeps - this
+/// kind's own, or the other kind's when the save switches between them.
+fn merge_proxy(
+    ob: &mut serde_json::Map<String, Value>,
+    incoming: &Value,
+    keys: ProxyKeys,
+    carried: Option<&str>,
+) -> std::result::Result<(), String> {
+    let Some(addr) = incoming
+        .get(keys.stored)
+        .and_then(Value::as_str)
+        .map(str::trim)
+    else {
+        return Ok(());
+    };
+    if addr.is_empty() {
+        ob.remove(keys.stored);
+        return Ok(());
+    }
+    if addr.contains('@') {
+        // The address box is host:port only - a spec pasted whole
+        // would put the proxy password in the echoed field.
+        return Err("proxy address: put the user and password in their own boxes".into());
+    }
+    // Port 0 parses as a `u16` and is not a port anybody can
+    // connect to: accepted here it saved silently and then
+    // failed every connection through this provider with an OS
+    // error instead of a form message (review sweep 7, L5). The
+    // NNTP port above takes the same range.
+    if addr
+        .rsplit_once(':')
+        .and_then(|(h, p)| p.parse::<u16>().ok().filter(|p| *p > 0 && !h.is_empty()))
+        .is_none()
+    {
+        return Err("proxy address: expected host:port".into());
+    }
+    // Blank password keeps the stored one, exactly like the
+    // server password above: it never round-trips through the UI.
+    let (stored_user, stored_pass) = socks5_creds(carried);
+    let user = incoming
+        .get(keys.name_box)
+        .and_then(Value::as_str)
+        .map_or(stored_user.clone(), |v| v.trim().to_string());
+    let pass = match incoming.get(keys.word_box).and_then(Value::as_str) {
+        Some(p) if !p.is_empty() => p.to_string(),
+        // A cleared user means the credential is gone entirely,
+        // so the stored password must not survive it.
+        _ if user.is_empty() => String::new(),
+        _ => stored_pass,
+    };
+    ob.insert(
+        keys.stored.into(),
+        json!(if user.is_empty() {
+            addr.to_string()
+        } else {
+            format!("{user}:{pass}@{addr}")
+        }),
+    );
+    Ok(())
+}
+
+/// The `user`, `pass` halves of a stored SOCKS or HTTP proxy spec (""
+/// when it has no credentials). Parsed exactly as `nntp::socks5_connect`
+/// and `nntp::route::http_connect` parse it, so what the editor shows is
+/// what the connection will use.
 pub fn socks5_creds(spec: Option<&str>) -> (String, String) {
     let Some((creds, _)) = spec.unwrap_or_default().rsplit_once('@') else {
         return (String::new(), String::new());

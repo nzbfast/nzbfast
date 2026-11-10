@@ -37,6 +37,55 @@ pub enum Kind {
     Custom(String),
 }
 
+impl Kind {
+    /// May a release of this kind legitimately carry an executable?
+    ///
+    /// The single statement of junk rule M32's scope (Prowlarr#2329): an
+    /// executable riding a media-shaped release is the classic malware
+    /// shape, and only a software post ships one for real. The indexer's
+    /// `junk::junk_score` asks it of a listed release, and the daemon's
+    /// completed-download refusal (TODO 358 item 13, decision D2) asks it
+    /// of a finished job, so the two can never disagree about which
+    /// kinds are exempt. The daemon additionally leaves `Other` alone -
+    /// an unclassified job is not known to be media - which is a
+    /// narrowing it states at its own site, not a second copy of this.
+    pub fn may_carry_executables(&self) -> bool {
+        matches!(self, Kind::Software)
+    }
+}
+
+impl Parsed {
+    /// Does this parse carry at least one TECHNICAL marker - year, S/E,
+    /// date, resolution, source, codec, remux?
+    ///
+    /// `parse_release` guesses `Movie` for any readable words, so a kind
+    /// alone is no evidence of media: "release" parses as a film. A real
+    /// scene/P2P post virtually always carries one of these (junk_v6),
+    /// and the trailing -group token deliberately does NOT count - any
+    /// "words-blob" name grows one for free. `junk::junk_score` reads it
+    /// as "evidence-free media", and the daemon's executable refusal
+    /// (TODO 358 item 13) as "this job's NAME says media".
+    pub fn carries_media_evidence(&self) -> bool {
+        self.year.is_some()
+            || self.season.is_some()
+            || self.episode.is_some()
+            // A parsed DATE is at least as much of a technical marker as
+            // the year this list already counts, and on a periodical it
+            // is strictly better: it is the identity of the issue. Added
+            // 2 Sep 2026 with the masthead date reading - a dated post
+            // gives its year token up to the date, so "The New York
+            // Times - 15 August 2026" posted somewhere with no media
+            // prior went from a year-bearing 0 to an evidence-free 60
+            // purely because the parser got BETTER at it.
+            || self.date.is_some()
+            || self.res.is_some()
+            || self.source.is_some()
+            || self.vcodec.is_some()
+            || self.acodec.is_some()
+            || self.remux
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Parsed {
     pub kind: Kind,

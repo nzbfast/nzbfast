@@ -70,6 +70,15 @@ impl FileWriter {
 
     /// True when every byte of [off, off+len) has been written.
     pub fn covered(&self, off: u64, len: u64) -> bool {
+        // An empty range holds no byte that could be missing. Asked of the
+        // map below it was answered by whether some span happened to
+        // TOUCH `off`, so a zero-length read at a hole - a reader at the
+        // end of what it wants, an empty member - read as uncovered, and
+        // a caller that waits for coverage waited out its whole deadline
+        // for bytes it never asked for.
+        if len == 0 {
+            return true;
+        }
         // Coverage is published after the `pwrite`, so a staged span
         // reads as a hole. That is the SAFE direction for every consumer
         // (nobody is told a byte is there when it is not), but a caller

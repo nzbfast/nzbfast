@@ -675,6 +675,7 @@ impl Shared {
         // TODO 208 item 1: the line cap the run settled on and how many
         // times the in-run shed moved a target. Same rule as the taper
         // arm: absent when disarmed, so the A/B's off arm is unchanged.
+        self.line_cap_finish();
         let taper = format!(
             "{taper}{steers}{}{}",
             self.line_cap_summary(),

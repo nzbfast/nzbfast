@@ -114,7 +114,10 @@ pub(super) fn run(job: &Job, spec: &PostingSetSpec, _started: Instant) -> Outcom
     for line in &coverage {
         sink.line(Level::Terse, line);
     }
-    if let Err(e) = clear_or_refuse(spec) {
+    if let Err(e) = distinct_names(&members) {
+        return *e;
+    }
+    if let Err(e) = clear_or_refuse(spec, &members) {
         return *e;
     }
     apply_knobs(
@@ -169,6 +172,20 @@ fn check_spec(spec: &PostingSetSpec) -> Result<(), Refused> {
             "bad_spec",
             format!(
                 "{:?} is not a name a set can take: one file name, no folders",
+                spec.name
+            ),
+        ));
+    }
+    // TODO 358 sweep F3: `.name.rar` is a dot-file, which the PAR2 half's
+    // source rule (`planner::SourceRules::Par2`) drops, so a two-pass job
+    // wrote the whole archive, found no sources and deleted it. Hidden
+    // files are no posting anyway.
+    if name.starts_with('.') {
+        return Err(refuse(
+            "bad_spec",
+            format!(
+                "{:?} starts with a dot, which hides the files and leaves them out of \
+                 the PAR2 set; choose a name that does not",
                 spec.name
             ),
         ));
@@ -272,12 +289,76 @@ fn existing_members(spec: &PostingSetSpec) -> Vec<PathBuf> {
     found
 }
 
+/// Two members under one name in the archive is two files that extract
+/// over each other, so the posting carries one of them and a recipient
+/// never learns there was a second. A Basename-mode walk over a tree
+/// reaches exactly that (`a/notes.txt` and `b/notes.txt` are both
+/// `notes.txt`). Refused, naming both, rather than written: which of the
+/// two a poster wanted is not this job's to guess. Exact comparison, as
+/// the Create pane's `par2gen::check_create_inputs` makes for a PAR2 set,
+/// so the two panes agree.
+///
+/// Found twice on 9 Nov 2026: by the parfast sweep (this function, code
+/// `duplicate_name`) and by TODO 358 sweep F2 (`check_member_names`,
+/// code `bad_spec`, landed first). Reconciled at the merge into this one
+/// copy with the dedicated code, because `duplicate_name` is the one the
+/// FFI contract (`parfast-ffi/API.md`) and both hosts already name.
+fn distinct_names(members: &[PlannedMember]) -> Result<(), Refused> {
+    let mut seen: std::collections::HashMap<&str, &Path> = std::collections::HashMap::new();
+    for m in members {
+        if let Some(first) = seen.insert(m.name.as_str(), &m.path) {
+            return Err(refuse(
+                "duplicate_name",
+                format!(
+                    "{} and {} would both be stored in the archive as {:?}; keep folder \
+                     names (relative paths) or leave one of them out",
+                    first.display(),
+                    m.path.display(),
+                    m.name
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The overwrite rule: refuse if a set is there and the spec did not
 /// say replace it; remove all of it if the spec did.
-fn clear_or_refuse(spec: &PostingSetSpec) -> Result<(), Refused> {
+///
+/// # Never one of the job's own sources
+///
+/// Checked for EVERY file in the way, before the first unlink. With
+/// overwrite on, this deleted whatever matched the set's names and only
+/// then went on to open the sources - so posting `Movie.rar` as the set
+/// `Movie`, or re-running a folder job into the folder it reads (whose
+/// last run's `Movie.rar` is now one of its inputs), deleted the input
+/// and then failed on "could not be opened". The checksum create's
+/// `output_is_a_source` is the same rule; matched by identity, so a
+/// link (or a hard link, or a `..` spelling) of a source is caught too.
+/// TODO 358 sweep F1 found the same defect and landed a canonical-path
+/// version first under `bad_spec`; this identity match is a superset of
+/// it, and keeps the `output_is_a_source` code the checksum create and
+/// the FFI contract already use.
+fn clear_or_refuse(spec: &PostingSetSpec, members: &[PlannedMember]) -> Result<(), Refused> {
     let there = existing_members(spec);
     if there.is_empty() {
         return Ok(());
+    }
+    if let Some((p, m)) = there.iter().find_map(|p| {
+        members
+            .iter()
+            .find(|m| m.path == *p || super::same_file(&m.path, p))
+            .map(|m| (p, m))
+    }) {
+        return Err(refuse(
+            "output_is_a_source",
+            format!(
+                "{} is one of this set's files and also a source ({}); choose a different \
+                 set name or output folder",
+                p.display(),
+                m.path.display()
+            ),
+        ));
     }
     if !spec.overwrite {
         return Err(refuse(
@@ -389,19 +470,96 @@ fn archive_bound(members: &[PlannedMember], recovery_percent: u32) -> u64 {
     bound + bound / 100 * u64::from(recovery_percent) + (1 << 20)
 }
 
-/// One opened member, ready to hand to the writer.
+/// One member, ready to hand to the writer.
 struct Opened {
-    file: File,
+    file: LazyFile,
     name: Vec<u8>,
     size: u64,
     mtime: Option<rarkit::Timestamp>,
     attributes: u32,
 }
 
+/// A member's reader that holds its descriptor only WHILE it is being
+/// read: opened on the first read, closed once `size` bytes have gone.
+///
+/// rarkit is handed every member's reader before `finish_*` starts and
+/// reads them one after another, so a `File` per member held one
+/// descriptor per source for the whole write. macOS gives a GUI app a
+/// soft limit of 256, so a posting set over a few hundred files failed
+/// on "Too many open files" before writing a byte (9 Nov 2026 sweep,
+/// A28's posting half). This holds one at a time, plus whatever rarkit's
+/// bounded read-ahead has in flight.
+struct LazyFile {
+    path: PathBuf,
+    left: u64,
+    file: Option<File>,
+    /// The file ended while bytes were still owed - it shrank after it
+    /// was measured. Every later read answers the same error rather than
+    /// reopening it and starting again from byte 0.
+    short: bool,
+}
+
+impl Read for LazyFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.short {
+            return Err(self.ended_early());
+        }
+        if self.left == 0 {
+            self.file = None;
+            return Ok(0);
+        }
+        if self.file.is_none() {
+            let f = File::open(&self.path).map_err(|e| {
+                std::io::Error::new(e.kind(), format!("{}: {e}", self.path.display()))
+            })?;
+            self.file = Some(f);
+        }
+        let want = buf
+            .len()
+            .min(usize::try_from(self.left).unwrap_or(usize::MAX));
+        let n = self
+            .file
+            .as_mut()
+            .expect("opened just above")
+            .read(&mut buf[..want])?;
+        if n == 0 {
+            // NOT a clean end: `left` bytes are owed and the header says
+            // so. Dropping the handle here and answering 0 let the next
+            // read reopen the file at offset 0 and feed its first bytes
+            // in as the missing tail.
+            self.file = None;
+            self.short = true;
+            return Err(self.ended_early());
+        }
+        self.left -= n as u64;
+        if self.left == 0 {
+            self.file = None;
+        }
+        Ok(n)
+    }
+}
+
+impl LazyFile {
+    fn ended_early(&self) -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!(
+                "{}: the file got shorter while it was being archived ({} bytes missing)",
+                self.path.display(),
+                self.left
+            ),
+        )
+    }
+}
+
 fn open_members(members: &[PlannedMember]) -> Result<Vec<Opened>, Refused> {
     members
         .iter()
         .map(|m| {
+            // Opened and CLOSED here, so an unreadable source is still the
+            // up-front refusal it always was rather than a failure half
+            // way through the archive; the read itself reopens it. See
+            // `LazyFile`.
             let file = File::open(&m.path).map_err(|e| {
                 refuse(
                     "io",
@@ -411,12 +569,18 @@ fn open_members(members: &[PlannedMember]) -> Result<Vec<Opened>, Refused> {
             let meta = file.metadata().map_err(|e| {
                 refuse("io", format!("{} could not be read: {e}", m.path.display()))
             })?;
+            drop(file);
             Ok(Opened {
                 name: m.name.as_bytes().to_vec(),
                 size: meta.len(),
                 mtime: meta.modified().ok().and_then(timestamp),
                 attributes: attributes_of(&meta),
-                file,
+                file: LazyFile {
+                    path: m.path.clone(),
+                    left: meta.len(),
+                    file: None,
+                    short: false,
+                },
             })
         })
         .collect()
@@ -543,8 +707,43 @@ fn rar_failure(job: &Job, e: &rarkit::Error) -> Outcome {
 // The CRC pre-read (one-pass route only)
 // ---------------------------------------------------------------------
 
+/// The CRC32 of `len` bytes of `f` at `at`, read through `buf` a buffer
+/// at a time and chained, so a piece needs no buffer of its own size.
+fn crc_of_range(f: &File, at: u64, len: u64, buf: &mut [u8]) -> std::io::Result<u32> {
+    let mut crc = 0u32;
+    let mut off = 0u64;
+    while off < len {
+        let n = (len - off).min(buf.len() as u64) as usize;
+        nzbkit::disk::read_exact_at(f, &mut buf[..n], at + off)?;
+        crc = nzbkit::yenc_simd::crc32(&buf[..n], crc);
+        off += n as u64;
+    }
+    Ok(crc)
+}
+
+/// The CRC pre-read's (workers, per-worker buffer bytes), from the CPU
+/// worker count and the process memory budget (TODO 358 sweep F4).
+///
+/// Each worker used to hold a whole 64 MiB piece, so 16 workers held
+/// 1 GiB outside `nzbkit::mem`'s budget and whatever the Memory limit
+/// said. A piece is now read through a 4 MiB buffer (`crc_of_range`
+/// chains the CRC across it; the pieces stay 64 MiB, so the parallel
+/// split is unchanged and only the read size moved - its throughput
+/// cost was NOT measured when this landed), and the
+/// buffers together take at most a quarter of the budget - the RAR and
+/// PAR2 halves that follow size themselves from the same budget. Never
+/// fewer than one worker, and never more than there are pieces.
+fn crc_plan(cpu: usize, budget: u64, pieces: usize) -> (usize, usize) {
+    const CHUNK: u64 = 4 << 20;
+    let share = budget / 4;
+    let buf = CHUNK.min(share).max(64 << 10);
+    let fit = (share / buf).max(1) as usize;
+    (cpu.clamp(1, 16).min(pieces.max(1)).min(fit), buf as usize)
+}
+
 /// Each member's CRC32, read in parallel: big members in 64 MiB pieces
-/// on every worker, combined in order. `None` on a cancel; an error
+/// on every worker (each read through a budgeted buffer, `crc_plan`),
+/// combined in order. `None` on a cancel; an error
 /// names the file.
 fn source_crcs(job: &Job, members: &[PlannedMember]) -> Result<Option<Vec<u32>>, Refused> {
     const PIECE: u64 = 64 << 20;
@@ -562,15 +761,28 @@ fn source_crcs(job: &Job, members: &[PlannedMember]) -> Result<Option<Vec<u32>>,
     let shown = std::sync::atomic::AtomicU64::new(0);
     let results: Mutex<Vec<Option<u32>>> = Mutex::new(vec![None; pieces.len()]);
     let failed: Mutex<Option<String>> = Mutex::new(None);
-    let files: Vec<std::io::Result<File>> = members.iter().map(|m| File::open(&m.path)).collect();
-    let workers = nzbkit::mem::cpu_workers()
-        .clamp(1, 16)
-        .min(pieces.len().max(1));
+    let (workers, chunk) = crc_plan(
+        nzbkit::mem::cpu_workers(),
+        nzbkit::mem::process_budget().total,
+        pieces.len(),
+    );
     std::thread::scope(|sc| {
         for _ in 0..workers {
             sc.spawn(|| {
-                let mut buf = vec![0u8; PIECE as usize];
+                let mut buf = vec![0u8; chunk];
+                // One descriptor per WORKER, kept while consecutive pieces
+                // are the same member. Every source used to be opened up
+                // front and held for the whole pre-read - the descriptor
+                // limit `LazyFile` exists for, reached here first.
+                let mut held: Option<(usize, File)> = None;
                 loop {
+                    // A park site: between two pieces, holding nothing any
+                    // other worker waits on. The pre-read was the one phase
+                    // of a posting set Pause did not reach - it ran to the
+                    // end, and on a large set it is most of a minute.
+                    if job.control.is_paused() && !gated(job) {
+                        return;
+                    }
                     if job.control.is_cancelled()
                         || failed.lock().map(|f| f.is_some()).unwrap_or(true)
                     {
@@ -581,16 +793,25 @@ fn source_crcs(job: &Job, members: &[PlannedMember]) -> Result<Option<Vec<u32>>,
                         return;
                     };
                     let path = &members[i].path;
-                    let read = match &files[i] {
-                        Ok(f) => nzbkit::disk::read_exact_at(f, &mut buf[..len as usize], at),
-                        Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
-                    };
-                    if let Err(e) = read {
-                        *failed.lock().unwrap_or_else(|p| p.into_inner()) =
-                            Some(format!("{} could not be read: {e}", path.display()));
-                        return;
+                    if held.as_ref().is_none_or(|(j, _)| *j != i) {
+                        held = match File::open(path) {
+                            Ok(f) => Some((i, f)),
+                            Err(e) => {
+                                *failed.lock().unwrap_or_else(|p| p.into_inner()) =
+                                    Some(format!("{} could not be read: {e}", path.display()));
+                                return;
+                            }
+                        };
                     }
-                    let crc = nzbkit::yenc_simd::crc32(&buf[..len as usize], 0);
+                    let (_, f) = held.as_ref().expect("opened just above");
+                    let crc = match crc_of_range(f, at, len, &mut buf) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            *failed.lock().unwrap_or_else(|p| p.into_inner()) =
+                                Some(format!("{} could not be read: {e}", path.display()));
+                            return;
+                        }
+                    };
                     results.lock().unwrap_or_else(|p| p.into_inner())[k] = Some(crc);
                     let d = done.fetch_add(len, Ordering::Relaxed) + len;
                     let frac = if total == 0 {
@@ -858,26 +1079,14 @@ fn one_pass(ctx: &Ctx<'_>, sink: &mut Sink) -> Outcome {
         s.phase_text = "Writing the recovery volumes".to_string();
         s.progress = s.progress.max(0.95);
     });
-    let names = match stream.finish(recovery_n, plan, opts.comment.as_deref()) {
-        Ok(n) => n,
+    // The volumes land under their final names: `create_plan` names them
+    // the reference's way and the engine commits them into place, so there
+    // is nothing to rename afterwards (`parfast::create::run`'s `Ok` arm
+    // says why that rename step went, 9 Nov 2026).
+    match stream.finish(recovery_n, plan, opts.comment.as_deref()) {
+        Ok(_) => {}
         Err(nzbkit::par2gen::Par2GenError::Cancelled) => return Outcome::cancelled(),
         Err(e) => return Outcome::failed("create_failed", e.to_string()),
-    };
-    let unpublished = parfast::create::rename_volumes(
-        dir,
-        &spec.name,
-        &names,
-        opts.first_block,
-        recovery,
-        opts.std_naming,
-        opts.no_clobber,
-    );
-    if !unpublished.is_empty() {
-        let (from, to, why) = &unpublished[0];
-        return Outcome::failed(
-            "create_failed",
-            format!("could not name {from} as {to}: {why}"),
-        );
     }
     done(ctx, ONE_PASS, String::new(), vec![archive_path])
 }

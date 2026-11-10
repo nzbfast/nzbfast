@@ -81,8 +81,17 @@ fn restore_crypto(
         };
         let src_len = src.metadata().map(|m| m.len()).unwrap_or(0);
         let cipher_len = crate::rarcrypt::align16(meta.unp);
-        let mut ckpts: Vec<(u64, [u8; 16])> =
-            meta.checkpoints.iter().map(|(&o, &b)| (o, b)).collect();
+        // Only 16-aligned anchors: the writer emits a `K` at a cipher
+        // block boundary and nowhere else, and the walk below encrypts
+        // whole blocks from its anchor - an unaligned offset off a
+        // corrupt line panicked it (sweep 9 Nov 2026). Dropping one
+        // costs at most a longer walk from the next anchor down.
+        let mut ckpts: Vec<(u64, [u8; 16])> = meta
+            .checkpoints
+            .iter()
+            .filter(|&(&o, _)| o % 16 == 0)
+            .map(|(&o, &b)| (o, b))
+            .collect();
         ckpts.sort_unstable();
         jobs.sort_by_key(|j| j.file_off);
         let mut dests: HashMap<PathBuf, Option<File>> = HashMap::new();

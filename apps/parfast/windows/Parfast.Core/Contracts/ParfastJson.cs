@@ -29,6 +29,9 @@ public static class ParfastJson
         NumberHandling = JsonNumberHandling.AllowReadingFromString,
         ReadCommentHandling = JsonCommentHandling.Skip,
         AllowTrailingCommas = true,
+
+        // One oversized u64 must not fail a whole snapshot; see the converter.
+        Converters = { new SaturatingInt32Converter() },
     };
 
     public static JsonSerializerOptions Indented { get; } = new(Options) { WriteIndented = true };

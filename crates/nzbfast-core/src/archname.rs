@@ -45,10 +45,13 @@ pub fn rar_magic(path: &std::path::Path) -> bool {
 /// in the rebuild case having USED the same `.rev` to reconstruct the
 /// deleted volume first (research/RAR-PERF-AUDIT-2026-09-02.md round 43).
 ///
-/// RAR 3.x `.rev` files carry the ORDINARY `Rar!\x1a\x07\x00` marker and
-/// parse cleanly into a memberless archive, which the extract arm
-/// already handles as its no-op `has_member == false` shape; only the
-/// RAR5 spelling needed naming. Do not widen this to `.rev` by NAME -
+/// RAR 3.x `.rev` files carry NO marker at all: they open straight into
+/// parity bytes and end in a 7-byte trailer (measured 9 Nov 2026 against
+/// `rar` 7.23 and the vendored `rev_newstyle` fixtures; the reader is
+/// `nzbfast-unpack`'s `rarfix::rev3`). An earlier note here said they
+/// carried the ordinary `Rar!\x1a\x07\x00` marker, which they do not. So
+/// they never pass [`rar_magic`] and only the RAR5 spelling needed
+/// naming. Do not widen this to `.rev` by NAME -
 /// obfuscated posts strip extensions, and the whole point of the
 /// obfuscated arm is that names cannot be trusted.
 pub fn rar_recovery_volume_magic(path: &std::path::Path) -> bool {

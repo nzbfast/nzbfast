@@ -218,11 +218,14 @@ impl Extractor {
                     // could not exist at state creation (the tail may not
                     // have been mapped) - resolve it NOW from the tail's
                     // stored CRC; the plain runs composed all along
-                    // (`track_plain`).
+                    // (`track_plain`). The fold key comes from the password
+                    // this file was DECRYPTED under, which the live cell
+                    // may no longer hold - see `CryptoState::password`.
                     let verdict = if cs.expect_crc.is_some() {
                         cs.crc_verdict()
                     } else {
-                        crc_gate_from(whole_crc, crc_owner, inner.password.as_deref())
+                        let pw = cs.password.as_deref().or(inner.password.as_deref());
+                        crc_gate_from(whole_crc, crc_owner, pw)
                             .and_then(|gate| cs.crc_verdict_with(&gate))
                     };
                     // The hash-only backstop, and the only ORDER-

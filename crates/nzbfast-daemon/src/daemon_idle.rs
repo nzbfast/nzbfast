@@ -44,10 +44,24 @@ impl Daemon {
     /// Coming back online only unpauses a queue that going offline
     /// paused - see `paused_by_offline`.
     pub fn set_offline(self: &Arc<Self>, want_offline: bool) {
+        // The WHOLE transition, flag swap to pool effects, runs under one
+        // lock. The swap used to happen first and outside everything, so
+        // an Offline that stalled between the swap and the pause block
+        // let an opposite Online swap the flag back and apply its own
+        // transition; the Offline then applied its stale one, leaving the
+        // flag online, the queue paused by offline, the pool shut, and a
+        // second Online returning early on the flag (6 Nov 2026 sweep F4).
+        // Moving only the swap inside the pause_until lock would not do:
+        // the pool close and reopen below would still apply out of order.
+        // Nothing below re-enters `set_offline`, and the pause_until lock
+        // is still taken inside this one, never around it.
+        let _transition = self.offline_transition.lock_ok();
         let was = self.offline.swap(want_offline, Ordering::SeqCst);
         if was == want_offline {
             return;
         }
+        #[cfg(test)]
+        offline_swap_hook(self, want_offline);
         // Cleared either way: an in-flight job has to wind down whether
         // or not this transition was the thing that paused the queue,
         // because staying connected is exactly what offline forbids.
@@ -273,5 +287,35 @@ impl Daemon {
             return true;
         };
         self.download_idle_for().is_none_or(|idle| idle < after)
+    }
+}
+
+/// Test-only: hold a `set_offline` between its flag swap and the rest of
+/// the transition, which is the window 6 Nov 2026 sweep F4 lived in.
+/// Keyed by the daemon's address and the direction, because the lib tests
+/// run in parallel and an unkeyed two-party barrier hangs such a run
+/// rather than failing it (see `hooks::HOOKS_GEN_BARRIER`). The first
+/// barrier says the call is in the window; the second releases it.
+#[cfg(test)]
+pub(crate) static OFFLINE_SWAP_BARRIER: std::sync::Mutex<
+    Option<(
+        usize,
+        bool,
+        Arc<std::sync::Barrier>,
+        Arc<std::sync::Barrier>,
+    )>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn offline_swap_hook(d: &Arc<Daemon>, want_offline: bool) {
+    let me = Arc::as_ptr(d) as usize;
+    let hit = OFFLINE_SWAP_BARRIER
+        .lock_ok()
+        .as_ref()
+        .filter(|(key, want, _, _)| *key == me && *want == want_offline)
+        .map(|(_, _, open, release)| (open.clone(), release.clone()));
+    if let Some((open, release)) = hit {
+        open.wait();
+        release.wait();
     }
 }

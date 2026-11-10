@@ -565,3 +565,303 @@ fn posting_member_names_the_set_and_nothing_else() {
         assert!(!posting_member("S", no), "{no}");
     }
 }
+
+/// A2: with overwrite on, a file of the set that is ALSO a source is
+/// refused before anything is unlinked. Two shapes: a source named
+/// exactly as the set's archive, and a folder job re-run into the folder
+/// it reads, whose last run's archive is now one of its inputs.
+#[test]
+fn overwrite_never_deletes_one_of_its_own_sources() {
+    let f = fixture();
+    let mut spec = spec_for(&f, RarOptions::default());
+    spec.overwrite = true;
+    // The set writes into the folder it reads, and a file there already
+    // carries the set's archive name.
+    spec.output_dir = f.src();
+    std::fs::write(f.src().join("Some.Post.rar"), b"my own payload").unwrap();
+    let before = names_in(&f.src());
+    let o = run_spec(&spec);
+    assert_eq!(o.state, JobState::Failed, "{:?}", o.error);
+    assert_eq!(o.error.as_ref().unwrap().code, "output_is_a_source");
+    assert_eq!(names_in(&f.src()), before, "nothing was unlinked");
+    assert_eq!(
+        std::fs::read(f.src().join("Some.Post.rar")).unwrap(),
+        b"my own payload",
+        "the source survived"
+    );
+
+    // Named directly, from a folder that is not the output's.
+    let g = fixture();
+    let mut spec = spec_for(&g, RarOptions::default());
+    spec.overwrite = true;
+    std::fs::write(g.out().join("Some.Post.rar"), b"named source").unwrap();
+    spec.sources.push(Source {
+        path: g.out().join("Some.Post.rar"),
+        recursive: false,
+    });
+    let o = run_spec(&spec);
+    assert_eq!(
+        o.error.as_ref().map(|e| e.code.as_str()),
+        Some("output_is_a_source")
+    );
+    assert!(
+        g.out().join("Some.Post.rar").exists(),
+        "the source survived"
+    );
+}
+
+/// Two members that would be stored under one name in the archive are
+/// refused, naming both, and nothing is written.
+#[test]
+fn two_members_under_one_archive_name_are_refused() {
+    let f = fixture();
+    std::fs::create_dir_all(f.src().join("a")).unwrap();
+    std::fs::create_dir_all(f.src().join("b")).unwrap();
+    std::fs::write(f.src().join("a/notes.txt"), b"first").unwrap();
+    std::fs::write(f.src().join("b/notes.txt"), b"second").unwrap();
+    let mut spec = spec_for(&f, RarOptions::default());
+    spec.sources[0].recursive = true;
+    let o = run_spec(&spec);
+    assert_eq!(
+        o.error.as_ref().map(|e| e.code.as_str()),
+        Some("duplicate_name")
+    );
+    let msg = &o.error.as_ref().unwrap().message;
+    // The message names each source by its path as the platform prints
+    // it, so a Windows run reads `a\notes.txt`; a literal `a/notes.txt`
+    // was green on unix only until first run on Windows (9 Nov 2026).
+    let a = Path::new("a").join("notes.txt").display().to_string();
+    let b = Path::new("b").join("notes.txt").display().to_string();
+    assert!(msg.contains(&a) && msg.contains(&b), "{msg}");
+    assert!(names_in(&f.out()).is_empty(), "{:?}", names_in(&f.out()));
+}
+
+/// A28's posting half: the members' readers hold no descriptor until
+/// they are read, and let it go once their bytes are out. Read through
+/// the same `open_members` the run uses.
+#[test]
+fn a_members_reader_holds_its_file_only_while_it_is_read() {
+    let f = fixture();
+    let members = planner::expand_sources(
+        &[Source {
+            path: f.src(),
+            recursive: false,
+        }],
+        PathMode::Basename,
+        None,
+        planner::SourceRules::Par2,
+    )
+    .unwrap()
+    .members;
+    let Ok(mut opened) = open_members(&members) else {
+        panic!("the members open");
+    };
+    assert!(
+        opened.iter().all(|o| o.file.file.is_none()),
+        "a member held a descriptor before anything read it"
+    );
+    // EXACTLY its size, as rarkit reads it - it never asks past the end,
+    // so a reader that let go only on a zero-length read would hold on.
+    let mut all = vec![0u8; opened[0].size as usize];
+    opened[0].file.read_exact(&mut all).unwrap();
+    assert!(
+        opened[0].file.file.is_none(),
+        "a finished member kept its descriptor"
+    );
+    assert!(opened[1].file.file.is_none());
+}
+
+/// The CRC pre-read honours Pause: with the job paused it parks rather
+/// than reading every source to the end, and a Cancel releases it.
+#[test]
+fn the_crc_pre_read_parks_on_pause() {
+    let f = fixture();
+    let spec = spec_for(&f, RarOptions::default());
+    let job = Arc::new(job_for(&spec));
+    let members = planner::expand_sources(
+        &spec.sources,
+        PathMode::Basename,
+        None,
+        planner::SourceRules::Par2,
+    )
+    .unwrap()
+    .members;
+    job.control.set_paused(true);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = Arc::clone(&job);
+    let t = std::thread::spawn(move || {
+        let got = source_crcs(&worker, &members).map(|c| c.is_some());
+        let _ = tx.send(got.is_ok_and(|done| done));
+    });
+    // Parked: no answer while paused. Not a sleep-and-hope for the pass
+    // - a pre-read that ignored Pause answers at once on three small
+    // files, so it is the ANSWER arriving that fails this.
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(300))
+            .is_err(),
+        "the pre-read finished while the job was paused"
+    );
+    job.control.cancel();
+    let finished = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("a cancel releases a parked pre-read");
+    assert!(!finished, "a cancelled pre-read must not report CRCs");
+    t.join().unwrap();
+}
+
+/// A member that SHRINKS after it was measured is an error on every read
+/// from then on - never a reopen that feeds its first bytes in again as
+/// the missing tail.
+#[test]
+fn a_member_that_shrank_stays_an_error() {
+    let f = fixture();
+    let path = f.src().join("film.mkv");
+    let mut lazy = LazyFile {
+        path: path.clone(),
+        left: 300_017,
+        file: None,
+        short: false,
+    };
+    let mut head = vec![0u8; 1_000];
+    lazy.read_exact(&mut head).expect("the first bytes");
+    std::fs::write(&path, &head).expect("truncate to what was read");
+    let mut rest = vec![0u8; 4_096];
+    let first = lazy.read(&mut rest);
+    assert!(first.is_err(), "a short file answered {first:?}");
+    let again = lazy.read(&mut rest);
+    assert_eq!(
+        again.map_err(|e| e.kind()).err(),
+        Some(std::io::ErrorKind::UnexpectedEof),
+        "the second read reopened the file instead of staying an error"
+    );
+}
+
+/// TODO 358 sweep F1: overwrite clears every file under the set's name
+/// in the output folder, and a SOURCE can be one of them - `Movie.rar`
+/// posted from its own folder as `Movie`. That deleted the source and
+/// then failed on ENOENT. It is refused instead, whatever `overwrite`
+/// says, and the source is untouched.
+#[test]
+fn overwrite_never_deletes_a_source() {
+    let f = fixture();
+    let src = f.out().join("Some.Post.rar");
+    std::fs::write(&src, noise(10_000, 9)).unwrap();
+    let mut spec = spec_for(&f, RarOptions::default());
+    spec.sources = vec![Source {
+        path: src.clone(),
+        recursive: false,
+    }];
+    spec.overwrite = true;
+    let o = run_spec(&spec);
+    assert_eq!(o.state, JobState::Failed, "{:?}", o.result);
+    // `output_is_a_source`, not the `bad_spec` this landed with: the two
+    // 9 Nov fixes of this defect were reconciled at the merge onto the
+    // code the FFI contract names (see `clear_or_refuse`).
+    assert_eq!(
+        o.error.as_ref().unwrap().code,
+        "output_is_a_source",
+        "{:?}",
+        o.error
+    );
+    assert_eq!(
+        std::fs::read(&src).unwrap(),
+        noise(10_000, 9),
+        "source kept"
+    );
+}
+
+/// TODO 358 sweep F2: in the basename path mode two sources with one
+/// file name (`S01/Sample/sample.mkv`, `S02/Sample/sample.mkv`) would be
+/// one name twice inside the archive - extraction keeps one of them - and
+/// the job reported Done. It is refused, naming the clash, as the Create
+/// pane's own check refuses a PAR2 set that names one slot twice.
+#[test]
+fn two_sources_with_one_name_are_refused() {
+    let f = fixture();
+    for s in ["S01", "S02"] {
+        let d = f.src().join(s);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("sample.mkv"), noise(5_000, s.len() as u64)).unwrap();
+    }
+    let mut spec = spec_for(&f, RarOptions::default());
+    spec.sources = vec![
+        Source {
+            path: f.src().join("S01"),
+            recursive: true,
+        },
+        Source {
+            path: f.src().join("S02"),
+            recursive: true,
+        },
+    ];
+    let o = run_spec(&spec);
+    assert_eq!(o.state, JobState::Failed, "{:?}", o.result);
+    let e = o.error.as_ref().unwrap();
+    // `duplicate_name` since the merge with the parfast sweep's own fix
+    // (see `distinct_names`).
+    assert_eq!(e.code, "duplicate_name", "{e:?}");
+    assert!(e.message.contains("sample.mkv"), "{}", e.message);
+    assert!(names_in(&f.out()).is_empty());
+}
+
+/// TODO 358 sweep F4: the CRC pre-read's buffers come out of the
+/// process memory budget (the Settings pane's Memory limit), not beside
+/// it - it used to hold up to 16 workers x 64 MiB = 1 GiB whatever the
+/// limit said. A quarter of the budget at most, and never no worker.
+#[test]
+fn the_crc_pre_read_fits_the_memory_budget() {
+    for (cpu, budget) in [
+        (16, 64u64 << 20),
+        (16, 256 << 20),
+        (4, 1 << 30),
+        (1, 64 << 20),
+    ] {
+        let (workers, buf) = crc_plan(cpu, budget, 1_000);
+        assert!(workers >= 1, "cpu {cpu} budget {budget}");
+        assert!(
+            (workers * buf) as u64 <= budget / 4,
+            "cpu {cpu} budget {budget}: {workers} x {buf}"
+        );
+    }
+    // A roomy budget still uses every worker the box has.
+    assert_eq!(crc_plan(16, 16 << 30, 1_000).0, 16);
+    assert_eq!(crc_plan(16, 16 << 30, 3).0, 3, "no idle workers");
+}
+
+/// TODO 358 sweep F4: a piece read through a buffer smaller than itself
+/// chains to the CRC of the whole piece.
+#[test]
+fn a_piece_crc_through_a_small_buffer_is_the_whole_crc() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("x");
+    let bytes = noise(100_003, 7);
+    std::fs::write(&p, &bytes).unwrap();
+    let f = File::open(&p).unwrap();
+    let mut buf = vec![0u8; 4096];
+    assert_eq!(
+        crc_of_range(&f, 17, 90_000, &mut buf).unwrap(),
+        nzbkit::yenc_simd::crc32(&bytes[17..90_017], 0)
+    );
+    assert_eq!(crc_of_range(&f, 0, 0, &mut buf).unwrap(), 0);
+}
+
+/// TODO 358 sweep F3: a set name starting with '.' writes `.name.rar`,
+/// which the PAR2 half's own source rule drops as a dot-file, so a
+/// two-pass job wrote the whole archive, failed `no_sources` and deleted
+/// it. Refused up front instead.
+#[test]
+fn a_dot_set_name_is_refused_before_anything_is_written() {
+    let f = fixture();
+    let mut spec = spec_for(
+        &f,
+        RarOptions {
+            compression: 3,
+            ..Default::default()
+        },
+    );
+    spec.name = ".Hidden".into();
+    let o = run_spec(&spec);
+    assert_eq!(o.state, JobState::Failed);
+    assert_eq!(o.error.as_ref().unwrap().code, "bad_spec", "{:?}", o.error);
+    assert!(names_in(&f.out()).is_empty());
+}

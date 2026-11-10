@@ -41,6 +41,12 @@ pub struct FinalizeOutcome {
     pub(super) ident: crate::identity::Identity,
     pub(super) identified: String,
     pub(super) cleaned: (usize, usize, bool),
+    /// TODO 358 item 13: the payload held an executable a media-shaped
+    /// job never ships, and this is the sentence the job FAILS with.
+    /// `Some` means the pass stopped there: nothing was published over a
+    /// previous copy, renamed, filed or queued for the mover, so the
+    /// caller files the record Failed and the *arr re-grabs.
+    pub(super) refused: Option<String>,
 }
 
 impl FinalizeOutcome {
@@ -50,18 +56,88 @@ impl FinalizeOutcome {
     /// user at Retry, which re-runs this whole tail.
     pub(super) fn crashed() -> Self {
         FinalizeOutcome {
-            needs_pw: false,
-            unlock_refused: None,
-            pw_used: None,
             blocked_by:
                 "post-processing did not finish (internal error) - retry the job to re-run it"
                     .to_string(),
+            ..Self::refused(None)
+        }
+    }
+
+    /// The pass stopped before any step that publishes: every field is
+    /// the "nothing happened" value, and `refused` carries why.
+    fn refused(why: Option<String>) -> Self {
+        FinalizeOutcome {
+            needs_pw: false,
+            unlock_refused: None,
+            pw_used: None,
+            blocked_by: String::new(),
             moved: None,
             filed_sfx: None,
             filed_ttl: None,
             ident: crate::identity::Identity::default(),
             identified: String::new(),
             cleaned: (0, 0, false),
+            refused: why,
+        }
+    }
+}
+
+/// `publish_over_previous`, but only while `canon` is still ours to take
+/// over - asked again at publish time, under `add_lock`.
+///
+/// `Job::replaces` is decided ONCE, at add (or at a retry's refile), and
+/// the canonical directory can change hands in the minutes or hours the
+/// replacement spends downloading: the completed result it was meant to
+/// replace is deleted with its files, and a NEW add of the same name is
+/// then handed the free canonical folder. The bare hand-over renames
+/// whatever sits at `canon` aside and the settle deletes it, so the
+/// replacement finished by moving the newer job's payload out of the way
+/// and removing it - while that job might still be writing into it
+/// (9 Nov 2026 sweep A11).
+///
+/// So the claim is re-read with the rule a FRESH placement uses,
+/// `dir_claim_for_add`, because that is what taking a directory over is.
+/// `Payload` - a completed record of OURS still names the directory and
+/// it is there - is the take-over `replaces` was recorded for. `Free` is
+/// a name with nothing on it to protect: absent, empty, or a failed
+/// record's leftovers, which an add would reuse in place by the same
+/// rule. `Active` (a queued or running job's ground) and `Occupied`
+/// (files that no record of ours names) keep the replacement in its own
+/// directory, which is the outcome a refused rename already has, so the
+/// caller needs no new arm.
+///
+/// UNDER `add_lock`, check and renames together: every directory
+/// decision runs under it (enqueue, retry, recategorize, park's filing
+/// window), so an add cannot choose the canonical name between the
+/// re-read and the rename into it. The renames are two metadata
+/// operations, which is what makes holding it across them affordable.
+/// `dir_claim_for_add` locks every record in both lists, so no job lock
+/// may be held here - and this pass holds none.
+///
+/// Generic over the hand-over only because `Published` is private to
+/// `job_publish`; the finalize pass passes `publish_over_previous`.
+pub(crate) fn publish_over_previous_if_ours<T>(
+    d: &Daemon,
+    out_dir: &std::path::Path,
+    canon: &std::path::Path,
+    publish: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    let _deciders = d.add_lock.lock_ok();
+    match d.dir_claim_for_add(canon) {
+        DirClaim::Payload | DirClaim::Free => publish(),
+        claim => {
+            let why = match claim {
+                DirClaim::Active => "a queued or running job holds it",
+                _ => "it holds files no record of ours names",
+            };
+            info!(
+                target: "replace",
+                "{} is no longer the result this download was set to replace ({why}) - \
+                 keeping the new download in {}",
+                canon.display(),
+                out_dir.display()
+            );
+            None
         }
     }
 }
@@ -94,6 +170,18 @@ pub(super) fn finalize_payload(
     {
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
+    // TODO 358 item 13 (D2): refuse an executable in a media-shaped
+    // job, FIRST. Everything below can publish this payload - the A6
+    // hand-over takes the canonical directory, the rename and filing
+    // move it, and the mover relocates it once this returns - so the
+    // question is asked while the payload still sits where it
+    // downloaded. The one-pass extraction has already written the
+    // archive members out by now, which is why this reads the folder
+    // rather than an archive listing; a set that is still LOCKED is
+    // asked again after the unlock below opens it.
+    if let Some(why) = crate::exerefuse::refuse_executables(&d3, &out2, &name2, &cat2) {
+        return FinalizeOutcome::refused(Some(why));
+    }
     // A6: this job downloaded beside a previous
     // successful result of the same name. It verified,
     // so it takes the canonical directory over now -
@@ -113,7 +201,14 @@ pub(super) fn finalize_payload(
     // nothing can open. See `job_publish::Published`. (N1,
     // reports/code-audit-2026-09-17.)
     let mut out2 = out2;
-    let mut published = repl2.and_then(|canon| publish_over_previous(&out2, &canon));
+    //
+    // And only over a canonical directory that is STILL that previous
+    // result: `replaces` was fixed at add, and the name can have changed
+    // hands since (9 Nov 2026 sweep A11) - see
+    // `publish_over_previous_if_ours`.
+    let mut published = repl2.and_then(|canon| {
+        publish_over_previous_if_ours(&d3, &out2, &canon, || publish_over_previous(&out2, &canon))
+    });
     let mut moved: Option<PathBuf> = None;
     if let Some(p) = &published {
         out2 = p.dir().to_path_buf();
@@ -226,6 +321,30 @@ pub(super) fn finalize_payload(
                     }
                 }
             }
+        }
+        // TODO 358 item 13, the second ask: the unlock just wrote the
+        // members out, and the first ask above could only see the
+        // volumes. A refusal here undoes an A6 hand-over the same way a
+        // still-locked replacement does, so the previous copy is what
+        // stays under the canonical name.
+        if !needs_pw
+            && unlock_refused.is_none()
+            && let Some(why) = crate::exerefuse::refuse_executables(&d3, &out2, &name2, &cat2)
+        {
+            // A rollback that cannot complete leaves the payload at the
+            // canonical directory, and the record has to say so.
+            let mut stuck = None;
+            if let Some(p) = published.take() {
+                let dir = p.dir().to_path_buf();
+                if !p.roll_back() {
+                    stuck = Some(dir);
+                }
+            }
+            return FinalizeOutcome {
+                pw_used,
+                moved: stuck,
+                ..FinalizeOutcome::refused(Some(why))
+            };
         }
     }
     // Something in a SUCCESSFUL job is still packed
@@ -407,6 +526,7 @@ pub(super) fn finalize_payload(
         ident,
         identified: identify,
         cleaned,
+        refused: None,
     }
 }
 
@@ -466,6 +586,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 9 Nov 2026 sweep A11: a replacement takes the canonical directory
+    /// over only while it still holds the result it was set to replace.
+    ///
+    /// The field sequence: A completes at `Name`; B is added as `Name.2`
+    /// replacing it; A is deleted with its files; C is added and handed
+    /// the now-free `Name`; B completes. The hand-over used to rename
+    /// whatever sat at `Name` aside and settle it into the Trash - C's
+    /// payload, possibly mid-download. Both of C's states are asserted (a
+    /// queued record on the folder, and the files left behind once its
+    /// row was cleared), and the record-of-ours case beside them, because
+    /// a guard that refused every take-over would pass the first two.
+    #[test]
+    fn a_replacement_never_takes_over_a_canonical_folder_that_changed_hands() {
+        let dir = crate::testutil::scratch_dir("nzbfast-replace-recheck", "a11");
+        let d = crate::testutil::test_daemon(&dir);
+        let canon = dir.join("Name");
+        let mine = dir.join("Name.2");
+        let fresh = |p: &std::path::Path, file: &str| {
+            let _ = std::fs::remove_dir_all(p);
+            std::fs::create_dir_all(p).unwrap();
+            std::fs::write(p.join(file), file.as_bytes()).unwrap();
+        };
+        let try_publish = || {
+            publish_over_previous_if_ours(&d, &mine, &canon, || {
+                publish_over_previous(&mine, &canon)
+            })
+        };
+
+        // C queued on the canonical folder.
+        fresh(&canon, "c.mkv");
+        fresh(&mine, "b.mkv");
+        let c = crate::testutil::jv(
+            "nzo-a11-c",
+            "Name",
+            serde_json::json!({"out_dir": canon.to_string_lossy()}),
+        );
+        d.queue.lock_ok().push_back(c.clone());
+        assert!(try_publish().is_none(), "took over a queued job's folder");
+        assert!(canon.join("c.mkv").exists() && mine.join("b.mkv").exists());
+
+        // C's row cleared, its files kept: nobody of ours names them.
+        d.queue.lock_ok().clear();
+        assert!(try_publish().is_none(), "took over files no record names");
+        assert!(canon.join("c.mkv").exists() && mine.join("b.mkv").exists());
+
+        // The case `replaces` exists for: our completed result is there.
+        let a = crate::testutil::rec(
+            "nzo-a11-a",
+            serde_json::json!({"out_dir": canon.to_string_lossy()}),
+        );
+        d.history.lock_ok().push(a);
+        let p = try_publish().expect("our own completed result is replaced");
+        assert!(
+            canon.join("b.mkv").exists(),
+            "the replacement is on the name"
+        );
+        drop(p);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A header-encrypted 7-Zip container: the file list and the payload
     /// are both behind the key, which is the shape a locked release is
     /// posted in and the one `unlockpw::encrypted_archive` answers yes
@@ -517,6 +698,14 @@ mod tests {
         std::fs::create_dir_all(&canon).unwrap();
         const GOOD: &[u8] = b"the previous, unpacked, watchable copy";
         std::fs::write(canon.join("movie.mkv"), GOOD).unwrap();
+        // The completed record of ours that `replaces` was recorded
+        // against: the hand-over re-reads the claim at publish time
+        // (9 Nov 2026 sweep A11), and a folder no record names is not
+        // ours to take over.
+        d.history.lock_ok().push(crate::testutil::rec(
+            "nzo-a6-previous",
+            serde_json::json!({"out_dir": canon.to_string_lossy()}),
+        ));
 
         // The re-add, downloaded beside it: it VERIFIED, and every one
         // of its archives is locked with a password nobody here holds.
@@ -652,6 +841,14 @@ mod tests {
         let canon = root.join("Some.Release.2024.1080p-GRP");
         std::fs::create_dir_all(&canon).unwrap();
         std::fs::write(canon.join("movie.mkv"), b"the older copy").unwrap();
+        // The completed record of ours that `replaces` was recorded
+        // against: the hand-over re-reads the claim at publish time
+        // (9 Nov 2026 sweep A11), and a folder no record names is not
+        // ours to take over.
+        d.history.lock_ok().push(crate::testutil::rec(
+            "nzo-a6-previous",
+            serde_json::json!({"out_dir": canon.to_string_lossy()}),
+        ));
 
         let fresh = root.join("Some.Release.2024.1080p-GRP.2");
         std::fs::create_dir_all(&fresh).unwrap();
@@ -708,6 +905,73 @@ mod tests {
             .filter(|n| n.contains(crate::job::REPLACED_SUFFIX))
             .collect();
         assert!(left.is_empty(), "parked copies left behind: {left:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// TODO 358 item 13: a refused replacement never takes the canonical
+    /// directory over. The refusal is asked BEFORE the A6 hand-over, so
+    /// the copy the user already has stays exactly where it was, and the
+    /// pass reports no new home for the mover to publish from.
+    #[test]
+    fn a_refused_replacement_never_publishes_over_the_previous_copy() {
+        let root = std::env::temp_dir().join(format!(
+            "nzbfast-a6-refused-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let d = crate::testutil::test_daemon(&root);
+        d.identity_lookup.store(false, Ordering::Relaxed);
+
+        let canon = root.join("Some.Release.2024.1080p-GRP");
+        std::fs::create_dir_all(&canon).unwrap();
+        const GOOD: &[u8] = b"the previous, watchable copy";
+        std::fs::write(canon.join("movie.mkv"), GOOD).unwrap();
+        // The completed record of ours that `replaces` was recorded
+        // against: the hand-over re-reads the claim at publish time
+        // (9 Nov 2026 sweep A11), and a folder no record names is not
+        // ours to take over.
+        d.history.lock_ok().push(crate::testutil::rec(
+            "nzo-a6-previous",
+            serde_json::json!({"out_dir": canon.to_string_lossy()}),
+        ));
+        let fresh = root.join("Some.Release.2024.1080p-GRP.2");
+        std::fs::create_dir_all(fresh.join("extras")).unwrap();
+        std::fs::write(fresh.join("movie.mkv"), b"new").unwrap();
+        // Two levels down: deeper than the cleanup sweeps reach.
+        std::fs::write(fresh.join("extras").join("codec.EXE"), b"MZ").unwrap();
+
+        let out = finalize_payload(
+            d.clone(),
+            "nzo-a6-refused".into(),
+            fresh.clone(),
+            Some(canon.clone()),
+            None,
+            root.join("job.nzb"),
+            String::new(),
+            "Some.Release.2024.1080p-GRP".into(),
+            0,
+            Vec::new(),
+            String::new(),
+            false,
+        );
+
+        let why = out.refused.expect("a film holding a program is refused");
+        assert!(why.contains("codec.EXE"), "{why}");
+        assert_eq!(
+            out.moved, None,
+            "a refused payload must not report a new home"
+        );
+        assert_eq!(std::fs::read(canon.join("movie.mkv")).unwrap(), GOOD);
+        assert!(
+            !fresh.join("extras").join("codec.EXE").exists(),
+            "the refused program is still in the folder"
+        );
+        assert!(
+            fresh.join("movie.mkv").is_file(),
+            "only the program is taken"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

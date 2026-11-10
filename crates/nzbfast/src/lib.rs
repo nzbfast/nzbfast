@@ -100,6 +100,8 @@ pub(crate) use nzbfast_meta::oracle_backtest;
 // binary exits when that binary dies, including when it dies by SIGKILL
 // and no destructor anywhere runs.
 mod parentwatch;
+// F7: a Windows minidump beside daemon.log on an unhandled exception.
+pub(crate) mod crashdump;
 pub(crate) use nzbfast_core::persist;
 // TODO 151 (issue #36): the first list source's own wire formats.
 mod post_cmd;
@@ -1037,6 +1039,11 @@ pub fn cli_main() -> Result<()> {
         );
         default_hook(info);
     }));
+    // Windows only, and opt-out with NZBFAST_NO_MINIDUMP=1: a native
+    // crash (an access violation in FFI code, a stack overflow) leaves a
+    // minidump beside daemon.log once `serve` has named that folder. A
+    // no-op everywhere else. See `crashdump` for what it does not cover.
+    crashdump::install();
     std::thread::Builder::new()
         .name("nzbfast-main".into())
         .stack_size(16 * 1024 * 1024)

@@ -24,6 +24,10 @@
             <TextBlock x:Name="PercentText" Style="{StaticResource FigureText}" HorizontalAlignment="Right" />
         </Grid>
 
+        <!-- result.warnings: what the job could not take in, beside Done. The
+             same control and severity as the Create preview's WarningBar. -->
+        <InfoBar x:Name="WarningsBar" IsOpen="False" Severity="Warning" IsClosable="False" />
+
         <Grid ColumnSpacing="24">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />

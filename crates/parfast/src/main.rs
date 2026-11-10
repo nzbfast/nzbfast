@@ -19,11 +19,24 @@ use std::process::ExitCode;
 nzbkit::fast_mem_ops!();
 
 fn main() -> ExitCode {
-    let mut argv = std::env::args();
     // argv[0] selects the command for the `par2create` / `par2verify` /
-    // `par2repair` spellings, which scripts invoke by name.
-    let argv0 = argv.next().unwrap_or_else(|| "parfast".to_string());
-    let args: Vec<String> = argv.collect();
+    // `par2repair` spellings, which scripts invoke by name. `args_os` and
+    // not `args`, which panics on an argument that is not UTF-8 - see
+    // `parfast::utf8_argv`.
+    let (argv0, args) = match parfast::utf8_argv(std::env::args_os()) {
+        Ok(v) => v,
+        Err(bad) => {
+            // `writeln!` and a dropped error, as `out::Sink` does it: a
+            // closed stderr must not turn this refusal into a panic.
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "Argument is not valid UTF-8 and cannot be read: {}",
+                bad.to_string_lossy()
+            );
+            return ExitCode::from(parfast::EXIT_INVALID_ARGS);
+        }
+    };
     fix_mmap_threshold_when_bounded(&argv0, &args);
     ExitCode::from(parfast::run(&argv0, &args))
 }

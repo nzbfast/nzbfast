@@ -35,6 +35,7 @@ fn pset(names: &[&str]) -> Par2Set {
         recovery_set_id: [0u8; 16],
         block_size: 4096,
         files: names.iter().copied().map(pfile).collect(),
+        undescribed: Vec::new(),
         nonrecovery: Vec::new(),
         recovery_blocks_seen: 0,
     }

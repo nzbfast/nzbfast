@@ -377,7 +377,7 @@ pub(super) struct DecodeCtx {
     /// having taken four of them positionally.
     pub(super) loss: LossLedgers,
     pub(super) unasked_noted: Arc<std::sync::atomic::AtomicBool>,
-    pub(super) disk_full_sample: Arc<std::sync::Mutex<Option<String>>>,
+    pub(super) write_halt_sample: HaltSampleCell,
     pub(super) verifier: Arc<nzbkit::live::LiveVerifier>,
     pub(super) extractor: Arc<nzbkit::extract::Extractor>,
     pub(super) shape_said: Arc<std::sync::atomic::AtomicBool>,
@@ -1142,7 +1142,7 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
         decode_errors,
         loss,
         unasked_noted,
-        disk_full_sample,
+        write_halt_sample,
         verifier,
         extractor,
         shape_said,
@@ -1350,18 +1350,30 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                                     // out-of-disk-space verdict, and the
                                     // journal keeps what landed for the
                                     // resume.
-                                    if note_storage_exhausted_halt(
+                                    // The same halt for a destination that
+                                    // refuses the write (permissions, a
+                                    // directory in the payload's place):
+                                    // every later article fails the same
+                                    // open, so fetching them is waste.
+                                    match note_storage_exhausted_halt(
                                         &e,
                                         name,
-                                        &disk_full_sample,
+                                        &write_halt_sample,
                                         &queue_ctl,
                                     ) {
-                                        warn!(
+                                        Some(nzbkit::disk::WriteHalt::Exhausted) => warn!(
                                             target: "get",
                                             "out of disk space - stopping the download; \
                                              what landed is journaled and a retry resumes \
                                              without refetching it"
-                                        );
+                                        ),
+                                        Some(nzbkit::disk::WriteHalt::Refused) => warn!(
+                                            target: "get",
+                                            "the output folder refused a write - stopping \
+                                             the download; what landed is journaled and a \
+                                             retry resumes without refetching it"
+                                        ),
+                                        None => {}
                                     }
                                 }
                                 Ok(persist) => {
@@ -1655,14 +1667,17 @@ pub(super) fn spawn_mem_sampler(stream_owner: &str, nzb_path: &std::path::Path) 
         &mem_sampler_label(stream_owner, nzb_path),
         &record,
     );
+    // The guard's liveness, as the task sees it - see `keeps_sampling`.
+    let alive = Arc::new(());
     let handle = {
         let record = record.clone();
+        let alive = Arc::downgrade(&alive);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let trace = holds_trace_enabled();
             let mut n: u32 = 0;
-            while MEM_SAMPLER_RUN.load(Ordering::Relaxed) == run {
+            while keeps_sampling(run, &alive) {
                 tick.tick().await;
                 record.note_rss_sample();
                 n = n.wrapping_add(1);
@@ -1676,7 +1691,30 @@ pub(super) fn spawn_mem_sampler(stream_owner: &str, nzb_path: &std::path::Path) 
         run,
         record,
         handle,
+        alive,
     }
+}
+
+/// Should the sampler born with `run` take another tick? While its token
+/// is still current AND its guard is still alive.
+///
+/// The second half is read-only sweep, 9 Nov 2026. Only
+/// `print_mem_summary` moved the token, and every `?` between
+/// `spawn_mem_sampler` and that summary - `drain_network`'s pause, user
+/// stop and full-disk bails, any error in the tail - skipped it, so in the
+/// daemon the task went on ticking into a record nobody would read until
+/// the NEXT job's spawn moved the token for it. The guard's drop is the
+/// one point every path reaches (its `Drop` already unregisters the record
+/// there), so the task now also watches a token the guard alone owns.
+///
+/// A liveness token and NOT a token bump in that `Drop`, deliberately: the
+/// bump was the first cut, and it made every test in this unit that drops
+/// anything a mover of `MEM_SAMPLER_RUN` to `test-global-gate`, which
+/// resolves calls by bare name. A `Weak` moves no process-global at all,
+/// and it cannot retire a later job's sampler because each guard owns its
+/// own.
+fn keeps_sampling(run: u64, alive: &std::sync::Weak<()>) -> bool {
+    MEM_SAMPLER_RUN.load(Ordering::Relaxed) == run && alive.strong_count() > 0
 }
 
 /// A live sampler, the generation token it was born with, and the peak
@@ -1692,6 +1730,13 @@ pub(super) struct MemSampler {
     // unfulfilled under cfg(test).
     #[allow(dead_code)]
     pub(super) handle: tokio::task::JoinHandle<()>,
+    /// The liveness token the task watches (`keeps_sampling`): the only
+    /// strong reference, so the task sees this guard go however the job
+    /// ended. Held, never read, outside the tests - holding it IS its job.
+    // Not #[expect]: the unit tests read the field, so the expectation is
+    // unfulfilled under cfg(test).
+    #[allow(dead_code)]
+    pub(super) alive: Arc<()>,
 }
 
 impl Drop for MemSampler {
@@ -2107,31 +2152,59 @@ fn note_corrupt_fault(
         .get_or_insert_with(|| crate::diag::DecodeSample::corrupt(format!("decode error: {e}")));
 }
 
-/// A storage-exhaustion write error halts the fetch. Classifies
-/// via [`nzbkit::disk::storage_exhausted`] (kind-first, raw codes
-/// platform-gated - 112 is ERROR_DISK_FULL only on Windows); on the
-/// FIRST detection it records the verbatim sample for the job verdict
-/// and aborts the pool so the line stops promptly. Returns whether this
-/// call was that first detection (callers log the halt once). Later
-/// detections - other decode threads racing through in-flight bodies -
-/// keep the first sample and re-assert the abort harmlessly.
+/// The first write error that halted the fetch, verbatim, and which
+/// kind of halt it was ([`nzbkit::disk::WriteHalt`]). Its presence IS
+/// the halt signal `drain_network` turns into the job's verdict; the
+/// kind picks which verdict.
+pub(super) type HaltSampleCell = Arc<std::sync::Mutex<Option<(nzbkit::disk::WriteHalt, String)>>>;
+
+/// A write error that refetching cannot fix halts the fetch: storage
+/// exhaustion (full volume, spent quota, read-only filesystem) or, since
+/// TODO 358 item 6, the destination refusing the write (EACCES, EPERM,
+/// EISDIR). Classifies via [`nzbkit::disk::write_halt`] (kind-first, raw
+/// codes platform-gated - 112 is ERROR_DISK_FULL only on Windows); on
+/// the FIRST detection it records the verbatim sample and its kind for
+/// the job verdict and aborts the pool so the line stops promptly.
+/// Returns that kind when this call was that first detection (callers
+/// log the halt once), and None otherwise. Later detections - other
+/// decode threads racing through in-flight bodies - keep the first
+/// sample and re-assert the abort harmlessly.
+///
+/// The ONLY caller is the article write into the job's own output, and
+/// that is what confines the refusal arm: a `PermissionDenied` is a fact
+/// about the destination only when it came out of a write into it.
 pub(super) fn note_storage_exhausted_halt(
     e: &std::io::Error,
     name: &str,
-    disk_full_sample: &Arc<std::sync::Mutex<Option<String>>>,
+    write_halt_sample: &HaltSampleCell,
     queue_ctl: &nzbkit::pool::QueueControl,
-) -> bool {
-    if !nzbkit::disk::storage_exhausted(e) {
-        return false;
-    }
+) -> Option<nzbkit::disk::WriteHalt> {
+    let halt = nzbkit::disk::write_halt(e)?;
     let first = {
-        let mut s = disk_full_sample.lock_ok();
+        let mut s = write_halt_sample.lock_ok();
         let was_empty = s.is_none();
-        s.get_or_insert_with(|| format!("write {name}: {e}"));
+        s.get_or_insert_with(|| (halt, format!("write {name}: {e}")));
         was_empty
     };
     queue_ctl.abort();
-    first
+    first.then_some(halt)
+}
+
+/// How long `spawn_deadlock_watchdog` lets a run sit with nothing
+/// decoding and nothing resolving before it aborts the pool and books
+/// what is left as missing: `NZBFAST_STALL_ABORT_SECS`, 180 s unset.
+///
+/// One reader, because the daemon's dispatch-stall watchdog
+/// (`nzbfast-tasks/src/tasks/dispatch_stall.rs`) is built in front of
+/// this one and has to know its window: its reset must land INSIDE it,
+/// or the abort here gets there first and the reset never happens. A
+/// second copy of the env read would let the two drift apart in silence
+/// the first time either default moved.
+pub fn deadlock_window_secs() -> u64 {
+    std::env::var("NZBFAST_STALL_ABORT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(180)
 }
 
 // Deadlock watchdog. A pool bug that leaves an article non-terminal
@@ -2173,10 +2246,7 @@ pub(super) fn spawn_deadlock_watchdog(
     abort_flag: Arc<std::sync::atomic::AtomicBool>,
     stalled: Arc<std::sync::atomic::AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
-    let secs: u64 = std::env::var("NZBFAST_STALL_ABORT_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(180);
+    let secs = deadlock_window_secs();
     // Poll several times per stall window (bounded 1..=15 s) so a short
     // override fires promptly in tests and production stays low-churn.
     let poll = (secs / 4).clamp(1, 15);
@@ -2234,6 +2304,42 @@ mod metatail;
 pub(super) use recovery::declared_volumes;
 use recovery::{par_race_missing_blocks, spawn_par_race, spawn_spec_prefetch, spawn_tail_giveup};
 
+/// Join every decode consumer and name the ones that panicked, as
+/// `"<thread name> panicked: <payload>"`.
+///
+/// The join used to be `let _ = c.join()`, so a decode thread that died
+/// left no line in the job log - the panic hook writes to stderr, which
+/// the daemon's log ring never sees - and the job then failed (or was
+/// repaired) over articles that had simply stopped being processed, with
+/// nothing anywhere saying why.
+///
+/// Saying so is the whole fix, and the verdict is deliberately NOT moved
+/// here. A dying thread takes the article it was on and the rest of its
+/// batch with it, and every one of those is still counted unresolved: the decode arm
+/// decrements `slot.remaining` only AFTER the write (the `fetch_sub`
+/// below `note_settled` in [`decode_consumer_loop`]). So the census
+/// already reads those articles as missing; a covered file's repair then
+/// rebuilds them from parity and proves them against the set's MD5s, and
+/// an uncovered one fails the job. Failing every such job outright would
+/// also turn a hostile article that trips a decoder bug into a job no
+/// amount of parity could save, where today the set heals around it.
+fn join_decode_consumers(consumers: Vec<std::thread::JoinHandle<()>>) -> Vec<String> {
+    consumers
+        .into_iter()
+        .filter_map(|c| {
+            let name = c.thread().name().unwrap_or("decode").to_string();
+            c.join().err().map(|p| {
+                let what = p
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| p.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "a non-text payload".to_string());
+                format!("{name} panicked: {what}")
+            })
+        })
+        .collect()
+}
+
 /// Wind the network phase down: stop the side tasks, join the decode
 /// consumers off the reactor, flush the final D records, stop the
 /// ticker and watchdog, honor user abort and graceful pause (bailing
@@ -2257,7 +2363,7 @@ pub(super) async fn drain_network(
     watchdog: tokio::task::JoinHandle<()>,
     stalled: &Arc<std::sync::atomic::AtomicBool>,
     abort_flag: &Arc<std::sync::atomic::AtomicBool>,
-    disk_full_sample: &Arc<std::sync::Mutex<Option<String>>>,
+    write_halt_sample: &HaltSampleCell,
     queue_ctl: &Arc<nzbkit::pool::QueueControl>,
     note_activity: &(dyn Fn(&'static str) + Sync),
     net_done: Option<tokio::sync::oneshot::Sender<std::time::Instant>>,
@@ -2280,12 +2386,20 @@ pub(super) async fn drain_network(
     }
     // Decode threads exit when the channel closes (fetch dropped tx).
     // Join off the reactor - thread::join blocks.
-    let _ = tokio::task::spawn_blocking(move || {
-        for c in consumers {
-            let _ = c.join();
-        }
-    })
-    .await;
+    //
+    // A thread that PANICKED is said, not swallowed (read-only sweep,
+    // 9 Nov 2026) - see [`join_decode_consumers`] for why saying it is the
+    // whole fix and the verdict is left where the census puts it.
+    let panicked = tokio::task::spawn_blocking(move || join_decode_consumers(consumers))
+        .await
+        .unwrap_or_else(|e| vec![format!("join did not complete: {e}")]);
+    for why in &panicked {
+        warn!(
+            target: "get",
+            "✘ decode thread {why} - the articles it held were never written and stay \
+             unresolved, so the census counts them missing (a bug: please report it)"
+        );
+    }
     // Every open write-coalescing run goes to disk HERE, before the
     // journal lands its last batch and before anything reads an output
     // by name (`FileWriter::flush_staged` says why the readers cannot
@@ -2366,12 +2480,27 @@ pub(super) async fn drain_network(
     // everything after it is appended detail, per the incomplete_reason
     // contract. The journal is NOT retired, so freeing space and
     // retrying resumes from what landed without refetching a byte.
-    if let Some(sample) = disk_full_sample.lock_ok().take() {
-        anyhow::bail!(
+    //
+    // A destination that REFUSED the write (TODO 358 item 6) halts the
+    // same way and keeps the journal the same way, but its verdict must
+    // not say "disk space": that opening is what `disk_full_failure` and
+    // `disk_full_mid_download` key on, and either would send the job back
+    // to wait for free space it already has. This opening classifies as
+    // `Local` - not transient, so no automatic retry onto the same
+    // refusal, and never reported to an indexer as a dead post - and the
+    // drawer's action for it is the folder.
+    match write_halt_sample.lock_ok().take() {
+        Some((nzbkit::disk::WriteHalt::Exhausted, sample)) => anyhow::bail!(
             "out of disk space - the output volume filled during the download, \
              so fetching was stopped early; what landed is journaled and kept \
              ({sample})"
-        );
+        ),
+        Some((nzbkit::disk::WriteHalt::Refused, sample)) => anyhow::bail!(
+            "the output folder refused writes (check its permissions, and that \
+             nothing else holds the payload's name), so fetching was stopped \
+             early; what landed is journaled and kept ({sample})"
+        ),
+        None => {}
     }
     // Graceful pause: the pool admitted no new work and let every in-flight
     // article finish and journal, so a resume re-fetches only the unstarted
@@ -2484,7 +2613,7 @@ pub(super) struct Counters {
     /// The loss ledgers, nested rather than flat: see [`LossLedgers`].
     pub(super) loss: LossLedgers,
     pub(super) unasked_noted: Arc<std::sync::atomic::AtomicBool>,
-    pub(super) disk_full_sample: Arc<std::sync::Mutex<Option<String>>>,
+    pub(super) write_halt_sample: HaltSampleCell,
     pub(super) throttle_mbps: Option<f64>,
     pub(super) throttle_t0: Instant,
     pub(super) backfill: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<u64>>>>,
@@ -2573,10 +2702,10 @@ pub(super) fn build_counters(
     // quote - the counter alone says nothing a bug report can act on.
     let transport_sample: Arc<std::sync::Mutex<Option<String>>> = Default::default();
     let decode_error_sample: crate::diag::DecodeSampleCell = Default::default();
-    // First storage-exhaustion write error, verbatim: its presence IS
-    // the halt signal drain_network turns into the out-of-disk-space
-    // verdict (see note_storage_exhausted_halt).
-    let disk_full_sample: Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    // First halting write error, verbatim, with its kind: its presence
+    // IS the halt signal drain_network turns into the out-of-disk-space
+    // or refused-write verdict (see note_storage_exhausted_halt).
+    let write_halt_sample: HaltSampleCell = Default::default();
     // Test knob: cap the consumer (decode+write) stage to N MB/s to
     // simulate a slow disk. The correct systemic response - proven by the
     // backpressure test - is that the bounded channel fills, workers stop
@@ -2616,7 +2745,7 @@ pub(super) fn build_counters(
             decode_error_sample,
         },
         unasked_noted,
-        disk_full_sample,
+        write_halt_sample,
         throttle_mbps,
         throttle_t0,
         backfill,
@@ -2715,7 +2844,7 @@ pub(super) fn spawn_decode_consumers(
             decode_errors: c.decode_errors.clone(),
             loss: c.loss.clone(),
             unasked_noted: c.unasked_noted.clone(),
-            disk_full_sample: c.disk_full_sample.clone(),
+            write_halt_sample: c.write_halt_sample.clone(),
             verifier: verifier.clone(),
             extractor: extractor.clone(),
             shape_said: shape_said.clone(),
@@ -3362,26 +3491,73 @@ mod missing_cause_tests {
 mod disk_full_halt_tests {
     use super::*;
 
+    use nzbkit::disk::WriteHalt;
+
     #[test]
     fn storage_exhaustion_records_once_and_halts() {
-        let sample: Arc<std::sync::Mutex<Option<String>>> = Default::default();
+        let sample: HaltSampleCell = Default::default();
         let qc = nzbkit::pool::QueueControl::default();
         let e = std::io::Error::new(
             std::io::ErrorKind::StorageFull,
             "No space left on device (os error 28)",
         );
-        assert!(note_storage_exhausted_halt(&e, "a.r01", &sample, &qc));
+        assert_eq!(
+            note_storage_exhausted_halt(&e, "a.r01", &sample, &qc),
+            Some(WriteHalt::Exhausted)
+        );
         // A second detection (another decode thread racing through its
         // in-flight bodies) keeps the FIRST sample and is not the halt.
         let e2 = std::io::Error::new(std::io::ErrorKind::StorageFull, "No space left on device");
-        assert!(!note_storage_exhausted_halt(&e2, "b.r02", &sample, &qc));
-        assert!(
-            sample
-                .lock_ok()
-                .as_deref()
-                .unwrap()
-                .starts_with("write a.r01:")
+        assert_eq!(
+            note_storage_exhausted_halt(&e2, "b.r02", &sample, &qc),
+            None
         );
+        let got = sample.lock_ok().clone().unwrap();
+        assert_eq!(got.0, WriteHalt::Exhausted);
+        assert!(got.1.starts_with("write a.r01:"), "{}", got.1);
+    }
+
+    /// TODO 358 item 6, one errno per row: a destination that refuses
+    /// the write halts the fetch exactly as a full one does - first
+    /// detection reported once, its sample kept - but is recorded as a
+    /// REFUSAL, which is what keeps `drain_network` from calling it a
+    /// full disk.
+    #[test]
+    fn a_refused_write_records_once_and_halts_as_a_refusal() {
+        // The same numbers on Linux and macOS (`nzbkit::disk`'s own test
+        // pins them against libc).
+        #[cfg(unix)]
+        let codes = [("EACCES", 13), ("EPERM", 1), ("EISDIR", 21)];
+        // ERROR_ACCESS_DENIED: Windows' spelling of all three.
+        #[cfg(windows)]
+        let codes = [("ERROR_ACCESS_DENIED", 5)];
+        for (label, code) in codes {
+            let sample: HaltSampleCell = Default::default();
+            let qc = nzbkit::pool::QueueControl::default();
+            let e = std::io::Error::from_raw_os_error(code);
+            assert_eq!(
+                note_storage_exhausted_halt(&e, "a.r01", &sample, &qc),
+                Some(WriteHalt::Refused),
+                "{label}"
+            );
+            assert_eq!(
+                note_storage_exhausted_halt(&e, "b.r02", &sample, &qc),
+                None,
+                "{label}: a second detection is not the halt"
+            );
+            let got = sample.lock_ok().clone().unwrap();
+            assert_eq!(got.0, WriteHalt::Refused, "{label}");
+            assert!(got.1.starts_with("write a.r01:"), "{label}: {}", got.1);
+        }
+        // And the first halt's KIND survives a later one of the other
+        // kind, as the first sample always did.
+        let sample: HaltSampleCell = Default::default();
+        let qc = nzbkit::pool::QueueControl::default();
+        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let full = std::io::Error::new(std::io::ErrorKind::StorageFull, "full");
+        note_storage_exhausted_halt(&denied, "a.r01", &sample, &qc);
+        note_storage_exhausted_halt(&full, "b.r02", &sample, &qc);
+        assert_eq!(sample.lock_ok().as_ref().unwrap().0, WriteHalt::Refused);
     }
 
     /// The pairing [`note_write_fault`] and [`note_corrupt_fault`]
@@ -3423,13 +3599,28 @@ mod disk_full_halt_tests {
         assert_eq!(s.text, "write a.r01: Permission denied");
     }
 
+    /// A write error that a later attempt CAN get past halts nothing.
+    /// This row used to be `PermissionDenied`, which is a halt since TODO
+    /// 358 item 6 (`a_refused_write_records_once_and_halts_as_a_refusal`);
+    /// what stays here is the class it stood for.
     #[test]
     fn ordinary_write_errors_do_not_halt() {
-        let sample: Arc<std::sync::Mutex<Option<String>>> = Default::default();
         let qc = nzbkit::pool::QueueControl::default();
-        let e = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-        assert!(!note_storage_exhausted_halt(&e, "a.r01", &sample, &qc));
-        assert!(sample.lock_ok().is_none());
+        for kind in [
+            std::io::ErrorKind::Interrupted,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::Other,
+        ] {
+            let sample: HaltSampleCell = Default::default();
+            let e = std::io::Error::new(kind, "transient");
+            assert_eq!(
+                note_storage_exhausted_halt(&e, "a.r01", &sample, &qc),
+                None,
+                "{kind:?}"
+            );
+            assert!(sample.lock_ok().is_none(), "{kind:?}");
+        }
     }
 }
 
@@ -3521,3 +3712,8 @@ mod damage_projection_tests;
 // only scope that can see both halves at once.
 #[cfg(test)]
 mod slice_len_tests;
+
+// Read-only sweep, 9 Nov 2026: a decode thread that panics is named in
+// the job log rather than swallowed at the join.
+#[cfg(test)]
+mod decode_join_tests;

@@ -49,7 +49,12 @@ impl Extractor {
             // its directory structure (a VIDEO_TS tree has to stay a
             // tree to play); anything else flattens exactly as before.
             let mut fname = sanitize_out_name(&base);
-            Self::claim_name(inner, slot, &mut fname);
+            // A directory already at the name counts as taken only for
+            // an EXTRACTED member (depth > 0). Level 0's plain files are
+            // the posted files themselves, and a directory standing in
+            // one's place stays the refusal that halts the job
+            // (e2e_refused's EISDIR leg pins that on purpose).
+            Self::claim_name(inner, slot, &mut fname, self.depth > 0);
             // The same two bounds as `inner_writer`, and for the same
             // reason: with nested routing on (the default) a group's inner
             // files are forwarded to the CHILD, so a non-archive inner
@@ -101,8 +106,26 @@ impl Extractor {
     /// on collision. Shared with nested children, so a child's plain file
     /// can never silently overwrite (or be overwritten by) another
     /// level's output of the same name.
-    pub(super) fn claim_name(inner: &Inner, slot: usize, out: &mut String) {
+    ///
+    /// `member` says the name is an EXTRACTED member's, and then a
+    /// DIRECTORY already standing at it under the output root is a taken
+    /// name too, so the member gets the next free name exactly as a
+    /// file-name collision does (TODO 358 item 6 follow-up). Without it
+    /// the create-open met EISDIR (access denied on Windows), which since
+    /// item 6 halts the whole job with a "check its permissions" verdict
+    /// for what is a name clash inside the archive's own output - a
+    /// member `Extras` beside a folder `Extras/` another member made, or
+    /// one the user already had. Only a real directory counts: a symlink
+    /// at the name is left to the open, which refuses it as an alias.
+    /// A posted file (level 0) passes `false`, so a directory in ITS
+    /// place stays the refusal it was.
+    pub(super) fn claim_name(inner: &Inner, slot: usize, out: &mut String, member: bool) {
         let fold = inner.fold_names;
+        let dir_at = |name: &str| {
+            member
+                && std::fs::symlink_metadata(crate::disk::join_out_name(&inner.out_dir, name))
+                    .is_ok_and(|m| m.is_dir())
+        };
         let key = name_collision_key(fold, out);
         // A name THIS slot preclaimed is already its own: the §94 A
         // replay claims a restored file's name before feeding it back
@@ -121,7 +144,7 @@ impl Extractor {
             }
         }
         let mut names = inner.names_taken.lock_ok();
-        if names.insert(key) {
+        if !dir_at(out) && names.insert(key) {
             return;
         }
         let mut n = 0usize;
@@ -132,7 +155,7 @@ impl Extractor {
             // See `disk::disambiguated_out_name` for why the cap cannot
             // go at the write - this string is also the claim key.
             let cand = crate::disk::disambiguated_out_name(out, slot, n);
-            if names.insert(name_collision_key(fold, &cand)) {
+            if !dir_at(&cand) && names.insert(name_collision_key(fold, &cand)) {
                 *out = cand;
                 return;
             }
@@ -283,6 +306,19 @@ impl Extractor {
     /// retry means the destination changed again), and duplicate
     /// deliveries land on identical offsets (routing is deterministic),
     /// so retries are harmless. Never called with the routing lock held.
+    ///
+    /// "Silently swallowed" is the slot half only, and holds when the
+    /// abandon comes FIRST: the slot reads `Discard` and the write returns
+    /// `Persist::No`. The pwrite itself runs after the lock drops, in the
+    /// Writer arm below and in the child's own job loop, and an abandon
+    /// in that window has already `abandon_close`d the writer (the slot's
+    /// writer and its promoted `routed_plain` clone are one Arc), so the
+    /// write fails `NotConnected` - worded "parked for an external tool"
+    /// by `FileWriter::handle`, which is not what happened - and is not
+    /// re-resolved here. That error leaves `write` and the engine counts
+    /// the article as a write fault (`get::workers`: a decode error, and
+    /// its bytes never reach the verifier), so it is a lost article, not
+    /// a hole the finish gate vouches for (sweep 9 Nov 2026).
     #[expect(clippy::too_many_arguments)]
     pub(super) fn deliver_routed(
         &self,

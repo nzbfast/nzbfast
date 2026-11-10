@@ -422,6 +422,7 @@ fn srv(host: &str, block: Option<u64>) -> nzbkit::config::ServerConfig {
         block_account: false,
         bind_ip: None,
         socks5: None,
+        http_proxy: None,
         enabled: true,
         warm_pool: false,
         idle_release_secs: None,
@@ -684,6 +685,56 @@ fn download_idle_requires_both_pipelines_quiet() {
     assert!(!super::download_idle(&d));
     *d.sidecar.lock_ok() = None;
     assert!(super::download_idle(&d));
+}
+
+/// The idle trim fires at completion when the queue has nothing left to
+/// start, and keeps its minute's grace while something is waiting - a
+/// queued or paused job, whose warm start the grace protects. Never twice
+/// for one download end (`fresh` false), however long the idle.
+#[test]
+fn idle_trim_fires_at_completion_only_when_nothing_waits() {
+    use std::time::Duration;
+    let s = Duration::from_secs;
+    // Nothing waiting: at once.
+    assert!(super::trim_due(true, s(0), false));
+    // Something waiting: not before the minute, then yes.
+    assert!(!super::trim_due(true, s(5), true));
+    assert!(!super::trim_due(true, s(59), true));
+    assert!(super::trim_due(true, s(60), true));
+    // Already covered: never.
+    assert!(!super::trim_due(false, s(0), false));
+    assert!(!super::trim_due(false, s(3600), true));
+
+    // And what counts as waiting, over a real queue.
+    let dir = tdir("trim-wait");
+    let d = super::super::testutil::test_daemon(&dir);
+    assert!(
+        !super::queue_waiting(&d),
+        "an empty queue waits for nothing"
+    );
+    let jv = super::super::testutil::jv;
+    d.queue
+        .lock_ok()
+        .push_back(jv("c1", "Done", json!({"state": "Completed"})));
+    d.queue
+        .lock_ok()
+        .push_back(jv("f1", "Dead", json!({"state": "Failed"})));
+    assert!(
+        !super::queue_waiting(&d),
+        "finished jobs left in the queue are not a next job"
+    );
+    d.queue
+        .lock_ok()
+        .push_back(jv("p1", "Held", json!({"state": "Queued", "paused": true})));
+    assert!(
+        super::queue_waiting(&d),
+        "a paused job may resume any second"
+    );
+    d.queue.lock_ok().retain(|j| j.lock_ok().nzo_id != "p1");
+    d.queue
+        .lock_ok()
+        .push_back(jv("q1", "Next", json!({"state": "Queued"})));
+    assert!(super::queue_waiting(&d), "a queued job is about to start");
 }
 
 // ---------------------------------------------------------------------
@@ -1227,4 +1278,46 @@ fn a_job_shorter_than_a_watchdog_tick_still_banks_its_refusal() {
         "the server's own words are the whole point of keeping it"
     );
     assert!(!r.permanent);
+}
+
+/// Sweep C (tasks.rs, library re-verify): the Failed flip landed on
+/// whatever the row had become during the minutes-long sample - a
+/// retried, fetched or deleted row - and while the daemon was offline.
+/// It now lands only on the row that was sampled, still in history.
+#[test]
+fn a_library_vanished_verdict_lands_only_on_the_row_it_sampled() {
+    let dir = tdir("lib-vanish");
+    let d = super::super::testutil::test_daemon(&dir);
+    let row = || {
+        let mut j = mkjob("Lib.Row", "");
+        j.state = JobState::Completed;
+        j.library = true;
+        Arc::new(Mutex::new(j))
+    };
+    let sampled = std::path::PathBuf::from("/spool/tsk1.nzb");
+
+    // Not in history (deleted while it was sampled): untouched.
+    let gone = row();
+    assert!(!super::library_mark_vanished(&d, &gone, &sampled));
+    assert_eq!(gone.lock_ok().state, JobState::Completed);
+
+    // In history but fetched meanwhile: untouched.
+    let fetched = row();
+    fetched.lock_ok().fetched = true;
+    d.history.lock_ok().push(fetched.clone());
+    assert!(!super::library_mark_vanished(&d, &fetched, &sampled));
+    assert_eq!(fetched.lock_ok().state, JobState::Completed);
+
+    // Offline: untouched, however the sample came out.
+    let live = row();
+    d.history.lock_ok().push(live.clone());
+    d.offline.store(true, Ordering::Relaxed);
+    assert!(!super::library_mark_vanished(&d, &live, &sampled));
+    assert_eq!(live.lock_ok().state, JobState::Completed);
+
+    // The row it sampled, online: flipped.
+    d.offline.store(false, Ordering::Relaxed);
+    assert!(super::library_mark_vanished(&d, &live, &sampled));
+    assert_eq!(live.lock_ok().state, JobState::Failed);
+    assert_eq!(live.lock_ok().fail_code, Some(FailKind::Gone));
 }

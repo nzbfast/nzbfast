@@ -979,8 +979,8 @@ pub fn xor_mul_multi_prepared(dst: &mut [u16], srcs: &[&[u8]], coeffs: &[&FoldCo
             && !gfni256_available()
         {
             if is_x86_feature_detected!("avx2") && forced_nibble_kernel() != Some("ssse3") {
-                // SAFETY: AVX2 verified above; every source covers dst's
-                // full byte length, debug_asserted in the callee.
+                // SAFETY: AVX2 verified above; the callee clamps its unit
+                // range to the shortest source and to dst.
                 return unsafe { xor_mul_multi_avx2_prepared(dst, srcs, coeffs) };
             }
             if is_x86_feature_detected!("ssse3") {
@@ -1016,14 +1016,28 @@ pub fn xor_mul_multi_prepared(dst: &mut [u16], srcs: &[&[u8]], coeffs: &[&FoldCo
 /// bytes, so the per-(row, source) table builds (and their cache
 /// footprint) vanish from the fold entirely.
 ///
-/// Every source must cover `dst`'s full byte length (the fold windows
-/// sources per tile and routes short tails through the single-source
-/// path). Zero coefficients are fine (they just waste the multiplies).
+/// Callers hand sources that cover `dst`'s full byte length (the fold
+/// windows sources per tile and routes short tails through the
+/// single-source path); a shorter source shortens the fold to it rather
+/// than being read past, which is what keeps this safe. Any number of
+/// sources is folded. Zero coefficients are fine (they just waste the
+/// multiplies).
 /// Processes whole 32-byte chunks; returns u16 WORDS processed - the
 /// caller runs the remainder per source.
 pub fn xor_mul_multi_into(dst: &mut [u16], srcs: &[&[u8]], coeffs: &[u16]) -> usize {
     debug_assert_eq!(srcs.len(), coeffs.len());
-    debug_assert!(srcs.iter().all(|s| s.len() >= dst.len() * 2));
+    // SOUNDNESS, not a convenience: this is a safe `pub fn`, and the
+    // aarch64 kernels size their chunk range from `dst` alone, so a
+    // source shorter than `dst` was an out-of-bounds read reachable from
+    // safe code behind nothing stronger than a `debug_assert` (9 Nov 2026
+    // Fable sweep, PAR2 residue lead 7). The destination is clamped to
+    // the shortest source ONCE, here, for every arm - the x86 kernels
+    // already clamp the same way inside, so on them this changes nothing
+    // - and the return stays "words folded", which the caller's
+    // remainder path already reads. One pass over at most a fold group's
+    // worth of lengths per call: nothing next to the fold it guards.
+    let words = srcs.iter().fold(dst.len(), |m, s| m.min(s.len() / 2));
+    let dst = &mut dst[..words];
     #[cfg(target_arch = "aarch64")]
     {
         // Recovery exponent 0 makes every source coefficient exactly 1.
@@ -1036,10 +1050,27 @@ pub fn xor_mul_multi_into(dst: &mut [u16], srcs: &[&[u8]], coeffs: &[u16]) -> us
             // its chunk range to the shortest source.
             return unsafe { xor_multi_neon(dst, srcs) };
         }
+        // The GF kernels below hold SIXTEEN coefficient registers and
+        // fold `srcs[..16]`, so a wider call folded the first sixteen,
+        // dropped the rest and still reported the whole range done - a
+        // silently wrong answer from a safe fn (same sweep lead). Split
+        // into groups of sixteen: `dst` is clamped above, so every group
+        // folds the same chunk range and returns the same count, and the
+        // fold is linear, so the groups simply accumulate. Slicing
+        // `coeffs` per group keeps a short coefficient list a panic, as
+        // the kernels' own indexing makes it, never a dropped source.
+        if srcs.len() > 16 {
+            let mut done = 0;
+            for g in (0..srcs.len()).step_by(16) {
+                let end = (g + 16).min(srcs.len());
+                done = xor_mul_multi_into(dst, &srcs[g..end], &coeffs[g..end]);
+            }
+            return done;
+        }
         if std::arch::is_aarch64_feature_detected!("sha3") {
             // SAFETY: sha3 verified by the detect above (NEON is baseline
-            // on aarch64); every source covers dst's full byte length, the
-            // documented precondition debug_asserted above.
+            // on aarch64); every source covers dst's full byte length, by the
+            // clamp at the top of this fn.
             return unsafe { xor_mul_multi_neon_sha3(dst, srcs, coeffs) };
         }
         // SAFETY: plain NEON (incl. pmull on poly8) is baseline on
@@ -2112,8 +2143,8 @@ unsafe fn xor_mul_multi_neon(dst: &mut [u16], srcs: &[&[u8]], coeffs: &[u16]) ->
     // feature check needed (see the doc above). All pointer accesses stay
     // within the first chunks * 32 bytes: in bounds for dst by
     // chunks = (dst.len() * 2) / 32, and for each source by
-    // xor_mul_multi_into's documented precondition (debug_asserted there)
-    // that every source covers dst's full byte length.
+    // xor_mul_multi_into clamping dst to the shortest source before any
+    // kernel is reached, so every source covers dst's full byte length.
     unsafe {
         let mut c_lo = [vdupq_n_p8(0); 16];
         let mut c_hi = [vdupq_n_p8(0); 16];
@@ -2240,8 +2271,8 @@ unsafe fn xor_mul_multi_neon_sha3_n<const NC: usize>(
     // verified by the sha3 detect at the dispatch site). All pointer
     // accesses stay within the first chunks * 32 bytes: in bounds for dst
     // by chunks = (dst.len() * 2) / 32, and for each source by
-    // xor_mul_multi_into's documented precondition (debug_asserted there)
-    // that every source covers dst's full byte length.
+    // xor_mul_multi_into clamping dst to the shortest source before any
+    // kernel is reached, so every source covers dst's full byte length.
     unsafe {
         // Q-register coefficient splats: the LOW-half multiply reads the
         // D register aliasing the low half (free), and the HIGH half goes
@@ -2732,8 +2763,8 @@ unsafe fn xor_mul_multi_fused<const NC: usize>(
     // feature check needed (see the doc above). All pointer accesses stay
     // within the first chunks * 32 bytes: in bounds for dst by
     // chunks = (dst.len() * 2) / 32, and for each source by
-    // xor_mul_multi_into's documented precondition (debug_asserted there)
-    // that every source covers dst's full byte length.
+    // xor_mul_multi_into clamping dst to the shortest source before any
+    // kernel is reached, so every source covers dst's full byte length.
     unsafe {
         let mut c_lo = [vdupq_n_p8(0); 16];
         let mut c_hi = [vdupq_n_p8(0); 16];

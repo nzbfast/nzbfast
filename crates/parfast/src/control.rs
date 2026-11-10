@@ -70,8 +70,11 @@ pub const EXIT_INTERRUPTED: u8 = 130;
 /// only writer; the watcher thread and the second-interrupt exit read it.
 static INTERRUPTS: AtomicU32 = AtomicU32::new(0);
 
-/// Hook Ctrl-C (SIGINT and SIGTERM on unix; Ctrl-C, Ctrl-Break and the
-/// console closing on Windows) to a fresh gate and hand the gate back.
+/// Hook Ctrl-C (SIGINT and SIGTERM on unix, unless the process was started
+/// with one IGNORED; Ctrl-C, Ctrl-Break and the console closing on
+/// Windows) to a fresh gate and hand the gate back. A console close,
+/// logoff or shutdown gets the clean cancel only inside the few seconds
+/// Windows allows before it ends the process - see `on_ctrl`.
 ///
 /// The FIRST interrupt cancels cleanly: a watcher thread sees the count
 /// move and calls [`PauseGate::cancel`], which a signal handler itself
@@ -118,24 +121,65 @@ extern "C" fn on_signal(_sig: libc::c_int) {
     }
 }
 
+/// Hook both signals, EXCEPT one the process was started with IGNORED.
+///
+/// An inherited `SIG_IGN` is the parent's decision and the convention is
+/// to keep it: `nohup` ignores SIGHUP, and a POSIX shell starts a
+/// background job (`parfast r set.par2 &`) with SIGINT ignored so a
+/// Ctrl-C at the terminal reaches the foreground job alone. Installing
+/// over it made that Ctrl-C cancel a repair the user had sent to the
+/// background (sweep A18). True when at least one handler went in, which
+/// is when the watcher thread has anything to watch for.
 #[cfg(unix)]
 fn hook() -> bool {
     let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
-    // SAFETY: `signal` with a plain function pointer of the documented
-    // shape; both signals are ones this process may take.
-    unsafe {
-        libc::signal(libc::SIGINT, handler) != libc::SIG_ERR
-            && libc::signal(libc::SIGTERM, handler) != libc::SIG_ERR
+    let mut any = false;
+    for sig in [libc::SIGINT, libc::SIGTERM] {
+        // SAFETY: `sigaction` with a null new action only READS the
+        // current disposition into a zeroed struct we own; `signal` takes
+        // a plain function pointer of the documented shape, for a signal
+        // this process may take.
+        unsafe {
+            let mut old: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(sig, std::ptr::null(), &mut old) != 0 {
+                continue;
+            }
+            if old.sa_sigaction == libc::SIG_IGN {
+                continue;
+            }
+            any |= libc::signal(sig, handler) != libc::SIG_ERR;
+        }
     }
+    any
 }
 
 #[cfg(windows)]
-unsafe extern "system" fn on_ctrl(_kind: u32) -> windows_sys::core::BOOL {
+unsafe extern "system" fn on_ctrl(kind: u32) -> windows_sys::core::BOOL {
+    use windows_sys::Win32::System::Console::{
+        CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+    };
     // Runs on a thread of the console's own, not a signal context, so a
     // plain `exit` is fine here. `1` tells the console it was handled.
     let n = INTERRUPTS.fetch_add(1, Ordering::SeqCst) + 1;
     if n >= 2 {
         std::process::exit(i32::from(EXIT_INTERRUPTED));
+    }
+    // CLOSE, LOGOFF AND SHUTDOWN ARE NOT CTRL-C. For those three Windows
+    // ends the process as soon as this handler RETURNS, whatever it
+    // returns - so returning at once, as this did for every event, killed
+    // the run before the watcher's next 20 ms poll had even cancelled the
+    // gate, and closing the console window was a plain kill (sweep A17).
+    // So the handler HOLDS the console's thread while the main thread
+    // cancels and unwinds; the process exits from `main` when that is
+    // done, which ends this thread with it. The system's own grace period
+    // (about five seconds for a close) is the ceiling either way, and the
+    // sleep is kept under it so a run that is still unwinding is ended by
+    // our return rather than by the system's timeout dialog.
+    if matches!(
+        kind,
+        CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT
+    ) {
+        std::thread::sleep(std::time::Duration::from_millis(4500));
     }
     1
 }
@@ -447,9 +491,11 @@ fn hook() -> bool {
 pub struct Meter {
     quiet: bool,
     /// The last tenth-percent drawn per phase, `RepairPhase` order;
-    /// `u32::MAX` is "nothing yet". A swap, not a compare: the engine
-    /// says `done` may step back across calls, and a redraw on any
-    /// change is what the reference does too.
+    /// `u32::MAX` is "nothing yet". On `Scanning:` and the create's
+    /// `Writing:` any change redraws: the engine says `done` may step
+    /// back across calls, and that is what the reference does too. The
+    /// bars that promise to be monotone compare against it instead, under
+    /// the output lock - see [`Meter::draw`].
     last: [AtomicU32; 4],
     /// Whether the last thing written was a `\r` fragment that nothing
     /// has terminated, so [`Meter::end_line`] knows whether a `\n` is
@@ -558,15 +604,41 @@ impl Meter {
     /// `slot` is the per-bar counter, not the phase: the create folds
     /// two phases onto one bar (see [`CreateMeter`]) and they must
     /// share a counter or each would redraw over the other's frame.
-    fn draw(&self, slot: usize, label: &str, tenth: u32) {
-        if self.quiet {
-            return;
-        }
-        if self.last[slot].swap(tenth, Ordering::Relaxed) == tenth {
+    ///
+    /// `monotone` is for the bars that promise never to fall (the merged
+    /// `Repairing:`, the create's `Processing:` and `--progress`): a frame
+    /// below the one on screen is dropped. That has to be decided HERE,
+    /// under the output lock, and not where the callers take their `max`:
+    /// they run on the engine's worker threads, so a lane that computed
+    /// 50.0% could reach the lock after a lane that computed 51.0% had
+    /// drawn, and the terminal - and a scraper reading the pipe - saw the
+    /// bar step back (sweep, CLI section B).
+    fn draw(&self, slot: usize, label: &str, tenth: u32, monotone: bool) {
+        self.emit(slot, tenth, monotone, |out| {
+            write!(out, "{label}{}.{}%\r", tenth / 10, tenth % 10)
+        });
+    }
+
+    /// One frame on `slot`: dropped when it repeats the frame on screen,
+    /// or when `monotone` and it is below it; otherwise written by
+    /// `frame` and flushed, all under the output lock.
+    fn emit(
+        &self,
+        slot: usize,
+        tenth: u32,
+        monotone: bool,
+        frame: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
+    ) {
+        if self.quiet || self.last[slot].load(Ordering::Relaxed) == tenth {
             return;
         }
         let mut out = self.out.lock().unwrap_or_else(|p| p.into_inner());
-        let _ = write!(out, "{label}{}.{}%\r", tenth / 10, tenth % 10);
+        let last = self.last[slot].load(Ordering::Relaxed);
+        if last == tenth || (monotone && last != u32::MAX && tenth < last) {
+            return;
+        }
+        self.last[slot].store(tenth, Ordering::Relaxed);
+        let _ = frame(&mut **out);
         let _ = out.flush();
         self.dirty.store(true, Ordering::SeqCst);
     }
@@ -577,26 +649,20 @@ impl Meter {
     /// as [`Meter::draw`]; only the text differs, and it is not the
     /// reference's shape on purpose - this frame exists only behind a
     /// switch the reference does not have.
+    /// It is always MONOTONE: it is one bar over the whole run.
     fn draw_bar(&self, slot: usize, tenth: u32) {
-        if self.quiet {
-            return;
-        }
-        if self.last[slot].swap(tenth, Ordering::Relaxed) == tenth {
-            return;
-        }
-        let filled = (tenth * Meter::BAR_CELLS / 1000) as usize;
+        let filled = (tenth.min(1000) * Meter::BAR_CELLS / 1000) as usize;
         let empty = Meter::BAR_CELLS as usize - filled;
-        let mut out = self.out.lock().unwrap_or_else(|p| p.into_inner());
-        let _ = write!(
-            out,
-            "Progress: {:>3}.{}% [{}{}]\r",
-            tenth / 10,
-            tenth % 10,
-            "=".repeat(filled),
-            " ".repeat(empty)
-        );
-        let _ = out.flush();
-        self.dirty.store(true, Ordering::SeqCst);
+        self.emit(slot, tenth, true, |out| {
+            write!(
+                out,
+                "Progress: {:>3}.{}% [{}{}]\r",
+                tenth / 10,
+                tenth % 10,
+                "=".repeat(filled),
+                " ".repeat(empty)
+            )
+        });
     }
 
     /// Cells in the `--progress` bar. Forty keeps the whole frame under
@@ -638,14 +704,14 @@ impl ProgressSink for Meter {
         // outside the merged bar's monotone floor: it runs once, before
         // the first sweep, on both engine entries this CLI calls.
         if matches!(phase, RepairPhase::Verify) {
-            self.draw(Meter::slot(phase), "Scanning: ", within);
+            self.draw(Meter::slot(phase), "Scanning: ", within, false);
             return;
         }
         let tenth = self.placed(phase, within);
         // Monotone - see [`Meter`]. `max` of what was asked for before,
         // so no hand-over can take the bar backwards.
         let tenth = tenth.max(self.drawn.fetch_max(tenth, Ordering::Relaxed));
-        self.draw(Meter::slot(RepairPhase::Fold), "Repairing: ", tenth);
+        self.draw(Meter::slot(RepairPhase::Fold), "Repairing: ", tenth, true);
     }
 }
 
@@ -817,7 +883,7 @@ impl CreateMeter {
             self.inner.draw_bar(Meter::slot(RepairPhase::Fold), placed);
         } else {
             self.inner
-                .draw(Meter::slot(RepairPhase::Write), "Writing: ", within);
+                .draw(Meter::slot(RepairPhase::Write), "Writing: ", within, false);
         }
     }
 
@@ -855,7 +921,7 @@ impl CreateMeter {
             self.inner.draw_bar(Meter::slot(RepairPhase::Fold), placed);
         } else {
             self.inner
-                .draw(Meter::slot(RepairPhase::Fold), "Processing: ", tenth);
+                .draw(Meter::slot(RepairPhase::Fold), "Processing: ", tenth, true);
         }
     }
 }
@@ -1511,5 +1577,38 @@ mod tests {
         let (m, buf) = unified_meter();
         m.settled();
         assert_eq!(text(&buf), "");
+    }
+
+    /// A MONOTONE BAR DROPS A LATE SMALLER FRAME AT THE DRAW, not only
+    /// where its caller took the `max`. The callers run on the engine's
+    /// worker threads: lane A computes 50.0%, lane B computes 51.0%, and
+    /// B can win the output lock - so A's frame arrives SECOND and the
+    /// terminal stepped back to 50.0% (sweep, CLI section B). This drives
+    /// that arrival order straight at the draw, which is the one place
+    /// the order can be judged. The scan bar is not monotone by design
+    /// and still redraws on any change.
+    #[test]
+    fn a_frame_that_arrives_late_never_takes_a_monotone_bar_backwards() {
+        let slot = Meter::slot(RepairPhase::Fold);
+        let (m, buf) = meter(false);
+        m.draw(slot, "Repairing: ", 510, true);
+        m.draw(slot, "Repairing: ", 500, true);
+        m.draw(slot, "Repairing: ", 520, true);
+        assert_eq!(text(&buf), "Repairing: 51.0%\rRepairing: 52.0%\r");
+
+        let (m, buf) = meter(false);
+        m.draw_bar(slot, 510);
+        m.draw_bar(slot, 500);
+        assert!(
+            !text(&buf).contains(" 50.0%"),
+            "the --progress bar stepped back: {:?}",
+            text(&buf)
+        );
+
+        let scan = Meter::slot(RepairPhase::Verify);
+        let (m, buf) = meter(false);
+        m.draw(scan, "Scanning: ", 510, false);
+        m.draw(scan, "Scanning: ", 500, false);
+        assert_eq!(text(&buf), "Scanning: 51.0%\rScanning: 50.0%\r");
     }
 }

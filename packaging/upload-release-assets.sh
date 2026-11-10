@@ -359,7 +359,7 @@ fi
 # builds the Linux tarballs, the Windows installer and zip and their
 # updater payloads on the public repo and attaches them to the DRAFT,
 # each with `<name>.intoto.jsonl` beside it (publish-release step 2a).
-# The release Mac downloads them to fold into SHA256SUMS and latest.json,
+# The release Mac downloads them to fold into latest.json,
 # so they sit in <dist-dir> next to the local assets and the usual upload
 # globs match them. The `--clobber` below would then replace an attested
 # file - harmless when the bytes are the ones CI built, and the exact

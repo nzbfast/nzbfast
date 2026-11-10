@@ -454,7 +454,18 @@ impl WarmReserve {
             // socket this module exists to prevent - so it says goodbye
             // instead, which is what gives the provider its slot back on
             // a session-counting account.
-            if !self.warm.accepting() || lease.spares() == 0 {
+            //
+            // Against the POOL, not just against zero: a fleet that
+            // trims the spares from N to 1 while N dials are out left
+            // `spares() == 0` false for every answer, and all N parked -
+            // N - 1 sockets past what the account still licenses, and
+            // nothing trims a parked surplus back down (the next tick
+            // only stops dialling). The floor `tick` dials against is
+            // `parked_for`, so this is the same arithmetic one answer
+            // later. It also caps two config rows that are one account
+            // (see `held`): both rows dial their shortfall, and the
+            // second row's answers now find the floor already met.
+            if !self.warm.accepting() || self.warm.parked_for(&s).await >= lease.spares() {
                 conn.quit().await;
                 continue;
             }

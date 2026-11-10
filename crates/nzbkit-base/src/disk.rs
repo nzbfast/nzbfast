@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// the size gate's 4,000-line ceiling.
 mod io_prim;
 pub use io_prim::{
-    bytes_written, chunk_len, raise_fd_limit, read_exact_at, storage_exhausted, write_all_at,
-    writes_issued,
+    WriteHalt, bytes_written, chunk_len, destination_refused, raise_fd_limit, read_exact_at,
+    storage_exhausted, write_all_at, write_halt, writes_issued,
 };
 
 /// Write-back pacing and the page-cache policy. Same ceiling.
@@ -2027,9 +2027,19 @@ impl FileWriter {
     fn handle(&self) -> io::Result<std::sync::RwLockReadGuard<'_, Option<File>>> {
         let g = self.file.read_ok();
         if g.is_none() {
+            // The handle is gone for one of two reasons, and the text has
+            // to say which: `abandon_close` drops it too, on a file the
+            // extractor has disowned and unlinked. Saying "parked for an
+            // external tool" there sends whoever reads the failed
+            // article's error looking for a repair that never ran. Same
+            // kind either way, so no caller's branching moves.
+            let why = match self.is_abandoned() {
+                true => "was discarded and takes no more writes",
+                false => "is parked for an external tool",
+            };
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
-                format!("{} is parked for an external tool", self.path.display()),
+                format!("{} {why}", self.path.display()),
             ));
         }
         Ok(g)

@@ -1899,6 +1899,12 @@ fn hunt_hold(
         extras.failure_host = f.host.clone();
         extras.failure_https = f.https;
     }
+    // The fetch's X-DNZB-Password, as `enqueue_fetched_with` carries it:
+    // the held copy is a different post of the release, and the indexer
+    // that served it is the one that knows ITS password.
+    if let Some(f) = fetched {
+        extras.header_password = f.password.clone();
+    }
     let e = d.enqueue_as_with(
         None,
         bytes,

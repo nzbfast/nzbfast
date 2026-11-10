@@ -1304,6 +1304,21 @@ impl MemBudget {
         (self.total / 4).clamp(8 << 20, 512 << 20)
     }
 
+    /// The working memory an archive DECODER may plan with: a quarter of the
+    /// budget, floored so ordinary archives keep their fast paths on small
+    /// hosts and capped because flat buffers beyond a few GB stop paying.
+    /// The figure [`Self::rar_execution_policy`] hands rars, and the one the
+    /// 7z chase sizes its LZMA2 workers by (`extract::sevenz`).
+    ///
+    /// NOT behind the `rar` feature, and that is why it exists: the 7z
+    /// chase read this figure out of `rar_execution_policy()`, which IS
+    /// gated, so every build of the engine without `rar` - the slim build,
+    /// and parfast, which needs no RAR - stopped compiling (claim
+    /// `red-slim-check-07d3af91`, 9 Nov 2026).
+    pub fn decoder_allowance(&self) -> u64 {
+        (self.total / 4).clamp(96 << 20, 6 << 30)
+    }
+
     /// RAR extraction's execution policy: how much working memory the rars
     /// decode pipelines may plan with (flat buffers vs the bounded ring,
     /// worker counts). A quarter of the budget, floored so ordinary archives
@@ -1314,9 +1329,7 @@ impl MemBudget {
     /// tiers have drained.
     #[cfg(feature = "rar")]
     pub fn rar_execution_policy(&self) -> rars::Rar50ExecutionPolicy {
-        let mut policy = rars::Rar50ExecutionPolicy::from_working_memory(
-            (self.total / 4).clamp(96 << 20, 6 << 30),
-        );
+        let mut policy = rars::Rar50ExecutionPolicy::from_working_memory(self.decoder_allowance());
         policy.max_tape_workers = policy.max_workers.min(rar_worker_cap());
         policy
     }

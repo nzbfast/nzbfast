@@ -44,6 +44,15 @@ pub fn is_forbidden_fetch_ip(ip: std::net::IpAddr) -> bool {
                 // INSIDE the 100.64/10 CGNAT range we otherwise allow for
                 // Tailscale - block just that host.
                 || a == Ipv4Addr::new(100, 100, 100, 200)
+                // Two metadata endpoints OUTSIDE link-local, which is why
+                // the rule above misses them: Azure's WireServer
+                // (168.63.129.16, a public address only an Azure VM can
+                // reach, which hands out VM configuration) and Oracle
+                // Cloud's legacy metadata host (192.0.0.192, inside the
+                // IETF protocol-assignment block 192.0.0.0/24, which no
+                // indexer lives in).
+                || a == Ipv4Addr::new(168, 63, 129, 16)
+                || a == Ipv4Addr::new(192, 0, 0, 192)
         }
         IpAddr::V6(a) => {
             if let Some(v4) = a.to_ipv4_mapped() {
@@ -635,6 +644,35 @@ fn agent_config(redirects: u32, timeout_secs: u64) -> ureq::config::Config {
         .build()
 }
 
+/// [`agent_config`] for an agent whose resolver feeds the address
+/// witness ([`witness_resolution`]): no idle connection is kept.
+///
+/// ureq 3 calls the resolver on EVERY request, pooled or not, and only
+/// then looks in the pool by scheme and authority (the private
+/// `connect` in ureq's own run module, read at 3.4.2). So on a reused connection the witness records what
+/// the name resolves to NOW while the bytes come from wherever the
+/// socket was opened. Inside one call that is a redirect chain that
+/// comes back to the same host: hop one dials the source's public
+/// address and pools it, a TTL-0 rebind repoints the name at loopback
+/// (which the plain guard permits), and hop two reuses the public
+/// socket while the witness writes down 127.0.0.1 - which
+/// [`OriginBoundResolver`] then reads as "the source lives here" and
+/// lets a grab of that netloc dial loopback. With nothing pooled, every
+/// request dials exactly what the resolver returned, so the witness is
+/// the peer. Both agents are built per call, so the price is one
+/// reconnect per same-host redirect hop. The search agent in
+/// `nzbfast-daemon`'s `indexers.rs` already keeps nothing idle, for
+/// the same reason.
+fn witnessing_agent_config(redirects: u32, timeout_secs: u64) -> ureq::config::Config {
+    ureq::Agent::config_builder()
+        .max_redirects(redirects)
+        .max_redirects_will_error(false)
+        .proxy(None)
+        .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
+        .max_idle_connections_per_host(0)
+        .build()
+}
+
 /// One request header's value out of a raw HTTP request, found without
 /// caring how the client spelled the NAME.
 ///
@@ -714,6 +752,15 @@ pub fn resolve_netloc<R: Resolver>(
 /// ureq connects to exactly the SocketAddrs returned here (no second
 /// lookup), this closes the DNS-rebinding window AND re-checks on every
 /// redirect hop, since each hop resolves through it.
+///
+/// "Connects to" means a NEW connection. ureq runs this on every request
+/// and then reuses a pooled socket for the same scheme and authority if
+/// it has one, so on a pooled agent the bytes can come from an address
+/// an EARLIER call resolved (and this guard checked then). That is
+/// harmless for the refusal - every address that was ever dialled
+/// passed it - and wrong for the address witness, which is why the
+/// agents that feed the witness keep nothing idle
+/// (`witnessing_agent_config`).
 #[derive(Debug, Default)]
 pub struct SsrfGuardResolver;
 impl Resolver for SsrfGuardResolver {
@@ -772,7 +819,7 @@ impl Resolver for DaemonApiResolver {
 /// URL. `redirects` is capped by the caller.
 pub fn ssrf_safe_agent(redirects: u32, timeout_secs: u64) -> ureq::Agent {
     ureq::Agent::with_parts(
-        agent_config(redirects, timeout_secs),
+        witnessing_agent_config(redirects, timeout_secs),
         ureq::unversioned::transport::DefaultConnector::new(),
         SsrfGuardResolver,
     )
@@ -964,7 +1011,7 @@ impl Resolver for EnrichResolver {
 /// [`OriginBoundResolver`].
 pub fn origin_bound_agent(origin: &SourceOrigin, redirects: u32, timeout_secs: u64) -> ureq::Agent {
     ureq::Agent::with_parts(
-        agent_config(redirects, timeout_secs),
+        witnessing_agent_config(redirects, timeout_secs),
         ureq::unversioned::transport::DefaultConnector::new(),
         OriginBoundResolver::new(origin),
     )
@@ -1214,38 +1261,30 @@ pub fn daemon_api_agent(timeout_secs: u64) -> ureq::Agent {
 /// and dies in `fetch_head` - whose refusal names the WHOLE url and is
 /// logged, exported and returned to the browser. The same literal search
 /// left `ftp://user:pw@host/p` unredacted, which `set_feeds` accepts.
+///
+/// **A URL with whitespace inside it does not end at the whitespace.**
+/// The end-of-URL rule is "the first whitespace", because that is what
+/// lets a URL inside a sentence keep the sentence after it. But a feed
+/// URL a user typed, or a link out of an indexer's XML, can carry a raw
+/// space, and the rule then ended the URL early and copied the rest
+/// verbatim: `https://idx/rss?q=the office&apikey=SECRET` logged
+/// ` office&apikey=SECRET`. So the text after a URL, up to the next one,
+/// is read word by word and any word shaped like a piece of a URL - a
+/// `=`, `&` or `@` anywhere, or a `/` in a relative path - is dropped
+/// as `...` (`url_fragment_shaped`). Prose words carry none of those,
+/// so "failed: connection refused" survives. And when the authority
+/// itself ended at whitespace while a later word holds an `@`, the
+/// space was inside the USERINFO (`https://user:pa ss@host/p`) and the
+/// "host" is the head of the credential, so it goes too, by the same
+/// ambiguous-means-redact rule as the delimiter case below.
 pub fn redact_url_creds(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
-    while let Some(sep) = rest.find("://") {
-        // Walk back over the scheme. RFC 3986 spells it
-        // ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) and every one of
-        // those is ASCII, so scanning bytes can never land mid-codepoint
-        // (these strings come out of response headers and indexer XML,
-        // so that matters).
-        let bytes = rest.as_bytes();
-        let mut p = sep;
-        while p > 0
-            && matches!(bytes[p - 1],
-                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'-' | b'.')
-        {
-            p -= 1;
-        }
-        // A scheme starts with a letter, so drop any leading digits or
-        // punctuation the walk-back picked up. It also stops at the
-        // first byte that cannot be in a scheme, so "failed at http://x"
-        // keeps its "failed at ".
-        while p < sep && !bytes[p].is_ascii_alphabetic() {
-            p += 1;
-        }
-        if p == sep {
-            // A bare `://` with no scheme in front of it is prose, not a
-            // URL. Copy it through and look past it.
-            out.push_str(&rest[..sep + 3]);
-            rest = &rest[sep + 3..];
-            continue;
-        }
-        out.push_str(&rest[..p]);
+    // Text before the first URL is somebody's prose and is copied as is;
+    // text after one may be the URL's own tail past a stray space.
+    let mut after_url = false;
+    while let Some((p, sep)) = next_url(rest) {
+        push_gap(&mut out, &rest[..p], after_url);
         let url = &rest[p..];
         let scheme_len = sep - p + 3;
         // The authority ends at the first path/query/fragment character,
@@ -1260,6 +1299,10 @@ pub fn redact_url_creds(s: &str) -> String {
         // Anything else attached to the URL is dropped, up to whitespace.
         let tail = &after[end..];
         let stop = tail.find(char::is_whitespace).unwrap_or(tail.len());
+        // The words between this URL and the next (or the end), which
+        // `push_gap` scrubs on the next turn of the loop.
+        let gap = &tail[stop..];
+        let gap = &gap[..next_url(gap).map_or(gap.len(), |(q, _)| q)];
         // ...unless the DROPPED part still holds an `@`, in which case
         // the authority ended early because the PASSWORD contains a
         // '/', '?' or '#'. Unescaped that is malformed by RFC 3986 - the
@@ -1272,11 +1315,16 @@ pub fn redact_url_creds(s: &str) -> String {
         // Ambiguous means redact everything: there is no way to tell
         // which side of that `@` is the credential without deciding
         // whose parser is right, and this function's whole job is that
-        // nothing sensitive survives it.
-        if tail[..stop].contains('@') {
+        // nothing sensitive survives it. The second arm is the same
+        // shape with a SPACE in the password: the authority ended at the
+        // whitespace (nothing was dropped) and the `@` is in a later word.
+        let userinfo_split = tail[..stop].contains('@')
+            || (stop == 0 && gap.split_whitespace().any(|w| w.contains('@')));
+        if userinfo_split {
             out.push_str(&url[..scheme_len]);
             out.push_str("...");
             rest = &tail[stop..];
+            after_url = true;
             continue;
         }
         out.push_str(&url[..scheme_len]);
@@ -1285,9 +1333,189 @@ pub fn redact_url_creds(s: &str) -> String {
             out.push_str("/...");
         }
         rest = &tail[stop..];
+        after_url = true;
     }
-    out.push_str(rest);
+    push_gap(&mut out, rest, after_url);
     out
+}
+
+/// The next URL in `s`, as `(scheme start, offset of its "://")`.
+///
+/// A URL is found by its `://`, with the scheme walked back from it.
+/// RFC 3986 spells the scheme ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+/// and every one of those is ASCII, so scanning bytes can never land
+/// mid-codepoint (these strings come out of response headers and indexer
+/// XML, so that matters). A bare `://` with no scheme in front of it is
+/// prose, not a URL, and the search looks past it.
+fn next_url(s: &str) -> Option<(usize, usize)> {
+    let bytes = s.as_bytes();
+    let mut from = 0;
+    while let Some(off) = s[from..].find("://") {
+        let sep = from + off;
+        let mut p = sep;
+        while p > 0
+            && matches!(bytes[p - 1],
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'-' | b'.')
+        {
+            p -= 1;
+        }
+        // A scheme starts with a letter, so drop any leading digits or
+        // punctuation the walk-back picked up. It also stops at the
+        // first byte that cannot be in a scheme, so "failed at http://x"
+        // keeps its "failed at ".
+        while p < sep && !bytes[p].is_ascii_alphabetic() {
+            p += 1;
+        }
+        if p < sep {
+            return Some((p, sep));
+        }
+        from = sep + 3;
+    }
+    None
+}
+
+/// Copy the text between URLs into `out`, dropping every word that is
+/// shaped like a piece of the URL before it when `scrub` is set.
+/// Whitespace is copied exactly, so the sentence keeps its shape.
+fn push_gap(out: &mut String, gap: &str, scrub: bool) {
+    if !scrub {
+        out.push_str(gap);
+        return;
+    }
+    let mut word_start = None;
+    for (i, c) in gap.char_indices() {
+        if c.is_whitespace() {
+            if let Some(w) = word_start.take() {
+                push_word(out, &gap[w..i]);
+            }
+            out.push(c);
+        } else if word_start.is_none() {
+            word_start = Some(i);
+        }
+    }
+    if let Some(w) = word_start {
+        push_word(out, &gap[w..]);
+    }
+}
+
+fn push_word(out: &mut String, w: &str) {
+    if url_fragment_shaped(w) {
+        out.push_str("...");
+    } else {
+        out.push_str(w);
+    }
+}
+
+/// Could this word be the rest of a URL that a stray space cut short?
+///
+/// A query parameter (`=`, `&`), the far side of userinfo (`@`), or a
+/// path tail (`DEF/SECRETKEY/x.nzb`: a `/` in a word that does not
+/// START with one, so a local absolute path in the sentence survives). A fraction like `2/3`
+/// is not a credential and is kept, since retry counters print that way.
+fn url_fragment_shaped(w: &str) -> bool {
+    if w.contains(['=', '&', '@']) {
+        return true;
+    }
+    let relative_path = w.contains('/') && !w.starts_with('/');
+    relative_path
+        && !w
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '/' | '(' | ')' | ',' | '.' | ':' | ';'))
+}
+
+#[cfg(test)]
+mod forbidden_ip_tests {
+    use super::{is_forbidden_daemon_ip, is_forbidden_fetch_ip};
+    use std::net::IpAddr;
+
+    /// Every cloud-metadata endpoint is refused by address, by both
+    /// guards, in both families' spellings; the LAN and loopback a
+    /// self-hosted indexer lives on are not. NEGATIVE CONTROL, run:
+    /// without the two new arms, 168.63.129.16 and 192.0.0.192 pass.
+    #[test]
+    fn every_metadata_endpoint_is_refused_and_the_lan_is_not() {
+        for ip in [
+            "169.254.169.254",
+            "169.254.170.2",
+            "100.100.100.200",
+            "168.63.129.16",
+            "192.0.0.192",
+            "::ffff:168.63.129.16",
+            "fd00:ec2::254",
+        ] {
+            let ip: IpAddr = ip.parse().unwrap();
+            assert!(is_forbidden_fetch_ip(ip), "{ip} is a metadata endpoint");
+            assert!(is_forbidden_daemon_ip(ip), "{ip} is a metadata endpoint");
+        }
+        for ip in [
+            "127.0.0.1",
+            "192.168.1.10",
+            "10.0.0.5",
+            "100.64.0.1",
+            "168.63.129.17",
+        ] {
+            assert!(!is_forbidden_fetch_ip(ip.parse().unwrap()), "{ip}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact_url_creds;
+
+    /// A raw space inside a URL must not hand the rest of it to the log.
+    ///
+    /// The URL still ends at the first whitespace, so a URL inside a
+    /// sentence keeps the sentence; what changed is that the words after
+    /// it are no longer trusted to be prose. NEGATIVE CONTROL, run: with
+    /// `push_gap` copying every gap verbatim and the `stop == 0` arm
+    /// removed, each of the first four inputs leaks its secret.
+    #[test]
+    fn a_space_inside_a_url_does_not_leak_its_tail() {
+        for input in [
+            "fetch https://idx.example/rss?q=the office&apikey=SECRET failed",
+            "fetch https://idx.example/rss?q=the big office&apikey=SECRET failed",
+            "fetch https://user:pa ss@idx.example/p failed",
+            "fetch https://idx.example/get/ABC DEF/SECRET/x.nzb failed",
+        ] {
+            let got = redact_url_creds(input);
+            assert!(!got.contains("SECRET"), "{input} leaked: {got}");
+            assert!(!got.contains("ss@"), "{input} leaked userinfo: {got}");
+            assert!(!got.contains("user"), "{input} leaked userinfo: {got}");
+            assert!(got.starts_with("fetch https://"), "{got}");
+            assert!(got.ends_with(" failed"), "{input} lost its sentence: {got}");
+        }
+        assert_eq!(
+            redact_url_creds("fetch https://idx.example/rss?q=the office&apikey=SECRET failed"),
+            "fetch https://idx.example/... ... failed"
+        );
+    }
+
+    /// ...and the sentence around a well-formed URL still reads, prose
+    /// before the first URL is never touched, and two URLs both go.
+    #[test]
+    fn prose_around_a_url_survives_the_tail_scrub() {
+        assert_eq!(
+            redact_url_creds(
+                "GET https://idx.example/x?r=K failed: connection refused (attempt 2/3)"
+            ),
+            "GET https://idx.example/... failed: connection refused (attempt 2/3)"
+        );
+        assert_eq!(
+            redact_url_creds("k=v before https://a/x?k=1 then wrote /srv/dl/y.nzb"),
+            "k=v before https://a/... then wrote /srv/dl/y.nzb"
+        );
+        assert_eq!(
+            redact_url_creds("http://a/x?k=1 then https://b/y?k=2 done"),
+            "http://a/... then https://b/... done"
+        );
+        assert_eq!(
+            redact_url_creds("https://idx.example refused"),
+            "https://idx.example refused"
+        );
+        assert_eq!(redact_url_creds("a :// b"), "a :// b");
+        assert_eq!(redact_url_creds("plain error"), "plain error");
+    }
 }
 
 /// Percent-encode a query value (RFC 3986 unreserved set kept).
@@ -1338,6 +1566,83 @@ mod ureq3_tests {
             }
         });
         addr
+    }
+
+    /// A witnessing agent must dial every request afresh, so the address
+    /// the witness records is the address the bytes came from.
+    ///
+    /// The server is keep-alive and answers `/a` with a redirect to `/b`
+    /// on the SAME host, which is the one shape where a per-call agent
+    /// could reuse a connection. Two accepted connections is the
+    /// evidence that hop two went back through the resolver AND dialled
+    /// what it said. NEGATIVE CONTROL, run: with `ssrf_safe_agent` and
+    /// `origin_bound_agent` built on plain `agent_config`, both report
+    /// one connection.
+    #[test]
+    fn a_witnessing_agent_never_reuses_a_connection_across_a_redirect() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let addr = l.local_addr().expect("its address").to_string();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let acc = accepted.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let Ok(s) = s else { return };
+                acc.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let mut w = s.try_clone().expect("a second handle");
+                    let mut r = BufReader::new(s);
+                    loop {
+                        let mut line = String::new();
+                        if r.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let redirect = line.starts_with("GET /a ");
+                        loop {
+                            let mut h = String::new();
+                            if r.read_line(&mut h).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            if h == "\r\n" {
+                                break;
+                            }
+                        }
+                        let reply = if redirect {
+                            "HTTP/1.1 302 Found\r\nLocation: /b\r\nContent-Length: 0\r\n\r\n"
+                        } else {
+                            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+                        };
+                        if w.write_all(reply.as_bytes()).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let url = format!("http://{addr}/a");
+        let origin = SourceOrigin::witnessed(
+            &format!("http://{addr}/"),
+            vec![std::net::IpAddr::from([127, 0, 0, 1])],
+        );
+        for (name, agent) in [
+            ("ssrf_safe_agent", ssrf_safe_agent(4, 10)),
+            ("origin_bound_agent", origin_bound_agent(&origin, 4, 10)),
+        ] {
+            let before = accepted.load(Ordering::SeqCst);
+            let (body, seen) = witness_resolution(&url_netloc(&url), || {
+                call_body(agent.get(&url)).expect("the redirect chain completes")
+            });
+            assert_eq!(body, "ok");
+            assert!(seen.contains(&std::net::IpAddr::from([127, 0, 0, 1])));
+            assert_eq!(
+                accepted.load(Ordering::SeqCst) - before,
+                2,
+                "{name} reused a connection, so the witness can name an address \
+                 the bytes did not come from"
+            );
+        }
     }
 
     /// **The port's load-bearing assertion.** ureq 2 raised

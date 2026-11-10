@@ -117,3 +117,56 @@ module `sevenz_crc_reader_tests`, which fail against the old reader.
 The BCJ2 reader's twin of the 32-bit cast is fixed in
 `vendor/lzma-rust2` (its README, item 11). Found by the 14 Oct 2026
 Gemini sweep (H14).
+
+## 6. `src/encryption/aes.rs` - the 7zAES key derivation, public
+
+`aes256_sha256_key_iv(properties, password)` is a public wrapper over the
+decoder's own `get_aes_key`: the property parse, the work-factor cap and
+the one-entry key cache, unchanged. Added 9 Nov 2026 for the one-pass
+direct map of header-encrypted (`-mhe`) stored 7z sets (TODO 358 item 9,
+`crates/nzbkit/src/extract/sevenz_map.rs`), which places each member's
+ciphertext at its output offset and decrypts it span by span as articles
+arrive, so it needs the key without a decoder around it. Keeping the one
+derivation here means the map cannot disagree with the decoder about
+what a password derives. Re-exported from `src/encryption.rs` and
+`src/lib.rs` (both lines marked by this item only). Tested from
+`crates/nzbkit-base/src/rar.rs` (`SevenZCrypt`), for the reason item 2
+gives.
+
+## 7. `src/reader.rs` - a coder stream may be bound only once
+
+`read_block` checked each bind pair's indices for range and nothing
+else, so several bind pairs could name one `out_index`. The decode-stack
+walk (`get_in_stream2`) follows every binding, so it built that coder's
+whole subtree once per binding, and BCJ2 coders (four inputs each) whose
+inputs fan into one another multiplied the walk by four per level: an
+exponential decoder build out of a header of a few hundred bytes. The
+depth guard there bounds the RECURSION DEPTH by the coder count, not the
+number of visits, and its comment ("each coder is visited at most once")
+was true only of a well-formed graph; it now says so. The parse now
+refuses an in-stream or out-stream bound twice, through two `bool` maps
+sized by the stream totals that are already bounded by the header's own
+length. No writer emits a shared binding. Found by the 9 Nov 2026 sweep
+(A19). Tested from `crates/nzbkit-base/src/nameprobe.rs`,
+`sevenz_parse_refuses_a_coder_output_bound_twice`, for the reason item
+2 gives; it fails against the old parse.
+
+## 8. `src/reader.rs` - a block's files run to its last STREAM file
+
+`calculate_stream_map` gives a stream-less entry (a directory or an empty
+file) that sits BETWEEN two of a block's stream files to that block,
+without counting it as one of the block's sub-streams - which is right.
+But `BlockDecoder::for_each_entries` and `BlockDecoder::entries` then
+took the block's files as `num_unpack_sub_streams` entries from its first
+file, so each such entry pushed one stream file out of the span: the
+walk visited the empty entry, never reached the block's last file, and
+returned Ok. That file was silently not extracted, and the "empty files"
+pass in `ArchiveReader::for_each_entries` does not catch it, since the
+file has a block. Whether a given writer interleaves such entries was
+not surveyed; the format permits it. Both now end the span at the
+`num_unpack_sub_streams`-th stream-carrying file (`block_file_span`),
+which is upstream's span exactly when no stream-less entry sits inside
+it. `entry_count` still answers the sub-stream count. Found by the 9 Nov
+2026 sweep (section C). Tested from `crates/nzbkit-base/src/nameprobe.rs`,
+`sevenz_file_after_a_mid_block_empty_entry_is_extracted`, for the reason
+item 2 gives; against the old span it extracts two of the three files.

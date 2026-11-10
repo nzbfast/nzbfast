@@ -211,6 +211,34 @@ impl Daemon {
     /// wind-down machinery. The daemon runs one job at a time, so
     /// scoping that machinery by predicate is all a per-job pause needs.
     pub fn suspend_matching(self: &Arc<Self>, graceful: bool, want: impl Fn(&Job) -> bool) {
+        self.wind_down_matching(graceful, want, false)
+    }
+
+    /// The dispatch-stall watchdog's reset (`tasks::dispatch_stall`): the
+    /// same immediate wind-down as [`Self::suspend_matching`], except
+    /// that it reaches a Force job too.
+    ///
+    /// Force is exempt from a PAUSE because the user asked for the job to
+    /// run through one; a reset is not a pause - it winds the run down
+    /// only so the next pass dials a fresh fleet and resumes from the
+    /// journal, which a stalled Force job needs exactly as much as any
+    /// other. Until 9 Nov 2026 the reset went through `suspend_matching`,
+    /// so for a Force job it marked nothing and stopped nothing, while
+    /// the watchdog had already spent the attempt's one reset and logged
+    /// "Resetting dispatch" over a run it never touched (plus a "keeps
+    /// downloading" line naming a queue pause that was not there).
+    pub fn reset_dispatch_matching(self: &Arc<Self>, want: impl Fn(&Job) -> bool) {
+        self.wind_down_matching(false, want, true)
+    }
+
+    /// The body of both: `through_force` lifts the Force exemption
+    /// ([`exempt_from_wind_down`]) for this one wind-down.
+    fn wind_down_matching(
+        self: &Arc<Self>,
+        graceful: bool,
+        want: impl Fn(&Job) -> bool,
+        through_force: bool,
+    ) {
         let mut paused: Vec<String> = Vec::new();
         // The prefetch sidecar runs a still-Queued record on a hub of its
         // own, so neither the state test below nor `fire_pause` (which
@@ -227,7 +255,7 @@ impl Daemon {
             if !want(&g) {
                 continue;
             }
-            let exempt = exempt_from_wind_down(&g, offline);
+            let exempt = !through_force && exempt_from_wind_down(&g, offline);
             // Said out loud, once per Force job the pause would have
             // spared: the pause path prints "keeps downloading" for the
             // job it leaves alone, and this is the matching line for the

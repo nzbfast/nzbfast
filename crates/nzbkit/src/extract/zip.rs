@@ -264,6 +264,7 @@ impl Extractor {
             sink_slots: Mutex::new(Vec::new()),
             outcome: Mutex::new(None),
             direct: Mutex::new(None),
+            pw_finish: Default::default(),
         });
         // Front-load the directory window: EOCD scan window (22 + 64 KiB
         // comment) + Zip64 locator/record, rounded up so a typical

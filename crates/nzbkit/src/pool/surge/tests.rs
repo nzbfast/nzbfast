@@ -82,6 +82,7 @@ fn fleet_anchored(
                     block_account: blocked && i == 0,
                     bind_ip: None,
                     socks5: None,
+                    http_proxy: None,
                     enabled: true,
                     warm_pool: false,
                     idle_release_secs: None,
@@ -489,4 +490,42 @@ fn the_loan_is_added_before_the_ceiling_is_applied() {
     // and a target above the spawned fleet wakes nothing, so that would
     // be a number the shed arms then read as real.
     assert_eq!(surge_want(10, 2, 8), 8);
+}
+
+/// Sweep 9 Nov 2026 (C): the take side is rate-limited to one thread,
+/// the RETURN side is not - every worker's `surge_tick` runs
+/// `surge_return_due` first. So a return can take this server's whole
+/// episode back, provisional loan included, between `surge_consider`'s
+/// commit and the rollback it makes when `surge_apply` moved nothing.
+/// The rollback was a bare `fetch_sub` on both counters and wrapped
+/// them. Staged in that order here: the commit, another server's live
+/// loan beside it (`out` is fleet-wide, so the rollback must not spend
+/// it), the concurrent return, then the rollback.
+#[test]
+fn a_rollback_after_a_concurrent_return_does_not_wrap_the_books() {
+    let (sh, _targets) = fleet(20, 4, false);
+    // Server 1 holds a loan of its own throughout.
+    sh.surge.lent[1].fetch_add(1, Ordering::Relaxed);
+    sh.surge.out.fetch_add(1, Ordering::Relaxed);
+    // `surge_consider`'s commit on server 0...
+    sh.surge.lent[0].fetch_add(1, Ordering::Relaxed);
+    sh.surge.out.fetch_add(1, Ordering::Relaxed);
+    // ...another worker's return takes server 0's episode back...
+    sh.surge_return(0, 1_000, false);
+    // ...and only then does the take side roll its commit back.
+    sh.surge_unlend(0);
+    assert_eq!(sh.surge.lent_on(0), 0, "server 0's ledger wrapped");
+    assert_eq!(
+        sh.surge.out.load(Ordering::Relaxed),
+        1,
+        "the fleet total is server 1's loan, no more and no less"
+    );
+
+    // The ordinary rollback, with no return in between, still undoes
+    // exactly the one loan.
+    sh.surge.lent[0].fetch_add(1, Ordering::Relaxed);
+    sh.surge.out.fetch_add(1, Ordering::Relaxed);
+    sh.surge_unlend(0);
+    assert_eq!(sh.surge.lent_on(0), 0);
+    assert_eq!(sh.surge.out.load(Ordering::Relaxed), 1);
 }

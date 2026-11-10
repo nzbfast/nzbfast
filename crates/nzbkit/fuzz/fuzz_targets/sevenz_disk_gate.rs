@@ -10,6 +10,12 @@
 //! and the gate itself must stay cheap: its own worst-case allocation
 //! is a 2 MiB window plus a 2 MiB packed-header decode, so run this
 //! with a low `-malloc_limit_mb` and any big allocation is a finding.
+//!
+//! The same two inputs also drive `sevenz_encrypted_header` (TODO 358
+//! item 9), the in-stream password probe's locator for a `-mhe`
+//! container's encrypted header: it reuses the gate's scanner, plus the
+//! one field it added (the header AES coder's property bytes), so it is
+//! held to the same bounds - one 32-byte read, one window, no decode.
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -23,6 +29,7 @@ fuzz_target!(|data: &[u8]| {
     // zeroed-start refusal.
     let mut f = std::io::Cursor::new(data);
     let _ = nzbkit::nameprobe::sevenz_disk_declared_bomb(&mut f);
+    let _ = nzbkit::nameprobe::sevenz_encrypted_header(&mut f);
     // Sealed: the input as the end header of a well-formed container,
     // so the fuzzer reaches the header scan and the packed-header
     // decode instead of being stopped at the checksum door. The window
@@ -39,4 +46,10 @@ fuzz_target!(|data: &[u8]| {
     file[8..12].copy_from_slice(&crc.to_le_bytes());
     let mut f = std::io::Cursor::new(file);
     let _ = nzbkit::nameprobe::sevenz_disk_declared_bomb(&mut f);
+    if let Some(hc) = nzbkit::nameprobe::sevenz_encrypted_header(&mut f) {
+        // What the probe then trusts: a pack range bounded like a header.
+        assert!(hc.pack_len > 0 && hc.pack_len <= nzbkit::nameprobe::SEVENZ_END_MAX);
+        assert!(hc.pack_off >= 32);
+        assert!(!hc.aes_props.is_empty());
+    }
 });

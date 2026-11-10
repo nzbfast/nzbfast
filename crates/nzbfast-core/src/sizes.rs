@@ -8,7 +8,32 @@
 //! call sites are unchanged.
 
 /// Parse "500M"/"10G"/"1.5T" (SAB-style size strings) to bytes.
+///
+/// A lowercase `b` here is BITS (`900Mb` is a line speed), which is
+/// right for a rate and wrong for the size of a file: see
+/// [`parse_byte_size`] for the rules that measure files.
 pub fn parse_size(s: &str) -> Option<u64> {
+    parse(s, true)
+}
+
+/// [`parse_size`] for a quantity that is a FILE SIZE, never a rate: a
+/// lowercase `b` is BYTES.
+///
+/// The bit reading exists for the Line speed box, where every ISP
+/// quotes megaBITS. A file-size rule shares the parser but not the
+/// convention: indexers, newsreaders and file managers all print a
+/// release as `1.4 GB`, and people type that back in lowercase, so
+/// `size<100mb` in an RSS filter or an index gate filtered at 12.5 MB.
+/// Nobody bounds a release's size in megabits, so reading every saved
+/// `mb`/`gb` rule as bytes gives each one the meaning its author
+/// evidently had. The spelled-out `bit`/`bits`/`bps` forms keep their
+/// bit meaning: those say so in words, and only the one-letter suffix
+/// was ambiguous.
+pub fn parse_byte_size(s: &str) -> Option<u64> {
+    parse(s, false)
+}
+
+fn parse(s: &str, lower_b_is_bits: bool) -> Option<u64> {
     let s = s.trim();
     // BITS when the user says bits, and this is not a nicety: every ISP
     // on earth advertises a line in megaBITS, so "900M" in the Line
@@ -39,7 +64,7 @@ pub fn parse_size(s: &str) -> Option<u64> {
     {
         (&s[..rest.len()], true)
     } else if let Some(rest) = s.strip_suffix('b') {
-        (rest, true)
+        (rest, lower_b_is_bits)
     } else if let Some(rest) = s.strip_suffix('B') {
         (rest, false)
     } else {
@@ -56,4 +81,30 @@ pub fn parse_size(s: &str) -> Option<u64> {
     let v: f64 = num.trim().parse().ok()?;
     let bytes = if bits { v * mult / 8.0 } else { v * mult };
     (v >= 0.0).then_some(bytes as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_byte_size, parse_size};
+
+    /// A file-size rule's lowercase `mb` is megaBYTES; a line speed's is
+    /// still megabits. NEGATIVE CONTROL, run: with `parse_byte_size`
+    /// passing `true`, `100mb` reads 12,500,000 and the first assert
+    /// fails.
+    #[test]
+    fn a_file_size_reads_lowercase_b_as_bytes_and_a_rate_as_bits() {
+        assert_eq!(parse_byte_size("100mb"), Some(100_000_000));
+        assert_eq!(parse_byte_size("1.5gb"), Some(1_500_000_000));
+        assert_eq!(parse_byte_size("100MB"), Some(100_000_000));
+        assert_eq!(parse_byte_size("100M"), Some(100_000_000));
+        assert_eq!(parse_byte_size("4096"), Some(4096));
+        // Spelled-out bits say so in words and keep that meaning.
+        assert_eq!(parse_byte_size("800Mbit"), Some(100_000_000));
+        assert_eq!(parse_byte_size("-1mb"), None);
+        assert_eq!(parse_byte_size("nope"), None);
+        // The rate parser is unchanged.
+        assert_eq!(parse_size("100mb"), Some(12_500_000));
+        assert_eq!(parse_size("900Mb"), Some(112_500_000));
+        assert_eq!(parse_size("100MB"), Some(100_000_000));
+    }
 }

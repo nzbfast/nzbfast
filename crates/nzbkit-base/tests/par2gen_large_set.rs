@@ -476,6 +476,124 @@ fn a_cancel_in_a_later_pass_removes_the_earlier_passes_volumes() {
     pin_accum_budget_for_tests(0);
 }
 
+/// ...and the same cancel in a later pass of a RE-CREATE takes back only
+/// the re-create's own files: the previous set, index and every volume,
+/// comes through byte-identical. The multi-pass route writes a batch's
+/// volumes and then folds the next batch, so by the second pass the first
+/// pass's volumes are on disk - and until 9 Nov 2026 a re-create's were
+/// written over the previous set's of the same names, which the cancel
+/// then removed (the 9 Nov 2026 parfast sweep handoff, E4). The same plan
+/// both times, so every name collides and every file is staged.
+#[test]
+fn a_cancel_in_a_later_pass_of_a_re_create_keeps_the_previous_set_whole() {
+    use nzbkit_base::par2gen::control::{CreateControl, CreatePhase};
+    use nzbkit_base::par2repair::{PauseGate, ProgressSink};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    let _pins = PinnedAccum::new(64 << 20);
+    let t = Tmp::new("recreatepass");
+    let block = 1u64 << 20;
+    let members = vec![
+        t.write("a.bin", &payload(5 << 20, 7)),
+        t.write("b.bin", &payload((3 << 20) + 4_097, 8)),
+    ];
+    let out = t.0.clone();
+    let per_batch = (accum_budget_bytes() / block).max(1) as usize;
+    let rows = per_batch * 3;
+    create_into_exact(
+        &out,
+        &members,
+        "rset",
+        Some(block),
+        rows,
+        CreatePlan::ENGINE,
+    )
+    .expect("the previous set");
+    let set_files = || -> Vec<(String, Vec<u8>)> {
+        let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(&out)
+            .expect("read dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("rset.") || n.starts_with('.'))
+            .map(|n| {
+                let b = std::fs::read(out.join(&n)).unwrap();
+                (n, b)
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    let before = set_files();
+    assert!(
+        before.len() > 3,
+        "{:?}",
+        before.iter().map(|(n, _)| n).collect::<Vec<_>>()
+    );
+    std::fs::write(&members[1].path, payload((3 << 20) + 4_097, 9)).unwrap();
+
+    /// Cancels at the second pass's sizing, having first recorded whether
+    /// the first pass's volumes were on disk under staging names.
+    struct OnSecondPass {
+        begins: AtomicU64,
+        gate: Arc<PauseGate>,
+        dir: std::path::PathBuf,
+        staged_seen: AtomicBool,
+    }
+    impl ProgressSink for OnSecondPass {
+        fn progress(&self, phase: CreatePhase, done: u64, _total: u64) {
+            if phase == CreatePhase::Fold
+                && done == 0
+                && self.begins.fetch_add(1, Ordering::SeqCst) + 1 >= 2
+            {
+                let staged = std::fs::read_dir(&self.dir).unwrap().flatten().any(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.starts_with(".rset.vol") && n.ends_with(".tmp")
+                });
+                self.staged_seen.store(staged, Ordering::SeqCst);
+                self.gate.cancel();
+            }
+        }
+    }
+    let gate = PauseGate::new();
+    let sink = Arc::new(OnSecondPass {
+        begins: AtomicU64::new(0),
+        gate: gate.clone(),
+        dir: out.clone(),
+        staged_seen: AtomicBool::new(false),
+    });
+    let progress: Arc<dyn ProgressSink> = sink.clone();
+    let err = nzbkit_base::par2gen::create_into_exact_controlled(
+        &out,
+        &members,
+        "rset",
+        Some(block),
+        rows,
+        CreatePlan::ENGINE,
+        None,
+        &CreateControl::new(Some(progress), Some(gate)),
+    )
+    .expect_err("a re-create cancelled in its second pass must not report success");
+    assert!(
+        matches!(err, nzbkit_base::par2gen::Par2GenError::Cancelled),
+        "{err:?}"
+    );
+    assert!(
+        sink.staged_seen.load(Ordering::SeqCst),
+        "the first pass's volumes were not on disk under staging names when the cancel landed, \
+         so this proved nothing about them"
+    );
+    let after = set_files();
+    assert_eq!(
+        after.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+        before.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+        "a cancelled multi-pass re-create changed the set's file list"
+    );
+    for ((n, a), (_, b)) in after.iter().zip(&before) {
+        assert!(a == b, "{n} is not byte-identical to the previous set's");
+    }
+}
+
 #[test]
 fn two_builds_of_one_set_are_byte_identical() {
     // The fold is PARALLEL and its work is split by a grid derived from

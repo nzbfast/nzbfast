@@ -135,3 +135,41 @@ fn delete_kept_mutations_move_the_queue_rev() {
         );
     });
 }
+
+/// F15: the kept-files strip says WHICH kind of "kept" it is. A Trash
+/// call that timed out may still move the files after the daemon stopped
+/// waiting, so the page must not tell that user the files could not be
+/// removed - it reads `pending` off the payload to pick its sentence. A
+/// real refusal stays `pending: false`, or every refused delete would
+/// start promising a Trash that never took anything.
+#[test]
+fn delete_kept_payload_says_when_the_trash_may_still_finish() {
+    with_daemon("dkpend", |d| {
+        let timed_out = crate::smart::testseam::timed_out_trash_reason();
+        d.note_delete_kept(
+            "Slow.Release",
+            std::path::Path::new("/Volumes/slow/Slow.Release"),
+            &format!("/Volumes/slow/Slow.Release: {timed_out}"),
+            None,
+        );
+        d.note_delete_kept(
+            "Refused.Release",
+            std::path::Path::new("/Volumes/nas/Refused.Release"),
+            "the Trash would not take it (no trash on this volume)",
+            None,
+        );
+        let served = crate::sabcompat::queue_json(d, &std::collections::HashMap::new());
+        let notes = served["queue"]["delete_kept"]
+            .as_array()
+            .expect("the notices ride the queue payload");
+        let pending = |name: &str| {
+            notes
+                .iter()
+                .find(|n| n["name"] == name)
+                .unwrap_or_else(|| panic!("{name} missing from {notes:?}"))["pending"]
+                .as_bool()
+        };
+        assert_eq!(pending("Slow.Release"), Some(true), "a timeout is pending");
+        assert_eq!(pending("Refused.Release"), Some(false), "a refusal is not");
+    });
+}

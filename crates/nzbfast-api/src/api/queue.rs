@@ -7,7 +7,9 @@ use super::ApiCtx;
 // histstore already call - a child module must not change a caller.
 mod caps;
 pub mod controls;
-mod files;
+// pub(crate) for `listing_with`, which the NZBGet facade's `listfiles`
+// renders the same file walk through (sabcompat/nzbget_lists.rs).
+pub(crate) mod files;
 mod payload;
 mod preview;
 
@@ -792,7 +794,35 @@ fn m_set_password(
                             // [`crate::unlockpw::unlock`].
                             let locked_before = crate::unlockpw::encrypted_archive(&out_dir);
                             let unlocked = crate::unlockpw::unlock(&out_dir, &pw);
-                            if unlocked.is_ok() {
+                            // TODO 358 item 13 (D2), on the one path into a
+                            // delivered payload that skipped it: the unlock
+                            // has just written the archive's members out, and
+                            // the completed tail's refusal only ever saw the
+                            // VOLUMES. A passworded media post holding
+                            // `Movie.exe` was unpacked, renamed and moved the
+                            // moment the user typed its password. Asked here
+                            // exactly as `job_finalize` asks it after its own
+                            // unlock, and answered the same way: the record
+                            // files Failed with the refusal's sentence,
+                            // nothing is renamed, filed or queued for the
+                            // mover, and the password stays recorded - it was
+                            // the right one.
+                            let refused = if unlocked.is_ok() {
+                                crate::exerefuse::refuse_executables(&d2, &out_dir, &name, &cat)
+                            } else {
+                                None
+                            };
+                            if let Some(why) = refused {
+                                let mut j = job2.lock_ok();
+                                j.password_required = false;
+                                j.state = JobState::Failed;
+                                j.fail_message = why;
+                                j.fail_code = Some(nzbfast_core::failkind::FailKind::Local);
+                                j.move_pending = false;
+                                drop(j);
+                                d2.history_publish_change(&job2, "the executable refusal");
+                                d2.save_queue();
+                            } else if unlocked.is_ok() {
                                 let post_year = match post_year_of(&nzb) {
                                     0 => crate::identify::current_year(),
                                     y => y,
@@ -818,6 +848,17 @@ fn m_set_password(
                                 // literal beside it.
                                 if crate::diag::unlock_answers(&j.fail_message) {
                                     j.clear_failure();
+                                    // TODO 358: a locked set with no password
+                                    // files FAILED (`finalize_completed_gen`),
+                                    // and this is the retry that answers it.
+                                    // Only when the failure WAS the lock -
+                                    // `unlock_answers` - so a job that failed
+                                    // for some other reason and also asked for
+                                    // a password keeps its verdict, the rule
+                                    // `settle_locked_failure` already holds.
+                                    if j.state == JobState::Failed {
+                                        j.state = JobState::Completed;
+                                    }
                                 }
                                 if !done.identify.is_empty() {
                                     j.identify = done.identify;

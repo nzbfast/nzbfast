@@ -539,6 +539,65 @@ fn disk_fallback_verdict(
     !any_set_failed && entered
 }
 
+/// Read-only sweep A2 (9 Nov 2026): the short slots the set-less RAR
+/// recovery-record rung's `Ok` does not speak for.
+///
+/// The rung answers for the volumes it walked (`rar_volumes`, taken
+/// before it ran) and for nothing else, so every other slot still short
+/// an article, decode or write is a hole - unless the disk-side PAR2
+/// pass verified a set naming it (`repaired_names`, which carries only
+/// what a set REPORTED, so an Unrepairable set's members are not in it).
+/// The same population `disk_par2_fallback`'s own uncovered scan selects,
+/// and with the same three exemptions, for the same reasons:
+///
+/// * a recovery slot (`is_par2`) carries no payload to be short of;
+/// * a mapped or chased slot (`in_stream`) has no standalone file, so the
+///   name test cannot speak for it either way. NOT because something else
+///   does: nzbkit's final-output CRC gate skips an entry whose bytes never
+///   fully arrived ("missing articles are the outer repair ladder's
+///   problem", `extract/settle.rs`), so a short in-stream slot is a gap
+///   this arm and `disk_par2_fallback`'s scan share. Left as it was here,
+///   deliberately - the holed slots that declare a record were
+///   materialized above and ARE walked, and which verdict the rest want
+///   is the deferred half of the same sweep's `noset.rs:431` lead;
+/// * issue #23's spare rule: optional furniture the census already
+///   spared is dropped at finish, not failed here.
+///
+/// What is left is asked through `slot_is_uncovered_hole`, the predicate
+/// that scan uses, so a volume the extraction consumed (its writer's file
+/// is gone) and a recovery volume by name or magic both stay out.
+fn rr_unspoken_holes(
+    out_dir: &Path,
+    slots: &[Arc<FileSlot>],
+    rar_volumes: &std::collections::HashSet<String>,
+    repaired_names: &[String],
+    in_stream: impl Fn(usize) -> bool,
+    slot_path: impl Fn(usize) -> Option<PathBuf>,
+) -> Vec<String> {
+    let mut covered = rar_volumes.clone();
+    covered.extend(
+        repaired_names
+            .iter()
+            .map(|n| nzbkit::disk::sanitize_out_name(n).to_lowercase()),
+    );
+    let spare_rule = crate::get::census::SpareRule::of(slots);
+    slots
+        .iter()
+        .enumerate()
+        .filter(|(i, s)| {
+            !s.is_par2()
+                && !in_stream(*i)
+                && (s.missing.load(Ordering::Relaxed) > 0
+                    || s.remaining.load(Ordering::Relaxed) > 0
+                    || s.errors.load(Ordering::Relaxed) > 0
+                    || s.abandoned.load(Ordering::Relaxed) > 0)
+        })
+        .filter(|(_, s)| !spare_rule.spares(&s.hint))
+        .filter(|(i, s)| slot_is_uncovered_hole(out_dir, slot_path(*i), &s.hint, &covered))
+        .map(|(_, s)| s.hint.clone())
+        .collect()
+}
+
 #[expect(clippy::too_many_arguments)]
 pub(super) async fn settle_without_set(
     extractor: &Arc<nzbkit::extract::Extractor>,
@@ -900,8 +959,20 @@ pub(super) async fn settle_without_set(
         // the archive for a full disk (TODO §249 item 1). Only a NAMED
         // reason is taken: the ordinary failure is worded by the arms
         // below exactly as before.
+        //
+        // Read-only sweep A2 (9 Nov 2026), the set-less twin of the arm in
+        // `settle::repair`: the volume list is taken BEFORE the rung, so
+        // it is the population the rung walked - see `rr_volume_names`.
+        let rar_volumes = rr_volume_names(out_dir);
         all_good = match try_rar_rr_repair_why(out_dir, password) {
-            Ok(()) => true,
+            // ...and an `Ok` from it never outvotes a refusal already
+            // recorded on the way in. The only one that reaches here is
+            // `conflicting_unvouched`'s above, which set `all_good = false`
+            // with it, and that is how it got into this arm at all; a RAR
+            // set extracting says nothing about a file whose own articles
+            // disagree. The with-set path holds the same line at its late
+            // pass (`all_good = late_good && reextract_failed.is_none()`).
+            Ok(()) => reextract_failed.is_none(),
             Err(why) => {
                 if let Some(why) = why {
                     reextract_failed = Some(why);
@@ -909,15 +980,35 @@ pub(super) async fn settle_without_set(
                 false
             }
         };
-        // Recovery records heal the RAR set they live in. A file
-        // the PAR2 pass already found outside every recovery set
-        // is still a hole, whatever the volumes did.
+        // Recovery records heal the RAR set they live in, and the rung's
+        // `Ok` means only that its volumes extract. So every short slot
+        // the rung did not walk is still a hole unless the disk-side PAR2
+        // pass above proved its name - see [`rr_unspoken_holes`]. Until
+        // A2 this list held only what that pass had filled, which it does
+        // on one arm alone (every set verified) plus the census's sparse
+        // slots: a plain file short an article beside an intact RAR set
+        // with a record, or beside a set the pass found Unrepairable,
+        // finished green with its hole.
+        if all_good {
+            for hint in rr_unspoken_holes(
+                out_dir,
+                slots,
+                &rar_volumes,
+                &repaired_names,
+                |i| extractor.is_mapped(i) || extractor.is_chased(i) || extractor.is_rar_chased(i),
+                |i| extractor.slot_path(i),
+            ) {
+                if !uncovered_after_par2.contains(&hint) {
+                    uncovered_after_par2.push(hint);
+                }
+            }
+        }
         if all_good && !uncovered_after_par2.is_empty() {
             all_good = false;
             warn!(
                 target: "repair",
-                "✘ RAR recovery records cannot speak for {} file(s) outside \
-                 the PAR2 set: {}",
+                "✘ RAR recovery records cannot speak for {} short file(s) that \
+                 are not RAR volumes and that no recovery set proved: {}",
                 uncovered_after_par2.len(),
                 uncovered_after_par2.join(", ")
             );
@@ -1473,5 +1564,105 @@ mod control_wire_tests {
             NOSET.contains("Err(nzbkit::par2repair::RepairError::Cancelled) => {"),
             "the cancel arm is gone: a user's Cancel would be logged as a repair error"
         );
+    }
+}
+
+/// Read-only sweep A2's set-less twin: what the RAR recovery-record rung's
+/// `Ok` leaves for [`rr_unspoken_holes`] to fail on.
+#[cfg(test)]
+mod rr_hole_tests {
+    use super::*;
+
+    fn slot(hint: &str, par2: bool, missing: usize) -> Arc<FileSlot> {
+        Arc::new(FileSlot {
+            hint: hint.to_string(),
+            hint_is_posted_name: true,
+            yenc_votes: Default::default(),
+            name_choice: Default::default(),
+            is_par2_main: par2,
+            par2_name_demoted: Default::default(),
+            par2_sniffed: Default::default(),
+            total_segments: 4,
+            posted_bytes: 0,
+            remaining: Default::default(),
+            missing: missing.into(),
+            errors: Default::default(),
+            deferred: Default::default(),
+            abandoned: Default::default(),
+            sample_skipped: false,
+            capture: std::sync::Mutex::new(None),
+        })
+    }
+
+    fn scratch(tag: &str) -> crate::testscratch::ScratchDir {
+        let d = std::env::temp_dir().join(format!("nzbfast-rrhole-{tag}-{}", std::process::id()));
+        crate::testscratch::ScratchDir::attach(&d)
+    }
+
+    fn vols(v: &[&str]) -> std::collections::HashSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The defect: a RAR set the rung extracted, beside a plain file that
+    /// lost an article. Before A2 the arm's only test after the rung was
+    /// a list nothing had filled on this path, and the job went green
+    /// with the hole in the plain file.
+    #[test]
+    fn a_short_plain_file_beside_the_rar_set_is_still_a_hole() {
+        let d = scratch("plain");
+        std::fs::write(d.join("movie.rar"), b"Rar!").unwrap();
+        std::fs::write(d.join("extras.mkv"), b"holed").unwrap();
+        let slots = [slot("movie.rar", false, 1), slot("extras.mkv", false, 1)];
+        let paths = [d.join("movie.rar"), d.join("extras.mkv")];
+        let got = rr_unspoken_holes(
+            &d,
+            &slots,
+            &vols(&["movie.rar"]),
+            &[],
+            |_| false,
+            |i| Some(paths[i].clone()),
+        );
+        assert_eq!(got, vec!["extras.mkv".to_string()]);
+    }
+
+    /// The guards against a false RED: a name a disk-side set verified, a
+    /// slot whose bytes went in-stream, a recovery slot and spared
+    /// furniture are none of them a hole the rung left behind - and a
+    /// volume the rung walked is its own to vouch for, short or not.
+    #[test]
+    fn proved_in_stream_recovery_and_spared_slots_are_not_holes() {
+        let d = scratch("guards");
+        for n in [
+            "movie.rar",
+            "extras.mkv",
+            "chased.7z",
+            "set.par2",
+            "movie.nfo",
+        ] {
+            std::fs::write(d.join(n), b"x").unwrap();
+        }
+        let slots = [
+            slot("movie.rar", false, 1),
+            slot("extras.mkv", false, 1),
+            slot("chased.7z", false, 1),
+            slot("set.par2", true, 1),
+            slot("movie.nfo", false, 1),
+        ];
+        let names = [
+            "movie.rar",
+            "extras.mkv",
+            "chased.7z",
+            "set.par2",
+            "movie.nfo",
+        ];
+        let got = rr_unspoken_holes(
+            &d,
+            &slots,
+            &vols(&["movie.rar"]),
+            &["extras.mkv".to_string()],
+            |i| i == 2,
+            |i| Some(d.join(names[i])),
+        );
+        assert!(got.is_empty(), "{got:?}");
     }
 }

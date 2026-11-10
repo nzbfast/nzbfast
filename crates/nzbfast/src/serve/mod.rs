@@ -158,6 +158,13 @@ pub async fn serve(config: PathBuf, mut opts: ServeOpts) -> Result<()> {
     // viewer sees the whole session, startup lines included.
     nzbkit::logtee::install();
     let settings_path = settings_file(&config);
+    // F7: the folder the settings file lives in is where every launcher
+    // puts daemon.log, so a Windows crash dump goes beside it.
+    if let Some(dir) = settings_path.parent() {
+        // A bare `settings.json` has an EMPTY parent: that is the cwd.
+        let cwd = std::path::Path::new(".");
+        crate::crashdump::set_dir(if dir.as_os_str().is_empty() { cwd } else { dir });
+    }
     apply_saved_settings(&mut opts, &settings_path);
     // Secure-by-default on a genuinely new install (and ONLY there - see
     // first_run_apikey). Printed once, prominently, next to the listener

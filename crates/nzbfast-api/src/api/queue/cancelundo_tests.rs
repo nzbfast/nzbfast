@@ -101,6 +101,82 @@ fn an_undone_cancel_gives_the_download_back_with_its_nzb() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 6 Nov 2026 sweep F3: an undone cancel keeps what the row carried for
+/// its processing and its client, not just the fields the queue shows.
+///
+/// The restore used to rebuild the row from the NZB, name, category,
+/// priority, paused flag and password alone. The `drone` PPParameter an
+/// *arr matches a download by came back empty, the SAB `pp` level was
+/// lost, and an explicit `script=None` came back as an EMPTY override -
+/// which inherits the global script, so the restored job would run a
+/// script its add had switched off. Asserted through `resolve_scripts`,
+/// the ladder the completion hook actually reads, with a global script
+/// configured so that inheriting it is visible.
+#[test]
+fn an_undone_cancel_keeps_its_script_choice_and_client_params() {
+    let dir = tmp("extras");
+    let d = test_daemon(&dir);
+    *d.scripts.lock_ok() = vec![std::path::PathBuf::from("/scripts/global.py")];
+    let e = d
+        .enqueue(
+            NZB,
+            "Extras.Release.nzb",
+            "tv",
+            1,
+            None,
+            None,
+            "test",
+            false,
+        )
+        .expect("enqueue");
+    {
+        let q = d.queue.lock_ok();
+        let mut g = q[0].lock_ok();
+        g.paused = true;
+        g.script_override = "None".into();
+        g.sab_pp = Some(1);
+        g.pp_params = vec![("drone".into(), "a1b2c3".into())];
+        g.failure_link = "https://indexer.example/failed?id=7".into();
+        g.failure_host = "indexer.example".into();
+        g.failure_https = true;
+        g.failure_depth = 2;
+    }
+    let job = d.queue.lock_ok()[0].clone();
+    assert!(
+        d.resolve_scripts(&job).is_empty(),
+        "control: script=None runs none"
+    );
+
+    let j = payload::delete_arm(&d, &params(&[("name", "delete")]), "delete", &e.nzo_id);
+    let token = j["undo"]["token"].as_str().expect("token").to_string();
+    let back = payload::undelete_arm(&d, &token);
+    assert_eq!(back["failed"], serde_json::json!([]), "the undo: {back}");
+
+    let job = d.queue.lock_ok()[0].clone();
+    {
+        let g = job.lock_ok();
+        assert_eq!(g.nzo_id, e.nzo_id);
+        assert!(g.paused, "a paused row came back running");
+        assert_eq!(
+            g.pp_params,
+            vec![("drone".to_string(), "a1b2c3".to_string())],
+            "the drone tag an *arr matches by was lost"
+        );
+        assert_eq!(g.sab_pp, Some(1), "the add's pp level was lost");
+        assert_eq!(g.script_override, "None", "the script choice was lost");
+        assert_eq!(g.failure_link, "https://indexer.example/failed?id=7");
+        assert_eq!(g.failure_host, "indexer.example");
+        assert!(g.failure_https);
+        assert_eq!(g.failure_depth, 2);
+    }
+    assert!(
+        d.resolve_scripts(&job).is_empty(),
+        "the restored job would run the global script its add switched off"
+    );
+    drop(job);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 27 Oct 2026 sweep F2: an undone paused row is never runnable, not
 /// even for a moment.
 ///

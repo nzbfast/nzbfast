@@ -191,6 +191,16 @@ pub struct ServerConfig {
     /// resolved BY the proxy (no local DNS leak).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socks5: Option<String>,
+    /// TODO 358 item 14 (decision D3): an HTTP CONNECT proxy for this
+    /// server's NNTP traffic, beside `socks5` and in the same shape -
+    /// "host:port" or "user:pass@host:port", the credential sent as
+    /// Basic `Proxy-Authorization`. The tunnel is opened to the server's
+    /// HOSTNAME, so the proxy does the lookup (no local DNS leak), and
+    /// TLS to the news server runs inside it exactly as it does over
+    /// SOCKS5. A server names one proxy or none: the dial refuses a row
+    /// that sets both rather than picking one in silence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_proxy: Option<String>,
     /// Soft on/off switch: a disabled server stays configured (and
     /// testable) but never joins a download pool.
     #[serde(default = "default_true")]
@@ -1259,6 +1269,7 @@ pub fn parse_sabnzbd_ini(text: &str) -> Result<Vec<ServerConfig>, ConfigError> {
             block_account: false,
             bind_ip: None,
             socks5: None,
+            http_proxy: None,
             enabled: true,
             warm_pool: false,
             idle_release_secs: None,
@@ -1366,6 +1377,7 @@ pub fn parse_nzbget_conf(text: &str) -> Vec<ServerConfig> {
             block_account: false,
             bind_ip: None,
             socks5: None,
+            http_proxy: None,
             enabled: true,
             warm_pool: false,
             idle_release_secs: None,

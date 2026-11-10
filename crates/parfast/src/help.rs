@@ -16,7 +16,11 @@
 //! in the same order, and nothing moved EXCEPT where the reference's
 //! text states a fact that is not true of this program.
 //!
-//! There is exactly one of those, and it is `-T`. The reference says
+//! There are two of those. The second, found by the 9 Nov 2026 sweep, is
+//! `-m`: the reference says "(default is half of total physical memory)",
+//! and parfast's default is `mem::MemBudget::auto` - a quarter of physical
+//! memory clamped to 256 MiB..16 GiB, and half a cgroup limit where one is
+//! lower - so the screen now says the quarter. The first is `-T`. The reference says
 //! "(2 are the default)"; parfast's default is `min(cpu_workers, file
 //! count)` - full width - because `verify::file_threads` falls back to
 //! `nzbkit::mem::cpu_workers`. Inheriting the reference's number told a
@@ -36,16 +40,25 @@
 //! _screen`, which checks switch SPELLINGS, not the prose beside them. Same switches,
 //! same sections, same order, same placeholders - so
 //! `run.py`'s own help parser reads the identical command and switch
-//! sets out of either screen. `switch_screen_matches_inventory` in the
-//! tests below is that claim, checked rather than asserted: it parses
-//! this text the way the harness parses the reference's and compares the
-//! result to the committed inventory file.
+//! sets out of either screen. `every_inventoried_switch_appears_on_our
+//! _help_screen` in the tests below is the half of that claim that is
+//! checked: every switch the committed inventory lists must be on this
+//! screen in the reference's spelling. It does not parse this screen the
+//! way the harness parses the reference's, so it cannot see an EXTRA
+//! switch or a moved section. (This paragraph named a
+//! `switch_screen_matches_inventory` test until 9 Nov 2026; no test of
+//! that name exists.)
 //!
 //! Adding a line here is therefore not free. An extra parfast can do
-//! that the reference cannot is a GNU-style long option (spec R.3) and
-//! goes in its own section below the reference's, never as a new short
-//! switch: the reference's next release may take that letter, and the
-//! day it does the drop-in claim breaks in silence.
+//! that the reference cannot is a GNU-style long option (spec R.3),
+//! never a new short switch: the reference's next release may take that
+//! letter, and the day it does the drop-in claim breaks in silence. The
+//! long options sit INSIDE the reference section they belong to
+//! (`--digest-cache` and `--progress` under "all uses", `--slow` under
+//! "verify or repair", `--no-clobber` under "create"), not in a section
+//! of their own as this said until 9 Nov 2026. `--comment`,
+//! `--std-naming` and `--volume-blocks` are accepted by the parser and
+//! are not on the screen at all.
 
 /// Detected cores, for the `-t<n>` line. The reference prints the same
 /// fact about the box it ran on, which is why the harness rewrites the
@@ -100,7 +113,8 @@ Options: (all uses)
   -B<path> : Set the basepath to use as reference for the datafiles
   -v [-v]  : Be more verbose
   -q [-q]  : Be more quiet (-q -q gives silence)
-  -m<n>    : Memory (in MB) to use (default is half of total physical memory)
+  -m<n>    : Memory (in MB) to use (default: a quarter of physical memory,
+             between 256 MiB and 16 GiB)
   -t<n>    : Number of threads used for main processing ({n} detected)
   -T<n>    : Number of files hashed in parallel
              (default: one per core, capped at the file count)

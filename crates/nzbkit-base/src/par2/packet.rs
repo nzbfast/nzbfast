@@ -522,6 +522,76 @@ pub(crate) fn verify_span(input: &[u8], start: usize, end: usize) -> Option<RawP
     })
 }
 
+/// The packets that BEGIN inside a deferred span that failed
+/// [`verify_span`], found by the serial scan's `+1` resume over the
+/// span's interior - the half of [`scan_packets_serial`] the deferring
+/// walk gave up (parfast sweep, 9 Nov 2026).
+///
+/// THE GAP. [`scan_packets_deferring`] frames by declared length and
+/// never hashes a recovery packet, so a RecvSlic whose LENGTH field is
+/// damaged (still a multiple of 4, still inside the file) swallows every
+/// packet behind it up to its false end - and since it is deferred, no
+/// MD5 fails and the walk never falls back to the serial scan. The
+/// hashing walk fails that packet's MD5, falls back, and the `+1` resume
+/// finds the swallowed packets; so `parfast v -q` (which defers) and
+/// default verbosity (which hashes) could disagree about repairability.
+/// Validating a failed span through this recovers exactly what the
+/// serial scan would have found starting inside it, and costs nothing
+/// on a span that verifies - which is every span of an undamaged volume.
+///
+/// A packet found here may run past `end` (the false end cut it in
+/// two); it is checked against `input`, not against the span. `budget`
+/// is the serial scan's own bound on MD5 bytes, shared across every span
+/// one validation pass rescans so a crafted run of overlapping magics
+/// stays linear; it is decremented by what this hashes, and the scan
+/// stops when it runs out.
+pub(crate) fn scan_inside_span<'a>(
+    input: &'a [u8],
+    start: usize,
+    end: usize,
+    budget: &std::sync::atomic::AtomicU64,
+    mut f: impl FnMut(RawPacket<'a>),
+) {
+    use std::sync::atomic::Ordering;
+    let mut off = start + 1;
+    while off < end.min(input.len()) {
+        let Some(rel) = find_magic(&input[off..]) else {
+            return;
+        };
+        let s = off + rel;
+        if s >= end || s + HEADER_LEN as usize > input.len() {
+            return;
+        }
+        let len = u64::from_le_bytes(input[s + 8..s + 16].try_into().unwrap());
+        let fits = len >= HEADER_LEN
+            && len % 4 == 0
+            && (s as u64)
+                .checked_add(len)
+                .is_some_and(|e| e <= input.len() as u64);
+        if !fits {
+            off = s + 1;
+            continue;
+        }
+        let e = s + len as usize;
+        let charge = (e - (s + 32)) as u64;
+        if budget
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |b| {
+                b.checked_sub(charge)
+            })
+            .is_err()
+        {
+            return;
+        }
+        match verify_span(input, s, e) {
+            Some(pkt) => {
+                f(pkt);
+                off = e;
+            }
+            None => off = s + 1,
+        }
+    }
+}
+
 /// Returns the total bytes fed to MD5, which is the quantity `budget` below
 /// bounds; callers other than [`scan_packets_counted`] may ignore it.
 pub(super) fn scan_packets_serial<'a>(input: &'a [u8], mut f: impl FnMut(RawPacket<'a>)) -> u64 {
@@ -750,6 +820,17 @@ pub(crate) fn parse_unifilen(body: &[u8]) -> Option<([u8; 16], String)> {
 /// Only the spec's own TRAILING padding is trimmed. A name ending in
 /// any other control byte keeps it and is sanitized downstream, which
 /// is what M4-60 measured and pinned.
+///
+/// ONE BYTE CLASS IS REWRITTEN, and the paragraph above does not cover
+/// it: bytes that are not valid UTF-8 are decoded LOSSILY (each bad
+/// sequence becomes U+FFFD), so a name an older Windows producer wrote
+/// in its ANSI code page (`caf\xE9.mkv`) reads as `caf\u{FFFD}.mkv` -
+/// a name that matches no file on disk and that two different originals
+/// can share. The descriptor is still kept, which is the argument above,
+/// and adoption by content still finds the file. Whether to decode such
+/// a name some other way (a code-page guess, or bytes kept raw as an
+/// `OsString`) changes the name a repair writes and renames to, so it is
+/// a product decision and was left open by the 9 Nov 2026 parfast sweep.
 pub(crate) fn parse_filedesc(body: &[u8]) -> Option<([u8; 16], Desc)> {
     if body.len() < 56 {
         return None;

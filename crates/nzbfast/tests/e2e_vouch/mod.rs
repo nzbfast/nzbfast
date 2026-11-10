@@ -146,13 +146,20 @@ async fn an_unvouched_decoy_that_stays_packed_still_completes() {
 }
 
 /// Regression 3: an encrypted vouched group that was never offered a
-/// password lands on the existing completed-but-locked shape - exit 0,
-/// the 🔒 line, volumes kept - and NOT on a failure. The daemon's
-/// finalize reads that shape off the finished directory and raises
-/// `password_required` on a Completed record (tests/daemon_password
-/// `passworded_archive_flow`), which is the 🔑 affordance with the
-/// automatic retry untouched; a Failed record carrying
-/// `password_required` would have killed it (12 Aug 2026 sweep).
+/// password lands on the existing locked shape - exit 0, the 🔒 line,
+/// volumes kept - and NOT on an unpack failure. This is the ENGINE's
+/// answer, and it is the input the daemon's verdict is built from: the
+/// daemon's finalize reads the locked shape off the finished directory,
+/// tries every password it holds, and with none that works files the
+/// record Failed with "password required to unpack" and
+/// `password_required` raised (TODO 358, decided 9 Nov 2026 -
+/// what SABnzbd reports, so an *arr grabs another release; pinned by
+/// tests/daemon_password `passworded_archive_flow`). The flag keeps the
+/// 🔑 and the unlock, which files it Completed again. An engine failure
+/// here instead would have reached the daemon as a generic "did not
+/// unpack", which names no password at all - and the 12 Aug 2026
+/// sweep's rule stands on that side: the flag is raised only where a
+/// password is what the job is missing.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_encrypted_vouched_set_without_a_password_is_locked_not_failed() {
     if !have_par2() {

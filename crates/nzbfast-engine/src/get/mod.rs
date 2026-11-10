@@ -47,6 +47,7 @@ use tail::finish_run;
 mod rig;
 mod settle;
 mod workers;
+pub use workers::deadlock_window_secs;
 use workers::{
     TailWatchers, build_counters, drain_network, spawn_deadlock_watchdog, spawn_decode_consumers,
     spawn_rate_ticker, spawn_tail_watchers,
@@ -601,8 +602,18 @@ pub async fn get_with_progress(job: JobSpec<'_>) -> Result<()> {
     // it with the rest of the fleet, deliberately: a recovery block that
     // will not arrive is the same doubt about the same set repairing
     // from what is still in RAM. See `nzbkit::extract::LossDoubt`.
+    // TODO 358 item 12: the group a session selects if a server answers
+    // a BODY with `412 no newsgroup selected` - the job's first, in
+    // document order. Never sent otherwise (see `PoolConfig::group`).
+    let first_group: Option<Arc<str>> = nzb
+        .files
+        .iter()
+        .flat_map(|f| f.groups.first())
+        .next()
+        .map(|g| Arc::from(g.as_str()));
     for (_, c) in &mut servers {
         c.loss_doubt = Some(extractor.loss_doubt());
+        c.group = first_group.clone();
     }
     let servers = servers;
 
@@ -724,7 +735,7 @@ pub async fn get_with_progress(job: JobSpec<'_>) -> Result<()> {
         watchdog,
         &stalled,
         &abort_flag,
-        &counters.disk_full_sample,
+        &counters.write_halt_sample,
         &queue_ctl,
         &note_activity,
         net_done,

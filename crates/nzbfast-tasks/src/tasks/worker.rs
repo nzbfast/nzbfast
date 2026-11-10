@@ -489,6 +489,47 @@ fn start_gap_refusal(j: &Job, insurance: bool) -> bool {
         }
 }
 
+/// The pre-pipeline arms' re-check (`start_next`, right before the hub is
+/// claimed): did the user PAUSE this job while the start sample or the
+/// pre-flight sweep held the runner? `None` means launch.
+///
+/// Paused or suspended (a per-job pause, or a queue pause that does not
+/// exempt it) goes back into the queue where it stood, which is what the
+/// tail's suspended arm does for a run a pause wound down (`postproc.rs`,
+/// "parked back in the queue"): `Queued`, the suspension consumed, the
+/// user's own `paused` flag untouched. An insurance row is paused by
+/// design and only a suspension stops it; a Force job a queue pause
+/// exempted was never suspended, so it runs.
+///
+/// A DELETE in the same window is deliberately left to the path it always
+/// took. The delete masks the spool copy the pipeline would read, so the
+/// launch finds no NZB and the tail parks the tombstone - pinned by
+/// `a_delete_during_the_start_sample_never_starts_the_download` in the
+/// daemon suite, which passes with or without this re-check.
+fn prestart_gap_refusal(
+    d: &Arc<Daemon>,
+    job: &Arc<Mutex<Job>>,
+    nzo_id: &str,
+    insurance: bool,
+) -> Option<Start> {
+    let still_ours = d.queue.lock_ok().iter().any(|q| Arc::ptr_eq(q, job));
+    {
+        let mut j = job.lock_ok();
+        if !still_ours || j.tombstone || !(j.suspended || (j.paused && !insurance)) {
+            return None;
+        }
+        j.state = JobState::Queued;
+        j.suspended = false;
+    }
+    d.hub.activity.lock_ok().remove(nzo_id);
+    info!(
+        target: "pause",
+        "{nzo_id} paused before its download began - parked back in the queue"
+    );
+    d.save_queue();
+    Some(Start::Ended)
+}
+
 /// What this start does with the job that is already on the wire.
 enum Carry<'a> {
     /// Nothing is: the ordinary pick with the runner idle.
@@ -686,6 +727,19 @@ async fn start_next(st: &mut Runner, quick: bool, carry: Carry<'_>, spill: Optio
     // `prestart::preflight_verdict` for what may and may not stop a job
     // here.
     if let Some(ended) = prestart::preflight_verdict(st, &pre, log_mark).await {
+        return ended;
+    }
+
+    // A pause or a queue pause that landed while the arms above awaited
+    // the network (9 Nov 2026 sweep). The job has been `Downloading`
+    // since the pick, so the pause treated it as running: it marked it
+    // suspended and re-fired a wind-down at whatever owned the hub. But no
+    // pipeline was on the hub yet - only the give-up's `Gone` arm re-read
+    // the record, and even it fell through to here - so the pipeline
+    // launched over the pause: a small job downloaded in full before the
+    // re-fire caught it, and past the re-fire's ~60 s any job did.
+    if let Some(ended) = prestart_gap_refusal(&d, &job, &nzo_id, insurance) {
+        job_ended_before_pipeline(&d, pre.overlapping);
         return ended;
     }
 

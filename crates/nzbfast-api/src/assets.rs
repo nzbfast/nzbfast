@@ -1265,4 +1265,64 @@ mod tests {
             );
         }
     }
+
+    /// No inline handler carries a value through HTML escaping inside a
+    /// JS string.
+    ///
+    /// `onclick="pvOpen('${escA(id)}','${escA(name)}',...)"` looked
+    /// escaped and was not: the HTML parser decodes `&#39;` back to `'`
+    /// before the handler is compiled, so a `'` in a poster-controlled
+    /// file name closed the JS string and ran whatever followed it on one
+    /// click of the preview button (bug sweep 9 Nov 2026, A10). The page
+    /// had the same shape at ~90 sites, nzo ids and server hosts among
+    /// them. A JS argument goes through `jsArg` (JSON.stringify, then
+    /// attribute-escaped), the rule wall.html already followed, and
+    /// `esc` escapes quotes so its attribute uses cannot close a `"`.
+    #[test]
+    fn no_handler_interpolates_inside_a_js_string() {
+        #[cfg_attr(not(feature = "indexer"), expect(unused_mut))]
+        let mut pages: Vec<(&str, &str)> = vec![("dashboard", DASHBOARD_HTML)];
+        #[cfg(feature = "indexer")]
+        pages.push(("wall", super::WALL_HTML));
+        for (name, page) in pages {
+            // A template hole quoted as a call argument, array element or
+            // index: the shape every one of those sites had, whether the
+            // string sat in the attribute or was built for one first.
+            for (i, _) in page.match_indices("'${") {
+                let before = page[..i].chars().next_back().unwrap_or(' ');
+                assert!(
+                    !matches!(before, '(' | ',' | '['),
+                    "{name}: a value interpolated inside a JS string literal - use \
+                     ${{jsArg(x)}}: {}",
+                    &page[i.saturating_sub(60)..(i + 40).min(page.len())]
+                );
+            }
+            // A bare JSON.stringify in a handler leaves its own quotes to
+            // close the attribute; jsArg is the one spelling.
+            for (i, _) in page.match_indices("JSON.stringify(") {
+                let line_start = page[..i].rfind('\n').map_or(0, |n| n + 1);
+                let line = &page[line_start..i];
+                let in_handler = line.rfind(" on").is_some_and(|o| {
+                    line[o + 3..].split('=').next().is_some_and(|ev| {
+                        !ev.is_empty() && ev.bytes().all(|b| b.is_ascii_lowercase())
+                    }) && line[o..].contains("=\"")
+                });
+                assert!(
+                    !in_handler,
+                    "{name}: JSON.stringify inside an on*= handler - use jsArg: {}",
+                    &page[line_start..(i + 40).min(page.len())]
+                );
+            }
+        }
+        let esc = fn_body("esc");
+        assert!(
+            esc.contains(r#"replace(/"/g,'&quot;')"#) && esc.contains("replace(/'/g,'&#39;')"),
+            "the dashboard esc() must escape quotes: it lands in double-quoted attributes"
+        );
+        let js = fn_body("jsArg");
+        assert!(
+            js.contains("escA(JSON.stringify("),
+            "jsArg is JSON.stringify then attribute escaping, nothing less"
+        );
+    }
 }

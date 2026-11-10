@@ -330,8 +330,9 @@ pub(super) const INDEXER_CAPS_FAIL_TTL: std::time::Duration =
 /// indexer costs one timeout, not a wedged search.
 ///
 /// Idle connections are NOT kept, which is the one place this agent
-/// differs from [`shared_enrich_agent`]. A reused connection skips the
-/// resolver entirely, and the resolver is where a search learns the
+/// differs from [`shared_enrich_agent`]. A reused connection lands on the
+/// OLD socket whatever the resolver just answered (ureq still calls the
+/// resolver, then takes the pooled connection), and the resolver is where a search learns the
 /// address its indexer answered from - the fact every later grab is
 /// checked against (M9, see [`OriginBoundResolver`]). Caps-then-search,
 /// or the scoreboard's seven sequential categories, would otherwise
@@ -511,7 +512,12 @@ pub fn indexer_search_one(
             if let Some(e) = crate::newznab::parse_error(&body) {
                 return Err(scrub_indexer_body_error(e, &cfg.apikey));
             }
-            crate::newznab::parse_results(&body)
+            // Checked: a 200 that is not a feed at all (a login page, a
+            // challenge page, JSON) is this entry's ERROR, not a healthy
+            // "nothing found" (9 Nov 2026 sweep). An empty feed is still
+            // zero results.
+            crate::newznab::parse_results_checked(&body)
+                .map_err(|e| scrub_indexer_body_error(e, &cfg.apikey))?
         }
         // Strict, and it reports a schema break as an ERROR rather than
         // as an empty result list - see `nzbindex::parse_results`. That

@@ -191,10 +191,11 @@ pub trait SurveyObserver {
     /// caller that has to print the reference's per-file `Loading` /
     /// `Loaded N new packets` lines can print them from this pass
     /// instead of reading and hashing every recovery volume a second
-    /// time on its own thread. Fires once per attempt, on the repair's
+    /// time on its own thread. Fires once per REPAIR, on the repair's
     /// thread, after any provisional pass has been settled (see
-    /// [`repair_dir_set_surveyed_as`]); never on the NTT retry, which
-    /// has no observer. Defaulted to nothing, like `forecast`.
+    /// [`repair_dir_set_surveyed_as`]); the NTT fold retry does not fire
+    /// it again (`AttemptRelay` carries why). Defaulted to nothing, like
+    /// `forecast`.
     ///
     /// `parfast` measured why: on a 2 GiB set with 100% parity its own
     /// load read and MD5'd the same 2 GiB the catalog was hashing on
@@ -217,7 +218,8 @@ pub trait SurveyObserver {
     /// on another thread should make this call BLOCK until it has,
     /// which is what `crates/parfast` does.
     ///
-    /// Fires ONCE per attempt, on the repair's thread, only on the path
+    /// Fires ONCE per repair (the NTT fold retry does not fire it a
+    /// second time), on the repair's thread, only on the path
     /// that goes on to repair something: a set that turns out clean, a
     /// caller that stopped at [`after_survey`](Self::after_survey) and
     /// a cancel all return before it. An empty slice is a real answer -
@@ -231,7 +233,12 @@ pub trait SurveyObserver {
     fn before_write(&mut self) {}
     /// New output copies made by this observer from current targets. These
     /// duplicate existing target bytes and must not become external donors.
-    /// Pre-existing backup files must never be included here.
+    /// Pre-existing backup files must never be included here. This is
+    /// asked on EVERY attempt, and the NTT fold retry runs AFTER
+    /// [`before_write`](Self::before_write) has fired - so an
+    /// implementation must keep answering with the copies it made once
+    /// that call has consumed whatever it used to make them, or the
+    /// retry scans them as donors (`AttemptRelay`, A25).
     fn adoption_exclusions(&self) -> &[PathBuf] {
         &[]
     }
@@ -241,9 +248,11 @@ pub trait SurveyObserver {
     /// [`control`](crate::par2repair::control), which carries the whole
     /// design.
     ///
-    /// Asked ONCE, on the repair's own thread, before the verify pass -
-    /// so an implementation must return the same control every time and
-    /// must not build it lazily per phase. Defaulted to an inert one,
+    /// Asked once per ATTEMPT, on the repair's own thread, before the
+    /// verify pass - the NTT fold retry asks again, and must get the
+    /// same gate the first attempt did - so an implementation must
+    /// return the same control every time and must not build it lazily
+    /// per phase. Defaulted to an inert one,
     /// which is what makes this widening rather than a second channel:
     /// `crates/parfast`, the daemon and every impl written before
     /// 12 Sep 2026 are unchanged and opt in when they want it.
@@ -255,6 +264,97 @@ pub trait SurveyObserver {
 impl<F: FnMut(&[MemberSurvey]) -> AfterSurvey> SurveyObserver for F {
     fn after_survey(&mut self, members: &[MemberSurvey]) -> AfterSurvey {
         self(members)
+    }
+}
+
+/// The caller's observer as EVERY attempt of one repair sees it - the
+/// first and the NTT verify-failure fold retry alike (parfast sweep A25,
+/// 9 Nov 2026).
+///
+/// The retry used to run with NO observer (`observe.take()`), on the
+/// ground that "an observer that prints would print twice". True, and it
+/// threw away the half that has to persist with it: [`control`] (so the
+/// retry - a full second fold, the longest stretch of the whole repair -
+/// could not be cancelled, paused or watched) and
+/// [`adoption_exclusions`] (so the backups the caller made of damaged
+/// originals came back as adoption DONORS on attempt two, and a spent
+/// donor is something a caller may delete). Forwarding is half of that
+/// fix: the retry follows `before_write`, so the observer has to still
+/// be answering then - see that method's note.
+///
+/// So the two that are a STANDING property of the caller are forwarded
+/// on every attempt, and the five that are ONE-SHOT HANDSHAKES fire at
+/// most once per repair, whichever attempt reaches them first. Once is
+/// not a nicety: `crates/parfast` BLOCKS on an acknowledgement inside
+/// `extra_files_scanned` and `before_write`, from a main thread that
+/// waits for each exactly once, so a second call would wait for an ack
+/// nobody sends. `after_survey` replays the caller's first answer rather
+/// than asking again, which is the answer the retry is the rest of.
+///
+/// [`control`]: SurveyObserver::control
+/// [`adoption_exclusions`]: SurveyObserver::adoption_exclusions
+pub(super) struct AttemptRelay<'r, 'o> {
+    inner: &'r mut (dyn SurveyObserver + 'o),
+    answer: Option<AfterSurvey>,
+    fired: u8,
+}
+
+impl<'r, 'o> AttemptRelay<'r, 'o> {
+    const PACKETS: u8 = 1;
+    const FORECAST: u8 = 2;
+    const EXTRA: u8 = 4;
+    const WRITE: u8 = 8;
+
+    pub(super) fn new(inner: &'r mut (dyn SurveyObserver + 'o)) -> Self {
+        AttemptRelay {
+            inner,
+            answer: None,
+            fired: 0,
+        }
+    }
+
+    /// True the first time `bit` is asked for, false every time after.
+    fn first(&mut self, bit: u8) -> bool {
+        let first = self.fired & bit == 0;
+        self.fired |= bit;
+        first
+    }
+}
+
+impl SurveyObserver for AttemptRelay<'_, '_> {
+    fn after_survey(&mut self, members: &[MemberSurvey]) -> AfterSurvey {
+        if let Some(a) = self.answer {
+            return a;
+        }
+        let a = self.inner.after_survey(members);
+        self.answer = Some(a);
+        a
+    }
+    fn forecast(&mut self, f: &RepairForecast) {
+        if self.first(Self::FORECAST) {
+            self.inner.forecast(f);
+        }
+    }
+    fn packets_scanned(&mut self, r: &ScanReport) {
+        if self.first(Self::PACKETS) {
+            self.inner.packets_scanned(r);
+        }
+    }
+    fn extra_files_scanned(&mut self, matches: &[ExtraFileMatch]) {
+        if self.first(Self::EXTRA) {
+            self.inner.extra_files_scanned(matches);
+        }
+    }
+    fn before_write(&mut self) {
+        if self.first(Self::WRITE) {
+            self.inner.before_write();
+        }
+    }
+    fn adoption_exclusions(&self) -> &[PathBuf] {
+        self.inner.adoption_exclusions()
+    }
+    fn control(&self) -> RepairControl {
+        self.inner.control()
     }
 }
 
@@ -483,7 +583,7 @@ pub(super) fn forecast(
     let mut exps: Vec<u32> = rec_locs
         .iter()
         .filter(|loc| slices::slice_fits_block(loc.len as usize, block_size))
-        .map(|loc| loc.exp)
+        .map(|loc| crate::par2::recovery_row(loc.exp))
         .collect();
     exps.sort_unstable();
     exps.dedup();

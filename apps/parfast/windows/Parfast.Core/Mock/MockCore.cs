@@ -267,12 +267,45 @@ public sealed class MockCore : ICoreClient
     /// </remarks>
     public bool RunNext(long id) => Mutate(id, job => job.RunNext = true);
 
-    /// <summary>The mock persists nothing and says so by answering zero jobs loaded.</summary>
+    /// <summary>
+    /// The mock persists nothing and says so by answering zero jobs loaded,
+    /// unless a test has staged what the store holds.
+    /// </summary>
+    /// <remarks>
+    /// THE REAL CORE LOADS THE SAVED SETTINGS HERE, not at session start
+    /// (parfast_session::Session::open_store), and a host that read its settings
+    /// before calling this never saw them. The mock answered zero and loaded
+    /// nothing, so that ordering was invisible to every test; a staged
+    /// <see cref="StoredSettings"/> makes it reachable, and
+    /// <see cref="StoreFailure"/> the negative answer an unreadable store gives.
+    /// </remarks>
     public int OpenQueueStore(string path)
     {
-        LastQueueStorePath = path;
-        return 0;
+        lock (_gate)
+        {
+            LastQueueStorePath = path;
+            if (StoreFailure is { } failure)
+            {
+                _lastError = new JobError { Code = "refused", Message = failure };
+                return -1;
+            }
+
+            if (StoredSettings is { } stored)
+            {
+                _settings = stored;
+                _concurrency = Math.Max(1, stored.Concurrency);
+                _postAction = stored.PostQueueAction;
+            }
+
+            return 0;
+        }
     }
+
+    /// <summary>Settings the next <see cref="OpenQueueStore"/> loads, as the real store would. Tests only.</summary>
+    public ParfastSettings? StoredSettings { get; set; }
+
+    /// <summary>When set, <see cref="OpenQueueStore"/> refuses with this reason. Tests only.</summary>
+    public string? StoreFailure { get; set; }
 
     /// <summary>The mock has no store, so there is nothing to clear.</summary>
     public int ClearDigestCache() => 0;
@@ -311,11 +344,17 @@ public sealed class MockCore : ICoreClient
         return MockPlanner.Plan(spec, sources);
     }
 
+    /// <remarks>
+    /// Concurrency and the post-queue action are read back LIVE, as the real core
+    /// does: it keeps them in the settings record and SetConcurrency /
+    /// SetPostAction write them there. The mock kept them apart, so a host that
+    /// wrote back a stale record could not be caught resetting them.
+    /// </remarks>
     public ParfastSettings GetSettings()
     {
         lock (_gate)
         {
-            return _settings;
+            return _settings with { Concurrency = _concurrency, PostQueueAction = _postAction };
         }
     }
 
@@ -606,7 +645,8 @@ internal sealed class MockJob(long id, JobSpec spec, MockSet set, DateTimeOffset
 
     public void Cancel()
     {
-        if (State is JobState.Done or JobState.Failed or JobState.Cancelled)
+        // A finished job keeps its state, as the core's cancel refuses one.
+        if (State is JobState.Done or JobState.Failed or JobState.Cancelled or JobState.Interrupted)
         {
             return;
         }
@@ -672,7 +712,8 @@ internal sealed class MockJob(long id, JobSpec spec, MockSet set, DateTimeOffset
             RateBytesPerS = State == JobState.Running ? RateFor(fraction) : 0,
             LowPriority = LowPriority,
             AddedAt = addedAt,
-            Name = string.IsNullOrEmpty(spec.DisplayName()) ? set.SetName : spec.DisplayName(),
+            // Title, as the real core sends it; it never sends `name`.
+            Title = string.IsNullOrEmpty(spec.DisplayName()) ? set.SetName : spec.DisplayName(),
             LogTail = _log.ToList(),
             Survey = survey,
             Result = State == JobState.Done ? ResultFor() : null,
@@ -716,6 +757,9 @@ internal sealed class MockJob(long id, JobSpec spec, MockSet set, DateTimeOffset
             return new JobResult
             {
                 Written = preview.Files.Select(f => new WrittenFile { Name = f.Name, Size = f.Size }).ToList(),
+
+                // The run repeats the preview's warnings on its result, as the core does.
+                Warnings = preview.Warnings,
             };
         }
 

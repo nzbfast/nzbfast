@@ -1695,6 +1695,7 @@ mod tests {
             recovery_set_id: [7u8; 16],
             block_size: 1000,
             files: vec![f("Real.Feature.MKV", 60_000), f("Placeholder.bin", 0)],
+            undescribed: Vec::new(),
             nonrecovery: vec![f("Sample.nfo", 900), f("Empty.nfo", 0)],
             recovery_blocks_seen: 0,
         })];

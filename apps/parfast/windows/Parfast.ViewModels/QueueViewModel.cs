@@ -16,7 +16,7 @@ public sealed class QueueRow : Observable
     // title so the Queue table and the sheet cannot call the same job two things.
     public string KindText => ProgressViewModel.KindWord(_job.Kind);
 
-    public string Name => _job.Name;
+    public string Name => _job.DisplayTitle;
 
     public JobState State => _job.State;
 
@@ -25,11 +25,30 @@ public sealed class QueueRow : Observable
         JobState.Queued => Strings.QueueStateQueued,
         JobState.Running => _job.PhaseText,
         JobState.Paused => Strings.QueueStatePaused,
+        // Beside Done, the first thing the job could not take in; the rest are in
+        // the tooltip (Detail). The column trims, so the word Done stays first.
+        JobState.Done when Warnings.Count > 0 => Warnings.Count == 1
+            ? $"{Strings.QueueStateDone} - {Warnings[0]}"
+            : $"{Strings.QueueStateDone} - {Warnings[0]} (+{Fmt.Count(Warnings.Count - 1)})",
         JobState.Done => Strings.QueueStateDone,
         JobState.Failed => Strings.QueueStateFailed,
         JobState.Cancelled => Strings.QueueStateCancelled,
         JobState.Interrupted => Strings.QueueStateInterrupted,
         _ => string.Empty,
+    };
+
+    private IReadOnlyList<string> Warnings => _job.Result?.Warnings ?? [];
+
+    /// <summary>
+    /// The row's tooltip: every warning of a job that finished with some, or the
+    /// core's message for one that failed (whatever its error code). Null when
+    /// there is nothing to add, so no empty tooltip appears.
+    /// </summary>
+    public string? Detail => _job.State switch
+    {
+        JobState.Done when Warnings.Count > 0 => string.Join(Environment.NewLine, Warnings),
+        JobState.Failed when !string.IsNullOrEmpty(_job.Error?.Message) => _job.Error.Message,
+        _ => null,
     };
 
     public double Progress => _job.Progress;
@@ -46,6 +65,7 @@ public sealed class QueueRow : Observable
 
     public PillTone Tone => _job.State switch
     {
+        JobState.Done when Warnings.Count > 0 => PillTone.Warn,
         JobState.Done => PillTone.Good,
         JobState.Failed => PillTone.Bad,
         JobState.Interrupted => PillTone.Warn,
@@ -58,7 +78,7 @@ public sealed class QueueRow : Observable
         _job = job;
         RaiseAll(nameof(KindText), nameof(Name), nameof(State), nameof(StatusText), nameof(Progress),
             nameof(ProgressText), nameof(IsIndeterminate), nameof(AddedText), nameof(IsFinished),
-            nameof(IsRunning), nameof(Tone));
+            nameof(IsRunning), nameof(Tone), nameof(Detail));
     }
 }
 

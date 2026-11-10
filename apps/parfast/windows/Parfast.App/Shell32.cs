@@ -6,6 +6,15 @@ namespace Parfast.App;
 public static class Shell32
 {
     /// <summary>
+    /// Explorer by ABSOLUTE path. A bare "explorer.exe" is resolved through a
+    /// search order, and whether a binary planted somewhere on it could win was
+    /// never established either way (sweep 2026-11-09 A44); naming the Windows
+    /// directory takes the question off the table.
+    /// </summary>
+    private static string ExplorerPath =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+
+    /// <summary>
     /// Opens Explorer on a path, selecting it when it is a file.
     /// </summary>
     /// <remarks>
@@ -33,7 +42,7 @@ public static class Shell32
         {
             var isFile = File.Exists(path);
             var arguments = isFile ? $"/select,\"{path}\"" : $"\"{path}\"";
-            Process.Start(new ProcessStartInfo("explorer.exe", arguments) { UseShellExecute = true });
+            Process.Start(new ProcessStartInfo(ExplorerPath, arguments) { UseShellExecute = true });
         }
         catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
         {

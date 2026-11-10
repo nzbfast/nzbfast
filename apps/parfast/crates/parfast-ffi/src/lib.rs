@@ -157,6 +157,43 @@ fn out(s: String) -> *mut c_char {
         .unwrap_or(std::ptr::null_mut())
 }
 
+/// Run `f`, and turn a panic inside it into `fallback` plus an
+/// `internal` record in [`pf_last_error`] (when there is a session to
+/// hold one).
+///
+/// A panic must never cross this ABI. Since Rust 1.81 an unwind that
+/// reaches an `extern "C"` frame ABORTS the process - so a bug in the
+/// planner, reached from a preview the Create pane draws on every
+/// keystroke, killed the whole app and every job running in it, with no
+/// message a host could show. Contained here it is one call answering
+/// an error. The codes are the existing ones (`PF_ERR_REFUSED` for an
+/// `int`, NULL for a `char *`): a new constant would be a header change
+/// both hosts are mid-edit against, and `pf_last_error.code` =
+/// `internal` already tells them apart.
+///
+/// The session behind the call is not assumed broken afterwards. Every
+/// lock it takes is read through `into_inner`, so a panic that poisoned
+/// one stops nobody.
+fn contain<T>(h: Option<&pf_session>, fallback: T, f: impl FnOnce() -> T) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(v) => v,
+        Err(payload) => {
+            if let Some(h) = h {
+                let said = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "no message".to_string());
+                h.fail(
+                    "internal",
+                    format!("the parfast core failed internally: {said}"),
+                );
+            }
+            fallback
+        }
+    }
+}
+
 /// Create a session. `settings_json` may be NULL for the defaults.
 ///
 /// # Safety
@@ -164,16 +201,21 @@ fn out(s: String) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pf_session_new(settings_json: *const c_char) -> *mut pf_session {
     // SAFETY: the caller's obligation on `settings_json` is `str_of`'s.
-    let settings = match unsafe { str_of(settings_json) } {
-        None => None,
+    let text = unsafe { str_of(settings_json) };
+    // The parse INSIDE the containment as well as the session: a panic in
+    // either crossed this frame and aborted the app at launch.
+    let Some(session) = contain(None, None, || {
         // A settings object that does not parse is NOT a refusal to
         // start: the app would have no way to show the error, and a
         // corrupt preferences file must not be an app that will not
         // launch. The defaults are used instead.
-        Some(text) => Settings::from_json(text).ok(),
+        let settings = text.and_then(|t| Settings::from_json(t).ok());
+        Some(Session::new(settings))
+    }) else {
+        return std::ptr::null_mut();
     };
     let handle = Box::new(pf_session {
-        session: Session::new(settings),
+        session,
         last_error: Mutex::new(None),
     });
     // SAFETY note for readers: this is a plain leak of a Box, undone by
@@ -196,7 +238,12 @@ pub unsafe extern "C" fn pf_session_free(s: *mut pf_session) {
     // SAFETY: the caller promises `s` came from `Box::into_raw` in
     // `pf_session_new`, has not been freed, and that no other thread is
     // using it - which is what makes reclaiming the Box sound.
-    drop(unsafe { Box::from_raw(s) });
+    let handle = unsafe { Box::from_raw(s) };
+    // Contained: the session's `Drop` writes the queue store one last
+    // time, and I/O is exactly where an unexpected panic would come from.
+    // The handle is gone either way, so there is no session to record it
+    // on.
+    contain(None, (), move || drop(handle));
 }
 
 /// Install the wake callback. Pass a NULL `f` to remove it.
@@ -241,13 +288,17 @@ pub unsafe extern "C" fn pf_job_submit(s: *mut pf_session, spec_json: *const c_c
         h.fail("arg", "spec_json was null or not UTF-8");
         return i64::from(PF_ERR_ARG);
     };
-    match serde_json::from_str::<JobSpec>(text) {
-        Ok(spec) => h.session.submit(spec),
-        Err(e) => {
-            h.fail("json", e.to_string());
-            i64::from(PF_ERR_JSON)
-        }
-    }
+    contain(
+        Some(h),
+        i64::from(PF_ERR_REFUSED),
+        || match serde_json::from_str::<JobSpec>(text) {
+            Ok(spec) => h.session.submit(spec),
+            Err(e) => {
+                h.fail("json", e.to_string());
+                i64::from(PF_ERR_JSON)
+            }
+        },
+    )
 }
 
 /// One job's snapshot as JSON, or NULL for an id nothing answers.
@@ -261,13 +312,13 @@ pub unsafe extern "C" fn pf_job_snapshot(s: *mut pf_session, id: i64) -> *mut c_
     let Some(h) = (unsafe { borrow(s) }) else {
         return std::ptr::null_mut();
     };
-    match h.session.job(id) {
+    contain(Some(h), std::ptr::null_mut(), || match h.session.job(id) {
         Some(j) => out(serde_json::to_string(&j).unwrap_or_else(|_| "{}".to_string())),
         None => {
             h.fail("not_found", format!("no job {id}"));
             std::ptr::null_mut()
         }
-    }
+    })
 }
 
 /// The whole queue as JSON.
@@ -281,7 +332,9 @@ pub unsafe extern "C" fn pf_queue_snapshot(s: *mut pf_session) -> *mut c_char {
     let Some(h) = (unsafe { borrow(s) }) else {
         return std::ptr::null_mut();
     };
-    out(serde_json::to_string(&h.session.snapshot()).unwrap_or_else(|_| "{}".to_string()))
+    contain(Some(h), std::ptr::null_mut(), || {
+        out(serde_json::to_string(&h.session.snapshot()).unwrap_or_else(|_| "{}".to_string()))
+    })
 }
 
 // The four id-taking calls are written out LONGHAND and not behind a
@@ -294,7 +347,8 @@ pub unsafe extern "C" fn pf_queue_snapshot(s: *mut pf_session) -> *mut c_char {
 /// Cancel a job. A queued job stops at once; a running one at its next
 /// honouring point - see `parfast_session::runner` for what each kind
 /// can actually reach. A cancelled posting set removes every file it
-/// wrote, archive and PAR2 set alike.
+/// wrote, archive and PAR2 set alike. A job that has already FINISHED is
+/// refused (`PF_ERR_NOT_FOUND`) and keeps its state and its result.
 ///
 /// # Safety
 /// `s` is a live session.
@@ -304,7 +358,9 @@ pub unsafe extern "C" fn pf_job_cancel(s: *mut pf_session, id: i64) -> i32 {
     let Some(h) = (unsafe { borrow(s) }) else {
         return PF_ERR_ARG;
     };
-    answer(h, id, h.session.cancel(id))
+    contain(Some(h), PF_ERR_REFUSED, || {
+        answer(h, id, h.session.cancel(id))
+    })
 }
 
 /// Pause a job. A verify, a repair and the two checksum kinds park; a
@@ -323,7 +379,9 @@ pub unsafe extern "C" fn pf_job_pause(s: *mut pf_session, id: i64) -> i32 {
     let Some(h) = (unsafe { borrow(s) }) else {
         return PF_ERR_ARG;
     };
-    answer(h, id, h.session.set_job_paused(id, true))
+    contain(Some(h), PF_ERR_REFUSED, || {
+        answer(h, id, h.session.set_job_paused(id, true))
+    })
 }
 
 /// Resume a paused job.
@@ -336,7 +394,9 @@ pub unsafe extern "C" fn pf_job_resume(s: *mut pf_session, id: i64) -> i32 {
     let Some(h) = (unsafe { borrow(s) }) else {
         return PF_ERR_ARG;
     };
-    answer(h, id, h.session.set_job_paused(id, false))
+    contain(Some(h), PF_ERR_REFUSED, || {
+        answer(h, id, h.session.set_job_paused(id, false))
+    })
 }
 
 /// Remove a FINISHED job from the table. A running or queued one is
@@ -351,7 +411,9 @@ pub unsafe extern "C" fn pf_job_remove(s: *mut pf_session, id: i64) -> i32 {
     let Some(h) = (unsafe { borrow(s) }) else {
         return PF_ERR_ARG;
     };
-    answer(h, id, h.session.remove(id))
+    contain(Some(h), PF_ERR_REFUSED, || {
+        answer(h, id, h.session.remove(id))
+    })
 }
 
 /// The one place the four above turn a `bool` into the ABI's answer, so
@@ -386,7 +448,9 @@ pub unsafe extern "C" fn pf_job_run_next(s: *mut pf_session, id: i64) -> i32 {
     let Some(h) = (unsafe { borrow(s) }) else {
         return PF_ERR_ARG;
     };
-    answer(h, id, h.session.run_next(id))
+    contain(Some(h), PF_ERR_REFUSED, || {
+        answer(h, id, h.session.run_next(id))
+    })
 }
 
 /// Mark a job low priority. Advisory: it is reported in the snapshot
@@ -400,12 +464,14 @@ pub unsafe extern "C" fn pf_job_set_low_priority(s: *mut pf_session, id: i64, on
     let Some(h) = (unsafe { borrow(s) }) else {
         return PF_ERR_ARG;
     };
-    if h.session.set_low_priority(id, on) {
-        PF_OK
-    } else {
-        h.fail("not_found", format!("no job {id}"));
-        PF_ERR_NOT_FOUND
-    }
+    contain(Some(h), PF_ERR_REFUSED, || {
+        if h.session.set_low_priority(id, on) {
+            PF_OK
+        } else {
+            h.fail("not_found", format!("no job {id}"));
+            PF_ERR_NOT_FOUND
+        }
+    })
 }
 
 /// Pause or resume the QUEUE: a paused queue starts nothing new and
@@ -419,8 +485,10 @@ pub unsafe extern "C" fn pf_queue_set_paused(s: *mut pf_session, paused: bool) -
     let Some(h) = (unsafe { borrow(s) }) else {
         return PF_ERR_ARG;
     };
-    h.session.set_queue_paused(paused);
-    PF_OK
+    contain(Some(h), PF_ERR_REFUSED, || {
+        h.session.set_queue_paused(paused);
+        PF_OK
+    })
 }
 
 /// How many jobs may run at once. Clamped to at least 1.
@@ -433,8 +501,10 @@ pub unsafe extern "C" fn pf_queue_set_concurrency(s: *mut pf_session, n: u32) ->
     let Some(h) = (unsafe { borrow(s) }) else {
         return PF_ERR_ARG;
     };
-    h.session.set_concurrency(n);
-    PF_OK
+    contain(Some(h), PF_ERR_REFUSED, || {
+        h.session.set_concurrency(n);
+        PF_OK
+    })
 }
 
 /// What to do when the queue drains: `none`, `notify`, `sleep` or
@@ -458,10 +528,10 @@ pub unsafe extern "C" fn pf_queue_set_post_action(
         return PF_ERR_ARG;
     };
     match PostQueueAction::parse(text) {
-        Some(a) => {
+        Some(a) => contain(Some(h), PF_ERR_REFUSED, || {
             h.session.set_post_action(a);
             PF_OK
-        }
+        }),
         None => {
             h.fail(
                 "refused",
@@ -483,12 +553,19 @@ pub unsafe extern "C" fn pf_queue_clear_post_action(s: *mut pf_session) -> i32 {
     let Some(h) = (unsafe { borrow(s) }) else {
         return PF_ERR_ARG;
     };
-    h.session.clear_post_action_due();
-    PF_OK
+    contain(Some(h), PF_ERR_REFUSED, || {
+        h.session.clear_post_action_due();
+        PF_OK
+    })
 }
 
 /// Persist the queue to `path` and load whatever is already there.
-/// Answers the number of jobs loaded, or a negative code.
+/// Answers the number of jobs loaded, or a negative code. A store a NEWER
+/// build wrote is refused and left untouched, and the session then saves
+/// nothing. Any other store that cannot be read is kept aside as
+/// `<path>.unreadable-<seconds>-<pid>`, a new queue is saved in its
+/// place, and the call still answers `PF_ERR_REFUSED` naming the kept
+/// file, so the host can tell the user.
 ///
 /// # Safety
 /// `s` is a live session and `path` a NUL-terminated UTF-8 string.
@@ -503,13 +580,15 @@ pub unsafe extern "C" fn pf_queue_open_store(s: *mut pf_session, path: *const c_
         h.fail("arg", "path was null or not UTF-8");
         return PF_ERR_ARG;
     };
-    match h.session.open_store(std::path::Path::new(text)) {
-        Ok(n) => i32::try_from(n).unwrap_or(i32::MAX),
-        Err(e) => {
-            h.fail("refused", e);
-            PF_ERR_REFUSED
+    contain(Some(h), PF_ERR_REFUSED, || {
+        match h.session.open_store(std::path::Path::new(text)) {
+            Ok(n) => i32::try_from(n).unwrap_or(i32::MAX),
+            Err(e) => {
+                h.fail("refused", e);
+                PF_ERR_REFUSED
+            }
         }
-    }
+    })
 }
 
 /// The create preview for a spec: block size and count, padding,
@@ -550,13 +629,15 @@ pub unsafe extern "C" fn pf_plan_preview(
         h.fail("json", "not a create spec");
         return std::ptr::null_mut();
     };
-    match planner::preview(&spec) {
-        Ok(p) => out(serde_json::to_string(&p).unwrap_or_else(|_| "{}".to_string())),
-        Err(e) => {
-            h.fail(e.code, e.message);
-            std::ptr::null_mut()
+    contain(Some(h), std::ptr::null_mut(), || {
+        match planner::preview(&spec) {
+            Ok(p) => out(serde_json::to_string(&p).unwrap_or_else(|_| "{}".to_string())),
+            Err(e) => {
+                h.fail(e.code, e.message);
+                std::ptr::null_mut()
+            }
         }
-    }
+    })
 }
 
 /// What this build can actually do. A host HIDES any control whose
@@ -567,7 +648,7 @@ pub unsafe extern "C" fn pf_plan_preview(
 /// `s` may be null. The result is released with [`pf_string_free`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pf_capabilities(_s: *mut pf_session) -> *mut c_char {
-    out(capabilities_json())
+    contain(None, std::ptr::null_mut(), || out(capabilities_json()))
 }
 
 /// The capability object, in Rust, so the crate's own tests can read
@@ -582,12 +663,12 @@ pub fn capabilities_json() -> String {
         // CPU features - `gf16::scale_kernel` IS the answer
         // `scale_dispatch` acts on.
         "kernel": nzbkit::gf16::scale_kernel().name(),
-        // The spec's own `vol<first>-<last>` volume spelling, as a
-        // rename after the writer has finished - the same shape the
-        // reference's own field widths already are.
-        // `parfast::create::final_volume_names` is the one rule, read
-        // by the rename AND by the preview, so the Create pane cannot
-        // name a file the create will not write.
+        // The spec's own `vol<first>-<last>` volume spelling, written by
+        // the engine under its final name - the same shape the
+        // reference's own field widths already are. `par2gen::
+        // volume_names` is the one rule, read by the writer AND by the
+        // preview, so the Create pane cannot name a file the create will
+        // not write.
         "std_naming": true,
         // An explicit per-volume ceiling in blocks or bytes. The
         // reference's dialect has ONE volume ceiling, `-l`, so parfast
@@ -686,7 +767,9 @@ pub unsafe extern "C" fn pf_settings_get(s: *mut pf_session) -> *mut c_char {
     let Some(h) = (unsafe { borrow(s) }) else {
         return std::ptr::null_mut();
     };
-    out(h.session.settings().to_json())
+    contain(Some(h), std::ptr::null_mut(), || {
+        out(h.session.settings().to_json())
+    })
 }
 
 /// Replace the settings. Keys left out take their defaults, and
@@ -706,35 +789,39 @@ pub unsafe extern "C" fn pf_settings_set(s: *mut pf_session, settings_json: *con
         h.fail("arg", "settings_json was null or not UTF-8");
         return PF_ERR_ARG;
     };
-    match Settings::from_json_reporting(text) {
-        Ok((s2, ignored)) => {
-            h.session.set_settings(s2);
-            // A SUCCESSFUL WRITE THAT DROPPED SOMETHING STILL SAYS SO.
-            // Unknown top-level keys are accepted on purpose (a host
-            // built against a different core is never stopped by a
-            // field only one side knows), but accepting in silence is
-            // what let the Windows lane lose `notifications` for a day
-            // - so the names land in `pf_last_error` under a code of
-            // their own. The return is still PF_OK: this is a note,
-            // not a failure, and API.md says so where it warns that
-            // `pf_last_error` can hold one after a success.
-            if !ignored.is_empty() {
-                h.fail(
-                    "settings_ignored_keys",
-                    format!(
-                        "the write succeeded, but this build does not know these top-level \
+    contain(
+        Some(h),
+        PF_ERR_REFUSED,
+        || match Settings::from_json_reporting(text) {
+            Ok((s2, ignored)) => {
+                h.session.set_settings(s2);
+                // A SUCCESSFUL WRITE THAT DROPPED SOMETHING STILL SAYS SO.
+                // Unknown top-level keys are accepted on purpose (a host
+                // built against a different core is never stopped by a
+                // field only one side knows), but accepting in silence is
+                // what let the Windows lane lose `notifications` for a day
+                // - so the names land in `pf_last_error` under a code of
+                // their own. The return is still PF_OK: this is a note,
+                // not a failure, and API.md says so where it warns that
+                // `pf_last_error` can hold one after a success.
+                if !ignored.is_empty() {
+                    h.fail(
+                        "settings_ignored_keys",
+                        format!(
+                            "the write succeeded, but this build does not know these top-level \
                          keys and ignored them: {}",
-                        ignored.join(", ")
-                    ),
-                );
+                            ignored.join(", ")
+                        ),
+                    );
+                }
+                PF_OK
             }
-            PF_OK
-        }
-        Err(e) => {
-            h.fail(e.code, e.message);
-            PF_ERR_JSON
-        }
-    }
+            Err(e) => {
+                h.fail(e.code, e.message);
+                PF_ERR_JSON
+            }
+        },
+    )
 }
 
 /// "Clear remembered checksums": delete every record in the per-user
@@ -750,13 +837,15 @@ pub unsafe extern "C" fn pf_digest_cache_clear(s: *mut pf_session) -> i32 {
     let Some(h) = (unsafe { borrow(s) }) else {
         return PF_ERR_ARG;
     };
-    match h.session.clear_digest_cache() {
-        Ok(n) => i32::try_from(n).unwrap_or(i32::MAX),
-        Err(e) => {
-            h.fail("refused", e);
-            PF_ERR_REFUSED
+    contain(Some(h), PF_ERR_REFUSED, || {
+        match h.session.clear_digest_cache() {
+            Ok(n) => i32::try_from(n).unwrap_or(i32::MAX),
+            Err(e) => {
+                h.fail("refused", e);
+                PF_ERR_REFUSED
+            }
         }
-    }
+    })
 }
 
 /// `{"code":"...","message":"..."}` for the last failure on this
@@ -821,6 +910,26 @@ mod tests {
         // SAFETY: same pointer, not yet freed, from this library.
         unsafe { pf_string_free(p) };
         s
+    }
+
+    /// A panic inside a call is an error answer, never an abort - and
+    /// it says `internal`, so a host can tell it from a refusal.
+    #[test]
+    fn a_panic_inside_a_call_is_contained_and_reported() {
+        let h = pf_session {
+            session: Session::new(None),
+            last_error: Mutex::new(None),
+        };
+        let got = contain(Some(&h), PF_ERR_REFUSED, || -> i32 {
+            panic!("a deliberate test panic")
+        });
+        assert_eq!(got, PF_ERR_REFUSED);
+        let held = h.last_error.lock().expect("unpoisoned").clone();
+        let (code, message) = held.expect("the panic left a last error");
+        assert_eq!(code, "internal");
+        assert!(message.contains("a deliberate test panic"), "{message}");
+        // And the session still answers afterwards.
+        assert_eq!(contain(Some(&h), -9, || 7), 7);
     }
 
     #[test]
@@ -948,10 +1057,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).expect("temp dir");
         std::fs::write(d.join("a.bin"), vec![3u8; 40_000]).expect("fixture");
+        // The paths go in as JSON STRINGS, escaped by serde: spliced in
+        // raw, a Windows path's backslashes (`C:\Users\...`) are invalid
+        // JSON escapes, the spec does not parse and the preview answers
+        // NULL. Green on unix only until first run on Windows (9 Nov 2026).
+        let json_path = |p: std::path::PathBuf| {
+            serde_json::to_string(&p.display().to_string()).expect("a path serialises")
+        };
         let bare = format!(
-            r#"{{"sources":[{{"path":"{}"}}],"output":"{}","block":{{"size":2048}}}}"#,
-            d.join("a.bin").display(),
-            d.join("set.par2").display()
+            r#"{{"sources":[{{"path":{}}}],"output":{},"block":{{"size":2048}}}}"#,
+            json_path(d.join("a.bin")),
+            json_path(d.join("set.par2"))
         );
         let wrapped = format!(r#"{{"kind":"create","create":{bare}}}"#);
         // SAFETY: null settings are allowed.

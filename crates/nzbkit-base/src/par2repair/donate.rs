@@ -52,9 +52,10 @@
 //! [`copy_verified`] for what lands under the member's name without it.
 
 use super::adopt::md5_of_file;
+use super::read_retry;
 use crate::md5fast::{Digest, Md5};
 use crate::par2::Par2Set;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// One member file taken off a donor, named as the SET names it.
@@ -171,7 +172,7 @@ pub(super) fn copy_verified(src: &Path, dst: &Path, want: [u8; 16]) -> std::io::
     let mut hasher = Md5::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
-        let n = r.read(&mut buf)?;
+        let n = read_retry(&mut r, &mut buf)?;
         if n == 0 {
             break;
         }

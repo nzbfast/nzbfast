@@ -305,3 +305,86 @@ async fn a_failure_that_is_not_about_unpacking_keeps_its_own_remedy() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// TODO 358, decided 9 Nov 2026: a COMPLETED download whose set is
+/// encrypted, with no password that opens it, files FAILED with the
+/// "password required" reason - what SABnzbd reports, so an *arr blocks
+/// the release and grabs another - and keeps everything the flag drives:
+/// `password_required`, the volumes on disk, and the unlock affordance.
+/// It used to file Completed with the flag, which an *arr reads as a
+/// finished download and then fails to import.
+///
+/// "never ask" mode changes only what the dashboard says, so the API
+/// verdict is the same there, reason and all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_completed_locked_set_with_no_password_files_failed_and_keeps_its_key() {
+    use nzbkit::zip::fixtures::{Encrypt, Spec, zip_of};
+    for mode in ["done", "never"] {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-lockedcomplete-{mode}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = test_daemon(&dir);
+        *d.password_prompt.lock_ok() = mode.to_string();
+        let out = dir.join("out").join("Locked.Job");
+        std::fs::create_dir_all(&out).unwrap();
+        let payload: Vec<u8> = (0..30_000u32).map(|i| (i * 5 + 1) as u8).collect();
+        std::fs::write(
+            out.join("payload.zip"),
+            zip_of(&[Spec {
+                encrypt: Some(Encrypt::Ae {
+                    password: "nobody-has-this",
+                    strength: 3,
+                    vendor_version: 2,
+                }),
+                ..Spec::deflated("movie.mkv", &payload)
+            }]),
+        )
+        .unwrap();
+        let job = Arc::new(Mutex::new(
+            job_from_json(&json!({
+                "nzo_id": format!("SABnzbd_nzo_lockedcomplete_{mode}"),
+                "name": "Locked.Job",
+                "nzb_path": dir.join("locked.nzb").to_string_lossy(),
+                "out_dir": out.to_string_lossy(),
+                "state": "Completed",
+            }))
+            .unwrap(),
+        ));
+        finalize_completed(&d, &job).await;
+
+        let j = job.lock_ok();
+        assert_eq!(
+            j.state,
+            JobState::Failed,
+            "{mode}: an encrypted set with no password is Failed"
+        );
+        assert_eq!(j.fail_message, crate::diag::PASSWORD_REQUIRED, "{mode}");
+        assert!(j.password_required, "{mode}: the key stays on the row");
+        assert_eq!(
+            nzbget_status(&j),
+            ("FAILURE/UNPACK", "SUCCESS", "PASSWORD"),
+            "{mode}: NZBGet clients read the password status"
+        );
+        assert_eq!(
+            fail_action(
+                fail_kind(&j.fail_message),
+                fail_hint(&j.fail_message),
+                &j.fail_message,
+                j.password_required,
+            ),
+            "password",
+            "{mode}: the drawer offers the unlock"
+        );
+        // Nothing is moved and the archive is kept for the unlock.
+        assert!(!j.move_pending, "{mode}");
+        assert!(
+            out.join("payload.zip").exists(),
+            "{mode}: the archive was disturbed"
+        );
+        drop(j);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

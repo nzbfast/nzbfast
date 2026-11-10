@@ -3745,6 +3745,8 @@ jobs:
           packaging/tests/publish-export-completes.sh --paths
       - name: release notes gate
         run: packaging/tests/release-notes-gate.sh
+      - name: checksum file coverage
+        run: packaging/tests/sha256sums-coverage.sh
       - name: synology compose parity
         run: packaging/tests/synology-compose-parity.sh
       - name: docker entrypoint key gate

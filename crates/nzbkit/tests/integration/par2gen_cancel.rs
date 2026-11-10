@@ -310,12 +310,9 @@ fn a_cancelled_extend_keeps_the_volumes_it_was_extending() {
         "{err:?}"
     );
     let after = set_on_disk(&t.0);
-    // Every VOLUME the set already had is byte-identical, and none of
-    // the extend's own is there.
+    // Every file the set already had - its INDEX included, since 9 Nov
+    // 2026 - is byte-identical, and none of the extend's own is there.
     for (name, bytes) in &before {
-        if name == "set.par2" {
-            continue;
-        }
         let found = after.iter().find(|(n, _)| n == name);
         assert_eq!(
             found.map(|(_, b)| b),
@@ -328,16 +325,24 @@ fn a_cancelled_extend_keeps_the_volumes_it_was_extending() {
         "the extend's own volumes survived a cancel: {:?}",
         after.iter().map(|(n, _)| n).collect::<Vec<_>>()
     );
-    // THE ONE THING AN EXTEND DOES LOSE, stated rather than implied:
-    // the index. Every create rewrites `<base>.par2` (with a
-    // placeholder critical block it backfills at the end), so the index
-    // IS a file this run wrote and the cancel takes it - which is
-    // better than leaving a placeholder that names no member. The
-    // volumes each repeat the critical block, so the set is still
-    // nameable, and re-running the create writes the index again.
+    // THE INDEX, which this used to say an extend LOSES. Every create
+    // rewrites `<base>.par2` (with a placeholder critical block it
+    // backfills at the end), and until 9 Nov 2026 it did so with a
+    // truncating open as its first write, so the cancel took an index
+    // that was already empty and this asserted the file was gone. That
+    // was finding A4b of the 9 Nov 2026 parfast sweep: the cancel
+    // destroyed the index of the set the user was extending. An
+    // overwriting create now writes its index under a staging name and
+    // renames it into place only once its own set is whole
+    // (`control::CreateTrail`), so the loop above holds `set.par2` to
+    // its old bytes like every volume - and neither the placeholder nor
+    // the staging file is left.
     assert!(
-        !t.0.join("set.par2").exists(),
-        "a cancelled create must not leave the placeholder index it wrote"
+        std::fs::read_dir(&t.0)
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().starts_with(".set.par2.")),
+        "a cancelled create left its staging index behind"
     );
 }
 
@@ -550,9 +555,10 @@ fn a_pause_raised_inside_the_transform_parks_the_create() {
         "a PAUSED create ran to completion in {budget:?} (an unpaused one takes {unpaused:?})"
     );
     // The index placeholder IS on disk by now and is meant to be: it
-    // is written before the fold, carries a placeholder critical block
-    // until the backfill at the very end, and is noted in the trail so
-    // a cancel takes it (the test below holds it to that). What a
+    // is written before the fold (under a staging name since 9 Nov 2026,
+    // renamed into place once the set is whole), carries a placeholder
+    // critical block until the backfill at the very end, and is noted in
+    // the trail so a cancel takes it (the test below holds it to that). What a
     // create parked in its arithmetic cannot have is a VOLUME - those
     // are written from `slices`, which is what the parked call has not
     // returned yet.

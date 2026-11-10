@@ -18,9 +18,9 @@ import PackageDescription
 // app falls back to MockCore when it is not.
 //
 // Conditional rather than always-on, deliberately: `swift test` must keep
-// running on a box with no Rust toolchain and no 110 MB of staticlib - the 76
-// tests are over the contract, the planner and the view models, and none of
-// them needs an engine. `make-app.sh` builds the lib and then this manifest
+// running on a box with no Rust toolchain and no 110 MB of staticlib - the
+// mock-build tests are over the contract, the planner and the view models,
+// and none of them needs an engine (`swift test --list-tests` counts them). `make-app.sh` builds the lib and then this manifest
 // picks it up on the next build with no edit anywhere.
 //
 // vendor/lib is gitignored: it holds a lipo of

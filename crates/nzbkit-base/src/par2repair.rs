@@ -200,7 +200,11 @@ pub enum RepairError {
     /// The chosen recovery slices do not span the missing blocks: their
     /// RS constants are linearly dependent, so the matrix cannot be
     /// inverted. Distinct from [`Self::RecoveryShort`], where there
-    /// were not enough slices to try in the first place.
+    /// were not enough slices to try in the first place. Since A27
+    /// (9 Nov 2026) a singular selection is retried once with an
+    /// independent one when spare recovery slices exist
+    /// (`catalog::independent_rows`), so this now means NO selection of
+    /// the available slices spans the damage.
     #[error("recovery matrix is singular for this slice combination")]
     SingularMatrix,
     /// A member was reconstructed and its MD5 still does not match the
@@ -943,7 +947,9 @@ fn repair_mapped_inner(
     let mut by_exp: HashMap<u32, &[u8]> = HashMap::new();
     for (e, data) in recovery {
         if data.len() == block_size {
-            by_exp.entry(*e).or_insert(data.as_slice());
+            by_exp
+                .entry(crate::par2::recovery_row(*e))
+                .or_insert(data.as_slice());
         }
     }
     if by_exp.len() < missing.len() {
@@ -952,6 +958,9 @@ fn repair_mapped_inner(
             need: missing.len(),
         });
     }
+    // A selection a previous pass of THIS call proved singular is
+    // replaced by the independent one it found - see the reselect below.
+    let reselected = catalog::pin_rows(&mut by_exp, probe.pinned_rows.take(), missing.len());
     let exps = catalog::selected_exponents(&by_exp, missing.len());
     // Borrowed payloads, not clones: the caller's corpus outlives the
     // whole attempt (it is pinned across the NTT-fallback retry), and
@@ -1060,7 +1069,24 @@ fn repair_mapped_inner(
             control::RepairPhase::Fold,
             work.iter().map(|&(_, _, _, take)| take as u64).sum(),
         );
-        let backsub = backsub_for_sweep(&mut backsub, n_inputs, &missing, &exps, w, control)?;
+        let planned = backsub_for_sweep(&mut backsub, n_inputs, &missing, &exps, w, control);
+        // A27: a singular selection is not the end when the set holds
+        // spare recovery rows - `catalog::independent_rows`. Before the
+        // first fold byte, so the re-run repeats nothing but the lay-out
+        // above; and once, because a pinned selection that is singular
+        // anyway is not reselected again.
+        let planned = catalog::note_singular(
+            planned,
+            si == 0 && !reselected,
+            &mut probe.pinned_rows,
+            || catalog::independent_rows(n_inputs, &missing, &by_exp, control),
+        );
+        if matches!(planned, Err(RepairError::SingularMatrix)) && probe.pinned_rows.is_some() {
+            return repair_mapped_inner(
+                files, block_size, recovery, io, policy, path, probe, control,
+            );
+        }
+        let backsub = planned?;
         let rec = Reconstructor::new_controlled_planned(
             w,
             n_inputs,
@@ -2152,17 +2178,30 @@ fn repair_sets_catalog(
 /// re-proves each selected recovery packet against its MD5 at pread.
 ///
 /// `observe`, when given, is shown the verify pass before the fold and
-/// may call the repair off - see [`repair_dir_set_surveyed`]. It is
-/// taken on the FIRST attempt and gone on the retry: the rerun
-/// re-verifies from disk, and an observer that prints would print
-/// twice.
+/// may call the repair off - see [`repair_dir_set_surveyed`]. Every
+/// attempt sees it through ONE [`survey::AttemptRelay`]: its control
+/// and adoption exclusions hold on the retry too, and its one-shot
+/// handshakes fire once per repair, so an observer that prints still
+/// prints once. Until A25 (9 Nov 2026) it was taken on the first attempt
+/// and the retry ran with none - no cancel, no pause, no progress, and
+/// the caller's fresh backups back in the donor list.
 fn repair_dir_set(
     cat: &mut PacketCatalog,
     want: Option<[u8; 16]>,
     ctx: &DirContext,
     fresh: bool,
-    mut observe: Option<&mut (dyn SurveyObserver + '_)>,
+    observe: Option<&mut (dyn SurveyObserver + '_)>,
 ) -> Result<RepairStatus, RepairError> {
+    let mut relay = observe.map(survey::AttemptRelay::new);
+    // A directory-scoped call names no set: it means the first one that
+    // can be repaired, never a stray packet's (`first_set_with_main`).
+    // Resolved once, here, so every attempt below repairs the same set.
+    // Only the directory-scoped entries pass `None`, and they pass a
+    // fresh catalog, so nothing on disk has moved under it yet.
+    let want = match want {
+        Some(id) => Some(id),
+        None => cat.first_set_with_main()?,
+    };
     // The NTT verify-failure retry is safe to run as a full re-attempt
     // here: the rerun re-verifies every target from disk, so any block
     // the failed attempt patched in place with wrong bytes fails its
@@ -2178,15 +2217,27 @@ fn repair_dir_set(
     // reason the two ids are separate.
     let inv = census::Invocation::start(ctx.caller);
     let out = run_with_ntt_fallback(SyndromePath::Auto, |path, probe| {
-        let f = std::mem::replace(&mut fresh, false);
-        let att = inv.attempt();
-        let r = repair_dir_set_inner(cat, want, ctx, f, path, probe, observe.take(), &att);
-        // `probe.used` on a `VerifyFailed` is exactly what makes the
-        // fallback rerun, so the attempt can say whether it is the
-        // verdict without the census guessing from a later record.
-        let continuing = probe.used && matches!(r, Err(RepairError::VerifyFailed(_)));
-        att.finish(&r, continuing);
-        r
+        loop {
+            let f = std::mem::replace(&mut fresh, false);
+            let att = inv.attempt();
+            let observe = relay.as_mut().map(|r| r as &mut dyn SurveyObserver);
+            let r = repair_dir_set_inner(cat, want, ctx, f, path, probe, observe, &att);
+            // A27: a singular selection that found an independent one
+            // (`probe.pinned_rows`) runs once more with it. Nothing was
+            // written - the solve plan is built before the first fold
+            // byte - so the re-run re-verifies the same directory.
+            let reselect =
+                matches!(r, Err(RepairError::SingularMatrix)) && probe.pinned_rows.is_some();
+            // `probe.used` on a `VerifyFailed` is exactly what makes the
+            // fallback rerun, so the attempt can say whether it is the
+            // verdict without the census guessing from a later record.
+            let continuing =
+                reselect || (probe.used && matches!(r, Err(RepairError::VerifyFailed(_))));
+            att.finish(&r, continuing);
+            if !reselect {
+                return r;
+            }
+        }
     });
     inv.finish(&out);
     out
@@ -2688,7 +2739,10 @@ fn repair_dir_set_inner(
         // bytes, so it is refused - out loud, which is the half that was
         // missing. See [`slices::slice_fits_block`].
         if slices::slice_fits_block(loc.len as usize, bs) {
-            by_exp.entry(loc.exp).or_insert(*loc);
+            // Keyed by ROW, not by the wire value - `par2::recovery_row`.
+            by_exp
+                .entry(crate::par2::recovery_row(loc.exp))
+                .or_insert(*loc);
         } else {
             refused += 1;
             shortest = shortest.min(loc.len);
@@ -2942,6 +2996,8 @@ fn repair_dir_set_inner(
     // have structure decides the arm, and the arm decides the window - an
     // unstructured set is Gauss-Jordan's two buffers and matrix, never the
     // joint arm's one. `reconstruct::solve_buffers` carries the incident.
+    // A27: an attempt after a singular one solves the rows it pinned.
+    let reselected = catalog::pin_rows(&mut by_exp, probe.pinned_rows.take(), needed);
     let structured = reconstruct::selection_structured(
         n_inputs,
         &missing,
@@ -3110,7 +3166,7 @@ fn repair_dir_set_inner(
             // pre-slab driver dropped them here.
             let feed_from = std::mem::take(&mut recovery);
             let max_exp = feed_from.last().map_or(0, |&(e, _)| e);
-            let mut rec = sweep_reconstructor(
+            let built = sweep_reconstructor(
                 &mut backsub,
                 w,
                 n_inputs,
@@ -3119,6 +3175,13 @@ fn repair_dir_set_inner(
                 feed_from,
                 path,
                 &control,
+            );
+            // A27, the mapped driver's reselect; `repair_dir_set` re-runs.
+            let mut rec = catalog::note_singular(
+                built,
+                si == 0 && !reselected,
+                &mut probe.pinned_rows,
+                || catalog::independent_rows(n_inputs, &missing, &by_exp, &control),
             )?;
             if si == 0 {
                 probe.selected = rec.ntt_selected();
@@ -3501,8 +3564,11 @@ fn repair_dir_set_inner(
         // A tree-preserved target writes into a subdirectory that may
         // not exist yet (missing-file recreate); the temp file lands in
         // the same parent, so both arms need it. Symlink-refusing, same
-        // containment rule as every other tree write.
-        crate::disk::create_out_dirs(dir, &crate::disk::out_name_of(dir, &t.path))?;
+        // containment rule as every other tree write. Its error, and the
+        // in-place open's below, clean up the temps earlier targets of
+        // this loop already staged - a bare `?` left them behind (A23).
+        crate::disk::create_out_dirs(dir, &crate::disk::out_name_of(dir, &t.path))
+            .inspect_err(|_| cleanup(&renames, None))?;
         // A whole-file match opens no destination and writes no byte -
         // it is landed by moving the donor, below. It stays in `damaged`
         // as far as THIS line because a tree-shaped target's parent
@@ -3524,7 +3590,8 @@ fn repair_dir_set_inner(
                 .write(true)
                 .create(true)
                 .truncate(false)
-                .open(&t.path)?;
+                .open(&t.path)
+                .inspect_err(|_| cleanup(&renames, None))?;
             jobs.push(PatchJob {
                 ti,
                 file: f,
@@ -3751,7 +3818,8 @@ fn repair_dir_set_inner(
 /// A free function rather than the tail of that one since 21 Sep 2026,
 /// under the size gate - the caller sits on a baseline and this block is
 /// the one self-contained stage of it that needed no state to move with
-/// it. The body is verbatim except for the donor guard named below.
+/// it. The body is verbatim except for the donor guard named below, and
+/// for the cleanup of the temps a failed rename never reached (A24).
 fn land_rebuilds(
     mut renames: Vec<(PathBuf, usize)>,
     whole: adopt::WholeMatches,
@@ -3769,7 +3837,12 @@ fn land_rebuilds(
             report.files_patched.push(targets[ti].file.name.clone());
         }
     }
-    for (tmp, ti) in renames {
+    // An iterator held across the loop rather than consumed by it, so the
+    // one arm that gives up (a failed rename on a set that is NOT short)
+    // can clean up the rebuild temps it never reached. Consuming the list
+    // orphaned every one of them under its `.nzbfast-repair.` name (A24).
+    let mut pending = renames.into_iter();
+    while let Some((tmp, ti)) = pending.next() {
         let t = &targets[ti];
         // Rename straight over the target - no remove first.
         //
@@ -3786,7 +3859,16 @@ fn land_rebuilds(
             if !whole.targets.contains(&ti) {
                 let _ = std::fs::remove_file(&tmp);
             }
-            status::publish_failed(shortfall, &t.file.name, e.into())?;
+            if let Err(e) = status::publish_failed(shortfall, &t.file.name, e.into()) {
+                // The donor guard again: a whole-file match's `tmp` is
+                // the donor, and stays where it is.
+                for (rest, rti) in pending {
+                    if !whole.targets.contains(&rti) {
+                        let _ = std::fs::remove_file(&rest);
+                    }
+                }
+                return Err(e);
+            }
             continue;
         }
         report.files_patched.push(t.file.name.clone());

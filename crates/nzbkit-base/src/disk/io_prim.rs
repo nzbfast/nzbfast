@@ -245,3 +245,74 @@ pub fn storage_exhausted(e: &io::Error) -> bool {
         },
     }
 }
+
+/// Is this write-path error the DESTINATION refusing to be written - a
+/// permission it does not grant, or a directory standing where the
+/// payload's file has to go? The sibling of [`storage_exhausted`], and
+/// the same reasoning makes it a halt: refetching cannot change the
+/// answer, and before this a job whose output folder lost its write
+/// permission kept downloading at line rate with every article failing
+/// the same open (TODO 358 item 6, a Weaver parity row).
+///
+/// EACCES and EPERM both arrive as `PermissionDenied` (std maps the
+/// two together; EPERM is what macOS answers for a folder privacy
+/// protection holds, and what an immutable flag answers anywhere), and
+/// Windows' ERROR_ACCESS_DENIED maps to the same kind - which is also
+/// what Windows answers for an attempt to open a DIRECTORY as a file,
+/// so that shape needs no arm of its own there. EISDIR is
+/// `IsADirectory`.
+///
+/// The raw codes are gated per platform exactly as
+/// [`storage_exhausted`]'s are, for errors built with
+/// `Error::from_raw_os_error`: 1 / 13 / 21 are EPERM / EACCES / EISDIR on
+/// both Linux and macOS, and 5 is ERROR_ACCESS_DENIED on Windows (5 is
+/// EIO on Unix, which is NOT this - a failing disk may come back).
+///
+/// WHAT KEEPS IT FROM HALTING ON AN UNRELATED REFUSAL is the caller, not
+/// this function: a `PermissionDenied` means nothing about the output
+/// folder until it came out of a write INTO it. The one consumer is the
+/// download's article write path (`get::workers`'
+/// `note_storage_exhausted_halt`, via [`write_halt`]), the same door the
+/// full-disk halt uses. Nothing that reads a source, probes a path or
+/// dials a socket reaches it.
+pub fn destination_refused(e: &io::Error) -> bool {
+    match e.kind() {
+        io::ErrorKind::PermissionDenied | io::ErrorKind::IsADirectory => true,
+        _ => match e.raw_os_error() {
+            // ERROR_ACCESS_DENIED / EPERM, EACCES, EISDIR.
+            Some(code) if cfg!(windows) => code == 5,
+            Some(code) => matches!(code, 1 | 13 | 21),
+            None => false,
+        },
+    }
+}
+
+/// Which of the two halting write failures this is, if either. The
+/// download's write path stops the fetch on both and needs to know which
+/// one it stopped on, because they want different verdicts: a full
+/// volume is answered by freeing space (and the min-free guard can wait
+/// for it), a refusal by fixing the folder's permissions - telling a user
+/// with a terabyte free that the disk is full sends them to the wrong
+/// fix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteHalt {
+    /// [`storage_exhausted`]: full volume, spent quota, read-only
+    /// filesystem, a write the kernel accepts zero bytes of.
+    Exhausted,
+    /// [`destination_refused`]: EACCES, EPERM, EISDIR.
+    Refused,
+}
+
+/// [`storage_exhausted`] first, then [`destination_refused`]. Exhaustion
+/// wins a tie, which only an error carrying both a halting kind and a
+/// halting raw code of the other class could produce; the full-disk
+/// verdict is the older and better-trodden of the two.
+pub fn write_halt(e: &io::Error) -> Option<WriteHalt> {
+    if storage_exhausted(e) {
+        Some(WriteHalt::Exhausted)
+    } else if destination_refused(e) {
+        Some(WriteHalt::Refused)
+    } else {
+        None
+    }
+}

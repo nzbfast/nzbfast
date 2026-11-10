@@ -91,12 +91,32 @@ fn a_tool_profile_denies_by_default_and_confines_reads_writes_and_network() {
         p.contains("(allow file-read* file-write* (subpath \"/jobs/x\"))"),
         "{p}"
     );
-    // The tool's own directory is readable; the user's home is not.
-    assert!(p.contains("(subpath \"/opt/homebrew/bin\")"), "{p}");
+    // The tool's own executable is readable; its directory is not.
+    assert!(p.contains("(literal \"/opt/homebrew/bin/unrar\")"), "{p}");
+    assert!(!p.contains("(subpath \"/opt/homebrew/bin\")"), "{p}");
     assert!(!p.contains("(allow default)"), "{p}");
     for dir in mac::SYSTEM_READ {
         assert!(p.contains(&format!("(subpath \"{dir}\")")), "{dir} in {p}");
     }
+}
+
+/// A tool installed straight into the home directory must not hand a
+/// strict child the home directory. NEGATIVE CONTROL, run: with the
+/// profile granting `program.parent()` as a subpath, this fails on the
+/// home grant.
+#[test]
+fn a_tool_in_the_home_directory_does_not_open_the_home_directory() {
+    let p = mac::profile(
+        Path::new("/nzbfast-test/userdir/par2"),
+        &verbatim_tool_policy("/jobs/x"),
+        true,
+    )
+    .expect("a UTF-8 policy has a profile");
+    assert!(
+        p.contains("(literal \"/nzbfast-test/userdir/par2\")"),
+        "{p}"
+    );
+    assert!(!p.contains("\"/nzbfast-test/userdir\")"), "{p}");
 }
 
 /// The fixture paths are chosen NOT to exist: `Policy` resolves symlinks
@@ -225,15 +245,15 @@ fn bwrap_argv_for_a_tool_is_the_policy_word_for_word() {
         ]);
     }
     want.extend([
+        // Private, and BEFORE the readable and writable binds: both land
+        // on top of it, so a donor or a job directory under /tmp is
+        // still the real one.
+        "--tmpfs".to_string(),
+        "/tmp".to_string(),
         "--proc".to_string(),
         "/proc".to_string(),
         "--dev".to_string(),
         "/dev".to_string(),
-        // Private, and AFTER nothing that could be written through: the
-        // job bind below lands on top of it, so a job directory under
-        // /tmp is still the real one.
-        "--tmpfs".to_string(),
-        "/tmp".to_string(),
         "--bind-try".to_string(),
         spelled("/jobs/x"),
         spelled("/jobs/x"),
@@ -329,6 +349,50 @@ fn bwrap_binds_a_tool_outside_the_system_prefixes_as_a_file() {
         a.iter()
             .filter(|s| s.to_string_lossy().ends_with("par2"))
             .count(),
+        0,
+        "{a:?}"
+    );
+}
+
+/// A repair donor under /tmp beside a job under /tmp: the policy grants
+/// the donor read-only, so the private tmpfs must land BEFORE that bind.
+/// It used to land after it, and a later parent mount hides every earlier
+/// bind below it, so the child saw its job (rebound after) and not the
+/// donor - nor a tool living inside the donor, which `shown` trusted the
+/// donor bind to expose (6 Nov 2026 sweep, F5).
+#[test]
+fn bwrap_lays_the_private_tmp_before_a_readable_donor_under_it() {
+    let mut policy = tool_policy("/tmp/job");
+    policy.readable.push(PathBuf::from("/tmp/donor"));
+    let tool = Path::new("/tmp/donor/par2");
+    let a: Vec<String> = linux::bwrap_args(tool, &policy)
+        .iter()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect();
+    let tmpfs = a
+        .windows(2)
+        .position(|w| w == ["--tmpfs", "/tmp"])
+        .expect("the private /tmp");
+    let donor = a
+        .windows(3)
+        .position(|w| w == ["--ro-bind-try", "/tmp/donor", "/tmp/donor"])
+        .expect("the donor is bound read-only");
+    let job = spelled("/tmp/job");
+    let job_bind = a
+        .windows(3)
+        .position(|w| w[0] == "--bind-try" && w[1] == job)
+        .expect("the job is bound writable");
+    assert!(tmpfs < donor, "the tmpfs would hide the donor: {a:?}");
+    assert!(tmpfs < job_bind, "the tmpfs would hide the job: {a:?}");
+    assert!(
+        !a.windows(2)
+            .any(|w| w[0] == "--bind-try" && w[1] == "/tmp/donor"),
+        "the donor stays read-only: {a:?}"
+    );
+    // The donor bind now shows a tool inside it, so it needs no bind of
+    // its own - and that is only true because the tmpfs comes first.
+    assert_eq!(
+        a.iter().filter(|s| *s == "/tmp/donor/par2").count(),
         0,
         "{a:?}"
     );

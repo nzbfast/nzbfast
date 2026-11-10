@@ -91,6 +91,7 @@ fn set_of(id: [u8; 16], bs: usize) -> nzbkit::par2::Par2Set {
         recovery_set_id: id,
         block_size: bs as u64,
         files: Vec::new(),
+        undescribed: Vec::new(),
         nonrecovery: Vec::new(),
         recovery_blocks_seen: 0,
     }

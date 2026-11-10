@@ -90,6 +90,15 @@ if ($Publish -or $Installer -or $Run) {
     if (-not (Test-Path $notices)) { throw "$notices is not there - the app ships rarkit's MIT notice" }
     Copy-Item $notices (Join-Path $out "THIRD-PARTY-NOTICES.txt") -Force
 
+    # The app's own GPL text, beside it for the same reason. Until 1.9.0 only
+    # the installer step below copied LICENSE, into its stage directory, so
+    # the installer showed it and the portable zip never carried it - the
+    # mac zip and DMG always have. The installer step still copies its own,
+    # because the .iss reads it from the stage by name.
+    $appLicense = Join-Path $root "..\..\..\LICENSE"
+    if (-not (Test-Path $appLicense)) { throw "$appLicense is not there - the zip ships the app's GPL text" }
+    Copy-Item $appLicense (Join-Path $out "LICENSE") -Force
+
     # MOTW-stamped executables hang headless (MACHINES.md): SmartScreen has no
     # desktop to ask on. Anything that came off the network carries the mark.
     Get-ChildItem $out -Recurse -File | Unblock-File

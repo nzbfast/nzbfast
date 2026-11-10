@@ -60,7 +60,10 @@ mod e2e_wstage;
 // Zero-length FileDescs (VIDEO_TS placeholders) - case 3 of the no-RAR
 // deobfuscation family (sibling dir, size gate).
 mod e2e_emptydesc;
+// G2 + item 15 (TODO 358): never Completed over a packed main payload,
+// and a packed extra named rather than failed (sibling dir, size gate).
 mod e2e_faults;
+mod e2e_g2;
 mod e2e_holdstrace;
 mod e2e_integrity;
 // X5-24 (30 Aug 2026 ruling): the RESIDUAL half of the late-set pass -
@@ -68,6 +71,9 @@ mod e2e_integrity;
 // it rebuilt from parity alone (sibling dir, size gate). The other half
 // of the same row is `e2e_residual`.
 mod e2e_lateset;
+// G1 (TODO 358): store sets with volumes bigger than a tight
+// --mem-limit, completing out of order, both routes (sibling dir).
+mod e2e_ladder;
 // TODO 311: a post that ships one recovery set PER FILE (GH #63) -
 // sibling dir, size gate.
 mod e2e_multiset;
@@ -86,6 +92,9 @@ mod e2e_norarsfv;
 // daemon queue, with healthy jobs behind it (sibling dir, size gate).
 mod e2e_qprog;
 mod e2e_relpath;
+// TODO 358 item 6: a destination that refuses writes halts the job with
+// a verdict naming the refusal (sibling dir, size gate).
+mod e2e_refused;
 mod e2e_repair;
 // X5-24 (30 Aug 2026 ruling): residual assignment after a TOTAL loss -
 // the one file a fully obfuscated post lost whole, against the one

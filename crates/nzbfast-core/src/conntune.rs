@@ -974,6 +974,14 @@ pub fn line_cap_auto_resolve(env: Option<&str>, setting: Option<usize>) -> bool 
 /// The I/O shard layout does NOT follow this: `linecap::shard_basis`
 /// holds such a run's shard count to the first ceiling's, so the only
 /// cost of the wider spawn is the parked tasks above.
+///
+/// **8 Nov 2026: unbounded, so each server spawns to its own ceiling.**
+/// The probe's ceiling past a paid rung is now the primaries' whole grant
+/// (`linecap::probe_ceiling`), not `LINE_CAP_SUPPLY_MAX_FLEET`, so a
+/// fixed fleet-wide headroom of 100 would strand it. A fill server spawns
+/// to its ceiling too and parks the surplus, which is what its queue-dry
+/// share already asked for. At ~6.3 KB a parked slot, a 290-connection
+/// fleet costs ~1.6 MB of parked tasks.
 pub fn line_cap_headroom_fleet(line_cap: usize, auto: bool, _anchor_measured: bool) -> usize {
     match auto {
         false => line_cap,
@@ -981,7 +989,13 @@ pub fn line_cap_headroom_fleet(line_cap: usize, auto: bool, _anchor_measured: bo
         // bound is per SERVER and is applied per server, one function
         // down. Handing this a fleet-wide sum would take the headroom
         // off servers that are not the ones with the small account.
-        true => nzbkit::pool::linecap::LINE_CAP_SUPPLY_MAX_FLEET,
+        // Every slot each server's own ceilings allow (8 Nov 2026): the
+        // probe may now walk to the primaries' whole grant
+        // (`linecap::probe_ceiling`), and a raise onto a target above
+        // the spawned fleet wakes nothing. `line_cap_spawn_slots` mins
+        // this into each server's `uncapped`, so the fleet-wide number
+        // only has to be at least as large as any grant.
+        true => usize::MAX,
     }
 }
 

@@ -132,7 +132,7 @@
 //! The record is `research/PAR2GEN-CREATE-CONTROL-AB-2026-09-12.md`
 //! (private tree).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use super::Par2GenError;
@@ -430,7 +430,8 @@ impl CreateControl {
 ///
 /// # Why a partial set is worse than no set
 ///
-/// The volumes are written to their FINAL names with no temp file, and
+/// A fresh create writes its volumes to their FINAL names with no temp
+/// file (only a name that is already taken is staged - see below), and
 /// the critical packets are patched into them LAST (see
 /// [`super::volwrite::backfill_critical`]), so a create killed in the
 /// middle leaves files that carry a placeholder critical block: they
@@ -439,6 +440,23 @@ impl CreateControl {
 /// try and broken enough to fail. That is the promise stated on
 /// [`Par2GenError::Cancelled`], and this is what keeps it.
 ///
+/// # Not only a cancel: any failure (9 Nov 2026)
+///
+/// Until 9 Nov 2026 only [`Par2GenError::Cancelled`] reached the unlink,
+/// and a create that failed for any other reason - a member that changed
+/// under it, a full disk - left what it had written "as a diagnosis".
+/// What it had written was the index under its FINAL name with the
+/// placeholder critical block in it: valid packet MD5s, the real set id
+/// and names, and an all-zero whole-file hash and block hashes. That is
+/// a set every reader parses and that calls every intact member damaged
+/// (finding A4 of the 9 Nov 2026 parfast sweep). The error message is
+/// the diagnosis; the files were only ever a trap. So
+/// [`CreateTrail::settle`] now unlinks on every failure of the create
+/// itself, and the cancel is one case of it - and a panic too, through
+/// [`CreateTrail::unlink_on_unwind`]. The one exception is a failed final
+/// rename of a set that is already whole, which keeps everything and names
+/// the staged index ([`CreateTrail::commit`]).
+///
 /// # Only what this run wrote
 ///
 /// An EXTEND (`-f`, a first exponent onto an existing set) writes new
@@ -446,11 +464,58 @@ impl CreateControl {
 /// its own and not the set it was extending. So the trail is a record
 /// of creation, written by [`CreateTrail::create`] as it opens each
 /// file, rather than a glob over the directory afterwards - a glob
-/// cannot tell the two apart. An OVERWRITING create re-run over the
-/// same names is the one case where the unlink removes a file that
-/// existed before: the open truncated it the moment the run started,
-/// so there was nothing left to keep. A no-clobber run has no such
-/// case, because it never opens a file it did not create.
+/// cannot tell the two apart. Since 9 Nov 2026 (the staging below) the
+/// unlink NEVER removes a file that existed before the run, in either
+/// mode: a no-clobber run never opens one, and an overwriting run writes
+/// its replacement under a staging name and removes only that.
+///
+/// # Every file it would replace is STAGED, so the set before it survives
+///
+/// An overwriting create used to open each of its names with a
+/// truncating open, so a re-create that failed or was cancelled had
+/// already destroyed whatever the previous set kept under those names,
+/// and the unlink then removed even the empty files. The index was staged
+/// first (findings A4 and A4b of the 9 Nov 2026 parfast sweep); the
+/// VOLUMES followed the same day, once a measured re-create of a 3 GiB set
+/// cancelled at 38% and 62% had lost six of its seven old volumes and a
+/// later damage went from repairable to "Repair is not possible" (the
+/// handoff's E4).
+///
+/// The rule, in [`CreateTrail::create`]: the index (named by
+/// [`CreateTrail::staging`]) is ALWAYS written under a hidden name beside
+/// it, and every other name is opened `O_EXCL` on its final name first -
+/// so a fresh create writes its volumes exactly where it always
+/// did, at today's cost - and a name that turns out to be TAKEN is
+/// written under a hidden name instead. [`CreateTrail::commit`] renames
+/// the staged files over their final names only once the whole set is
+/// written, backfilled and synced. Until then nothing that was there
+/// before the run has been opened for write, and any failure unlinks only
+/// this run's own files.
+///
+/// The price, accepted with the measurement in hand: for the length of a
+/// re-create, the old set's colliding files and their replacements are on
+/// disk together. The objection that kept the volumes unstaged until 9 Nov
+/// was exactly that, on a near-full disk; but a re-create that does not
+/// FIT now fails with ENOSPC and the old set whole, where it used to fail
+/// with the old set destroyed. There is no mode that falls back to the
+/// truncating open.
+///
+/// A no-clobber run stages nothing: its index open is the `O_EXCL` that
+/// decides which of two concurrent creates owns the set, and there is no
+/// previous file to protect.
+///
+/// # Staging names
+///
+/// `.<name>.<pid>-<n>.tmp` in the output directory: same directory, so
+/// the commit is a rename on one filesystem; hidden and ending `.tmp`, so
+/// no reader's pattern takes a leftover (from a `kill -9`) for a set
+/// member - verify's sibling scan wants `<stem>*.par2`, the CLI's own-output
+/// guard and the GUI's `set_member` want `<base>...par2`, the GUI's folder
+/// walk skips dot-files, and the CLI's `-R` walk, which takes dot-files as
+/// par2cmdline's unix half does, skips this exact shape by name
+/// (`parfast::create::is_own_output`). A leftover is never removed by a later
+/// run either, because it may be another live process's - nor opened: every
+/// staging name is opened `O_EXCL`, and a taken one is passed over.
 ///
 /// # Which is why the trail OPENS the files
 ///
@@ -470,7 +535,8 @@ impl CreateControl {
 /// # `no_clobber`
 ///
 /// Set from [`super::CreatePlan::no_clobber`]. `false` is every caller
-/// this engine has ever had and is `File::create`'s truncating open;
+/// this engine has ever had, and REPLACES what is there (by the staging
+/// above since 9 Nov 2026, by a truncating open before that);
 /// `true` opens with `O_EXCL`, so an existing file is
 /// [`std::io::ErrorKind::AlreadyExists`] and this run neither writes it
 /// nor owns it. That is the only door below the CLI that can refuse the
@@ -478,29 +544,182 @@ impl CreateControl {
 /// preflight, and two creates started together on one base race straight
 /// through it.
 pub(super) struct CreateTrail {
-    names: Mutex<Vec<String>>,
+    /// By final name: `create` asks whether a name is already this run's
+    /// once per FILE, and a set can be tens of thousands of volumes.
+    names: Mutex<std::collections::HashMap<String, Noted>>,
     no_clobber: bool,
+    /// The one name an overwriting run stages WHATEVER is on disk - the
+    /// index, which is what a reader starts from and so is the file that
+    /// must never sit under its final name half-written. Every other name
+    /// is staged only when something is already there. See the type's doc.
+    index: Option<String>,
+}
+
+/// One file this run created (keyed by its final name in the output
+/// directory): where its bytes actually are until [`CreateTrail::commit`].
+struct Noted {
+    /// `dir/name`, or the hidden staging name beside it.
+    path: PathBuf,
+    /// Written under a staging name that `commit` has not renamed yet.
+    staged: bool,
+    /// Staged because a file was ALREADY under the final name when this run
+    /// opened it - so committing it replaces something that existed before
+    /// the run. True for every staged volume (a volume is staged only on a
+    /// collision); for the index, which is staged whatever is there, true
+    /// only when an index was already there. What decides, at a failed
+    /// commit, whether this run's files go or stay (`commit`).
+    replaces: bool,
+}
+
+/// How long [`CreateTrail::commit`] keeps retrying one destination - its
+/// probe and then its rename.
+const RENAME_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// `f`, retried for about [`RENAME_PATIENCE`] with a doubling backoff -
+/// the pattern cargo and rustup use for a rename on Windows, where
+/// `MoveFileExW` over an existing file fails while anything holds the old
+/// one open without delete sharing, and an antivirus scanner does exactly
+/// that for a moment after a file is closed.
+fn patiently<T>(mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut wait = std::time::Duration::from_millis(10);
+    let mut waited = std::time::Duration::ZERO;
+    loop {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(e) if waited >= RENAME_PATIENCE => return Err(e),
+            Err(_) => {
+                std::thread::sleep(wait);
+                waited += wait;
+                wait = (wait * 2).min(std::time::Duration::from_millis(500));
+            }
+        }
+    }
+}
+
+/// Can `path` be REPLACED by a rename? Opened the way that needs and closed
+/// at once: for write, so a read-only file refuses (as the truncating open
+/// this replaces refused it), and on Windows for DELETE too, which is the
+/// access a rename over it takes - so a file held open by another process
+/// without delete sharing refuses HERE, while nothing has been lost yet,
+/// rather than at the rename. An absent file is replaceable; so is a
+/// dangling symlink, which the rename replaces as a link. A directory
+/// refuses on every platform.
+fn probe_replaceable(path: &Path) -> std::io::Result<()> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_WRITE_DATA | DELETE. The default share mode (read, write and
+        // delete) is kept, so the probe itself blocks nobody.
+        o.access_mode(0x0000_0002 | 0x0001_0000);
+    }
+    match o.open(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Why [`CreateTrail::commit`] did not land the set, which decides what
+/// [`CreateTrail::settle`] may then remove.
+enum CommitFailure {
+    /// Nothing had been renamed, and the commit would have REPLACED at least
+    /// one file that was there before the run: the directory still holds
+    /// the previous set whole plus this run's own files, so those go and the
+    /// create fails like any other, leaving the previous set as it was.
+    Untouched(Par2GenError),
+    /// Everything stays. Either a rename failed after others had landed, or
+    /// the commit would have replaced nothing that existed before the run -
+    /// a FRESH create, whose only staged file is its index - so this run's
+    /// finished set is the one copy of the work and removing it would buy
+    /// nothing back. The error names the staged files left. See `commit`.
+    Kept(Par2GenError),
+}
+
+/// [`CreateTrail::unlink_on_unwind`]'s guard.
+pub(super) struct UnlinkOnUnwind<'t>(&'t CreateTrail);
+
+impl Drop for UnlinkOnUnwind<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.unlink_all();
+        }
+    }
+}
+
+/// Distinguishes two staging names minted by one process in the same
+/// directory - two creates of one base on two threads. A name that is taken
+/// anyway (a leftover of a killed run whose pid this process now has, or a
+/// second process's) is never opened: staging names are opened `O_EXCL`
+/// like every other file this run brings into existence, and a taken one is
+/// answered by minting the next (`CreateTrail::create`).
+static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The sequence number the next staging name will carry, so a test can
+/// plant leftovers on exactly the names this process is about to mint.
+#[cfg(test)]
+pub(super) fn staging_seq_for_tests() -> u64 {
+    STAGING_SEQ.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The hidden name `name`'s bytes are written under until the commit. See
+/// the type's doc ("Staging names") for why this shape and no other.
+fn staging_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!(
+        ".{name}.{}-{}.tmp",
+        std::process::id(),
+        STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }
 
 impl Default for CreateTrail {
     /// Overwriting, which is what every engine caller and
     /// par2cmdline's own default do.
     fn default() -> Self {
-        CreateTrail {
-            names: Mutex::new(Vec::new()),
-            no_clobber: false,
-        }
+        CreateTrail::new(false)
     }
 }
 
 impl CreateTrail {
     /// A trail that refuses to write over a file that is already there
-    /// when `no_clobber`, and truncates as it always has when not.
+    /// when `no_clobber`, and replaces it (by staging) when not.
     pub(super) fn new(no_clobber: bool) -> Self {
         CreateTrail {
-            names: Mutex::new(Vec::new()),
+            names: Mutex::new(std::collections::HashMap::new()),
             no_clobber,
+            index: None,
         }
+    }
+
+    /// Write `index` under a staging name WHETHER OR NOT anything is there,
+    /// and rename it into place at [`CreateTrail::commit`], last of all.
+    /// Ignored by a no-clobber trail, whose open of the final name is the
+    /// `O_EXCL` that decides the race (type doc).
+    pub(super) fn staging(self, index: &str) -> Self {
+        CreateTrail {
+            index: Some(index.to_string()),
+            ..self
+        }
+    }
+
+    /// Refuse the create NOW if any of `names` exists and could not be
+    /// replaced at the commit ([`probe_replaceable`]) - before a byte of
+    /// the set is written. A no-clobber trail replaces nothing, so it
+    /// probes nothing: its `O_EXCL` opens are the refusal.
+    pub(super) fn probe_replaceable<'n>(
+        &self,
+        dir: &Path,
+        names: impl IntoIterator<Item = &'n String>,
+    ) -> Result<(), Par2GenError> {
+        if self.no_clobber {
+            return Ok(());
+        }
+        for name in names {
+            let path = dir.join(name);
+            probe_replaceable(&path).map_err(super::io(&path))?;
+        }
+        Ok(())
     }
 
     /// Create `name` in `dir` as a member of this run's set, and note
@@ -514,46 +733,358 @@ impl CreateTrail {
     /// what makes this the one door in the LANGUAGE rather than only in
     /// the gate: `SetMember`'s field is private to this module, so no
     /// other function anywhere can produce one. See that type's doc.
+    ///
+    /// # Which file it opens
+    ///
+    /// * A name this run already owns: where it was written, truncated
+    ///   (next section).
+    /// * No-clobber: the final name, `O_EXCL`, and a file already there is
+    ///   the refusal.
+    /// * Overwriting, the index: a staging name, always - opened `O_EXCL`
+    ///   too, and a staging name that is somehow taken is passed over for
+    ///   the next, so a leftover or a pid collision is never truncated.
+    /// * Overwriting, anything else: the final name, `O_EXCL` - so a fresh
+    ///   create writes where it always did, with no rename and no extra
+    ///   call - and a name that turns out to be TAKEN is staged instead,
+    ///   the previous file left untouched until the commit. The `O_EXCL`
+    ///   is what makes "taken" exact: a stat first and a plain open after
+    ///   would truncate a file that appeared between the two.
+    ///
+    /// # A name this run already owns is reopened, never refused
+    ///
+    /// The stripe-first arm lays every volume out before its transform's
+    /// check runs, and a check that disagrees hands the create to the
+    /// batched writer, which lays the SAME names out again. Under
+    /// no-clobber that second open was an `O_EXCL` over the run's own
+    /// files and failed the create with `AlreadyExists` (parfast sweep,
+    /// 9 Nov 2026) - a refusal protecting nothing, since "noted means
+    /// this run created it". So an owned name is truncated where it was
+    /// written - its staging name, if it was staged - and is not noted
+    /// twice.
     pub(super) fn create(&self, dir: &Path, name: &str) -> std::io::Result<SetMember> {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(self.no_clobber)
-            // `create(true).truncate(true)` is `File::create`, spelled
-            // the long way so the one flag that differs between the two
-            // modes is the one flag that moves.
-            .create(!self.no_clobber)
-            .truncate(!self.no_clobber)
-            .open(dir.join(name))?;
+        let owned = self.path_of_owned(name);
+        let index = owned.is_none() && !self.no_clobber && self.index.as_deref() == Some(name);
+        let mut staged = index;
+        // Whether committing this file replaces one that was there before
+        // the run (`Noted::replaces`). The index asks; a volume is staged
+        // only BECAUSE something was there, below.
+        let mut replaces = index && dir.join(name).symlink_metadata().is_ok();
+        // A bound on minting staging names, so a directory that answers
+        // `AlreadyExists` to everything cannot spin this forever.
+        let mut minted = 0u32;
+        let (path, file) = loop {
+            let path = match &owned {
+                Some(p) => p.clone(),
+                None if staged => staging_path(dir, name),
+                None => dir.join(name),
+            };
+            // THE REFUSAL A TRUNCATING OPEN USED TO MAKE, kept now that
+            // the file is staged: a final name that cannot be REPLACED -
+            // read-only, a directory, held open without delete sharing on
+            // Windows - refuses here, before this file's bytes are written,
+            // and not at the commit after the whole set is. The create's
+            // own up-front probe (`probe_replaceable`, above) has already
+            // asked this of every name; this is the same question again for
+            // the one name that is actually being staged, for a file that
+            // appeared since.
+            if staged && owned.is_none() {
+                probe_replaceable(&dir.join(name))?;
+            }
+            let opened = match &owned {
+                Some(_) => std::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&path),
+                // EXCLUSIVE, EVERY TIME this run brings a file into
+                // existence - a final name or a staging name, either mode.
+                // So nothing that was already there is ever opened for
+                // write by this door, only its own files; what a file
+                // already there MEANS is decided below, and that is where
+                // `no_clobber` acts: the refusal, or the cue to stage.
+                None => std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path),
+            };
+            match opened {
+                // A STAGING name that is taken - a leftover of a killed run,
+                // or another process's - is somebody else's: mint the next.
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::AlreadyExists
+                        && owned.is_none()
+                        && staged
+                        && minted < 4096 =>
+                {
+                    minted += 1;
+                }
+                // TAKEN, in overwrite mode: somebody's file - most often the
+                // previous set's - is under this name. Leave it alone and
+                // write this one beside it. Under no-clobber this arm does
+                // not match and the `AlreadyExists` is the refusal.
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::AlreadyExists
+                        && owned.is_none()
+                        && !self.no_clobber
+                        && !staged =>
+                {
+                    staged = true;
+                    replaces = true;
+                }
+                r => break (path, r?),
+            }
+        };
         // AFTER the open, and only on success. A refused open is
         // somebody else's file and was never this run's to remove.
-        self.note(name);
+        if owned.is_none() {
+            self.note(name, path, staged, replaces);
+        }
         // The ONE construction of a `SetMember` in the crate, and the
         // reason the write paths can only be fed by this function.
         Ok(SetMember { file })
     }
 
-    /// Note a file this create has just created, by its name in the
-    /// output directory.
-    fn note(&self, name: &str) {
+    /// Note a file this create has just created: its name in the output
+    /// directory, and the path its bytes are at.
+    fn note(&self, name: &str, path: PathBuf, staged: bool, replaces: bool) {
+        self.names.lock().unwrap_or_else(|p| p.into_inner()).insert(
+            name.to_string(),
+            Noted {
+                path,
+                staged,
+                replaces,
+            },
+        );
+    }
+
+    /// Where this run wrote `name`, if it did.
+    fn path_of_owned(&self, name: &str) -> Option<PathBuf> {
         self.names
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .push(name.to_string());
+            .get(name)
+            .map(|n| n.path.clone())
     }
 
-    /// Remove every file this create created. Best effort by design:
+    /// The path a member of this run is at NOW: its staging name until
+    /// [`CreateTrail::commit`], otherwise `dir/name`. What a reopen (the
+    /// critical backfill) must open.
+    pub(super) fn path_of(&self, dir: &Path, name: &str) -> PathBuf {
+        self.path_of_owned(name).unwrap_or_else(|| dir.join(name))
+    }
+
+    /// Land every staged file on its final name: the set is whole, so what
+    /// it replaces may go now and not before.
+    ///
+    /// # In three passes, and only the third changes anything
+    ///
+    /// 1. SYNC every staged file (`sync_data`, as the stripe-first arm does
+    ///    for its volumes), so a crash after a rename cannot leave a final
+    ///    name over bytes the disk never received. Only staged files: a
+    ///    fresh create's volumes were written in place and are not renamed,
+    ///    and are no more synced than they ever were.
+    /// 2. PROBE every destination again ([`probe_replaceable`], patiently),
+    ///    so a lock or a read-only bit that appeared during the run refuses
+    ///    the commit before anything has moved.
+    /// 3. RENAME, the volumes first and the INDEX LAST, each patiently.
+    ///
+    /// # A failure before anything has moved: whose files go
+    ///
+    /// A failure in 1 or 2, or on the FIRST rename, has changed nothing that
+    /// was there before the run. What happens next depends on whether the
+    /// commit would have replaced anything:
+    ///
+    /// * A RE-CREATE (at least one staged file replaces a file that existed
+    ///   before the run - `Noted::replaces`): [`CommitFailure::Untouched`].
+    ///   `settle` removes this run's files and the previous set is exactly
+    ///   as it was - the invariant this whole design exists for.
+    /// * A FRESH create (nothing to replace; its only staged file is its
+    ///   index): [`CommitFailure::Kept`]. The finished set is the one copy
+    ///   of the work and removing it would protect nothing, so its volumes
+    ///   stay where they were written and its index under its staging name,
+    ///   which the error names - the policy this commit had before the
+    ///   volumes were staged, kept deliberately.
+    ///
+    /// # What a failure or a crash in the middle of pass 3 leaves
+    ///
+    /// Each rename is atomic, so no name is ever half one file and half the
+    /// other; what can be mixed is the SET. With `k` of the staged volumes
+    /// renamed:
+    ///
+    /// * the previous index is still under `<base>.par2` (it is renamed
+    ///   last), and its own set id still says which volumes are its: the
+    ///   `k` it lost are now the NEW set's files, which a verify starting
+    ///   from the old index skips as another set's, so the old set has
+    ///   lost exactly those `k` volumes' recovery blocks and nothing else;
+    /// * the new set has every volume under its final name (the fresh ones
+    ///   were written there, the `k` renamed ones are there, the rest are
+    ///   still under their staging names) and its index under its staging
+    ///   name - a reader handed one of its volumes still names it, since
+    ///   every volume carries the critical packets;
+    /// * the staging names left are hidden `.<name>.<pid>-<n>.tmp` files
+    ///   that no reader takes for a set member.
+    ///
+    /// Once the index rename lands the new set is whole. So a crash never
+    /// leaves an index that lies about its volumes: either the old one,
+    /// whose set id tells the truth about which files are its, or the new
+    /// one with all of its volumes in place.
+    ///
+    /// A rename that still fails after its retry, once others have landed,
+    /// is [`CommitFailure::Kept`], and it DESTROYS NOTHING: renames already
+    /// done cannot be undone, removing the new set would destroy the one
+    /// complete copy of the work, and the files not yet renamed are the
+    /// previous set's, untouched. The error names every staged file that
+    /// remains, so the state above is reported rather than guessed at.
+    ///
+    /// The commit does not poll the cancel: once it starts it is a handful
+    /// of renames, and stopping between two of them would leave the mixed
+    /// state above for nothing.
+    fn commit(&self, dir: &Path) -> Result<(), CommitFailure> {
+        let mut names = self.names.lock().unwrap_or_else(|p| p.into_inner());
+        let mut staged: Vec<String> = names
+            .iter()
+            .filter(|(_, n)| n.staged)
+            .map(|(name, _)| name.clone())
+            .collect();
+        // The volumes in name order (a stable report), the index LAST.
+        staged.sort_by_key(|name| (self.index.as_deref() == Some(name.as_str()), name.clone()));
+        let replacing = staged.iter().any(|n| names[n].replaces);
+        // The one place a failed commit is classified (see the doc above).
+        let fail = |names: &std::collections::HashMap<String, Noted>, k: usize, what: String| {
+            if k == 0 && replacing {
+                return CommitFailure::Untouched(Par2GenError::Other(format!(
+                    "the recovery set could not be moved into place, so nothing was changed \
+                     and the set it would have replaced is whole: {what}"
+                )));
+            }
+            let left: Vec<String> = staged[k..]
+                .iter()
+                .map(|n| names[n].path.display().to_string())
+                .collect();
+            CommitFailure::Kept(Par2GenError::Other(format!(
+                "the recovery set is complete but could not all be moved into place: {what}. \
+                 Nothing was deleted; {k} of its staged files were renamed into place, and \
+                 these are still under their staging names: {}",
+                left.join(", ")
+            )))
+        };
+        for name in &staged {
+            let from = &names[name].path;
+            if let Err(e) = std::fs::OpenOptions::new()
+                .write(true)
+                .open(from)
+                .and_then(|f| f.sync_data())
+            {
+                return Err(fail(
+                    &names,
+                    0,
+                    format!("syncing {} failed: {e}", from.display()),
+                ));
+            }
+        }
+        for name in &staged {
+            let to = dir.join(name);
+            if let Err(e) = patiently(|| probe_replaceable(&to)) {
+                return Err(fail(
+                    &names,
+                    0,
+                    format!("{} cannot be replaced: {e}", to.display()),
+                ));
+            }
+        }
+        for (k, name) in staged.iter().enumerate() {
+            let from = names[name].path.clone();
+            let to = dir.join(name);
+            #[cfg(test)]
+            let injected = rename_faults::armed(&to);
+            #[cfg(not(test))]
+            let injected = false;
+            let landed = if injected {
+                Err(std::io::Error::other("rename refused by the test seam"))
+            } else {
+                // par2-create-door-gate: this lands a file `create` opened
+                // and noted under its staging name onto its final name, and
+                // only a trail that is NOT no-clobber stages (`create`), so
+                // it never replaces a file a no-clobber run left alone.
+                patiently(|| std::fs::rename(&from, &to))
+            };
+            let Err(e) = landed else {
+                // Landed: it is the set's finished file now, so it leaves
+                // the trail - nothing later may remove it, because the file
+                // it replaced is already gone.
+                names.remove(name);
+                continue;
+            };
+            return Err(fail(
+                &names,
+                k,
+                format!(
+                    "renaming {} to {} failed: {e}",
+                    from.display(),
+                    to.display()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The create's outcome, settled on disk: a finished set is committed
+    /// (its staged files renamed into place), and ANY failure of the create
+    /// itself - a cancel, a full disk, a member that changed, a commit that
+    /// could not start - removes every file this run created, and so leaves
+    /// every file that was there before it byte-identical. See the type's
+    /// doc. A commit that fails with nothing it would replace (a fresh
+    /// create) or after renames have landed is the one failure that removes
+    /// nothing (`commit`).
+    pub(super) fn settle<T>(
+        &self,
+        dir: &Path,
+        r: Result<T, Par2GenError>,
+    ) -> Result<T, Par2GenError> {
+        match r
+            .map_err(CommitFailure::Untouched)
+            .and_then(|v| self.commit(dir).map(|()| v))
+        {
+            Ok(v) => Ok(v),
+            Err(CommitFailure::Untouched(e)) => {
+                self.unlink_all();
+                Err(e)
+            }
+            Err(CommitFailure::Kept(e)) => Err(e),
+        }
+    }
+
+    /// A guard that removes every file this run created if the create
+    /// UNWINDS - a worker's re-raised panic, say - rather than returning.
+    /// [`CreateTrail::settle`] only ever sees a `Result`, so without this a
+    /// panic left the staged files and the volumes, still carrying the
+    /// all-zero placeholder critical block, for the next reader's sibling
+    /// scan to pick up. Inert on a normal return.
+    pub(super) fn unlink_on_unwind(&self) -> UnlinkOnUnwind<'_> {
+        UnlinkOnUnwind(self)
+    }
+
+    /// Remove every file this create created, at the path its bytes are
+    /// at (a staged file's staging name, never the final name it has not
+    /// reached - which may be the previous set's). Best effort by design:
     /// one that cannot be removed leaves the directory no worse than
-    /// stopping without trying, and there is nobody to report an error
-    /// to - the cancel is the outcome.
-    pub(super) fn unlink_all(&self, dir: &Path) {
-        for name in self.names.lock().unwrap_or_else(|p| p.into_inner()).iter() {
-            let _ = std::fs::remove_file(dir.join(name));
+    /// stopping without trying, and there is nobody to report an error to
+    /// - the failure is the outcome.
+    pub(super) fn unlink_all(&self) {
+        for n in self
+            .names
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+        {
+            let _ = std::fs::remove_file(&n.path);
         }
     }
 
     #[cfg(test)]
     pub(super) fn noted(&self) -> Vec<String> {
-        self.names.lock().unwrap().clone()
+        let mut v: Vec<String> = self.names.lock().unwrap().keys().cloned().collect();
+        v.sort();
+        v
     }
 }
 
@@ -654,6 +1185,35 @@ impl std::io::Write for SetMember {
 
     fn flush(&mut self) -> std::io::Result<()> {
         std::io::Write::flush(&mut self.file)
+    }
+}
+
+/// The test seam that makes ONE rename of a commit fail after its probe
+/// has passed - the case no portable fixture can reach (a directory or a
+/// read-only bit on the destination is refused by the probe first, which
+/// is the point of the probe), and the one where the commit has to stop
+/// and destroy nothing. Per THREAD, because the commit runs on the thread
+/// that called the create and tests run side by side.
+#[cfg(test)]
+pub(super) mod rename_faults {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    thread_local! {
+        static ONTO: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Every rename ONTO `to` on this thread fails until [`clear`].
+    pub(in crate::par2gen) fn fail_onto(to: &Path) {
+        ONTO.with(|o| o.borrow_mut().push(to.to_path_buf()));
+    }
+
+    pub(in crate::par2gen) fn clear() {
+        ONTO.with(|o| o.borrow_mut().clear());
+    }
+
+    pub(super) fn armed(to: &Path) -> bool {
+        ONTO.with(|o| o.borrow().iter().any(|p| p == to))
     }
 }
 
@@ -938,12 +1498,22 @@ mod tests {
             std::fs::write(dir.join(n), b"x").expect("write");
         }
         let trail = CreateTrail::default();
-        trail.note("set.par2");
-        trail.note("set.vol000+01.par2");
+        trail.note("set.par2", dir.join("set.par2"), false, false);
+        trail.note(
+            "set.vol000+01.par2",
+            dir.join("set.vol000+01.par2"),
+            false,
+            false,
+        );
         // A name that is not there at all must not stop the rest.
-        trail.note("set.vol999+01.par2");
+        trail.note(
+            "set.vol999+01.par2",
+            dir.join("set.vol999+01.par2"),
+            false,
+            false,
+        );
         assert_eq!(trail.noted().len(), 3);
-        trail.unlink_all(&dir);
+        trail.unlink_all();
         assert!(!dir.join("set.par2").exists());
         assert!(!dir.join("set.vol000+01.par2").exists());
         assert!(
@@ -998,7 +1568,7 @@ mod tests {
             "the refusal itself must not have touched the file"
         );
 
-        trail.unlink_all(&dir);
+        trail.unlink_all();
         assert!(!dir.join("set.par2").exists(), "this run's own file goes");
         assert_eq!(
             std::fs::read(dir.join("set.vol000+01.par2")).expect("still there"),
@@ -1008,34 +1578,178 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The control arm of the test above: the DEFAULT trail truncates,
-    /// which is what every engine caller and par2cmdline itself do, and
-    /// a file it truncated is this run's to take back on a cancel.
+    /// The control arm of the test above: the DEFAULT trail still writes
+    /// over what is there, which is what every engine caller and
+    /// par2cmdline itself do - but since 9 Nov 2026 it does so by STAGING,
+    /// so the file it would replace is never opened for write and a cancel
+    /// takes back only the staging file. Until then this test asserted the
+    /// open had TRUNCATED the previous file and that the cancel then removed
+    /// it, which was the mechanism of the re-create data loss (the 9 Nov
+    /// 2026 sweep handoff, E4).
     #[test]
-    fn a_default_trail_still_truncates_and_owns_what_it_truncated() {
+    fn a_default_trail_stages_what_it_would_replace_and_owns_only_that() {
+        let dir = trail_dir("clobber");
+        let old = b"the previous run's volume".to_vec();
+        std::fs::write(dir.join("set.vol000+01.par2"), &old).expect("write");
+
+        let trail = CreateTrail::default();
+        let mut m = trail
+            .create(&dir, "set.vol000+01.par2")
+            .expect("the default trail writes over what is there");
+        std::io::Write::write_all(&mut m, b"the new volume").expect("write");
+        drop(m);
+        assert_eq!(
+            std::fs::read(dir.join("set.vol000+01.par2")).expect("still there"),
+            old,
+            "the open touched the file it is replacing before the commit"
+        );
+        assert_eq!(trail.noted(), vec!["set.vol000+01.par2".to_string()]);
+        trail.unlink_all();
+        assert_eq!(
+            listing(&dir),
+            vec!["set.vol000+01.par2".to_string()],
+            "the cancel must take the staging file and nothing else"
+        );
+        assert_eq!(std::fs::read(dir.join("set.vol000+01.par2")).unwrap(), old);
+
+        // ...and a run that finishes does replace it.
+        let done = CreateTrail::default();
+        let mut m = done.create(&dir, "set.vol000+01.par2").expect("open");
+        std::io::Write::write_all(&mut m, b"the new volume").expect("write");
+        drop(m);
+        done.settle(&dir, Ok(())).expect("commit");
+        assert_eq!(
+            std::fs::read(dir.join("set.vol000+01.par2")).unwrap(),
+            b"the new volume"
+        );
+        assert_eq!(listing(&dir), vec!["set.vol000+01.par2".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A FRESH name is written where it will stay: no staging file, no
+    /// rename at the commit - the cost of a create with nothing to replace
+    /// is what it always was. And a cancel removes it, since it is this
+    /// run's.
+    #[test]
+    fn a_fresh_name_is_written_in_place_and_not_staged() {
+        let dir = trail_dir("fresh");
+        let trail = CreateTrail::default().staging("set.par2");
+        let mut m = trail.create(&dir, "set.vol000+01.par2").expect("open");
+        std::io::Write::write_all(&mut m, b"v").expect("write");
+        drop(m);
+        assert_eq!(
+            listing(&dir),
+            vec!["set.vol000+01.par2".to_string()],
+            "a fresh volume went to a staging name"
+        );
+        trail.unlink_all();
+        assert!(listing(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn trail_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "nzbfast-trail-clobber-{}-{:?}",
+            "nzbfast-trail-{tag}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
-        std::fs::write(dir.join("set.par2"), b"the previous run's index").expect("write");
+        dir
+    }
 
-        let trail = CreateTrail::default();
-        trail
-            .create(&dir, "set.par2")
-            .expect("the default trail writes over what is there");
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .expect("read dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// A STAGED index leaves the previous one whole until `commit`, and a
+    /// failure takes only the staging file (findings A4 / A4b of the 9 Nov
+    /// 2026 parfast sweep). Both halves, on one trail each.
+    #[test]
+    fn a_staged_index_replaces_the_previous_one_only_at_commit() {
+        let dir = trail_dir("staged");
+        let old = b"the previous run's index".to_vec();
+        std::fs::write(dir.join("set.par2"), &old).expect("write");
+
+        // The run that fails: the previous index survives it untouched.
+        let failed = CreateTrail::default().staging("set.par2");
+        let mut m = failed.create(&dir, "set.par2").expect("staged open");
+        std::io::Write::write_all(&mut m, b"a placeholder").expect("write");
+        drop(m);
         assert_eq!(
-            std::fs::read(dir.join("set.par2"))
-                .expect("still there")
-                .len(),
-            0,
-            "the open must have truncated"
+            std::fs::read(dir.join("set.par2")).expect("still there"),
+            old,
+            "the staged open truncated the previous index"
         );
-        assert_eq!(trail.noted(), vec!["set.par2".to_string()]);
-        trail.unlink_all(&dir);
-        assert!(!dir.join("set.par2").exists());
+        let r: Result<(), Par2GenError> = failed.settle(&dir, Err(Par2GenError::Other("x".into())));
+        assert!(r.is_err());
+        assert_eq!(std::fs::read(dir.join("set.par2")).expect("kept"), old);
+        assert_eq!(
+            listing(&dir),
+            vec!["set.par2".to_string()],
+            "staging file left behind"
+        );
+
+        // The run that finishes: committed over the final name.
+        let done = CreateTrail::default().staging("set.par2");
+        let mut m = done.create(&dir, "set.par2").expect("staged open");
+        std::io::Write::write_all(&mut m, b"the new index").expect("write");
+        drop(m);
+        done.settle(&dir, Ok(())).expect("commit");
+        assert_eq!(
+            std::fs::read(dir.join("set.par2")).expect("landed"),
+            b"the new index"
+        );
+        assert_eq!(listing(&dir), vec!["set.par2".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A no-clobber trail stages NOTHING: its open of the final name is the
+    /// `O_EXCL` that decides which of two concurrent creates owns the set.
+    #[test]
+    fn a_no_clobber_trail_ignores_staging_and_still_refuses() {
+        let dir = trail_dir("staged-noclobber");
+        std::fs::write(dir.join("set.par2"), b"theirs").expect("write");
+        let trail = CreateTrail::new(true).staging("set.par2");
+        let e = trail
+            .create(&dir, "set.par2")
+            .expect_err("no-clobber must refuse whatever staging says");
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists, "{e:?}");
+        assert!(trail.noted().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A name this run already created is REOPENED, not refused, under
+    /// no-clobber - the stripe-first arm's fallback to the batched writer
+    /// lays the same volumes out twice - and it is noted once.
+    #[test]
+    fn a_name_this_run_owns_is_reopened_under_no_clobber() {
+        let dir = trail_dir("owned");
+        let trail = CreateTrail::new(true);
+        let mut m = trail
+            .create(&dir, "set.vol000+01.par2")
+            .expect("first open");
+        std::io::Write::write_all(&mut m, b"stripe-first layout").expect("write");
+        drop(m);
+        let mut m = trail
+            .create(&dir, "set.vol000+01.par2")
+            .expect("the run's own file must reopen under no-clobber");
+        std::io::Write::write_all(&mut m, b"batched").expect("write");
+        drop(m);
+        assert_eq!(
+            std::fs::read(dir.join("set.vol000+01.par2")).expect("read"),
+            b"batched",
+            "the reopen must truncate what the first layout wrote"
+        );
+        assert_eq!(trail.noted(), vec!["set.vol000+01.par2".to_string()]);
+        trail.unlink_all();
+        assert!(listing(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -39,6 +39,35 @@ pub(crate) const LEDGER_VERSION_KEY: &str = "ledger_v";
 /// host-keyed ledger every install before 5 Sep 2026 carries.
 pub(crate) const LEDGER_VERSION: u64 = 2;
 
+/// The ledger's `YYYY-MM-DD` day key for `days` since the epoch, or
+/// None for a day before 2000 (TODO 358 sweep E2).
+///
+/// No download was billed before 2000, so such a reading is a clock
+/// that is wrong right now: a board with no RTC boots at 1970 until NTP
+/// answers, and a clock before the epoch reads as day 0 through the
+/// callers' `unwrap_or(0)`. Writing that day made a key the prune never
+/// reached (it removed keys starting with '2') and that NZBGet's
+/// `servervolumes` drew a cell per day back to, forever. The bytes are
+/// still billed to the lifetime buckets; only the day is unknowable.
+pub(crate) fn ledger_day_key(days: i64) -> Option<String> {
+    let (y, m, d) = civil_from_days(days);
+    (y >= 2000).then(|| format!("{y:04}-{m:02}-{d:02}"))
+}
+
+/// Whether `key` is a ledger DAY bucket (`YYYY-MM-DD`, any year) rather
+/// than a named one (`lifetime`, `reliability`, ...). The prune needs
+/// this rather than "starts with '2'" so a pre-2000 key written before
+/// [`ledger_day_key`] refused them is pruned too.
+fn is_day_key(key: &str) -> bool {
+    let b = key.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+}
+
 impl Daemon {
     /// M18b: bill per-ACCOUNT bytes of a finished download to today's
     /// usage history (UTC days, like the quota) and persist. Best-effort.
@@ -70,10 +99,9 @@ impl Daemon {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| (d.as_secs() / 86_400) as i64)
             .unwrap_or(0);
-        let (y, m, d) = civil_from_days(days);
-        let today = format!("{y:04}-{m:02}-{d:02}");
+        let today = ledger_day_key(days);
         let mut u = self.usage.lock_ok();
-        for bucket in [today.as_str(), "lifetime"] {
+        for bucket in today.as_deref().into_iter().chain(["lifetime"]) {
             let day = u.entry(bucket.to_string()).or_insert_with(|| json!({}));
             if let Some(map) = day.as_object_mut() {
                 for (acct, bytes) in per_account {
@@ -103,8 +131,13 @@ impl Daemon {
         // and "reliability", "account_lifetime", "block_base" and
         // "article_days" survive it the same way. The last of those is bounded per host inside
         // `add_reliability` instead, being a day map one level deeper.
-        while u.keys().filter(|k| k.starts_with('2')).count() > 60 {
-            let oldest = u.keys().find(|k| k.starts_with('2')).cloned();
+        // A pre-2000 day key goes first and unconditionally: it is a
+        // wrong clock's bill, not a day (see `ledger_day_key`).
+        u.retain(|k, _| !is_day_key(k) || k.starts_with('2'));
+        while u.keys().filter(|k| is_day_key(k)).count() > 60 {
+            // By `min()` for the reason `add_reliability` gives: under
+            // `preserve_order` the first key is the oldest INSERT.
+            let oldest = u.keys().filter(|k| is_day_key(k)).min().cloned();
             if let Some(k) = oldest {
                 u.remove(&k);
             }
@@ -153,8 +186,7 @@ impl Daemon {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| (d.as_secs() / 86_400) as i64)
             .unwrap_or(0);
-        let (y, m, d) = civil_from_days(days);
-        let today = format!("{y:04}-{m:02}-{d:02}");
+        let today = ledger_day_key(days);
         let mut u = self.usage.lock_ok();
         let rel = u
             .entry("reliability".to_string())
@@ -177,6 +209,12 @@ impl Daemon {
                 );
             }
         }
+        // No day bucket under a pre-2000 clock (`ledger_day_key`); the
+        // lifetime pair above still counts the articles.
+        let Some(today) = today else {
+            self.save_usage(&u);
+            return;
+        };
         let byday = u
             .entry("article_days".to_string())
             .or_insert_with(|| json!({}));

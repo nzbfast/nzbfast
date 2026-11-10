@@ -2890,3 +2890,87 @@ fn a_zero_numbered_set_head_extracts_through_settle() {
     assert_eq!(std::fs::read(dir.join("real.mkv")).unwrap(), total);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Sweep 9 Nov 2026 A1: a 7z head parked for want of a trusted size
+/// (TODO 118.2 (b)) is re-sniffed by the write that brings the trust,
+/// and that write is a DIFFERENT article. The re-sniff routed the head's
+/// bytes into that article's job queue, whose entries carry only
+/// `(src_start, len)` and are sliced out of the CURRENT article's buffer
+/// once the lock drops: the head's range received the triggering
+/// article's bytes, and a triggering article shorter than the head
+/// panicked the slice. The arm here is the one where the attach declines
+/// (a plain `.7z` whose end header lies past the file) and the head
+/// lands Plain; a direct-mapped `.7z.NNN` continuation queues through
+/// the same sink.
+#[test]
+fn a_resniffed_7z_head_lands_its_own_bytes_not_the_triggering_articles() {
+    let half = 4_000usize;
+    // Equal length shows the corruption; a SHORTER triggering article
+    // is the panic.
+    for tail_len in [half, half / 2] {
+        let dir = tmpdir(&format!("resniff-head-own-bytes-{tail_len}"));
+        let total = (half + tail_len) as u64;
+        let mut head = payload(half, 51);
+        head[..6].copy_from_slice(b"7z\xbc\xaf\x27\x1c");
+        head[6] = 0;
+        head[7] = 4;
+        // The end header lies past the file and the name is no part
+        // name, so `try_attach_sevenz` declines and the slot goes Plain.
+        head[12..20].copy_from_slice(&(total * 4).to_le_bytes());
+        head[20..28].copy_from_slice(&64u64.to_le_bytes());
+        head[28..32].copy_from_slice(&[0; 4]);
+        let crc = crc32fast::hash(&head[12..32]);
+        head[8..12].copy_from_slice(&crc.to_le_bytes());
+        let tail = payload(tail_len, 97);
+        let ex = Arc::new(Extractor::new(&dir, 1, true));
+        ex.anchor();
+        // A bare claim: the head parks.
+        ex.write(0, "a.7z", total, 0, &head).unwrap();
+        // This article's end lands on its own `size=`, which is the
+        // exact witness that releases the head.
+        ex.write(0, "a.7z", total, half as u64, &tail).unwrap();
+        // The head's article was parked whole, so its record comes back
+        // as a late placement covering the head, never through the
+        // triggering article's own Persist.
+        let late = ex.drain_late_placements();
+        assert!(
+            late.iter()
+                .any(|lp| lp.slot == 0 && lp.frag.vol_off == 0 && lp.frag.len == half as u64),
+            "the re-sniffed head left no late placement: {:?}",
+            late.iter()
+                .map(|lp| (lp.frag.vol_off, lp.frag.len))
+                .collect::<Vec<_>>()
+        );
+        finish_within(&ex, 30).unwrap();
+        let got = std::fs::read(dir.join("a.7z")).unwrap();
+        assert_eq!(got.len() as u64, total);
+        assert!(
+            got[..half] == head[..],
+            "the re-sniffed head's range holds bytes that are not the head's"
+        );
+        assert!(
+            got[half..] == tail[..],
+            "the triggering article's own range"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// Sweep 9 Nov 2026: the in-stream 7z chase left sevenz-rust2's default
+/// of one LZMA2 worker per core in place, which the vendored lzma-rust2
+/// spawn fix made real - each worker a dictionary and a decoded block.
+/// It now takes the disk opener's bound. This pins the bound itself; the
+/// call is in `sevenz_run`, where nothing observable reports it.
+#[test]
+fn the_7z_chase_decodes_with_the_disk_openers_bounded_worker_count() {
+    let n = sevenz_decode_threads();
+    assert!((1..=8).contains(&n), "{n} LZMA2 workers");
+    // The figure the chase reads, which is also the rar policy's
+    // `working_memory_limit` (`MemBudget::decoder_allowance`), ungated so
+    // this compiles - and runs - without the `rar` feature too.
+    let allowance = crate::mem::process_budget().decoder_allowance();
+    assert!(
+        u64::from(n) <= (allowance / (320 << 20)).max(1),
+        "{n} workers at ~320 MiB each overrun a {allowance}-byte allowance"
+    );
+}

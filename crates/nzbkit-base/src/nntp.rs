@@ -18,6 +18,9 @@ use crate::config::{AddressFamily, ServerConfig};
 use tracing::warn;
 
 pub mod resolve;
+// The `bind_ip` kill switch and the HTTP CONNECT tunnel (TODO 358
+// item 14); its own header carries the design.
+pub mod route;
 pub use resolve::{Resolve, ResolveFuture, SystemResolver, install_resolver, resolver_installed};
 
 /// Everything that can go wrong on an NNTP conversation.
@@ -130,6 +133,45 @@ pub enum AuthRefusal {
     /// cap. Retrying at the same connection count re-provokes it; the
     /// useful response is to back off and ask for FEWER connections.
     Capacity,
+}
+
+/// An article command refused because of the SESSION's state rather
+/// than the article's: the server never looked the article up, so the
+/// refusal says nothing about whether it holds it, and the remedy is
+/// one non-pipelined command on the same socket and then asking again.
+/// TODO 358 items 2 and 12.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRefusal {
+    /// `480 authentication required`: the login this socket made at
+    /// connect has lapsed (RFC 4643 lets a server demand it again at
+    /// any point). Answered with [`Connection::authenticate`].
+    AuthRequired,
+    /// `412 no newsgroup selected`: a server that will not serve
+    /// `BODY <message-id>` until some `GROUP` is selected. RFC 3977
+    /// does not require one for the message-id form, but a minority of
+    /// frontends enforce it. Answered with [`Connection::group`].
+    NoGroup,
+}
+
+impl NntpError {
+    /// Whether this error is a [`SessionRefusal`] to an article command
+    /// (`BODY`, `ARTICLE`, `STAT`). Only the [`NntpError::Unexpected`]
+    /// shape the article readers raise for a status they do not accept
+    /// can be one, and the command name is checked so a 480 to anything
+    /// else (a GROUP, a DATE fence) is never mistaken for it.
+    pub fn session_refusal(&self) -> Option<SessionRefusal> {
+        let NntpError::Unexpected { cmd, line } = self else {
+            return None;
+        };
+        if !matches!(cmd.as_str(), "BODY" | "ARTICLE" | "STAT") {
+            return None;
+        }
+        match status_code_of(line) {
+            480 => Some(SessionRefusal::AuthRequired),
+            412 => Some(SessionRefusal::NoGroup),
+            _ => None,
+        }
+    }
 }
 
 /// WHICH capacity limit a [`AuthRefusal::Capacity`] refusal names.
@@ -542,16 +584,22 @@ pub fn decode_header_line(line: &[u8]) -> std::borrow::Cow<'_, str> {
 ///
 /// The OVER spelling carries the angle brackets and the NZB spelling
 /// does not, so the brackets come off before the check - `is_wire_safe`
-/// refuses '<' and '>' by design. `MAX_WIRE_TOKEN` is RFC 3977 3.1's
-/// 512-octet command-line cap, the same figure `nzb.rs` uses.
+/// refuses '<' and '>' by design. Some servers send the id bare, and that
+/// is kept (`over_tests` pins it), but only when it has the '@' every
+/// Message-ID has (RFC 5536 3.1.3): a bare `12345` reaches the wire as
+/// `BODY 12345`, which RFC 3977 reads as an ARTICLE NUMBER in the
+/// selected group, so it would fetch some other post and file its bytes
+/// under this row. `MAX_WIRE_TOKEN` is RFC 3977 3.1's 512-octet
+/// command-line cap, the same figure `nzb.rs` uses.
 fn over_id_is_fetchable(id: &str) -> bool {
     if id.is_empty() || id.len() > crate::nzb::limits::MAX_WIRE_TOKEN {
         return false;
     }
-    let inner = id
-        .strip_prefix('<')
-        .and_then(|s| s.strip_suffix('>'))
-        .unwrap_or(id);
+    let inner = match id.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+        Some(inner) => inner,
+        None if id.contains('@') => id,
+        None => return false,
+    };
     !inner.is_empty() && crate::nzb::is_wire_safe(inner)
 }
 
@@ -1163,6 +1211,11 @@ pub struct Connection {
     /// error (the scan bisect, nettools probes) would then silently
     /// file the previous range's rows as the next range's answer. Once
     /// set, `exec` refuses with `Closed` so the caller reconnects.
+    ///
+    /// Not only a BODY read sets it: `exec` latches it too when a command
+    /// it wrote gets no readable status line (a timeout leaves that
+    /// answer owed, to arrive as the reply to the next command), and
+    /// [`Connection::read_multiline_into`] when a body it reads fails.
     desynced: bool,
     /// Liveness counter for the OVER body read: every chunk taken off
     /// the wire is added to it as it lands (see
@@ -1302,6 +1355,13 @@ async fn direct_connect_opts(
                 std::io::Error::other(format!("bind_ip {s:?} is not an IP address"))
             })?),
         };
+    // The kill switch (TODO 358 item 14), BEFORE the lookup: a bind
+    // address that is not on an interface that is up refuses the dial by
+    // name, and a dead tunnel leaks no DNS query over the bare line.
+    // `route`'s header carries the two silent failures this replaces.
+    if let Some(ip) = bind {
+        route::ensure_bind_up(ip)?;
+    }
     // The one DNS call on the download path, behind the §129 3a seam:
     // production resolves with `lookup_host` exactly as before, the rig
     // installs a registry (`mock::dns`) so DNS faults are reproducible.
@@ -1376,8 +1436,17 @@ where
     Fut: std::future::Future<Output = std::io::Result<T>>,
 {
     let tried = &addrs[..addrs.len().min(MAX_DIAL_CANDIDATES)];
-    if let [only] = tried {
-        return one(*only).await;
+    match tried {
+        // Public, so an empty list is a caller's to hand in, and the
+        // slice below divides by the count.
+        [] => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no address to dial",
+            ));
+        }
+        [only] => return one(*only).await,
+        _ => {}
     }
     let slice = CONNECT_TIMEOUT / tried.len() as u32;
     // Report the LAST failure, matching `TcpStream::connect`'s
@@ -1506,9 +1575,9 @@ async fn socks5_connect(
         Some((c, hp)) => (Some(c.split_once(':').unwrap_or((c, ""))), hp),
         None => (None, spec),
     };
-    let (phost, pport) = proxy_hp
-        .rsplit_once(':')
-        .and_then(|(h, p)| p.parse::<u16>().ok().map(|p| (h, p)))
+    // `route::split_host_port` drops the brackets of an IPv6 literal,
+    // which the resolver would otherwise read as a hostname.
+    let (phost, pport) = route::split_host_port(proxy_hp)
         // `proxy_hp`, never `spec`: the documented form is
         // "user:pass@host:port", so `spec` still carries the proxy password
         // here. This error reaches the log file, the logtee ring served by
@@ -1594,10 +1663,21 @@ impl Connection {
 
     async fn connect_unbounded(server: &ServerConfig) -> Result<(Connection, Status), NntpError> {
         let tcp_connect = || async {
-            let tcp = if let Some(proxy) = &server.socks5 {
+            let tcp = if let (Some(_), Some(_)) = (&server.socks5, &server.http_proxy) {
+                // One proxy or none: picking one of two in silence would
+                // send this provider's traffic somewhere the user did
+                // not choose, so the row is refused until it says.
+                return Err(NntpError::Io(std::io::Error::other(
+                    "this server names both a SOCKS5 and an HTTP proxy: keep one",
+                )));
+            } else if let Some(proxy) = &server.socks5 {
                 // M32: all traffic (DNS included - the hostname goes to
                 // the proxy verbatim) rides the SOCKS5 tunnel.
                 socks5_connect(proxy, &server.host, server.port, server).await?
+            } else if let Some(proxy) = &server.http_proxy {
+                // TODO 358 item 14: the same, over HTTP CONNECT. TLS and
+                // NNTP below run over this socket unchanged.
+                route::http_connect(proxy, &server.host, server.port, server).await?
             } else {
                 direct_connect(server.host.as_str(), server.port, server).await?
             };
@@ -1705,26 +1785,43 @@ impl Connection {
         }
 
         if let (Some(user), Some(pass)) = (&server.username, &server.password) {
-            let st = conn.exec(&format!("AUTHINFO USER {user}")).await?;
-            let st = match st.code {
-                281 => st,
-                381 => conn.exec(&format!("AUTHINFO PASS {pass}")).await?,
-                _ => {
-                    return Err(NntpError::AuthFailed {
-                        kind: classify_auth_refusal(st.line()),
-                        line: st.into_line(),
-                    });
-                }
-            };
-            if st.code != 281 {
+            conn.authenticate(user, pass).await?;
+        }
+
+        Ok((conn, greeting))
+    }
+
+    /// `AUTHINFO USER` / `AUTHINFO PASS` on this connection, refused as
+    /// [`NntpError::AuthFailed`] with the server's own line classified.
+    ///
+    /// The connect path's login, and since TODO 358 item 2 also the
+    /// pool's re-login after a mid-session `480`: a provider whose
+    /// session authentication lapses (a timeout on the login, not on
+    /// the socket) answers the next article command with 480, and
+    /// logging in again on the SAME socket is what that reply asks for.
+    /// Never pipelined: the caller must have read every outstanding
+    /// response first, because a 281/381 read off a socket with a BODY
+    /// answer still queued on it would be misattributed exactly as a
+    /// dropped pipelined response is.
+    pub async fn authenticate(&mut self, user: &str, pass: &str) -> Result<(), NntpError> {
+        let st = self.exec(&format!("AUTHINFO USER {user}")).await?;
+        let st = match st.code {
+            281 => st,
+            381 => self.exec(&format!("AUTHINFO PASS {pass}")).await?,
+            _ => {
                 return Err(NntpError::AuthFailed {
                     kind: classify_auth_refusal(st.line()),
                     line: st.into_line(),
                 });
             }
+        };
+        if st.code != 281 {
+            return Err(NntpError::AuthFailed {
+                kind: classify_auth_refusal(st.line()),
+                line: st.into_line(),
+            });
         }
-
-        Ok((conn, greeting))
+        Ok(())
     }
 
     /// A command line must not contain a bare CR or LF: this is a
@@ -1755,10 +1852,42 @@ impl Connection {
 
     /// Write a pre-formatted raw block (already CRLF-lined and
     /// dot-stuffed - a POST/IHAVE article payload) and flush.
+    ///
+    /// Bounded by `STREAM_IDLE_TIMEOUT` as a no-progress deadline, the
+    /// write-side twin of the body read's: a peer that stops READING
+    /// fills its receive window and then our send buffer, and a bare
+    /// `write_all` parks the post worker on it forever - the status-line
+    /// reads around it are bounded, this was the one await in a POST
+    /// that was not. Per chunk rather than per payload, so a slow but
+    /// moving uplink is never cut off for being slow. A failure leaves a
+    /// partial article on the wire, so it latches `desynced` and the
+    /// caller reconnects.
     pub async fn send_raw(&mut self, data: &[u8]) -> Result<(), NntpError> {
-        self.wire.write_all(data).await?;
-        self.wire.flush().await?;
-        Ok(())
+        self.send_raw_bounded(data, STREAM_IDLE_TIMEOUT).await
+    }
+
+    /// [`Connection::send_raw`] with the no-progress deadline named, so a
+    /// test can watch it fire without waiting two minutes.
+    async fn send_raw_bounded(
+        &mut self,
+        data: &[u8],
+        idle: std::time::Duration,
+    ) -> Result<(), NntpError> {
+        // 64 KiB a step: at the 120 s default a peer must drain about
+        // half a kilobyte a second to count as moving.
+        const STEP: usize = 64 * 1024;
+        let wire = &mut self.wire;
+        let r = async {
+            for chunk in data.chunks(STEP) {
+                idle_bounded_for(idle, wire.write_all(chunk)).await?;
+            }
+            idle_bounded_for(idle, wire.flush()).await
+        }
+        .await;
+        if r.is_err() {
+            self.desynced = true;
+        }
+        r
     }
 
     /// Write a command without flushing - for batching pipelined commands.
@@ -1835,8 +1964,27 @@ impl Connection {
         if self.desynced {
             return Err(NntpError::Closed);
         }
-        self.send(cmd).await?;
-        self.read_status().await
+        // Checked before anything reaches the wire, so a refused command
+        // line leaves the conversation exactly where it was.
+        Self::check_cmd(cmd)?;
+        // From here on the command may be on the wire, and an answer we
+        // failed to read is still owed: a status line that timed out
+        // arrives LATER and is read as the reply to whatever is asked
+        // next. That is the same misattribution the `desynced` field
+        // exists to stop, reached through the status line rather than a
+        // body, so it latches the same way. Every single-line command
+        // goes through here (OVER, HEAD, GROUP, CAPABILITIES, LIST, DATE),
+        // so a caller that keeps a connection across the error - the
+        // header scan does - gets `Closed` on its next command and
+        // reconnects instead of filing one command's answer as another's.
+        let r = match self.send(cmd).await {
+            Ok(()) => self.read_status().await,
+            Err(e) => Err(e),
+        };
+        if r.is_err() {
+            self.desynced = true;
+        }
+        r
     }
 
     /// Read a dot-terminated multiline block, appending the raw wire
@@ -1853,7 +2001,14 @@ impl Connection {
     /// path CAN read the socket straight into `out`, but that is off
     /// by default (`wirebuf::direct_read_cap`).
     pub async fn read_multiline_into(&mut self, out: &mut Vec<u8>) -> Result<(), NntpError> {
-        read_multiline_generic(&mut self.wire, out).await
+        let r = read_multiline_generic(&mut self.wire, out).await;
+        // A body that died partway leaves the rest of it on the wire,
+        // which is `over()`'s latch for the same reason (HEAD,
+        // CAPABILITIES and both LISTs read their bodies through here).
+        if r.is_err() {
+            self.desynced = true;
+        }
+        r
     }
 }
 
@@ -2113,6 +2268,11 @@ impl Connection {
     /// always attempt this and fall back silently. Only OVER/XOVER
     /// reads change behavior; enable it on scan connections, never on
     /// article-body connections.
+    ///
+    /// `false` also covers a session that BROKE on the way (no status
+    /// line came back), which is not a decline. That case is not lost:
+    /// `exec` has latched `desynced`, so the caller's next command is
+    /// refused with `Closed` rather than reading this one's late answer.
     pub async fn enable_header_gzip(&mut self) -> bool {
         if self.header_gzip {
             return true;
@@ -2786,9 +2946,25 @@ impl Connection {
     ///
     /// Any status other than 111 is still a live, responsive server, so
     /// it counts as success for liveness purposes; only an I/O or
-    /// protocol failure means the session is gone.
+    /// protocol failure means the session is gone - and a `400`, which
+    /// is the server saying exactly that (RFC 3977 3.2.1: "service not
+    /// available", and the server closes). A provider's idle reaper
+    /// writes its `400 Idle timeout` and hangs up, so on a parked
+    /// session that line is ALREADY in the buffer when the DATE goes out
+    /// and reads as its answer: every liveness probe here (the warm
+    /// pool's checkout and keepalive, the pool's held-session keepalive)
+    /// called that session alive and handed out a socket the peer had
+    /// closed. An error, so all three drop it through the arm they
+    /// already have for a dead one.
     pub async fn date(&mut self) -> Result<Status, NntpError> {
-        self.exec("DATE").await
+        let st = self.exec("DATE").await?;
+        if st.code == 400 {
+            return Err(NntpError::Unexpected {
+                cmd: "DATE".into(),
+                line: st.into_line(),
+            });
+        }
+        Ok(st)
     }
 
     /// Fetch one article body, blocking on the response (the serial path).
@@ -2869,3 +3045,8 @@ mod unit_tests;
 
 #[cfg(test)]
 mod dial_race_tests;
+
+// TODO 358 item 14: the bind-address kill switch and HTTP CONNECT,
+// driven through `Connection::connect`.
+#[cfg(test)]
+mod route_tests;

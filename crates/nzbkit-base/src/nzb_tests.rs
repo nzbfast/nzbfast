@@ -1062,6 +1062,13 @@ fn a_second_root_or_a_misplaced_core_tag_is_refused() {
         ),
         ("a file inside <head>", doc(&format!("<head>{good}</head>"))),
         (
+            "a meta inside a file",
+            doc(
+                "<file subject=\"a.rar\"><meta type=\"password\">x</meta><segments>\
+                 <segment bytes=\"1\" number=\"1\">a@t</segment></segments></file>",
+            ),
+        ),
+        (
             "a segment outside any file",
             doc("<segments><segment bytes=\"1\" number=\"1\">a@t</segment></segments>"),
         ),
@@ -1079,6 +1086,32 @@ fn a_second_root_or_a_misplaced_core_tag_is_refused() {
         Nzb::parse(format!("<nzb>{good}").as_bytes()),
         Err(NzbError::Truncated)
     ));
+}
+
+/// Issue 121: one indexer writes its category `<meta>` straight under
+/// `<nzb>`, after a `<head>` carrying the password. That used to refuse
+/// the whole document ("<meta> is not allowed inside <nzb>"), so every
+/// grab from it failed in Sonarr while SABnzbd took the same file. It
+/// parses now, with every file, and both metas read - the password
+/// from `<head>` and the category from the root.
+#[test]
+fn a_category_meta_directly_under_the_root_parses() {
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n\
+         <head>\n<meta type=\"password\">hunter2</meta>\n</head>\n\
+         <meta type=\"category\">TV</meta>\n{}{}</nzb>",
+        one_file("a.rar", "a@t"),
+        one_file("b.rar", "b@t"),
+    );
+    let nzb = Nzb::parse(xml.as_bytes()).expect("root-level meta must parse");
+    assert_eq!(nzb.files.len(), 2);
+    assert_eq!(nzb.password(), Some("hunter2"));
+    assert!(
+        nzb.meta.iter().any(|(t, v)| t == "category" && v == "TV"),
+        "category meta not read: {:?}",
+        nzb.meta
+    );
 }
 
 /// T1: the root spellings a FIELD corpus actually carries.

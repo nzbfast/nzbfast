@@ -55,7 +55,7 @@ pub async fn probe_sample(
     probes: u32,
 ) -> Option<crate::health::PostHealth> {
     let now = unix_now();
-    let (mut answers, mut rec_answers) = stat_burst(d, servers, &sample).await;
+    let (mut answers, mut rec_answers) = stat_burst(d, servers, &sample, Spread::FIRST).await;
     let mut verdict = crate::health::score(&answers, sample.age_days, now, probes);
     // §294: one escalation, same pass. The first sample is a takedown
     // detector (health.rs says so of SAMPLE_K in as many words) and the
@@ -89,7 +89,11 @@ pub async fn probe_sample(
             }
         };
         if let Ok(Some(s2)) = s2 {
-            let (a2, r2) = stat_burst(d, servers, &s2).await;
+            // TODO 358 item 1: split over connections, or a slow-430
+            // provider leaves most of the 64 Unknown at the deadline and
+            // the escalated verdict can never be unanimous (the 4.2
+            // defect, on `Spread`).
+            let (a2, r2) = stat_burst(d, servers, &s2, Spread::ESCALATED).await;
             // An escalation that learned nothing (a fleet that went
             // quiet mid-pass) keeps the first burst's evidence rather
             // than blanking it.
@@ -191,18 +195,129 @@ pub async fn nzb_preview_probe(
         .ok_or("no_answer")
 }
 
+/// What [`start_sample`] decided about a job about to start.
+#[derive(Debug)]
+pub enum StartSample {
+    /// Not run. The token says why, for the log: "offline",
+    /// "no_servers", "unsampleable", or "young" (the post is below
+    /// [`crate::diag::GONE_MIN_AGE_DAYS`], where no verdict can reach
+    /// red, so a probe could not fail it and is not worth a dial).
+    Skipped(&'static str),
+    /// Run, and the bar was not met: the job downloads as normal. The
+    /// verdict rides along for the log; `None` when nothing answered.
+    Pass(Option<crate::health::PostHealth>),
+    /// Run, and the verdict clears [`crate::health::PostHealth::fails_job`]:
+    /// every configured server said every sampled article was missing,
+    /// at full width, past the age gate.
+    Gone(crate::health::PostHealth),
+}
+
+/// TODO 358 item 1 (decision D1, shape A'): the PARALLEL START SAMPLE.
+/// Run at prestart by the opt-in give-up, when the job's own record has
+/// no verdict wide and unanimous enough to act on - which is the usual
+/// case, since an *arr grab to an idle daemon starts long before the
+/// idle prober's next tick (`research/DEAD-POST-GIVEUP-NEVER-SEES-A-VERDICT-2026-10-12.md`
+/// section 1).
+///
+/// Two steps, both across every server at once:
+///
+/// 1. **A k=8 burst, one id per connection** ([`Spread::START_FIRST`]).
+///    The everyday healthy post ends here: a present article answers
+///    STAT in 2-15 ms, so the cost is one connect per server, well under
+///    a second. Anything short of unanimous - one article present on one
+///    server, one server silent - ends here too, as `Pass`: a post with
+///    even one sampled article still on the fleet is not wholly dead,
+///    and a silent server has not voted.
+/// 2. **Only when step 1 was already unanimous missing, the 64-wide
+///    sample** ([`Spread::START_WIDE`]), re-drawn across the whole post
+///    and split over up to twenty connections per server. Never the k=8
+///    shortcut: eight unanimous misses on a 90%-dead, repairable post
+///    happen 43% of the time, 64 of them about 0.1% (see
+///    [`crate::health::PostHealth::fails_job`]). A post of 64 articles
+///    or fewer was already sampled whole in step 1 and skips this.
+///
+/// The bar is the one the give-up always had, unchanged in every
+/// clause; this only makes it reachable. Below the age gate the probe
+/// is not run at all.
+///
+/// Connections: never past an account's configured number
+/// ([`probe_width`]). At prestart the job about to start owns the
+/// account's slots, so the probe borrows them for its few seconds and
+/// returns them before the pipeline dials. When something else is
+/// already on the wire (a predecessor draining in a hand-over, a
+/// prefetch sidecar), `probe_width` leaves the probe only what that run
+/// is not holding, and a server with no headroom does not vote, so the
+/// verdict can only get thinner, never harsher. The stand-down fires if
+/// a download STARTS during the probe that was not running when it
+/// began.
+pub async fn start_sample(
+    d: &Arc<Daemon>,
+    servers: &[nzbkit::config::ServerConfig],
+    nzb_path: &std::path::Path,
+) -> StartSample {
+    if d.offline.load(Ordering::Relaxed) {
+        return StartSample::Skipped("offline");
+    }
+    if servers.is_empty() {
+        return StartSample::Skipped("no_servers");
+    }
+    let draw = |k: usize| {
+        let p = nzb_path.to_path_buf();
+        tokio::task::spawn_blocking(move || sample_job(&p, k))
+    };
+    let Ok(Some(s1)) = draw(crate::health::SAMPLE_K).await else {
+        return StartSample::Skipped("unsampleable");
+    };
+    if s1.age_days < crate::diag::GONE_MIN_AGE_DAYS {
+        return StartSample::Skipped("young");
+    }
+    let was_idle = download_idle(d);
+    let dd = d.clone();
+    let stop: Stop = Arc::new(move || was_idle && !download_idle(&dd));
+    let now = unix_now();
+    let a1 = split_burst(d, servers, &s1.ids, Spread::START_FIRST, stop.clone()).await;
+    let Some(v1) = crate::health::score(&a1, s1.age_days, now, 1) else {
+        return StartSample::Pass(None);
+    };
+    if !v1.no_server_can_supply() {
+        return StartSample::Pass(Some(v1));
+    }
+    if v1.fails_job(s1.population) {
+        return StartSample::Gone(v1);
+    }
+    let Ok(Some(s2)) = draw(crate::health::ESCALATE_K).await else {
+        return StartSample::Pass(Some(v1));
+    };
+    let a2 = split_burst(d, servers, &s2.ids, Spread::START_WIDE, stop).await;
+    match crate::health::score(&a2, s2.age_days, now, 1) {
+        Some(v2) if v2.fails_job(s2.population) => StartSample::Gone(v2),
+        Some(v2) => StartSample::Pass(Some(v2)),
+        // Nothing answered the wide pass: the narrow verdict is all the
+        // evidence there is, and it is too narrow to fail on.
+        None => StartSample::Pass(Some(v1)),
+    }
+}
+
 /// §282 item 2: one pipelined STAT burst per server carrying BOTH
 /// samples, split back apart afterwards. A second burst per sample
 /// would be a second connection to every host per probe, for evidence
 /// that costs the same handful of STATs riding along behind the first.
-/// Re-checked per server, not just once at the top: a job can start
-/// between two hosts, and when it does the rest of the probe is
-/// abandoned with whatever it has. Hoisted out of the loop for §294,
-/// whose escalation runs it a second time at a bigger k.
+/// The payload ids go first, so a deadline that cuts a slow server
+/// short takes recovery cells before payload ones (see [`split_burst`]).
+///
+/// Every server at once since TODO 358 item 1, not one after another,
+/// and the stand-down is the burst's `stop`: a job starting under it
+/// drops every session, where the old loop abandoned the hosts it had
+/// not reached yet. A server the burst never reached is now in the
+/// answer list as all-Unknown, which `tally` drops from the vote exactly
+/// as it drops any other silent host, and which `servers` then counts.
+/// Hoisted out of the loop for §294, whose escalation runs it a second
+/// time at a bigger k.
 async fn stat_burst(
     d: &Arc<Daemon>,
     servers: &[nzbkit::config::ServerConfig],
     sample: &JobSample,
+    spread: Spread,
 ) -> (
     Vec<crate::health::ServerAnswer>,
     Vec<crate::health::ServerAnswer>,
@@ -214,20 +329,16 @@ async fn stat_burst(
         .map(|r| r.ids.clone())
         .unwrap_or_default();
     let all: Vec<String> = sample.ids.iter().chain(rec_ids.iter()).cloned().collect();
-    let mut answers: Vec<crate::health::ServerAnswer> = Vec::new();
-    let mut rec_answers: Vec<crate::health::ServerAnswer> = Vec::new();
-    for s in servers {
-        if !download_idle(d) {
-            break;
-        }
-        let mut a = probe_server(s, &all, d).await;
-        let tail = a.cells.split_off(split.min(a.cells.len()));
-        rec_answers.push(crate::health::ServerAnswer {
+    let dd = d.clone();
+    let stop: Stop = Arc::new(move || !download_idle(&dd));
+    let mut answers = split_burst(d, servers, &all, spread, stop).await;
+    let rec_answers = answers
+        .iter_mut()
+        .map(|a| crate::health::ServerAnswer {
             host: a.host.clone(),
-            cells: tail,
-        });
-        answers.push(a);
-    }
+            cells: a.cells.split_off(split.min(a.cells.len())),
+        })
+        .collect();
     (answers, rec_answers)
 }
 
@@ -268,6 +379,11 @@ pub struct JobSample {
     /// from - the denominator the completable arithmetic projects the
     /// sampled loss rate over.
     pub payload_bytes: u64,
+    /// TODO 358 item 1: payload articles the NZB declares, the population
+    /// `ids` was drawn from. What tells a 64-wide verdict on a small post
+    /// (which is the whole post) from a k=8 shortcut on a big one - see
+    /// [`crate::health::wide_enough`].
+    pub population: usize,
     /// `None` on a post that declares no PAR2 at all.
     pub recovery: Option<RecoverySample>,
 }
@@ -378,6 +494,7 @@ pub(super) fn sample_bytes(bytes: &[u8], k: usize) -> Option<JobSample> {
         seed,
     });
     Some(JobSample {
+        population: ids.len(),
         ids: pick(&ids, k),
         age_days: if age == u32::MAX { 0 } else { age },
         payload_bytes,
@@ -397,7 +514,7 @@ pub(super) fn sample_bytes(bytes: &[u8], k: usize) -> Option<JobSample> {
 ///
 /// `None` means the probe was abandoned, not that it failed: a download
 /// starting under us takes the account's connection slots back, exactly
-/// as `probe_server` yields them, and an abandoned probe must not be
+/// as `probe_conn` yields them, and an abandoned probe must not be
 /// recorded as an answer.
 ///
 /// Callers pass only servers that ANSWERED the STAT sweep and that
@@ -407,8 +524,23 @@ async fn probe_recovery(
     ids: &[String],
     d: &Arc<Daemon>,
 ) -> Option<bool> {
+    // A seat per server it may dial, held for the whole probe, like any
+    // STAT burst's (`Daemon::probe_sessions`); a server with no room left
+    // beside the other bursts sits this one out.
+    let mut seats = Vec::with_capacity(servers.len());
+    let mut room = Vec::with_capacity(servers.len());
+    for s in servers {
+        let seat = reserve_probe_width(d, s, 1).await;
+        if seat.n > 0 {
+            room.push(s.clone());
+        }
+        seats.push(seat);
+    }
+    if room.is_empty() {
+        return None;
+    }
     tokio::select! {
-        got = nzbkit::preflight::probe_recovery_set(servers, ids) => Some(got.is_some()),
+        got = nzbkit::preflight::probe_recovery_set(&room, ids) => Some(got.is_some()),
         () = async {
             while download_idle(d) {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -417,30 +549,298 @@ async fn probe_recovery(
     }
 }
 
-/// STAT every sampled id on one server over a single pipelined burst.
+/// How one burst spreads over the wire: at most `conns_max` connections
+/// to each server, all servers at once, every server's sessions cut at
+/// one shared `deadline` measured from the start of the burst.
 ///
-/// Every failure path - refused login, a dead socket, a peer that goes
-/// mute mid-batch - leaves the cells it never reached `Unknown`, which
-/// [`crate::health::score`] treats as "this server did not vote" rather
-/// than as evidence in either direction. Nothing here can produce a
-/// miss that a server did not actually report.
-async fn probe_server(
-    s: &nzbkit::config::ServerConfig,
-    ids: &[String],
+/// TODO 358 item 1 (decision D1), and the defect it fixes first
+/// (`research/DEAD-POST-GIVEUP-NEVER-SEES-A-VERDICT-2026-10-12.md`
+/// section 4.2). This used to be one connection per server, servers in
+/// sequence, under a fixed 20 s ceiling each. A provider answers a
+/// not-found STAT one at a time per session, at 0.47-2.2 s an article on
+/// four of the five measured accounts, and pipelining does not hide it,
+/// so the escalated 64-article pass could not finish inside 20 s on any
+/// of them (xsnews answered about 9 of 64). `tally` counts an article
+/// absent only when every voting server said Missing, and an Unknown
+/// cell never is, so the verdict could never be "no server can supply"
+/// and the opt-in give-up was a silent no-op on that fleet. The same 64
+/// ids split over N connections cost near-linearly less (section 4.3:
+/// xsnews 142 s on one, 19.9 s on 8, 9.4 s on 20), which is what
+/// `conns_max` buys. A PRESENT article answers in 2-15 ms at any width
+/// (measured 9 Nov 2026 on the same five accounts, ids from a live
+/// post), so the width only ever costs a dead or damaged post anything.
+///
+/// The width is a CEILING, never a demand: [`probe_width`] takes it down
+/// to the headroom the account has left, so a probe never dials past a
+/// server's configured connections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Spread {
+    pub conns_max: usize,
+    pub deadline: std::time::Duration,
+}
+
+impl Spread {
+    /// The §77 prober's first k=8 burst, and the §303 preview's: one
+    /// connection per server and the old 20 s ceiling, exactly the
+    /// shape it always had. The takedown detector answers a healthy
+    /// post in milliseconds, and the idle prober is in no hurry.
+    pub const FIRST: Spread = Spread {
+        conns_max: 1,
+        deadline: std::time::Duration::from_secs(20),
+    };
+    /// The §294 escalated pass (k=64 payload plus the recovery sample)
+    /// on the idle prober and the preview. Eight connections and a 30 s
+    /// deadline: xsnews, the slowest measured account, answered 64 dead
+    /// ids in 19.9 s over 8 (section 4.3), and [`split_burst`] hands
+    /// every connection its share of the PAYLOAD ids before any recovery
+    /// id, so the payload half is answered first whatever the recovery
+    /// half costs. Eight rather than the start sample's twenty because
+    /// this is background curiosity on an idle daemon, not a job about
+    /// to start: it keeps the dial burst small.
+    pub const ESCALATED: Spread = Spread {
+        conns_max: 8,
+        deadline: std::time::Duration::from_secs(30),
+    };
+    /// The start sample's first k=8 burst: one id per connection, so a
+    /// dead post's first answer costs ONE per-article refusal time (2.2 s
+    /// on xsnews) rather than eight of them in series (17.6 s), and a
+    /// healthy post's costs one connect plus milliseconds.
+    pub const START_FIRST: Spread = Spread {
+        conns_max: 8,
+        deadline: std::time::Duration::from_secs(30),
+    };
+    /// The start sample's 64-wide pass, run only when the k=8 burst was
+    /// already unanimous missing. Twenty connections is the widest the
+    /// 13 Oct round measured (9.4 s for 64 dead ids on xsnews), and 30 s
+    /// covers that account at eight (19.9 s) for an install configured
+    /// below twenty.
+    pub const START_WIDE: Spread = Spread {
+        conns_max: 20,
+        deadline: std::time::Duration::from_secs(30),
+    };
+}
+
+/// How many connections a burst may open to `s` right now, at most
+/// `want`: the account's configured connections less what is already
+/// in use on it.
+///
+/// The §77 rule ("the account's connection slots belong to the
+/// download") in arithmetic. In use is the download permits the hub's
+/// connection budget has handed out on this account, plus the larger of
+/// the warm reserve's held slots and the sessions parked in the warm
+/// pool (the two overlap, so the larger is taken rather than the sum;
+/// the error is on the safe side either way). One more is left for the
+/// background samplers that hold a session per server whatever the pool
+/// does (the M29 oracle, the tip watcher), except on an account with a
+/// single free slot, which keeps the one connection the prober has
+/// always opened. Zero when the account is full: that server then does
+/// not vote, which can only ever make a verdict thinner, never
+/// manufacture a miss.
+///
+/// And in use includes the sessions every OTHER post-health burst holds
+/// on the account right now (`Daemon::probe_sessions`), since 9 Nov 2026:
+/// the job-start sample runs before `started_at` is set, so the idle
+/// prober and the add-time preview can burst the same servers at the
+/// same moment, and the download's permits see none of the three. This
+/// is the answer a burst would get; [`split_burst`] takes it through
+/// [`reserve_probe_width`], which holds what it was given.
+pub async fn probe_width(d: &Arc<Daemon>, s: &nzbkit::config::ServerConfig, want: usize) -> usize {
+    let (configured, in_use) = account_in_use(d, s).await;
+    let probing = d
+        .probe_sessions
+        .lock_ok()
+        .get(&nzbkit::pool::handoff::ConnBudget::key(s))
+        .copied()
+        .unwrap_or(0);
+    width_of(configured, in_use + probing, want)
+}
+
+/// The account's configured connections, and what the download side has
+/// in use on it - the async half of [`probe_width`].
+async fn account_in_use(d: &Arc<Daemon>, s: &nzbkit::config::ServerConfig) -> (usize, usize) {
+    let configured = (s.connections as usize).max(1);
+    let (held, spares) = d
+        .hub
+        .conn_budget
+        .get()
+        .and_then(|b| b.lease_borrowed(&nzbkit::pool::handoff::ConnBudget::key(s)))
+        .map_or((0, 0), |l| (l.snapshot().0, l.spares()));
+    let parked = match d.hub.warm.get() {
+        Some(w) => w.parked_for(s).await,
+        None => 0,
+    };
+    (configured, held + spares.max(parked))
+}
+
+/// [`probe_width`]'s arithmetic, given everything in use.
+fn width_of(configured: usize, in_use: usize, want: usize) -> usize {
+    let free = configured.saturating_sub(in_use);
+    let usable = free.saturating_sub(1).max(free.min(1));
+    usable.min(want)
+}
+
+/// A burst's hold on the sessions it was sized for, returned on drop -
+/// which covers a burst that is itself cancelled mid-flight.
+pub struct ProbeSeats {
+    d: Arc<Daemon>,
+    key: String,
+    /// How many sessions the burst may open.
+    pub n: usize,
+}
+
+impl Drop for ProbeSeats {
+    fn drop(&mut self) {
+        if self.n == 0 {
+            return;
+        }
+        let mut m = self.d.probe_sessions.lock_ok();
+        if let Some(c) = m.get_mut(&self.key) {
+            *c = c.saturating_sub(self.n);
+            if *c == 0 {
+                m.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// [`probe_width`], and the width it answers RESERVED until the returned
+/// seats drop. The read of the other bursts' sessions and the reservation
+/// are one critical section, so two bursts sizing themselves together
+/// cannot both count the same free slots.
+pub async fn reserve_probe_width(
     d: &Arc<Daemon>,
-) -> crate::health::ServerAnswer {
+    s: &nzbkit::config::ServerConfig,
+    want: usize,
+) -> ProbeSeats {
+    let (configured, in_use) = account_in_use(d, s).await;
+    let key = nzbkit::pool::handoff::ConnBudget::key(s);
+    let n = {
+        let mut m = d.probe_sessions.lock_ok();
+        let probing = m.get(&key).copied().unwrap_or(0);
+        let n = width_of(configured, in_use + probing, want);
+        if n > 0 {
+            *m.entry(key.clone()).or_default() += n;
+        }
+        n
+    };
+    ProbeSeats {
+        d: d.clone(),
+        key,
+        n,
+    }
+}
+
+/// The stand-down a burst polls. True means "drop every session now".
+pub type Stop = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// STAT `ids` on every server at once, each server's share split over up
+/// to `spread.conns_max` connections (see [`Spread`]). One answer per
+/// server, in `servers` order, every cell in `ids` order.
+///
+/// `stop` is the stand-down: polled every 100 ms, and the moment it
+/// says true every session in the burst is dropped where it stands. The
+/// prober passes "a download started"; the start sample passes "a
+/// download started that was not already running when I began".
+///
+/// The ids are dealt ROUND-ROBIN onto the connections, not cut into
+/// contiguous runs, and each connection asks for its share in index
+/// order. Callers put the payload ids first, so when a deadline cuts a
+/// slow server short it is the recovery tail that goes unanswered and
+/// not the payload sample the give-up bar reads.
+///
+/// Every failure path a single connection can take - refused login, a
+/// dead socket, a peer that goes mute mid-batch, the deadline, the
+/// stand-down - leaves the cells that connection never reached
+/// `Unknown`, which [`crate::health::score`] treats as "this server did
+/// not vote" rather than as evidence in either direction. Nothing here
+/// can produce a miss that a server did not actually report. Each
+/// connection keeps the single-connection discipline `probe_conn`
+/// documents (checked positional reads, no QUIT on an unclean session).
+pub async fn split_burst(
+    d: &Arc<Daemon>,
+    servers: &[nzbkit::config::ServerConfig],
+    ids: &[String],
+    spread: Spread,
+    stop: Stop,
+) -> Vec<crate::health::ServerAnswer> {
     use crate::health::Avail;
-    let mut cells = vec![Avail::Unknown; ids.len()];
-    let host = s.host.clone();
-    let Ok((mut conn, _)) = nzbkit::nntp::Connection::connect(s).await else {
-        return crate::health::ServerAnswer { host, cells };
+    let mut cells: Vec<Vec<Avail>> = vec![vec![Avail::Unknown; ids.len()]; servers.len()];
+    if ids.is_empty() || stop() {
+        return answers_of(servers, cells);
+    }
+    let deadline = tokio::time::Instant::now() + spread.deadline;
+    // A JoinSet rather than a join over borrowed futures: dropping it
+    // aborts every task in it, so a caller that is itself cancelled
+    // still closes every socket, exactly as dropping the old single
+    // probe future did.
+    // Held until every session below has ended (declared before the set,
+    // so they drop after it): another burst on the same account sizes
+    // itself around them.
+    let mut seats: Vec<ProbeSeats> = Vec::with_capacity(servers.len());
+    let mut set = tokio::task::JoinSet::new();
+    for (si, s) in servers.iter().enumerate() {
+        let seat = reserve_probe_width(d, s, spread.conns_max.min(ids.len())).await;
+        let n = seat.n;
+        seats.push(seat);
+        for c in 0..n {
+            let share: Vec<(usize, String)> = (c..ids.len())
+                .step_by(n)
+                .map(|i| (i, ids[i].clone()))
+                .collect();
+            let s = s.clone();
+            let stop = stop.clone();
+            set.spawn(async move { (si, probe_conn(&s, &share, deadline, stop).await) });
+        }
+    }
+    while let Some(r) = set.join_next().await {
+        if let Ok((si, got)) = r {
+            for (i, a) in got {
+                cells[si][i] = a;
+            }
+        }
+    }
+    answers_of(servers, cells)
+}
+
+fn answers_of(
+    servers: &[nzbkit::config::ServerConfig],
+    cells: Vec<Vec<crate::health::Avail>>,
+) -> Vec<crate::health::ServerAnswer> {
+    servers
+        .iter()
+        .zip(cells)
+        .map(|(s, cells)| crate::health::ServerAnswer {
+            host: s.host.clone(),
+            cells,
+        })
+        .collect()
+}
+
+/// STAT one connection's share of a burst over a single pipelined
+/// session, returning only the cells it actually got an answer for.
+///
+/// The connect counts against the deadline too: a server that cannot
+/// be reached in time has not voted.
+async fn probe_conn(
+    s: &nzbkit::config::ServerConfig,
+    share: &[(usize, String)],
+    deadline: tokio::time::Instant,
+    stop: Stop,
+) -> Vec<(usize, crate::health::Avail)> {
+    use crate::health::Avail;
+    let host = &s.host;
+    let mut got: Vec<(usize, Avail)> = Vec::with_capacity(share.len());
+    let Ok(Ok((mut conn, _))) =
+        tokio::time::timeout_at(deadline, nzbkit::nntp::Connection::connect(s)).await
+    else {
+        return got;
     };
     let probe = async {
-        for id in ids {
+        for (_, id) in share {
             conn.send_stat(id).await?;
         }
         conn.flush().await?;
-        for (cell, id) in cells.iter_mut().zip(ids) {
+        for (i, id) in share {
             // `read_stat_checked` is the normalizer both this and the
             // M29 sampler share: 223 have, 423/430 missing, and
             // Giganews's nonstandard "451 0 <msgid>" for a takedown
@@ -453,32 +853,31 @@ async fn probe_server(
             // lost upstream and every later refusal is filed against
             // the article behind it, which is a healthy server voting
             // Missing on articles it holds. An id mismatch errors, and
-            // the error path here already leaves every cell it never
-            // reached Unknown, which `crate::health::score` reads as
-            // "did not vote" rather than as evidence. A server that
-            // echoes no id at all still passes - that is most of them
-            // on a 430.
-            *cell = match conn.read_stat_checked(Some(id.as_str())).await? {
+            // the error path here leaves every cell it never reached
+            // Unknown, which `crate::health::score` reads as "did not
+            // vote" rather than as evidence. A server that echoes no id
+            // at all still passes - that is most of them on a 430.
+            let a = match conn.read_stat_checked(Some(id.as_str())).await? {
                 true => Avail::Have,
                 false => Avail::Missing,
             };
+            got.push((*i, a));
         }
         Ok::<(), nzbkit::nntp::NntpError>(())
     };
-    // Two ways out, and both end the session immediately: the ordinary
-    // 20 s ceiling, and a download starting under us. Dropping the
-    // future cancels the probe outright (nothing is spawned), and
-    // dropping the Connection closes the socket - so "yield the slot"
-    // is not a request the provider has to wait on.
+    // Two ways out, and both end the session immediately: the burst's
+    // deadline, and the stand-down. Dropping the future cancels the
+    // probe outright, and dropping the Connection closes the socket - so
+    // "yield the slot" is not a request the provider has to wait on.
     let clean = tokio::select! {
-        r = tokio::time::timeout(std::time::Duration::from_secs(20), probe) => {
+        r = tokio::time::timeout_at(deadline, probe) => {
             if let Ok(Err(e)) = &r {
                 warn!(target: "health", "{host}: STAT: {e}");
             }
             matches!(r, Ok(Ok(())))
         }
         () = async {
-            while download_idle(d) {
+            while !stop() {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         } => false,
@@ -491,5 +890,9 @@ async fn probe_server(
     if clean {
         conn.quit().await;
     }
-    crate::health::ServerAnswer { host, cells }
+    got
 }
+
+#[cfg(test)]
+#[path = "postprobe_tests.rs"]
+mod tests;

@@ -252,3 +252,18 @@ Test `filter::bcj2::clamp_tests`, which asserts the 4 GiB cases on every
 target (it is the 32-bit build where the old cast fails them). Found by
 the 14 Oct 2026 Gemini sweep (H14); the sevenz-rust2 half is that
 crate's README item 5.
+
+## 12. `src/lzma2_reader_mt.rs` - a panicking worker reports instead of wedging
+
+A worker that panicked in the decode never sent its unit's result, and
+the dispatcher waits on a channel whose sender it owns itself, so it is
+never `Disconnected`; its only other exit is the error store it polls
+every `ERROR_CHECK_INTERVAL`, which nothing filled. The read hung forever,
+on the 7z chase thread. `worker_thread_logic` now arms a `ReportPanic`
+guard once per thread, whose `Drop` writes an error into the store while
+the thread unwinds (poison-tolerant, since a second panic there would
+abort). A test build makes a worker panic on demand through one preset
+dictionary value, `tests::WORKER_PANIC_DICT`, checked once per unit and
+compiled out of every other build. Test
+`tests::a_panicking_worker_errors_instead_of_wedging`, watchdog-shaped;
+without the guard it times out at 20 s. Found by the 9 Nov 2026 sweep.

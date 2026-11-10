@@ -1905,3 +1905,122 @@ fn an_armed_veto_stops_a_long_repair_before_a_byte_is_written() {
         "an unarmed caller sees this set's real verdict: {plain:?}"
     );
 }
+
+/// Parfast sweep A7. A cancel raised during the patch of a SHORT set is
+/// a cancel, not a member that failed to publish.
+///
+/// The fixture is `unrepairable_partial`'s: `a.bin` exists only as a
+/// byte-identical copy under a donor name, so it is publishable out of a
+/// set that `b.bin` sinks, and its publish is a temp-staged write. The
+/// cancel lands at the write phase's first report. Until the fix
+/// `status::publish_failed` ruled the `Cancelled` a member that did not
+/// land, so the call went on to `Ok(Unrepairable)` - a verdict for a
+/// repair the user had stood down.
+#[test]
+fn a_cancel_during_a_short_sets_publish_is_reported_as_a_cancel() {
+    let dir = tmpdir("control-cancel-short-publish");
+    let a = payload(200, 41);
+    let b = payload(200, 42);
+    let files: &[(&str, &[u8])] = &[("a.bin", &a), ("b.bin", &b)];
+    std::fs::write(dir.join("set.par2"), par2_index(SET, BS, files)).unwrap();
+    std::fs::write(dir.join("a9f1c2-donor"), &a).unwrap();
+    let mut b_damaged = b.clone();
+    for x in &mut b_damaged[0..128] {
+        *x ^= 0x66;
+    }
+    std::fs::write(dir.join("b.bin"), &b_damaged).unwrap();
+    std::fs::write(
+        dir.join("set.vol0+1.par2"),
+        par2_volume(SET, BS, files, &[0]),
+    )
+    .unwrap();
+
+    let gate = PauseGate::new();
+    let rec = Arc::new(Rec {
+        calls: Mutex::new(Vec::new()),
+        slabs: Mutex::new(Vec::new()),
+        arms: Mutex::new(Vec::new()),
+        trip: Some((RepairPhase::Write, 0, gate.clone())),
+    });
+    let mut o = watching(rec.clone(), Some(gate.clone()));
+    let got = repair_dir_set_surveyed(&dir, &SET, &[], &mut o);
+    assert!(
+        !rec.of(RepairPhase::Write).is_empty(),
+        "the fixture must reach the publish, or this pins nothing"
+    );
+    assert!(
+        matches!(got, Err(RepairError::Cancelled)),
+        "a cancel during a short set's publish must come back as Cancelled, not as a \
+         verdict: {got:?}"
+    );
+    assert!(
+        !dir.join("a.bin").exists(),
+        "nothing is renamed in under a cancel"
+    );
+    assert!(!any_repair_temp(&dir), "a repair temp survived the cancel");
+
+    // The negative control: the same call uncancelled publishes a.bin,
+    // so the absence above is the cancel's doing.
+    let mut o2 = watching(Arc::new(Rec::default()), None);
+    let status = repair_dir_set_surveyed(&dir, &SET, &[], &mut o2)
+        .expect("a shortfall is a verdict")
+        .expect("the observer said Repair");
+    assert!(
+        matches!(status, RepairStatus::Unrepairable { .. }),
+        "{status:?}"
+    );
+    assert_eq!(std::fs::read(dir.join("a.bin")).unwrap(), a);
+}
+
+/// Parfast sweep A25. The NTT verify-failure fold retry is asked for the
+/// caller's control too, and does not re-run the survey handshake.
+///
+/// Driven by `force_one_retry`, the seam that makes the next repair on
+/// this thread run its attempt twice, because a real NTT divergence
+/// cannot be produced on demand. Until the fix the retry ran with no
+/// observer at all (`observe.take()`), so `control()` was asked ONCE -
+/// and the second fold, the longest stretch of the repair, could not be
+/// cancelled, paused or watched.
+#[test]
+fn the_fold_retry_keeps_the_callers_control() {
+    struct Counting {
+        control: RepairControl,
+        controls: AtomicUsize,
+        surveys: AtomicUsize,
+    }
+    impl SurveyObserver for Counting {
+        fn after_survey(&mut self, _members: &[MemberSurvey]) -> AfterSurvey {
+            self.surveys.fetch_add(1, Ordering::Relaxed);
+            AfterSurvey::Repair
+        }
+        fn control(&self) -> RepairControl {
+            self.controls.fetch_add(1, Ordering::Relaxed);
+            self.control.clone()
+        }
+    }
+    let (dir, files) = damaged_set("control-retry-keeps-control", &[(0, 3), (2, 7)]);
+    let mut o = Counting {
+        control: RepairControl::new(Some(Arc::new(Rec::default())), Some(PauseGate::new())),
+        controls: AtomicUsize::new(0),
+        surveys: AtomicUsize::new(0),
+    };
+    crate::par2repair::fastpar::force_one_retry();
+    let status = repair_dir_set_surveyed(&dir, &SET, &[], &mut o)
+        .expect("the repair completes")
+        .expect("the observer said Repair");
+    assert!(
+        matches!(status, RepairStatus::NoDamage | RepairStatus::Repaired(_)),
+        "{status:?}"
+    );
+    assert!(intact(&dir, &files), "the repair is byte-exact");
+    assert_eq!(
+        o.controls.load(Ordering::Relaxed),
+        2,
+        "both attempts must run under the caller's control"
+    );
+    assert_eq!(
+        o.surveys.load(Ordering::Relaxed),
+        1,
+        "the survey handshake is the caller's once per repair, not once per attempt"
+    );
+}

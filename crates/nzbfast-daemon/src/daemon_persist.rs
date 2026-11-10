@@ -434,7 +434,13 @@ impl Daemon {
                     self.history_compact();
                 }
                 self.history_enforce_retention();
-                if nh > 0 {
+                // ...and so is a history store that is THERE and could
+                // not be read, with nothing loaded from it: its rows' ids
+                // carry the same tokens, and this early return used to
+                // skip the unreadable-store floor further down, which is
+                // the one arm written for exactly this (9 Nov 2026 sweep).
+                let unread = self.history_store_unreadable.load(Ordering::Relaxed);
+                if nh > 0 || unread {
                     // A history-only restore is still a restore: those
                     // rows' ids carry permanent stream tokens, and a
                     // fresh allocator starting at 1 would re-mint them
@@ -445,7 +451,9 @@ impl Daemon {
                     let cur = self.next_id.load(Ordering::Relaxed);
                     self.next_id
                         .store(cur.max(Self::id_floor()), Ordering::Relaxed);
-                    info!(target: "queue", "restored {nh} history jobs");
+                    if nh > 0 {
+                        info!(target: "queue", "restored {nh} history jobs");
+                    }
                 }
                 return;
             }
@@ -842,5 +850,57 @@ impl Daemon {
                 let _ = std::fs::remove_file(&path);
             }
         }
+    }
+}
+
+// unix only: the one test here makes its fixture unreadable with a
+// permission bit, and on Windows the module would be two unused imports.
+#[cfg(all(test, unix))]
+mod load_floor_tests {
+    use super::*;
+    use crate::testutil::test_daemon;
+
+    /// 9 Nov 2026 sweep: a start with NO queue store and NO queue.json,
+    /// over a history store that exists and cannot be read, floors the id
+    /// allocator all the same.
+    ///
+    /// That shape takes `load_queue`'s early return, which floored only
+    /// when it had restored history rows - and an unreadable store
+    /// restores none. The arm further down that floors for an unreadable
+    /// store was never reached, so the fresh allocator handed out small
+    /// ids the unread rows already carry, each with a permanent stream
+    /// token.
+    #[test]
+    fn an_unreadable_history_alone_still_floors_the_allocator() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::testutil::scratch_dir("nzbfast-persist-floor", "hist-only");
+        let d = test_daemon(&dir);
+        let hpath = d.history_store_path();
+        std::fs::write(
+            &hpath,
+            br#"{"nzo_id":"SABnzbd_nzo_nzbfast3","name":"x","out_dir":"/tmp/o","nzb_path":"/tmp/n.nzb","state":"Completed"}
+"#,
+        )
+        .unwrap();
+        assert!(!d.queue_store_path().exists());
+        std::fs::set_permissions(&hpath, std::fs::Permissions::from_mode(0o200)).unwrap();
+        if std::fs::read(&hpath).is_ok() {
+            // root reads anything; the fault cannot be staged here.
+            std::fs::set_permissions(&hpath, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let d2 = test_daemon(&dir);
+        d2.load_queue();
+        std::fs::set_permissions(&hpath, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(d2.history_store_unreadable.load(Ordering::Relaxed));
+        assert!(d2.history.lock_ok().is_empty());
+        assert!(
+            d2.next_id.load(Ordering::Relaxed) >= 1_700_000_000,
+            "a history store that could not be read holds ids a fresh allocator re-mints"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

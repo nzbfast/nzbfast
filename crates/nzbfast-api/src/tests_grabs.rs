@@ -2049,7 +2049,8 @@ fn fetch_url_keeps_the_indexer_headers() {
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\
                  X-DNZB-Failure: http://indexer/fail?id=abc\r\n\
-                 X-DNZB-Category: tv\r\n\r\n{body}",
+                 X-DNZB-Category: tv\r\n\
+                 X-DNZB-Password:  s3cret pass \r\n\r\n{body}",
                 body.len()
             )
             .as_bytes(),
@@ -2059,6 +2060,9 @@ fn fetch_url_keeps_the_indexer_headers() {
     t.join().unwrap();
     assert_eq!(f.failure_link, "http://indexer/fail?id=abc");
     assert_eq!(f.category, "tv");
+    // TODO 358 item 5: read beside the other two, trimmed, and the
+    // interior space kept.
+    assert_eq!(f.password, "s3cret pass");
     assert!(super::is_nzb_body(&f.bytes));
 }
 
@@ -2091,6 +2095,8 @@ fn fetch_url_keeps_the_content_disposition_name() {
     let f = super::fetch_url(&url).expect("loopback fetch");
     t.join().unwrap();
     assert_eq!(f.filename, "Some.Release.2026.1080p-GRP.nzb");
+    // No X-DNZB-Password sent, so none recorded.
+    assert_eq!(f.password, "");
     assert_eq!(
         super::name_from_fetch(&f, &url).as_deref(),
         Some("Some.Release.2026.1080p-GRP.nzb")
@@ -2168,6 +2174,7 @@ fn name_from_fetch_strips_the_query() {
         host: String::new(),
         https: false,
         category: String::new(),
+        password: String::new(),
         filename: String::new(),
         addrs: Vec::new(),
     };

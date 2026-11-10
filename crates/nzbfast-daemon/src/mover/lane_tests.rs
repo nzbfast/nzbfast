@@ -673,3 +673,53 @@ async fn mover_lane_bench() {
     let _ = std::fs::remove_dir_all(&root_one);
     let _ = std::fs::remove_dir_all(&root_two);
 }
+
+/// 9 Nov 2026 sweep: the mover raises its `moving` marker AFTER it has
+/// checked the record, so it has to check again once the marker is up.
+///
+/// Retry samples `moving` under the history lock and takes the record
+/// out under that same hold. One landing between the mover's check and
+/// its insert found no marker and re-queued the job - and the move then
+/// carried off the directory the re-download was about to write into.
+/// The seam holds the mover in exactly that gap.
+#[test]
+fn a_retry_in_the_gap_before_the_fence_is_not_moved_out_from_under() {
+    let dir = scratch("fence-gap");
+    let d = test_daemon(&dir);
+    let nas = dir.join("nas");
+    *d.move_completed.write_ok() = Some(nas.clone());
+    let job = pending_job(&d, "Fence.Gap", "");
+    let id = job.lock_ok().nzo_id.clone();
+    let src = job.lock_ok().out_dir.clone();
+
+    let open = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    *MOVER_FENCE_BARRIER.lock_ok() = Some((id.clone(), open.clone(), release.clone()));
+    let mover = {
+        let (d, job) = (d.clone(), job.clone());
+        std::thread::spawn(move || d.mover_process(&job))
+    };
+    open.wait();
+    // The mover has checked the record and has not raised its marker.
+    *MOVER_FENCE_BARRIER.lock_ok() = None;
+    assert!(
+        d.retry(&id),
+        "nothing fences the record yet, so the retry lands"
+    );
+    release.wait();
+    let requeue = mover.join().expect("mover thread");
+
+    assert!(
+        !requeue,
+        "a record that left history owes this mover nothing"
+    );
+    assert!(
+        src.join("payload.bin").exists(),
+        "the move carried off the folder the retried job is downloading into"
+    );
+    assert!(
+        !nas.join("Fence.Gap").exists(),
+        "a payload landed at the destination for a record that was re-queued"
+    );
+    assert_eq!(job.lock_ok().out_dir, src);
+}

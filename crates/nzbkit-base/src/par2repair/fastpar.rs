@@ -40,7 +40,8 @@ pub const FAST_PAR_DEFAULT: bool = true;
 static FAST_PAR_ENABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(FAST_PAR_DEFAULT);
 /// Trip-breaker: set when a repair that used the NTT path failed
-/// whole-file verification (or panicked) and the fold retry ran. Once
+/// whole-file verification and the fold retry then SUCCEEDED, or that
+/// PANICKED whatever the retry did - see `run_with_ntt_fallback`. Once
 /// tripped, setting-driven dispatch prefers the fold for the rest of
 /// the process; the explicit env override still works.
 pub(super) static FAST_PAR_TRIPPED: std::sync::atomic::AtomicBool =
@@ -59,8 +60,8 @@ pub fn fast_par_tripped() -> bool {
 }
 
 /// Field telemetry for one NTT divergence: a repair that ran the NTT
-/// syndrome path and then failed whole-file verification (or panicked)
-/// where the fold retry was invoked. Both paths are bit-identical by
+/// syndrome path and failed whole-file verification with its fold retry
+/// then completing it, or that panicked. Both paths are bit-identical by
 /// construction, so every one of these is an NTT bug; the geometry here
 /// is what a reproduction needs.
 #[derive(Debug, Clone)]
@@ -80,8 +81,12 @@ pub struct NttDivergence {
     pub(crate) context: String,
 }
 
-/// Drain the recorded divergence events (the daemon appends them to the
-/// job log / history).
+/// Drain the recorded divergence events. NO PRODUCTION CALLER DRAINS
+/// THEM (checked 9 Nov 2026): this comment used to say the daemon
+/// appends them to the job log, and nothing in the workspace calls this
+/// outside the crate's own tests. The log is therefore bounded at
+/// `NTT_DIVERGENCES_KEPT` records rather than left to grow, and the warn line
+/// each record is logged with is the field-visible half.
 pub fn take_ntt_divergences() -> Vec<NttDivergence> {
     // Poison-proof: this log must never turn a caught panic elsewhere
     // into a new one (the push/take critical sections cannot panic).
@@ -104,6 +109,15 @@ pub(super) struct NttProbe {
     pub(super) block_size: usize,
     pub(super) max_exp: u32,
     pub(super) context: String,
+    /// The one thing here that is not about the NTT, kept on the struct
+    /// both drivers already thread through an attempt: an independent
+    /// recovery selection to use INSTEAD of the ordinary one. A driver
+    /// whose ordinary selection proved singular fills it
+    /// (`catalog::independent_rows`) and returns `SingularMatrix`; the
+    /// re-attempt takes it. A driver that was handed one and is singular
+    /// anyway does not fill it again, so the reselect runs at most once
+    /// (parfast sweep A27).
+    pub(super) pinned_rows: Option<Vec<u32>>,
 }
 
 fn record_ntt_divergence(probe: &NttProbe, panicked: bool) {
@@ -120,12 +134,12 @@ fn record_ntt_divergence(probe: &NttProbe, panicked: bool) {
     // by construction, so this is an NTT bug by definition, not noise.
     warn!(
         target: "par2",
-        "WARNING: NTT syndrome path diverged ({}) - retrying with the fold path \
-         (m={}, n_present={}, block_size={}, max_exp={}, context={})",
+        "WARNING: NTT syndrome path diverged ({}) (m={}, n_present={}, block_size={}, \
+         max_exp={}, context={})",
         if panicked {
-            "panic"
+            "panic - the fold path takes this and every later Auto repair"
         } else {
-            "repaired output failed verification"
+            "repaired output failed verification, and the fold retry completed the repair"
         },
         d.m,
         d.n_present,
@@ -133,8 +147,21 @@ fn record_ntt_divergence(probe: &NttProbe, panicked: bool) {
         d.max_exp,
         d.context,
     );
-    NTT_DIVERGENCES.lock_ok().push(d);
+    // BOUNDED, because nothing drains it in production: no caller of
+    // `take_ntt_divergences` exists outside this crate (A26). The breaker
+    // above stops the Auto path from adding to it after the first, but a
+    // forced path (`NZBFAST_NTT`) keeps reaching the transform, and a
+    // daemon's uptime is long. The first few carry the geometry a
+    // reproduction needs; the warn line above carries every one.
+    let mut log = NTT_DIVERGENCES.lock_ok();
+    if log.len() < NTT_DIVERGENCES_KEPT {
+        log.push(d);
+    }
 }
+
+/// Most [`NttDivergence`] records kept for [`take_ntt_divergences`]
+/// between drains. See `record_ntt_divergence`.
+const NTT_DIVERGENCES_KEPT: usize = 64;
 
 // Armed by `force_one_retry`: the next `run_with_ntt_fallback` ON
 // THE ARMING THREAD runs its attempt twice.
@@ -216,8 +243,44 @@ pub(super) fn run_with_ntt_fallback<T>(
             Err(p) => std::panic::resume_unwind(p),
         };
     }
-    record_ntt_divergence(&probe, panicked);
-    attempt(SyndromePath::Fold, &mut NttProbe::default())
+    // THE BREAKER TRIPS ON THE RETRY'S VERDICT, NOT ON THE FIRST
+    // ATTEMPT'S (parfast sweep A26, 9 Nov 2026). It used to be recorded
+    // here, before the retry ran, so ANY verify failure under the NTT -
+    // an internally inconsistent set, a member that changed under the
+    // repair, a bad recovery slice that proved - tripped the
+    // process-wide breaker, and every later Auto repair in that process
+    // (the daemon's, for its whole uptime) took the fold on the strength
+    // of a failure the fold then reproduced. The two paths are
+    // bit-identical by construction, so the only evidence that the NTT
+    // was at fault is the fold SUCCEEDING where it did not. A retry that
+    // fails too is the set's verdict and says nothing about the
+    // transform; one that returns a different error (a cancel, an I/O
+    // failure) has not answered the question either, and is not counted.
+    //
+    // A PANIC IS THE EXCEPTION, and trips BEFORE the retry. A panic under
+    // the transform is a transform bug whatever the fold then does - the
+    // set cannot make the NTT panic legitimately - and if the fold retry
+    // fails too (a bad set, a cancel) the rule above would leave the
+    // breaker off and every later Auto repair free to hit the same panic.
+    // Before the retry rather than after it, because a fold that panics
+    // as well unwinds straight out of here.
+    warn!(
+        target: "par2",
+        "the NTT repair attempt {} - retrying with the fold path",
+        if panicked {
+            "panicked"
+        } else {
+            "failed whole-file verification"
+        },
+    );
+    if panicked {
+        record_ntt_divergence(&probe, true);
+    }
+    let retry = attempt(SyndromePath::Fold, &mut NttProbe::default());
+    if retry.is_ok() && !panicked {
+        record_ntt_divergence(&probe, false);
+    }
+    retry
 }
 
 /// Conservative static gates. The Stage 0/1 hot-loop sweeps

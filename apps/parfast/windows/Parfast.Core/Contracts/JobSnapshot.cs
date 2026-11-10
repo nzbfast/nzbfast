@@ -20,7 +20,24 @@ public sealed record JobSnapshot
     [JsonPropertyName("rate_bytes_per_s")] public long RateBytesPerS { get; init; }
     [JsonPropertyName("low_priority")] public bool LowPriority { get; init; }
     [JsonPropertyName("added_at")] public DateTimeOffset? AddedAt { get; init; }
+    /// <summary>
+    /// A name for the job that the CORE never sends; FfiCore fills it from the
+    /// spec it submitted, as the fallback for an empty <see cref="Title"/>.
+    /// </summary>
     [JsonPropertyName("name")] public string Name { get; init; } = string.Empty;
+
+    /// <summary>
+    /// What the queue and a notification call the job: the output of a create,
+    /// the .par2 of a verify or repair, a posting set's name. Always sent by the
+    /// core since 9 Nov 2026, possibly empty. The app read only <see cref="Name"/>,
+    /// which the core never sent, so the queue's Name column was blank.
+    /// </summary>
+    [JsonPropertyName("title")] public string Title { get; init; } = string.Empty;
+
+    /// <summary>The name to show: the core's title as a file name, else <see cref="Name"/>.</summary>
+    [JsonIgnore]
+    public string DisplayTitle => string.IsNullOrEmpty(Title) ? Name : PathUtil.FileName(Title);
+
     [JsonPropertyName("log_tail")] public IReadOnlyList<string> LogTail { get; init; } = [];
 
     /// <summary>
@@ -98,6 +115,13 @@ public sealed record JobResult
 
     /// <summary>A posting set's route and its two halves' files. Null for every other kind.</summary>
     [JsonPropertyName("posting")] public PostingResult? Posting { get; init; }
+
+    /// <summary>
+    /// What the job could not take in (an unreadable folder, an empty file, a
+    /// source outside the base folder). Omitted when empty. Never an error: the
+    /// app shows it beside Done.
+    /// </summary>
+    [JsonPropertyName("warnings")] public IReadOnlyList<string> Warnings { get; init; } = [];
 }
 
 /// <summary>result.posting: which route a posting set took and what each half wrote.</summary>

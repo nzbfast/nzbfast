@@ -401,6 +401,27 @@ impl QueueControl {
         )
     }
 
+    /// Articles this run still owes a terminal outcome (Done, Missing or
+    /// Failed): queued, in flight, held for a re-ask or parked. `None`
+    /// once the run's pool is gone.
+    ///
+    /// The daemon's dispatch-stall watchdog
+    /// (`nzbfast-tasks/src/tasks/dispatch_stall.rs`) reads it for two
+    /// things: "is there queued work at all", and as a liveness signal,
+    /// since it falls on every verdict by every route (a 430 ladder that
+    /// moves no bytes still moves this). Same reasoning as the engine's
+    /// `FileSlot::remaining`, one layer down, where a daemon can reach it.
+    pub fn pending(&self) -> Option<usize> {
+        Some(
+            self.shared
+                .lock_ok()
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)?
+                .pending
+                .load(Ordering::Acquire),
+        )
+    }
+
     /// M11 stream mode: a live /stream reader touched the hub. Workers
     /// cap their pipelines to `stream_window()` while this stays fresh
     /// (see `Shared::stream_until`), so seek promotions preempt instead

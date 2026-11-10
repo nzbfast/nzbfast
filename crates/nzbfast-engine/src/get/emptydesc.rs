@@ -857,6 +857,7 @@ mod unsatisfied_tests {
                 md5_16k: EMPTY_MD5,
                 blocks: Vec::new(),
             }],
+            undescribed: Vec::new(),
             nonrecovery: Vec::new(),
             recovery_blocks_seen: 0,
         })]

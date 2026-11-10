@@ -9,14 +9,18 @@
 //!
 //! One subject: each leg is a different door the password comes through -
 //! `set_password` after the fact, a passwords file consulted at
-//! completion, a publish that ran out of disk after the decrypt, and the
-//! prompt that must never leave the archive packed on disk.
+//! completion, a publish that ran out of disk after the decrypt, the
+//! indexer's `X-DNZB-Password` header on a URL grab, and the prompt that
+//! must never leave the archive packed on disk.
 
 use super::*;
 
-/// M24 passworded archives, end to end: an encrypted-header RAR
-/// completes with password_required flagged in history; set_password
-/// attempts an unlock (and reports a wrong password); NZB-meta and
+/// M24 passworded archives, end to end: an encrypted-header RAR with no
+/// password lands in history FAILED with the "password required" reason
+/// and password_required flagged (TODO 358, decided 9 Nov 2026:
+/// what SABnzbd reports, so an *arr blocks the release and grabs another;
+/// it was Completed with the flag until then); set_password attempts an
+/// unlock (and reports a wrong password, keeping the flag); NZB-meta and
 /// "Name{{pw}}" passwords are captured at enqueue.
 #[tokio::test(flavor = "multi_thread")]
 async fn passworded_archive_flow() {
@@ -122,20 +126,36 @@ async fn passworded_archive_flow() {
         for _ in 0..150 {
             let h = http(port, "/api?mode=history&apikey=sekrit&output=json", None);
             done = slots(&h);
-            if done.len() == 3 && done.iter().all(|s| s["status"] == "Completed") {
+            // The locked one is Failed now, the two plain ones Completed.
+            if done.len() == 3
+                && done.iter().all(|s| {
+                    s["status"]
+                        == if s["name"] == "Locked.Release.2026" {
+                            "Failed"
+                        } else {
+                            "Completed"
+                        }
+                })
+            {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        assert_eq!(done.len(), 3, "not all jobs completed: {done:?}");
+        assert_eq!(done.len(), 3, "not all jobs finished: {done:?}");
         let by_name = |name: &str| -> serde_json::Value {
             done.iter().find(|s| s["name"] == name).cloned().unwrap_or_else(|| {
                 panic!("no history slot named {name}: {done:?}")
             })
         };
 
-        // Encrypted set: flagged, volumes intact on disk.
+        // Encrypted set: Failed with the reason an *arr reads, still
+        // flagged for the unlock, volumes intact on disk.
         let locked_slot = by_name("Locked.Release.2026");
+        assert_eq!(locked_slot["status"], "Failed", "{locked_slot}");
+        assert_eq!(
+            locked_slot["fail_message"], "password required to unpack",
+            "{locked_slot}"
+        );
         assert_eq!(locked_slot["password_required"], true, "{locked_slot}");
         assert!(
             dir2.join("complete/Locked.Release.2026/Locked.Release.2026.rar").exists(),
@@ -143,6 +163,7 @@ async fn passworded_archive_flow() {
         );
         // NZB meta password captured; nothing to unlock on a plain bin.
         let meta_slot = by_name("Meta.Release");
+        assert_eq!(meta_slot["status"], "Completed", "{meta_slot}");
         assert_eq!(meta_slot["has_password"], true, "{meta_slot}");
         assert_eq!(meta_slot["password_required"], false, "{meta_slot}");
         // "Name{{pw}}": password split out, clean job name.
@@ -166,6 +187,7 @@ async fn passworded_archive_flow() {
             if let Some(l) = s.iter().find(|s| s["name"] == "Locked.Release.2026")
                 && l["fail_message"].as_str().unwrap_or("").contains("did not unlock") {
                     assert_eq!(l["password_required"], true, "{l}");
+                    assert_eq!(l["status"], "Failed", "a wrong password is no unlock: {l}");
                     reported = true;
                     break;
                 }
@@ -328,6 +350,144 @@ async fn passwords_file_unlocks_at_completion() {
         assert!(
             !job_dir.join("Listed.Release.2026.rar").exists(),
             "spent volume must be consumed by the unlock"
+        );
+    })
+    .await
+    .unwrap();
+}
+
+/// TODO 358 item 5: the indexer's `X-DNZB-Password` header is a door
+/// too. A URL grab whose response carries the header, of an NZB that
+/// carries no password of its own, with no passwords file and nothing in
+/// the name, unlocks its encrypted RAR5 volume at download time - the
+/// header is the only place that password exists. Before the header was
+/// read this job parked as password_required with the volume on disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn dnzb_password_header_on_a_url_grab_unlocks_the_archive() {
+    use nzbkit::rar::fixtures;
+    use std::io::{Read, Write};
+    let dir = std::env::temp_dir().join(format!("nzbfast-dnzbpw-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let inner = payload(80_001, 29);
+    let f = fixtures::encrypt_file("hdr pw", &inner, 9);
+    let n = f.cipher.len();
+    let vol = fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..n, false, false)], None);
+    let mut articles = HashMap::new();
+    let segs = make_file_articles("Header.Release.2026.rar", &vol, 40_000, "hp", &mut articles);
+    let srv = MockServer::start(articles, Chaos::default()).await;
+
+    let mut xml = format!(
+        "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <file poster=\"x\" date=\"0\" subject=\"&quot;Header.Release.2026.rar&quot; yEnc (1/{})\">\n    <groups><group>g</group></groups>\n    <segments>\n",
+        segs.len()
+    );
+    for (id, bytes, num) in &segs {
+        xml.push_str(&format!(
+            "      <segment bytes=\"{bytes}\" number=\"{num}\">{id}</segment>\n"
+        ));
+    }
+    xml.push_str("    </segments>\n  </file>\n</nzb>\n");
+
+    // The "indexer": one loopback GET, answered with the NZB and the
+    // three X-DNZB headers a real indexer sends beside it. Loopback is
+    // reachable through the user-link SSRF guard on purpose.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let web = listener.local_addr().unwrap().port();
+    let indexer = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = sock.read(&mut buf);
+        let _ = sock.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\
+                 Content-Disposition: attachment; filename=\"Header.Release.2026.nzb\"\r\n\
+                 X-DNZB-Category: movies\r\n\
+                 X-DNZB-Password: hdr pw\r\n\
+                 Connection: close\r\n\r\n{xml}",
+                xml.len()
+            )
+            .as_bytes(),
+        );
+    });
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--apikey")
+            .arg("sekrit")
+            .arg("--out")
+            .arg(dir.join("complete"));
+        c
+    })
+    .await;
+    let port = d.port;
+
+    let dir2 = dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let r = http(
+            port,
+            &format!(
+                "/api?mode=addurl&name=http%3A%2F%2F127.0.0.1%3A{web}%2Fgetnzb%2Fabc&apikey=sekrit&output=json"
+            ),
+            None,
+        );
+        assert!(r.contains("nzo_ids"), "{r}");
+        indexer.join().unwrap();
+
+        let mut slot = serde_json::Value::Null;
+        for _ in 0..150 {
+            let h = http(port, "/api?mode=history&apikey=sekrit&output=json", None);
+            if let Some(s) = serde_json::from_str::<serde_json::Value>(&h)
+                .ok()
+                .and_then(|v| v["history"]["slots"].as_array().cloned())
+                .and_then(|s| s.iter().find(|s| s["name"] == "Header.Release.2026").cloned())
+                && (s["status"] == "Completed" || s["status"] == "Failed")
+            {
+                slot = s;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert_eq!(slot["status"], "Completed", "{slot}");
+        // Unlocked by the header's password - not parked, and the job
+        // reports holding one.
+        assert_eq!(slot["password_required"], false, "{slot}");
+        assert_eq!(slot["has_password"], true, "{slot}");
+        // The value never reaches the API answer.
+        let h = http(port, "/api?mode=history&apikey=sekrit&output=json", None);
+        assert!(!h.contains("hdr pw"), "password value leaked into history: {h}");
+        let job_dir = std::path::PathBuf::from(slot["storage"].as_str().unwrap());
+        assert!(
+            job_dir.starts_with(dir2.join("complete")),
+            "unexpected storage dir: {job_dir:?}"
+        );
+        let files: Vec<_> = std::fs::read_dir(&job_dir)
+            .expect("job dir")
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        assert!(
+            files.iter().any(|p| p.extension().is_some_and(|x| x == "mkv")
+                && std::fs::read(p).is_ok_and(|b| b == inner)),
+            "no decrypted payload equal to the posted plaintext in {files:?}"
         );
     })
     .await
@@ -586,10 +746,14 @@ async fn enospc_after_decrypt_publish_retries_without_refetching() {
     .unwrap();
 }
 
-/// password_prompt=never: a locked job completes QUIETLY - no failure
-/// text (nothing for the dashboard to announce), the still-packed note
-/// names the archive so the row says why it is packed, and
-/// password_required keeps the manual 🔑 available.
+/// password_prompt=never: the mode is about the DASHBOARD, which stays
+/// silent for this row (its `job.failed` arm), and never about what an
+/// API client reads. Since TODO 358 (9 Nov 2026) a locked set with
+/// no password is Failed with the "password required" reason in every
+/// mode - a Failed row with an empty reason tells an *arr nothing. The
+/// still-packed note still names the archive, and password_required
+/// keeps the manual 🔑 available. It used to complete quietly with no
+/// failure text.
 #[tokio::test(flavor = "multi_thread")]
 async fn password_prompt_never_leaves_archive_packed() {
     let dir = std::env::temp_dir().join(format!("nzbfast-pwnever-{}", std::process::id()));
@@ -687,17 +851,18 @@ async fn password_prompt_never_leaves_archive_packed() {
                 .ok()
                 .and_then(|v| v["history"]["slots"].as_array().cloned())
                 .and_then(|s| s.iter().find(|s| s["name"] == "Quiet.Release.2026").cloned())
-                && s["status"] == "Completed"
+                && s["status"] == "Failed"
             {
                 slot = s;
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        assert_eq!(slot["status"], "Completed", "{slot}");
-        // Locked, but presented as a quiet caveat, not a failure.
+        assert_eq!(slot["status"], "Failed", "{slot}");
+        // The API verdict is the same in this mode: Failed, with the
+        // reason, and the key still on the row.
         assert_eq!(slot["password_required"], true, "{slot}");
-        assert_eq!(slot["fail_message"], "", "{slot}");
+        assert_eq!(slot["fail_message"], "password required to unpack", "{slot}");
         let blocked = slot["unpack_blocked_by"].as_str().unwrap_or("");
         assert!(
             blocked.contains("Quiet.Release.2026.rar"),
@@ -1156,6 +1321,191 @@ async fn header_encrypted_meta_password_survives_a_kill9_mid_download() {
             refetched.len() < total,
             "the resumed job refetched the whole set ({} of {total})",
             refetched.len()
+        );
+    })
+    .await
+    .unwrap();
+}
+
+/// TODO 358, the other half of the 9 Nov 2026 decision: a locked set that
+/// filed FAILED for want of a password is still unlockable, and the
+/// unlock decides the verdict again.
+///
+/// Two media-named posts of one encrypted RAR5 store volume each, neither
+/// with a password: both land Failed with password_required. The right
+/// password then turns the clean one Completed with its payload out, the
+/// flag down and the reason cleared - and turns the one whose archive
+/// also holds `Movie.exe` into a refusal (TODO 358 item 13, D2): the
+/// manual unlock skipped the executable check the completed tail runs,
+/// so the executable was unpacked, renamed and moved the moment the
+/// password was typed (pre-release sweep, 9 Nov 2026).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_password_required_failure_unlocks_to_completed_or_to_a_refusal() {
+    use nzbkit::rar::fixtures;
+    let dir = std::env::temp_dir().join(format!("nzbfast-pwfailunlock-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let film = payload(80_001, 23);
+    let mut program = vec![0u8; 4096];
+    program[0..2].copy_from_slice(b"MZ");
+    program[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+    program[0x40..0x44].copy_from_slice(b"PE\0\0");
+    let f_clean = fixtures::encrypt_file("rightpw", &film, 9);
+    let f_bad = fixtures::encrypt_file("rightpw", &film, 11);
+    let f_exe = fixtures::encrypt_file("rightpw", &program, 13);
+    let clean = fixtures::rar5_volume_enc(
+        &[("movie.mkv", &f_clean, 0..f_clean.cipher.len(), false, false)],
+        None,
+    );
+    let bad = fixtures::rar5_volume_enc(
+        &[
+            ("movie.mkv", &f_bad, 0..f_bad.cipher.len(), false, false),
+            ("Movie.exe", &f_exe, 0..f_exe.cipher.len(), false, false),
+        ],
+        None,
+    );
+    const CLEAN: &str = "Clean.Movie.2026.1080p.BluRay.x264-GRP";
+    const BAD: &str = "Bad.Movie.2026.1080p.BluRay.x264-GRP";
+    let mut articles = HashMap::new();
+    let mut nzbs = Vec::new();
+    for (name, vol, tag) in [(CLEAN, &clean, "cl"), (BAD, &bad, "bd")] {
+        let fname = format!("{name}.rar");
+        let segs = make_file_articles(&fname, vol, 40_000, tag, &mut articles);
+        let mut xml = format!(
+            "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <file poster=\"x\" date=\"0\" subject=\"&quot;{fname}&quot; yEnc (1/{})\">\n    <groups><group>g</group></groups>\n    <segments>\n",
+            segs.len()
+        );
+        for (id, bytes, num) in &segs {
+            xml.push_str(&format!(
+                "      <segment bytes=\"{bytes}\" number=\"{num}\">{id}</segment>\n"
+            ));
+        }
+        xml.push_str("    </segments>\n  </file>\n</nzb>\n");
+        nzbs.push((format!("{name}.nzb"), xml));
+    }
+    let srv = MockServer::start(articles, Chaos::default()).await;
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--apikey")
+            .arg("sekrit")
+            .arg("--out")
+            .arg(dir.join("complete"));
+        c
+    })
+    .await;
+    let port = d.port;
+    let daemon_log = d.log_path();
+
+    tokio::task::spawn_blocking(move || {
+        for (nzb_name, xml) in &nzbs {
+            let boundary = "----nzbfastboundary";
+            let mut body = Vec::new();
+            body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"name\"; filename=\"{nzb_name}\"\r\nContent-Type: application/x-nzb\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(xml.as_bytes());
+            body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+            let ctype = format!("multipart/form-data; boundary={boundary}");
+            let r = http(port, "/api?mode=addfile&apikey=sekrit&output=json", Some((&ctype, &body)));
+            assert!(r.contains("nzo_ids"), "{r}");
+        }
+        let slot_of = |name: &str| -> Option<serde_json::Value> {
+            let h = http(port, "/api?mode=history&apikey=sekrit&output=json", None);
+            serde_json::from_str::<serde_json::Value>(&h)
+                .ok()
+                .and_then(|v| v["history"]["slots"].as_array().cloned())
+                .and_then(|s| s.iter().find(|s| s["name"] == name).cloned())
+        };
+        let wait = |name: &str, done: &dyn Fn(&serde_json::Value) -> bool| -> serde_json::Value {
+            for _ in 0..300 {
+                if let Some(s) = slot_of(name)
+                    && done(&s)
+                {
+                    return s;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            let log = std::fs::read_to_string(&daemon_log).unwrap_or_default();
+            panic!("{name} never settled: {:?}\n--- log ---\n{log}", slot_of(name))
+        };
+
+        // Both park Failed with the key, the way an *arr must read them.
+        let mut ids = Vec::new();
+        for name in [CLEAN, BAD] {
+            let s = wait(name, &|s| s["status"] == "Failed" && s["password_required"] == true);
+            assert_eq!(s["fail_message"], "password required to unpack", "{s}");
+            ids.push(s["nzo_id"].as_str().unwrap().to_string());
+        }
+        for id in &ids {
+            let r = http(
+                port,
+                &format!("/api?mode=set_password&value={id}&password=rightpw&apikey=sekrit&output=json"),
+                None,
+            );
+            assert!(r.contains("\"status\":true"), "{r}");
+        }
+
+        // The clean one is a completion after all.
+        let s = wait(CLEAN, &|s| s["password_required"] == false);
+        assert_eq!(s["status"], "Completed", "{s}");
+        assert_eq!(s["fail_message"], "", "{s}");
+        let job_dir = std::path::PathBuf::from(s["storage"].as_str().unwrap());
+        let files: Vec<_> = std::fs::read_dir(&job_dir)
+            .expect("job dir")
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        assert!(
+            files
+                .iter()
+                .any(|p| std::fs::metadata(p).is_ok_and(|m| m.len() == 80_001)),
+            "the unlocked payload is missing: {files:?}"
+        );
+
+        // The one holding an executable is refused, as the completed
+        // tail would have refused it had it held the password.
+        let s = wait(BAD, &|s| s["password_required"] == false);
+        assert_eq!(s["status"], "Failed", "{s}");
+        let why = s["fail_message"].as_str().unwrap_or_default();
+        assert!(
+            why.starts_with("refused:") && why.contains("Movie.exe"),
+            "the refusal must say what it refused: {why:?}"
+        );
+        let job_dir = std::path::PathBuf::from(s["storage"].as_str().unwrap());
+        let left: Vec<_> = std::fs::read_dir(&job_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        assert!(
+            !left
+                .iter()
+                .any(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe"))),
+            "the refused executable is still in the output: {left:?}"
         );
     })
     .await

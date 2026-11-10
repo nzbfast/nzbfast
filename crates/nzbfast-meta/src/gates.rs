@@ -51,7 +51,7 @@ pub struct Gates {
 /// which binds them as SQLite INTEGERs (`max as i64`), so anything past
 /// this wraps NEGATIVE there - and `DELETE FROM releases WHERE
 /// total_bytes > <negative>` matches every row: the whole index gone,
-/// printed as a successful prune. `parse_size` reaches that easily,
+/// printed as a successful prune. `parse_byte_size` reaches that easily,
 /// since it ends in a saturating `f64 as u64` ("99999999T" alone yields
 /// `u64::MAX`). 8 EiB is unbounded for any real index, so no legitimate
 /// gate is refused.
@@ -68,7 +68,7 @@ impl Gates {
     pub fn from_json(text: &str) -> anyhow::Result<Gates> {
         let g: Gates = serde_json::from_str(text)?;
         for s in [&g.min_size, &g.max_size].into_iter().flatten() {
-            let n = crate::sizes::parse_size(s)
+            let n = crate::sizes::parse_byte_size(s)
                 .ok_or_else(|| anyhow::anyhow!("gates: can't parse size {s:?}"))?;
             // REJECT rather than clamp, because there is no safe value to
             // clamp to: pushing `max` down to MAX_SIZE_BYTES is harmless,
@@ -101,7 +101,7 @@ impl Gates {
     pub fn size_bounds(&self) -> (u64, u64) {
         let p = |o: &Option<String>| {
             o.as_deref()
-                .and_then(crate::sizes::parse_size)
+                .and_then(crate::sizes::parse_byte_size)
                 .filter(|n| *n <= MAX_SIZE_BYTES)
                 .unwrap_or(0)
         };
@@ -264,6 +264,10 @@ mod tests {
     #[test]
     fn sizes_validate_and_parse() {
         let g = gates(r#"{"min_size": "200M", "max_size": "80G"}"#);
+        assert_eq!(g.size_bounds(), (200_000_000, 80_000_000_000));
+        // A gate bounds a release's SIZE, so a lowercase `b` is bytes
+        // here, never the line speed's bits.
+        let g = gates(r#"{"min_size": "200mb", "max_size": "80gb"}"#);
         assert_eq!(g.size_bounds(), (200_000_000, 80_000_000_000));
         assert!(Gates::load(Path::new("/nonexistent")).is_err());
     }

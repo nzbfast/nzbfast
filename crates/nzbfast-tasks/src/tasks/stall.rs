@@ -1489,9 +1489,13 @@ pub fn spawn_slow_job_watchdog(
         // tick - and warns AGAIN if the server comes back and dies
         // again, which is a different fact worth a line.
         let mut outage_noted: std::collections::HashMap<String, u64> = Default::default();
+        // TODO 358 item 3: the dispatch-stall reset. Always on, like the
+        // observation half; see `dispatch_stall.rs`.
+        let mut dispatch = super::dispatch_stall::DispatchStall::from_env();
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(tick)).await;
             observe_transfer_and_outages(&d, &mut stall, &mut outage_noted);
+            super::dispatch_stall::dispatch_stall_tick(&d, &mut dispatch);
             // Retention insurance: an in-flight background fetch stands
             // down the moment a real job becomes runnable. Before the
             // auto_defer/auto_prefetch gate below on purpose - yielding

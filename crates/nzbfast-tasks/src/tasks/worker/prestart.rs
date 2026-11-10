@@ -197,10 +197,9 @@ pub(super) async fn post_health_giveup(st: &Runner, p: &PreStart<'_>) -> Option<
         ..
     } = *p;
     let giveup: Option<String> = if !insurance && d.post_health_fail.load(Ordering::Relaxed) {
-        let j = job.lock_ok();
-        j.health
+        giveup_verdict(st, p)
+            .await
             .as_ref()
-            .filter(|h| h.no_server_can_supply())
             .map(crate::health::giveup_reason)
     } else {
         None
@@ -245,6 +244,97 @@ pub(super) async fn post_health_giveup(st: &Runner, p: &PreStart<'_>) -> Option<
     }
 
     None
+}
+
+/// TODO 358 item 1 (decision D1): the verdict the give-up above acts
+/// on, or `None` to download as normal.
+///
+/// Two sources, and only a verdict that clears
+/// [`crate::health::PostHealth::fails_job`] comes out of either:
+///
+/// * **The record**, when the §77 prober (or an earlier start of this
+///   same job) already left a 64-wide unanimous verdict on it. This is
+///   also what a restart reads: a start-sample verdict is written onto
+///   the record and the queue saved BEFORE the job is failed, so a
+///   daemon that dies anywhere between the two finds the verdict in
+///   `queue.json` on the way back up and ends the job on it without a
+///   second probe. A NARROW record verdict (the prober's k=8 burst,
+///   when its escalation was skipped because something was
+///   downloading) is never acted on - that is the 43% misfire
+///   `fails_job` is written against - and the start sample decides
+///   instead.
+/// * **The parallel start sample** ([`crate::postprobe::start_sample`]),
+///   otherwise. It needs the post-health check itself to be on, as the
+///   setting's row says ("Needs the check above").
+///
+/// The user's waiver ends the question on either road: a job they have
+/// reordered or re-prioritized, or retried after a give-up, downloads.
+///
+/// The probe takes the account's slots for a few seconds before this
+/// job's own pipeline dials, so the job is re-read afterwards: one that
+/// was deleted, paused or waived while it ran is left alone rather than
+/// failed under the user's hand.
+async fn giveup_verdict(st: &Runner, p: &PreStart<'_>) -> Option<crate::health::PostHealth> {
+    let d = &st.d;
+    let PreStart {
+        job,
+        nzb_path,
+        nzo_id,
+        ..
+    } = *p;
+    let record = job.lock_ok().health.clone();
+    match &record {
+        Some(h) if h.waived => return None,
+        Some(h) if h.fails_job(usize::MAX) => return record,
+        _ => {}
+    }
+    if !d.post_health.load(Ordering::Relaxed) {
+        return None;
+    }
+    let servers: Vec<nzbkit::config::ServerConfig> =
+        match nzbkit::config::Config::load(st.config.as_path()) {
+            Ok(c) => c.servers.into_iter().filter(|s| s.enabled).collect(),
+            Err(_) => return None,
+        };
+    d.hub
+        .activity
+        .lock_ok()
+        .insert(nzo_id.to_string(), "preflight");
+    let t = Instant::now();
+    let verdict = match crate::postprobe::start_sample(d, &servers, nzb_path).await {
+        crate::postprobe::StartSample::Skipped(why) => {
+            tracing::debug!(target: "health", "{nzo_id}: start sample not run ({why})");
+            return None;
+        }
+        crate::postprobe::StartSample::Pass(v) => {
+            info!(
+                target: "health",
+                "{nzo_id}: start sample in {:.1} s, downloading: {}",
+                t.elapsed().as_secs_f64(),
+                v.as_ref().map_or("no server answered", |v| v.reason.as_str())
+            );
+            return None;
+        }
+        crate::postprobe::StartSample::Gone(v) => v,
+    };
+    info!(
+        target: "health",
+        "{nzo_id}: start sample in {:.1} s: {}",
+        t.elapsed().as_secs_f64(),
+        verdict.reason
+    );
+    let still_ours = d.queue.lock_ok().iter().any(|q| Arc::ptr_eq(q, job));
+    {
+        let mut j = job.lock_ok();
+        if !still_ours || j.tombstone || j.paused || j.health.as_ref().is_some_and(|h| h.waived) {
+            return None;
+        }
+        j.health = Some(verdict.clone());
+    }
+    // Journaled before the job is failed, so a restart in between keeps
+    // the verdict (the first bullet above).
+    d.save_queue();
+    Some(verdict)
 }
 
 /// Opt-in pre-flight (settings.json `preflight`): sample

@@ -178,6 +178,20 @@ impl Shared {
     }
 }
 
+/// Reserve this worker's dial slot on server `idx`: the wait until it
+/// may connect, spacing every dial on one host at least `gap` apart.
+/// The first dial of a run waits nothing; a fleet admitted together
+/// takes 0, gap, 2 x gap, ... in admission order, which is the stagger
+/// `ramp_delay x slot` used to give it; a worker admitted later than the
+/// last reservation dials at once.
+pub(super) fn dial_pace(shared: &Shared, idx: usize, gap: Duration) -> Duration {
+    let now = tokio::time::Instant::now();
+    let mut next = shared.dial_next[idx].lock_ok();
+    let at = (*next).max(now);
+    *next = at + gap;
+    at - now
+}
+
 /// Park this worker until its server has an admission free under the
 /// live target. Returns None if the run ended (or began draining)
 /// while parked - the caller must retire, not dial.
@@ -197,6 +211,18 @@ pub(super) async fn wait_for_slot(
     // count safe to divide by.
     let mut parked: Option<Parked> = None;
     loop {
+        // Registered for a wake BEFORE the count is read, not after. A
+        // `Notify` keeps at most ONE permit for a waiter that has not
+        // registered yet, so two admissions dropping between this
+        // worker's failed check and its first poll of `notified()` left
+        // it one permit for two freed places: a second parked worker in
+        // the same window slept on a free slot until something else
+        // moved. Enabled first, every `notify_one` that lands after the
+        // read below wakes a registered waiter instead of folding into
+        // the single stored permit.
+        let wake = shared.admit_wake[idx].notified();
+        tokio::pin!(wake);
+        wake.as_mut().enable();
         let t = *rx.borrow_and_update();
         let admitted = shared.admitted[idx]
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |a| {
@@ -226,7 +252,7 @@ pub(super) async fn wait_for_slot(
                     });
                 }
             }
-            _ = shared.admit_wake[idx].notified() => {}
+            _ = &mut wake => {}
             _ = super::runlife::parked_run_over(finished, shared) => return None,
         }
     }

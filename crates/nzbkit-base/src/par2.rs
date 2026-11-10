@@ -439,6 +439,26 @@ pub struct Par2Set {
     /// a recovery-set member may ever be added to it - see
     /// [`Par2Set::nonrecovery`].
     pub files: Vec<Par2File>,
+    /// Recovery-set ids the Main packet DECLARES that resolved to no
+    /// usable FileDesc, as `(position in the Main packet's recoverable
+    /// list, file id)`, in that list's order. Empty on every whole set.
+    ///
+    /// [`Par2Set::files`] holds only the members that resolved, so on its
+    /// own it cannot say a member was DROPPED: one FileDesc packet failing
+    /// its MD5 (a single bad article in an index-only download) left a set
+    /// that described its other members, and `parfast v` verified those,
+    /// printed "All files are correct, repair is not required." and
+    /// exited 0 - with `-p`, then purged the recovery files. Repair
+    /// refuses the same set loudly (`par2repair`'s target walk, "No
+    /// details available for recoverable file number N."), because the
+    /// dropped member also shifts the slice index space. This field is
+    /// what lets a reader of the PARSE reach the same answer; the
+    /// declared count is `files.len() + undescribed.len()`.
+    ///
+    /// The position is 0-based; the reference's sentence prints it +1.
+    /// A verify-only id (the Main packet's second half) is never listed
+    /// here, because losing one costs naming and no verdict.
+    pub undescribed: Vec<(usize, [u8; 16])>,
     /// Every file this set DESCRIBES but carries no parity for, resolved
     /// through its FileDesc packet. Same shape as [`Par2Set::files`],
     /// deliberately a different list.
@@ -595,6 +615,24 @@ pub fn slice_fits_block(len: usize, bs: usize) -> bool {
     len >= bs
 }
 
+/// The coding-matrix ROW a recovery exponent names: `e` reduced modulo
+/// the multiplicative order of GF(2^16), 65,535.
+///
+/// The exponent is a `u32` on the wire, but every RS constant is
+/// `g^e` for a `g` in that group, so `e` and `e + 65535` are ONE row
+/// (the reconstructor already computes `2^(k*e mod 65535)`). Keying a
+/// recovery count or a selection map by the raw value counted such a
+/// pair as two blocks of repair power: verify reported a repair the set
+/// cannot do, and a selection that took both ended in `SingularMatrix`
+/// (parfast sweep, 9 Nov 2026). Every exponent below 65,535 - which is
+/// every exponent par2cmdline and this crate's own creator write - is
+/// its own row, so this changes nothing on any set a real producer
+/// makes. One copy, so the counting sites and the selection sites cannot
+/// disagree about what a row is.
+pub fn recovery_row(e: u32) -> u32 {
+    e % crate::gf16::ORDER
+}
+
 /// The deferred recovery spans of ONE input ([`Par2Set::parse_deferred`])
 /// verified over `input` (the same bytes, or a fresh read of the same
 /// file): the exponents of the packets that check, that belong to
@@ -617,7 +655,9 @@ pub fn validate_recovery_spans(
 /// the same [`PacketInfo`] a whole-file [`packet_census`] would have
 /// produced, in span order. A span that cannot be read, or whose bytes
 /// do not hash to the MD5 in its own header, contributes nothing - the
-/// same silence [`packet_census`] keeps about a packet it rejects.
+/// same silence [`packet_census`] keeps about a packet it rejects -
+/// except the packets a damaged length swallowed, which a failed span's
+/// interior rescan returns as the hashing walk would (parfast sweep).
 ///
 /// EACH SPAN IS READ ON ITS OWN, with one positioned read into a
 /// buffer the worker reuses for every packet after it, so the file is
@@ -646,7 +686,12 @@ pub fn verify_recovery_file(path: &std::path::Path, spans: &[(u64, u64)]) -> Vec
     };
     let threads = crate::mem::cpu_workers().clamp(1, spans.len());
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let found = std::sync::Mutex::new(Vec::<(usize, PacketInfo)>::new());
+    let found = std::sync::Mutex::new(Vec::<(usize, usize, PacketInfo)>::new());
+    // The serial scan's MD5 budget over this file, for the rescans of
+    // failed spans below - the in-memory door's rule, `scan_inside_span`.
+    let file_len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let rescan_budget =
+        std::sync::atomic::AtomicU64::new(file_len.saturating_mul(4).max(16 * 1024 * 1024));
     std::thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(|| {
@@ -654,7 +699,7 @@ pub fn verify_recovery_file(path: &std::path::Path, spans: &[(u64, u64)]) -> Vec
                 // has met and never shrunk: every packet of a set is
                 // the same size, so this allocates once.
                 let mut buf: Vec<u8> = Vec::new();
-                let mut mine: Vec<(usize, PacketInfo)> = Vec::new();
+                let mut mine: Vec<(usize, usize, PacketInfo)> = Vec::new();
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if i >= spans.len() {
@@ -673,8 +718,21 @@ pub fn verify_recovery_file(path: &std::path::Path, spans: &[(u64, u64)]) -> Vec
                     if crate::disk::read_exact_at(&f, &mut buf[..len], off).is_err() {
                         continue;
                     }
-                    if let Some(pkt) = packet::verify_span(&buf, 0, len) {
-                        mine.push((i, census_entry(&pkt)));
+                    match packet::verify_span(&buf, 0, len) {
+                        Some(pkt) => mine.push((i, 0, census_entry(&pkt))),
+                        // A span that fails may be a damaged LENGTH that
+                        // swallowed good packets, exactly as on the
+                        // in-memory door. Its own bytes are enough here:
+                        // `sparse_frame` frames only when the NEXT header
+                        // sits at the false end, so whatever it swallowed
+                        // is whole inside the span.
+                        None => {
+                            let mut j = 0usize;
+                            packet::scan_inside_span(&buf[..len], 0, len, &rescan_budget, |pkt| {
+                                j += 1;
+                                mine.push((i, j, census_entry(&pkt)));
+                            });
+                        }
                     }
                 }
                 let mut g = found.lock().unwrap_or_else(|e| e.into_inner());
@@ -683,8 +741,8 @@ pub fn verify_recovery_file(path: &std::path::Path, spans: &[(u64, u64)]) -> Vec
         }
     });
     let mut out = found.into_inner().unwrap_or_else(|e| e.into_inner());
-    out.sort_unstable_by_key(|(i, _)| *i);
-    out.into_iter().map(|(_, p)| p).collect()
+    out.sort_unstable_by_key(|(i, j, _)| (*i, *j));
+    out.into_iter().map(|(_, _, p)| p).collect()
 }
 
 /// [`validate_recovery_spans`] over spans that are FILE offsets from a
@@ -715,7 +773,7 @@ pub fn validate_recovery_file(
         // invariant held one function away.
         let data = p.body_len.saturating_sub(4);
         if slice_fits_block(data, bs) {
-            let v = out.entry(e).or_insert(0);
+            let v = out.entry(recovery_row(e)).or_insert(0);
             *v = (*v).max(data);
         }
     }
@@ -732,26 +790,39 @@ fn validate_recovery_spans_in(
     let threads = crate::mem::cpu_workers().clamp(1, spans.len().max(1));
     let next = std::sync::atomic::AtomicUsize::new(0);
     let found = std::sync::Mutex::new(HashMap::<u32, usize>::new());
+    // The serial scan's MD5 budget, for the rescans of failed spans
+    // below - see `packet::scan_inside_span`. Untouched on a clean set.
+    let rescan_budget = std::sync::atomic::AtomicU64::new(
+        (input.len() as u64).saturating_mul(4).max(16 * 1024 * 1024),
+    );
     std::thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(|| {
                 let mut mine: Vec<(u32, usize)> = Vec::new();
+                let mut accept = |pkt: packet::RawPacket<'_>| {
+                    if pkt.set_id != *set_id || pkt.ptype != *TYPE_RECVSLIC || pkt.body.len() < 4 {
+                        return;
+                    }
+                    let e = u32::from_le_bytes(pkt.body[0..4].try_into().unwrap());
+                    let data = pkt.body.len() - 4;
+                    if slice_fits_block(data, bs) {
+                        mine.push((recovery_row(e), data));
+                    }
+                };
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if i >= spans.len() {
                         break;
                     }
                     let (start, end) = spans[i];
-                    let Some(pkt) = packet::verify_span(input, start, end) else {
-                        continue;
-                    };
-                    if pkt.set_id != *set_id || pkt.ptype != *TYPE_RECVSLIC || pkt.body.len() < 4 {
-                        continue;
-                    }
-                    let e = u32::from_le_bytes(pkt.body[0..4].try_into().unwrap());
-                    let data = pkt.body.len() - 4;
-                    if slice_fits_block(data, bs) {
-                        mine.push((e, data));
+                    match packet::verify_span(input, start, end) {
+                        Some(pkt) => accept(pkt),
+                        // A span that fails may be a damaged LENGTH that
+                        // swallowed good packets behind it; the hashing
+                        // walk would have found those, so this does too.
+                        None => {
+                            packet::scan_inside_span(input, start, end, &rescan_budget, &mut accept)
+                        }
                     }
                 }
                 let mut f = found.lock().unwrap_or_else(|e| e.into_inner());
@@ -1266,7 +1337,7 @@ impl Par2Set {
                     t if t == TYPE_RECVSLIC && pkt.body.len() >= 4 => {
                         let e = u32::from_le_bytes(pkt.body[0..4].try_into().unwrap());
                         let data = pkt.body.len() - 4;
-                        let seen = g.exps.entry(e).or_insert(0);
+                        let seen = g.exps.entry(recovery_row(e)).or_insert(0);
                         *seen = (*seen).max(data);
                     }
                     _ => {} // Creator + anything unknown: skip
@@ -1354,7 +1425,11 @@ impl Par2Set {
             // about the name, length or digest AND neither outranks
             // the other (`DescClaim::offer_desc`), and in all of those we
             // do not know what file this is. The other members of the
-            // set still verify and still repair.
+            // set still verify. They do NOT still repair, which this
+            // said until 9 Nov 2026: the repair's own target walk refuses
+            // the set ("No details available for recoverable file number
+            // N."), and for a RECOVERY id the caller below records the
+            // loss in `Par2Set::undescribed` so a verify can say so too.
             let d = descs.remove(&fid)?.into_settled()?;
             // Two IFSC packets that disagree with EACH OTHER are
             // dropped for that same reason, with the whole-file MD5 as
@@ -1383,7 +1458,16 @@ impl Par2Set {
                 blocks,
             })
         };
-        let files: Vec<Par2File> = file_ids.into_iter().filter_map(&mut resolve).collect();
+        // A recovery id that does not resolve is still RECORDED, by its
+        // position in the Main packet's list - see `Par2Set::undescribed`.
+        let mut files: Vec<Par2File> = Vec::with_capacity(file_ids.len());
+        let mut undescribed: Vec<(usize, [u8; 16])> = Vec::new();
+        for (at, fid) in file_ids.into_iter().enumerate() {
+            match resolve(fid) {
+                Some(f) => files.push(f),
+                None => undescribed.push((at, fid)),
+            }
+        }
         let mut nonrecovery: Vec<Par2File> = nonrecovery_ids
             .into_iter()
             .filter_map(&mut resolve)
@@ -1423,6 +1507,7 @@ impl Par2Set {
             recovery_set_id: set_id,
             block_size,
             files,
+            undescribed,
             nonrecovery,
             // The Unicode spelling first, for the same reason a Unicode
             // Filename packet outranks the FileDesc's name: a producer

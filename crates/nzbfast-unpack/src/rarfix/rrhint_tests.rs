@@ -1142,3 +1142,135 @@ fn the_volume_deadline_is_minutes_not_seconds() {
     assert_eq!(volume_deadline(117 << 20).as_secs(), 417);
     assert!(volume_deadline(4 << 30) > std::time::Duration::from_secs(3600));
 }
+
+/// Hold `vol`'s publish at `stage`, returning the two barriers. The caller
+/// waits the first (the worker is there) and the second (let it go), and
+/// clears the hook once the worker has finished.
+fn hold_publish(
+    vol: &std::path::Path,
+    stage: crate::rarfix::RrStage,
+) -> (
+    std::sync::Arc<std::sync::Barrier>,
+    std::sync::Arc<std::sync::Barrier>,
+) {
+    let open = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+    crate::rarfix::RR_PUBLISH_BARRIER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((vol.to_path_buf(), stage, open.clone(), release.clone()));
+    (open, release)
+}
+
+fn clear_publish_hook(vol: &std::path::Path) {
+    crate::rarfix::RR_PUBLISH_BARRIER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|(p, ..)| p != vol);
+}
+
+/// 6 Nov 2026 sweep F1: a pass that walked away from a volume is never
+/// overwritten by that volume's late repair.
+///
+/// The worker used to read the walk-away flag once, before flushing its
+/// rebuilt temp, and rename unconditionally after the flush. A cancel that
+/// landed while the flush blocked returned at once; the job moved on - a
+/// retry re-fetched the volume, say - and the flush then finished and the
+/// old rebuild was renamed over the newer bytes. This holds the worker
+/// between the flush and the publish, cancels, puts a NEW owner's bytes
+/// at the path, and lets the worker go: the new bytes must survive and the
+/// temp must be gone.
+#[test]
+fn a_cancelled_volume_repair_never_publishes_after_the_pass_left() {
+    let dir = temp_dir("rr-cancel-publish");
+    let vols = write_rr_set(&dir, &payload(100_000, 2654435761));
+    damage(&vols[1]);
+    let vol = vols[1].clone();
+    let (open, release) = hold_publish(&vol, crate::rarfix::RrStage::BeforeClaim);
+
+    let worker = super::rrhint::VolumeWorker::start(dir.clone(), vols.clone(), None).unwrap();
+    let cancel = std::sync::Arc::new(crate::streamhub::SideCancel::new());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let owner = {
+        let (vol, cancel) = (vol.clone(), cancel.clone());
+        std::thread::spawn(move || {
+            let wait = worker.repair(&vol, Some(&cancel), std::time::Duration::from_secs(600));
+            let _ = tx.send(matches!(wait, super::rrhint::VolumeWait::Cancelled));
+            worker
+        })
+    };
+    open.wait(); // rebuilt and flushed, about to decide
+    cancel.cancel();
+    let cancelled = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("a cancel during the publish window did not end the wait");
+    assert!(cancelled, "the pass must report the cancel");
+    // The job has moved on: something else owns this path now.
+    let newer = b"Rar!\x1a\x07\x01\x00 a newer owner's bytes".to_vec();
+    std::fs::write(&vol, &newer).unwrap();
+    release.wait();
+    // Dropping the worker hangs up its channel, so its thread finishes
+    // the volume it holds and exits; wait for the temp to go.
+    drop(owner.join().unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !repair_temps(&dir).is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    clear_publish_hook(&vol);
+    assert_eq!(
+        std::fs::read(&vol).unwrap(),
+        newer,
+        "the late repair renamed its stale rebuild over the newer owner's volume"
+    );
+    assert!(repair_temps(&dir).is_empty(), "{:?}", repair_temps(&dir));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The other side of the same arbiter: a publish already CLAIMED is the
+/// answer, so a cancel landing in it waits for that one rename and reports
+/// the volume rebuilt rather than walking away while it lands.
+#[test]
+fn a_cancel_during_a_claimed_publish_takes_the_publish_as_the_answer() {
+    let dir = temp_dir("rr-publish-wins");
+    let data = payload(100_000, 40503);
+    let vols = write_rr_set(&dir, &data);
+    let pristine = std::fs::read(&vols[1]).unwrap();
+    damage(&vols[1]);
+    let vol = vols[1].clone();
+    let (open, release) = hold_publish(&vol, crate::rarfix::RrStage::AfterClaim);
+
+    let worker = super::rrhint::VolumeWorker::start(dir.clone(), vols.clone(), None).unwrap();
+    let cancel = std::sync::Arc::new(crate::streamhub::SideCancel::new());
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let (vol, cancel) = (vol.clone(), cancel.clone());
+        std::thread::spawn(move || {
+            let wait = worker.repair(&vol, Some(&cancel), std::time::Duration::from_secs(600));
+            let _ = tx.send(matches!(
+                wait,
+                super::rrhint::VolumeWait::Done(Ok(RrRepair::Rebuilt))
+            ));
+        });
+    }
+    open.wait(); // the publish is claimed, the rename not yet run
+    cancel.cancel();
+    // Two poll intervals: a pass that ignored the claim would be gone.
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(800))
+            .is_err(),
+        "the pass walked away from a publish it had already lost"
+    );
+    release.wait();
+    let rebuilt = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the claimed publish never answered");
+    clear_publish_hook(&vol);
+    assert!(rebuilt, "the answer is the rename that landed");
+    assert_eq!(
+        std::fs::read(&vol).unwrap(),
+        pristine,
+        "the volume is rebuilt"
+    );
+    assert!(repair_temps(&dir).is_empty(), "{:?}", repair_temps(&dir));
+    let _ = std::fs::remove_dir_all(&dir);
+}

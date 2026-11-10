@@ -30,6 +30,9 @@ enum DemoRoute {
 
     static func handle(_ url: URL, app: AppModel) -> Bool {
         guard url.host == "demo" else { return false }
+        guard app.core is MockCore else {
+            return handleScreenshotOnly(url)
+        }
         // NOTHING A SHOOT DOES TO THE WINDOW IS PERSISTED. `resize` below sets
         // an explicit size so a round of pictures stays comparable with the
         // round before it, and with frame persistence live (12 Sep 2026) that
@@ -37,13 +40,13 @@ enum DemoRoute {
         // window. Suspended for the whole process on the first demo URL, not
         // just around the resize, because `center()` moves it too and the next
         // thing a shoot learns to drive would inherit the same trap.
+        //
+        // AFTER the gates, not before them (sweep, section B: "DemoRoute
+        // reachable in a real build"). It ran first, so in a release build
+        // any web page that fired `parfast://demo` turned off window-frame
+        // saving for the rest of the run, though the route then did nothing.
         MainWindowFrame.suspend()
-        guard app.core is MockCore else {
-            return handleScreenshotOnly(url)
-        }
-        let q = Dictionary(
-            uniqueKeysWithValues: (URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                .queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        let q = query(url)
 
         // Each shot starts from a clean app. Without this the set is one long
         // stateful session and a sheet left up by shot 15 lands in shot 16 -
@@ -112,6 +115,8 @@ enum DemoRoute {
         app.checksums.file = ""
         app.checksums.jobId = nil
         app.checksums.snapshot = nil
+        app.checksums.verifyJobId = nil
+        app.checksums.verifySnapshot = nil
         app.checksums.outputEdited = false
         app.checksums.subMode = .create
         for job in app.queue.jobs {
@@ -121,12 +126,19 @@ enum DemoRoute {
         app.refresh()
     }
 
+    /// The query as a dictionary, the LAST value winning for a repeated key.
+    /// It was `Dictionary(uniqueKeysWithValues:)`, which traps on a duplicate:
+    /// `parfast://demo?size=1&size=2` took the whole app down.
+    static func query(_ url: URL) -> [String: String] {
+        Dictionary((URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
+            .map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { _, last in last })
+    }
+
     /// A real build understands exactly two keys, and only under the flag.
     private static func handleScreenshotOnly(_ url: URL) -> Bool {
         guard screenshotModeAllowed else { return false }
-        let q = Dictionary(
-            uniqueKeysWithValues: (URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                .queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        MainWindowFrame.suspend()
+        let q = query(url)
         if let size = q["size"] { resize(size) }
         if let appearance = q["appearance"] { setAppearance(appearance) }
         return true

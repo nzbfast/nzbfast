@@ -1121,6 +1121,45 @@ fn journal_d_overflowing_its_end_refetches_without_panicking() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Sweep 9 Nov 2026 (section C, `journal/restore.rs:113`): a `K`
+/// checkpoint's offset comes off disk unchecked, and the restore walk
+/// assumes every anchor is 16-aligned (the writer only ever emits one at
+/// a cipher-block boundary). A corrupt line naming an UNALIGNED offset
+/// just below a fragment made the walk encrypt a 5-byte stretch and slice
+/// `walk[n - 16..n]`, which panicked the resume. It must be ignored, and
+/// the fragment simply restores (or refetches) off the aligned anchors.
+#[test]
+fn journal_k_at_an_unaligned_offset_is_ignored_without_panicking() {
+    let dir = tmpdir("k-unaligned");
+    std::fs::write(dir.join("movie.mkv"), payload(64_000, 3)).unwrap();
+    let salt = [7u8; 16];
+    let keys = crate::rarcrypt::derive_keys("pw", &salt, 1).unwrap();
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let text = format!(
+        "nzbfast-journal v1 d41d8cd98f00b204e9800998ecf8427e\n\
+         S 0 100000 v.rar\n\
+         F 0 movie.mkv\n\
+         E {} 1 {} 64000 {} movie.mkv\n\
+         K 32763 {} movie.mkv\n\
+         D 0 0:32768:5000:100 <a1@t>\n",
+        hex(&salt),
+        hex(&[9u8; 16]),
+        hex(&crate::rarcrypt::make_check(&keys)),
+        hex(&[5u8; 16]),
+    );
+    std::fs::write(dir.join(".nzbfast.journal"), text).unwrap();
+    let (_j, resume) = crate::journal::Journal::open(&dir, b"").unwrap();
+    assert!(
+        resume.crypto_files["movie.mkv"]
+            .checkpoints
+            .contains_key(&32763),
+        "the corrupt K must reach the restore for this to test anything"
+    );
+    // The assertion is that this returns at all.
+    let _ = crate::journal::restore(&dir, &resume, Some("pw"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// `-hp` shape: encrypted headers AND encrypted data.
 #[test]
 fn encrypted_headers_volume_decrypts() {
@@ -1805,6 +1844,48 @@ fn real_rar_split_fixture_verifies() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// TODO 358 sweep, lane 3 item 2: the finish gate of a split encrypted
+/// RAR5 file folds its whole-file CRC with a hash key derived from the
+/// password the file was DECRYPTED under, not from whatever the
+/// extractor-wide cell holds by then. One job may carry two encrypted
+/// sets with different passwords, and the candidate probe overwrites the
+/// cell when it unlocks the second (a header-encrypted 7z, or another
+/// RAR set) - before `verify_encrypted_outputs` runs. Keyed off the cell,
+/// this intact, password-verified set then failed hard with "failed its
+/// stored CRC after decryption". The second password is installed
+/// exactly the way the probe installs it.
+#[test]
+fn a_later_probed_password_does_not_fail_an_already_decrypted_split_set() {
+    let secret = nzbkit_base::testdata::RAR5_SECRET.to_vec();
+    let vols: Vec<(&str, &[u8])> = vec![
+        (
+            "enc-vols.part1.rar",
+            nzbkit_base::testdata::RAR5_ENC_VOLS_P1,
+        ),
+        (
+            "enc-vols.part2.rar",
+            nzbkit_base::testdata::RAR5_ENC_VOLS_P2,
+        ),
+        (
+            "enc-vols.part3.rar",
+            nzbkit_base::testdata::RAR5_ENC_VOLS_P3,
+        ),
+    ];
+    let dir = tmpdir("enc-split-second-pw");
+    let ex = Extractor::new(&dir, vols.len(), true);
+    ex.set_password("testpw123");
+    for (si, (name, bytes)) in vols.iter().enumerate() {
+        feed(&ex, si, name, bytes, 1400, 60 + si as u64);
+    }
+    ex.apply_probed_password("the-other-archive's-password")
+        .unwrap();
+    let rep = ex.finish().unwrap();
+    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    assert_eq!(rep.decrypted, vec!["secret.bin".to_string()]);
+    assert_eq!(std::fs::read(dir.join("secret.bin")).unwrap(), secret);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Damaged SPLIT ciphertext must fail its whole-file CRC. One flipped
 /// byte in the middle volume's data area survives every other check
 /// (the stored password check proves only the key), so this gate is
@@ -2477,5 +2558,45 @@ fn crypto_ingest_bench() {
             );
         }
     }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Sweep 9 Nov 2026 (section C, `crypto_decrypt.rs:225`): a SPLIT entry's
+/// finish gate is resolved from its tail piece's stored CRC, and a
+/// TWEAKED checksum is folded under a key derived from the password.
+/// That derivation read the live password cell at finish, which a
+/// mid-download re-key overwrites (`apply_probed_password`, and one job
+/// may carry two encrypted sets with different passwords). The file had
+/// already decrypted under its own, check-verified password, so the gate
+/// folded with the other set's key, missed, and the verified-password
+/// arm turned that miss into a hard "failed its stored CRC" over clean
+/// plaintext. The gate now uses the password the file's state was built
+/// under.
+#[test]
+fn a_split_tweaked_entry_is_judged_under_its_own_password_after_a_rekey() {
+    let dir = tmpdir("enc-split-tweaked-rekey");
+    let plain = payload(300_007, 61);
+    let mut f = fixtures::encrypt_file("s3cret", &plain, 31);
+    f.with_crc = true;
+    f.tweaked = true;
+    let n = f.cipher.len();
+    let (a, b) = (100_003, 200_006);
+    let vols = [
+        fixtures::rar5_volume_enc(&[("film.mkv", &f, 0..a, false, true)], Some(0)),
+        fixtures::rar5_volume_enc(&[("film.mkv", &f, a..b, true, true)], Some(1)),
+        fixtures::rar5_volume_enc(&[("film.mkv", &f, b..n, true, false)], Some(2)),
+    ];
+    let ex = Extractor::new(&dir, 3, true);
+    ex.set_password("s3cret");
+    for (i, v) in vols.iter().enumerate() {
+        let name = format!("x.part{}.rar", i + 1);
+        feed(&ex, i, &name, v, 9000, 40 + i as u64);
+    }
+    // A second set's password lands in the live cell before finish.
+    ex.set_password("another-sets-password");
+    let rep = ex.finish().unwrap();
+    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    assert_eq!(rep.decrypted, vec!["film.mkv".to_string()]);
+    assert_eq!(std::fs::read(dir.join("film.mkv")).unwrap(), plain);
     std::fs::remove_dir_all(&dir).unwrap();
 }

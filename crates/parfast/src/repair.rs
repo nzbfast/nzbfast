@@ -27,6 +27,9 @@ enum Stopped {
     Clean,
     /// Not enough recovery data and nothing for the adoption scan.
     NotPossible,
+    /// The Main packet declares a recovery member no FileDesc describes
+    /// (see `Par2Set::undescribed`). Nothing can be repaired or purged.
+    Undescribed,
     /// `-O`: the verify verdict, and no reconstruction.
     RenameOnly,
     /// The engine's report could not be matched to the set one-for-one
@@ -108,6 +111,8 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
     // thing that makes a numbered file safe to delete - see
     // `verify::purge`.
     let mut created: Vec<std::path::PathBuf> = Vec::new();
+    // Which member each of `created` copies, for `untouched_backups`.
+    let mut created_of: Vec<String> = Vec::new();
 
     // ONE PASS OVER THE PACKETS, AND THE ORDER IS HELD BY THE CHANNELS.
     //
@@ -202,7 +207,15 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
             let _ = self.rx_extra_ack.recv();
         }
         fn before_write(&mut self) {
-            let failed = join_backups(std::mem::take(&mut self.pending));
+            // Joined IN PLACE: the copies are waited for and their
+            // failures taken, but `pending.created` stays, because
+            // `adoption_exclusions` reads it for the WHOLE repair. A
+            // `mem::take` here emptied it, so anything the engine ran
+            // after this call - its fold retry after an NTT verify
+            // failure keeps this observer - saw this run's own `.n`
+            // copies as adoption candidates, and possibly as spent
+            // donors (engine lane, 9 Nov 2026).
+            let failed = self.pending.join_in_place();
             // Hand them over and WAIT. Not a fire-and-forget: the value
             // of the line is that it lands while the damaged original
             // is still whole, and the first write follows this call.
@@ -315,7 +328,15 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
                 // to `par2repair`'s target walk, not to this caller.
                 //
                 // VERIFY still honours `-B` in full: it only reads.
-                if loaded.data_dir != loaded.dir {
+                //
+                // THE SAME DIRECTORY, not the same SPELLING: `dir` is the
+                // set argument's parent (`.` for a bare `set.par2`) and
+                // `data_dir` is `-B` as typed, so `cd /data/job && parfast
+                // r -B /data/job set.par2` - one directory, two spellings,
+                // and SABnzbd passes an absolute `-B` on every repair - was
+                // refused with exit 3 by a byte compare (sweep A11, 9 Nov
+                // 2026). See `same_dir`.
+                if !same_dir(&loaded.data_dir, &loaded.dir) {
                     sink.err(
                         "-B is not supported on repair: the recovery set and the data \
                          files must be in the same directory.",
@@ -348,12 +369,26 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
                                 // reference would have printed, and
                                 // before the action is sent so the
                                 // engine never starts the fold.
-                                if !watch.before_fold(&survey) {
+                                //
+                                // NOT consulted over an Undescribed stop:
+                                // that verdict is already decided and is
+                                // a failure, and a refusal here turned
+                                // its exit 5 into the cancel's 1.
+                                let decided = matches!(stopped, Some(Stopped::Undescribed));
+                                if !decided && !watch.before_fold(&survey) {
                                     action = AfterSurvey::Stop;
-                                    backups = BackupBatch::default();
+                                    // Joined and REMOVED, not dropped:
+                                    // `announce` already started the
+                                    // copies, and dropping the batch
+                                    // left them running to land `.n`
+                                    // files no list recorded - a full
+                                    // duplicate per damaged member per
+                                    // refused run (sweep A22).
+                                    discard_backups(std::mem::take(&mut backups));
                                     stopped = Some(Stopped::Cancelled);
                                 }
                                 created = backups.created.clone();
+                                created_of = backups.sources.clone();
                                 surveyed = Some(survey);
                             }
                             None => stopped = Some(Stopped::Unmatched),
@@ -467,7 +502,26 @@ pub fn run_watched(opts: &Options, sink: &mut Sink, watch: &dyn RepairWatch) -> 
         }
         return crate::EXIT_REPAIR_FAILED;
     };
-    finish(&loaded, opts, &survey, status, &created, sink)
+    finish(&loaded, opts, &survey, status, &created, &created_of, sink)
+}
+
+/// Do two directory arguments name ONE directory? Resolved through the
+/// filesystem (`.` against an absolute path, a trailing `/`, a symlink),
+/// falling back to the byte compare only where either side cannot be
+/// resolved - which is the old answer, so a path that does not exist is
+/// refused exactly as before.
+///
+/// Identity is decided by `canonicalize`, which follows links: a `-B`
+/// that is a symlink to the set's own directory IS that directory, and
+/// the engine, handed `dir`, writes where `-B` would have read.
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
 }
 
 /// Does the repair's load print from the engine's scan report
@@ -495,6 +549,19 @@ fn announce(
     defer: bool,
 ) -> (AfterSurvey, BackupBatch, bool) {
     verify::print_targets(survey, sink);
+    // A member the Main packet declares and nothing describes is not in
+    // `survey`, so the clean arm below would call the set whole and `-p`
+    // would purge it (sweep A1, 9 Nov 2026). The surveyed route never
+    // gets here with one - the engine refuses the set at its target walk,
+    // before the survey handshake - but the re-surveying route does,
+    // with the load's set rather than the engine's, so the refusal is
+    // stated where both routes pass.
+    if !loaded.set.undescribed.is_empty() {
+        sink.line(Level::Terse, "");
+        verify::refuse_undescribed(loaded, sink);
+        *stopped = Some(Stopped::Undescribed);
+        return (AfterSurvey::Stop, BackupBatch::default(), false);
+    }
     if !survey.damaged() {
         sink.line(Level::Terse, "");
         sink.line(
@@ -525,9 +592,11 @@ fn announce(
     //
     // Only where a deferred verdict is certain to be `Repair`: `-O`
     // stops here with its own block, and the "Repair is not possible."
-    // arm below needs the candidate list to be EMPTY, which is the one
-    // case with nothing to wait for anyway.
-    if defer && !opts.rename_only && !extra_candidates(loaded, survey).is_empty() {
+    // arm below needs [`adoption_possible`] to say NO - nothing in the
+    // directory and nothing on the command line - which is the one case
+    // with nothing to wait for anyway. Both sites ask that one function,
+    // so the deferral and the verdict cannot disagree about it.
+    if defer && !opts.rename_only && adoption_possible(loaded, opts, survey) {
         return (AfterSurvey::Repair, back_up_damaged(loaded, survey), true);
     }
     let action = announce_tail(loaded, opts, survey, &[], sink, stopped);
@@ -575,7 +644,7 @@ fn announce_tail(
     // rows pin. When a candidate exists we say nothing and let the
     // engine answer; its own `Unrepairable` arm below prints the same
     // block.
-    if !survey.repairable() && extra_candidates(loaded, survey).is_empty() {
+    if !survey.repairable() && !adoption_possible(loaded, opts, survey) {
         sink.line(Level::Terse, "Repair is not possible.");
         sink.line(
             Level::Terse,
@@ -605,6 +674,48 @@ fn announce_tail(
     AfterSurvey::Repair
 }
 
+/// Is there anything for the engine's adoption pass to look at - an
+/// unclaimed file in the data directory, or a donor named on the
+/// command line that the directory walk does not already reach?
+///
+/// The second half is sweep A13 (9 Nov 2026). Both repair entries hand
+/// `opts.files` to the engine as donors (X6-02), but the gate in
+/// [`announce_tail`] asked only [`extra_candidates`], a flat walk of the
+/// data directory, so `parfast r set.par2 /backup` with the member whole
+/// in `/backup` printed "Repair is not possible." and exited 2 without
+/// ever asking the engine that was about to adopt it.
+///
+/// It counts only an argument that ADDS something, so the refusal keeps
+/// its printed position for every other shape: a path that does not
+/// exist (parfast expands no wildcard, so SABnzbd's literal
+/// `<dir>/<setname>*` lands here), a `.par2`, the data directory itself,
+/// and a file inside it - which the flat walk already judged, including
+/// the members and this run's own backups it deliberately leaves out.
+/// A directory anywhere else counts, because the engine walks it.
+fn adoption_possible(loaded: &Loaded, opts: &Options, survey: &Survey) -> bool {
+    if !extra_candidates(loaded, survey).is_empty() {
+        return true;
+    }
+    let Ok(home) = std::fs::canonicalize(&loaded.data_dir) else {
+        // No data directory to compare against: every existing argument
+        // is something the (empty) walk did not reach.
+        return opts.files.iter().any(|p| p.exists());
+    };
+    opts.files.iter().any(|p| {
+        let Ok(real) = std::fs::canonicalize(p) else {
+            return false;
+        };
+        if real.is_dir() {
+            return real != home;
+        }
+        let par2 = real
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("par2"));
+        real.is_file() && !par2 && real.parent() != Some(home.as_path())
+    })
+}
+
 /// The exit code for a run that stopped before the fold, plus the one
 /// filesystem action left over: `-p` on a clean set. Held back until
 /// here rather than done inside the observer, which runs while the
@@ -626,6 +737,10 @@ fn stop_code(
             crate::EXIT_SUCCESS
         }
         Some(Stopped::NotPossible) => crate::EXIT_REPAIR_NOT_POSSIBLE,
+        // The surveyed route's code for the same set, where the engine
+        // refuses it and `finish` never runs: one condition, one answer
+        // from either route.
+        Some(Stopped::Undescribed) => crate::EXIT_REPAIR_FAILED,
         Some(Stopped::RenameOnly) => match survey {
             Some(s) => rename_only(loaded, s, sink),
             // Unreachable: `announce` sets `RenameOnly` from a survey it
@@ -666,6 +781,18 @@ fn stop_code(
 /// the engine still holds the directory's packet catalog open there,
 /// which is the same reason the `-p` purge waits until here.
 fn rename_only(loaded: &Loaded, survey: &Survey, sink: &mut Sink) -> u8 {
+    // A candidate that IS a member's own file under another case is not
+    // a spare copy, however its bytes compare. `extra_candidates` claims
+    // members by exact path, so on a case-insensitive volume `movie.mkv`
+    // on disk for the member `Movie.mkv` is listed as unclaimed - and
+    // when a second member carries the same bytes and is missing, the
+    // rename below MOVED the first member's only file onto the second's
+    // name (sweep section B, 9 Nov 2026). The folded keys are the guard
+    // `purge` and the backups already use for the same alias. A candidate
+    // whose key is the TARGET'S OWN is still offered to that target: on
+    // a case-sensitive volume that is a member renamed only in case, and
+    // putting it back is exactly what `-O` is for.
+    let protected = loaded.protected_keys();
     let mut candidates = extra_candidates(loaded, survey);
     let mut renamed = 0usize;
     for (name, target) in &survey.targets {
@@ -675,14 +802,23 @@ fn rename_only(loaded: &Loaded, survey: &Survey, sink: &mut Sink) -> u8 {
         let Some(file) = loaded.set.files.iter().find(|f| &f.name == name) else {
             continue;
         };
+        // A ZERO-LENGTH member matches every empty file in the directory
+        // - the MD5 of nothing - so the first one sorted would be taken
+        // away from whatever it was and renamed. An empty file is no
+        // evidence of anything; such a member is left missing.
+        if file.length == 0 {
+            continue;
+        }
         let dest = loaded.data_path(name);
         if dest.exists() {
             continue;
         }
-        let Some(pos) = candidates
-            .iter()
-            .position(|c| nzbkit::par2::verify_file_md5_path(c, file).unwrap_or(false))
-        else {
+        let own = verify::path_key(&dest);
+        let Some(pos) = candidates.iter().position(|c| {
+            let key = verify::path_key(c);
+            (key == own || !protected.contains(&key))
+                && nzbkit::par2::verify_file_md5_path(c, file).unwrap_or(false)
+        }) else {
             continue;
         };
         let src = candidates.remove(pos);
@@ -746,6 +882,7 @@ fn run_resurveying(loaded: &Loaded, opts: &Options, sink: &mut Sink) -> u8 {
     // The batch is consumed by the join; `-p` still needs to know what
     // it made, so the destinations are taken off it first.
     let created = backups.created.clone();
+    let created_of = backups.sources.clone();
     // No `before_write` on this entry point, so the copies finish here,
     // in front of the fold, as they always did on this path - which
     // makes this the one site where the warning is naturally in front
@@ -758,7 +895,7 @@ fn run_resurveying(loaded: &Loaded, opts: &Options, sink: &mut Sink) -> u8 {
         &opts.files,
         par2repair::RetentionCaller::new(par2repair::CallerSite::ParfastResurvey),
     );
-    finish(loaded, opts, &survey, status, &created, sink)
+    finish(loaded, opts, &survey, status, &created, &created_of, sink)
 }
 
 /// How many bytes the run may say it wrote, and whether to say anything
@@ -807,6 +944,18 @@ fn wrote_bytes(
     Some(bytes)
 }
 
+/// [`wrote_bytes`]'s `published` for an engine verdict: `None` where the
+/// verdict rebuilt the whole set, otherwise the names it actually wrote
+/// - a shortfall's courtesy publishes, and nothing at all for
+/// `NoDamage`. See the shortfall note in [`finish`].
+fn published_of(status: &Result<RepairStatus, par2repair::RepairError>) -> Option<&[String]> {
+    match status {
+        Ok(RepairStatus::Unrepairable { partial, .. }) => Some(&partial.files_patched),
+        Ok(RepairStatus::NoDamage) => Some(&[]),
+        _ => None,
+    }
+}
+
 /// The lines that say how much of a repair was COPIED rather than
 /// computed, or nothing when none of it was.
 ///
@@ -852,8 +1001,22 @@ fn finish(
     // The backup copies this run made, for `-p`. Provenance, not a name
     // shape - see `verify::purge`.
     created: &[std::path::PathBuf],
+    // The member each of `created` copies, in the same order.
+    created_of: &[String],
     sink: &mut Sink,
 ) -> u8 {
+    // Every copy of an original this run did not touch goes now, before
+    // anything below reads `created` - see [`untouched_backups`].
+    let untouched = untouched_backups(&status, created, created_of);
+    for p in &untouched {
+        let _ = std::fs::remove_file(p);
+    }
+    let created: Vec<std::path::PathBuf> = created
+        .iter()
+        .filter(|p| !untouched.contains(p))
+        .cloned()
+        .collect();
+    let created = created.as_slice();
     // The reference's own reading of this line is the OUTPUT it
     // produced, not the syscalls it made: it reconstructs each damaged
     // member whole, so its figure is the member's length. Our engine
@@ -874,10 +1037,14 @@ fn finish(
     // no data file at all, and a 10 GiB one claimed 10 GB. That reads as
     // a repair which wrote the WRONG bytes rather than one which wrote
     // none, and a full day was spent looking for the former.
-    let published: Option<&[String]> = match &status {
-        Ok(RepairStatus::Unrepairable { partial, .. }) => Some(&partial.files_patched),
-        _ => None,
-    };
+    //
+    // `NoDamage` published NOTHING and is answered the same way, which
+    // until 9 Nov 2026 it was not: it fell to the whole-set arm and
+    // announced every non-`Found` member's length as written, over a run
+    // that wrote no byte (the engine found the members byte-exact after
+    // all) - and on a re-verify that then disagreed, "Wrote N bytes to
+    // disk" sat directly above "Repair Failed." (sweep section B).
+    let published = published_of(&status);
     if status.is_ok() {
         let damaged: Vec<(String, u64)> = survey
             .targets
@@ -1190,7 +1357,10 @@ fn back_up_damaged(loaded: &verify::Loaded, survey: &verify::Survey) -> BackupBa
     // target, and `-p` would then delete the member it just made.
     // Skipping to the next number costs nothing and cannot collide.
     let protected = loaded.protected_keys();
-    let mut jobs: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    let mut jobs: Vec<(std::path::PathBuf, std::path::PathBuf, std::fs::File)> = Vec::new();
+    let mut created: Vec<std::path::PathBuf> = Vec::new();
+    let mut sources: Vec<String> = Vec::new();
+    let mut early_failures: Vec<BackupFailure> = Vec::new();
     for (name, t) in &survey.targets {
         if matches!(t, Target::Found | Target::Missing) {
             continue;
@@ -1206,18 +1376,56 @@ fn back_up_damaged(loaded: &verify::Loaded, survey: &verify::Survey) -> BackupBa
         // The ceiling is a runaway guard, not a policy: reaching it
         // means something else is wrong with the directory, and writing
         // no backup is still better than writing a millionth one.
+        //
+        // THE SLOT IS CLAIMED, NOT PROBED (9 Nov 2026 review of sweep
+        // A22). This chose the first `.n` that `exists()` called free and
+        // then `fs::copy` opened it with truncate-and-follow, so a file
+        // created in between - or a DANGLING SYMLINK sitting at `name.1`,
+        // which `exists()` reports as absent - was overwritten, put on
+        // `created`, and could then be deleted by `-p` or by
+        // `untouched_backups`. `claim_slot` creates the destination
+        // exclusively (`O_EXCL`, which refuses any existing entry,
+        // symlinks included), so every path on `created` is provably one
+        // this run made, and an occupied slot just moves to the next.
+        // macOS only - see `StagedClone`. Everywhere else every slot is
+        // claimed by the plain exclusive create.
+        #[cfg(target_os = "macos")]
+        let staged = stage_clone(&src);
+        #[cfg(target_os = "macos")]
+        let staged_file = staged.as_ref().map(|s| s.file.as_path());
+        #[cfg(not(target_os = "macos"))]
+        let staged_file: Option<&std::path::Path> = None;
         for n in 1..=u32::from(u16::MAX) {
             let dst = loaded.data_path(&format!("{name}.{n}"));
-            if !dst.exists() && !protected.contains(&verify::path_key(&dst)) {
-                jobs.push((src, dst));
-                break;
+            if protected.contains(&verify::path_key(&dst)) {
+                continue;
             }
+            match claim_slot(staged_file, &dst) {
+                Ok(None) => continue,
+                Ok(Some(claim)) => {
+                    created.push(dst.clone());
+                    sources.push(name.clone());
+                    if let Some(handle) = claim {
+                        jobs.push((src, dst, handle));
+                    }
+                }
+                // Not an occupied slot - the directory refuses creation
+                // (read-only, say). Reported like a failed copy, and not
+                // on `created`: nothing was made.
+                Err(e) => early_failures.push((src, dst, e.to_string())),
+            }
+            break;
         }
     }
+    let failed = std::sync::Arc::new(std::sync::Mutex::new(early_failures));
     if jobs.is_empty() {
-        return BackupBatch::default();
+        return BackupBatch {
+            lanes: Vec::new(),
+            created,
+            sources,
+            failed,
+        };
     }
-    let created = jobs.iter().map(|(_, dst)| dst.clone()).collect();
     let lanes = jobs.len().min(4);
     let queue = std::sync::Arc::new(std::sync::Mutex::new(jobs));
     // THE COPY ERROR IS KEPT, and until 20 Sep 2026 it was dropped at
@@ -1228,7 +1436,6 @@ fn back_up_damaged(loaded: &verify::Loaded, survey: &verify::Survey) -> BackupBa
     // exited 0 having silently not kept the one copy a backup exists to
     // be. The failure is reported by the caller, which knows when the
     // first write is about to happen; see `report_backup_failures`.
-    let failed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let lanes = (0..lanes)
         .map(|_| {
             let queue = std::sync::Arc::clone(&queue);
@@ -1236,8 +1443,20 @@ fn back_up_damaged(loaded: &verify::Loaded, survey: &verify::Survey) -> BackupBa
             std::thread::spawn(move || {
                 loop {
                     let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop();
-                    let Some((src, dst)) = next else { return };
-                    if let Err(e) = std::fs::copy(&src, &dst) {
+                    let Some((src, dst, mut out)) = next else {
+                        return;
+                    };
+                    // INTO THE CLAIMED HANDLE, never by path: the path
+                    // could have been swapped since the claim, the handle
+                    // cannot. `io::copy` between two files is the
+                    // kernel's copy on linux (`copy_file_range`).
+                    // The source's permissions follow, as `fs::copy`'s did.
+                    let copied = std::fs::File::open(&src).and_then(|mut input| {
+                        let n = std::io::copy(&mut input, &mut out)?;
+                        out.set_permissions(input.metadata()?.permissions())?;
+                        Ok(n)
+                    });
+                    if let Err(e) = copied {
                         failed.lock().unwrap_or_else(|p| p.into_inner()).push((
                             src,
                             dst,
@@ -1251,8 +1470,143 @@ fn back_up_damaged(loaded: &verify::Loaded, survey: &verify::Survey) -> BackupBa
     BackupBatch {
         lanes,
         created,
+        sources,
         failed,
     }
+}
+
+/// The backups of members a finished repair did NOT write, which are
+/// copies of originals still sitting untouched beside them.
+///
+/// THE COPIES START BEFORE THE VERDICT IS KNOWN, on purpose - beside the
+/// fold rather than in front of it, see [`back_up_damaged`] - so a run
+/// that ends without touching a member still made its `.n` copy. Kept,
+/// that is a full duplicate of the damaged file per member per attempt:
+/// an Unrepairable verdict left `name.1`, the retry after fetching more
+/// recovery data left `name.2`, and the reference, which renames aside
+/// only when it actually repairs, leaves none (sweep A22, 9 Nov 2026).
+///
+/// Only what the ENGINE says it did not write goes: every backup on
+/// `NoDamage` (nothing was written), and on a shortfall every backup
+/// whose member is absent from `files_patched` - a shortfall still
+/// publishes members it could finish without parity, and those
+/// originals were replaced, so their copies stay. Any other outcome,
+/// errors included, keeps everything: whether an `Err` wrote first is
+/// not something the status says.
+fn untouched_backups(
+    status: &Result<RepairStatus, par2repair::RepairError>,
+    created: &[std::path::PathBuf],
+    sources: &[String],
+) -> Vec<std::path::PathBuf> {
+    created
+        .iter()
+        .zip(sources)
+        .filter(|(_, member)| match status {
+            Ok(RepairStatus::NoDamage) => true,
+            Ok(RepairStatus::Unrepairable { partial, .. }) => {
+                !partial.files_patched.contains(member)
+            }
+            _ => false,
+        })
+        .map(|(dst, _)| dst.clone())
+        .collect()
+}
+
+/// Wait for a batch whose repair will not run, and remove every copy it
+/// made: the originals were never touched, so each copy is a duplicate
+/// nothing will ask for. The caller's handshake refusal is the one site.
+fn discard_backups(backups: BackupBatch) {
+    let created = backups.created.clone();
+    let _ = join_backups(backups);
+    for p in &created {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// Claim one backup slot: `Ok(None)` when something already occupies
+/// `dst` (try the next number), `Ok(Some(None))` when the copy is
+/// already complete (a clone linked into place), `Ok(Some(Some(handle)))`
+/// when `dst` was created empty and exclusively and the bytes still have
+/// to go into `handle`, and `Err` when the directory refuses creation.
+///
+/// Both claims are EXCLUSIVE and neither follows a link at `dst`:
+/// `create_new` is `O_CREAT|O_EXCL`, and `link(2)` fails `EEXIST` on any
+/// existing entry, a dangling symlink included. `staged` is a clone of
+/// the source already sitting in a private directory (macOS's
+/// `StagedClone`); linking it to `dst` is the claim AND the copy.
+fn claim_slot(
+    staged: Option<&std::path::Path>,
+    dst: &std::path::Path,
+) -> std::io::Result<Option<Option<std::fs::File>>> {
+    if let Some(staged) = staged {
+        match std::fs::hard_link(staged, dst) {
+            Ok(()) => return Ok(Some(None)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
+            // A volume without hard links: the plain create decides.
+            Err(_) => {}
+        }
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)
+    {
+        Ok(f) => Ok(Some(Some(f))),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// An APFS clone of a damaged member, made in a directory this run just
+/// created, waiting to be linked into its `.n` slot; removed on drop.
+///
+/// THE CLONE IS WHAT MADE THE COPY FREE ON macOS: `fs::copy` clones on
+/// APFS, and a single 8.86 GB member's backup cost 0.000 s on an M5 Max
+/// against seconds on NTFS and ext4 (`back_up_damaged`'s note). It is
+/// not cloned straight to the slot because `clonefile` FOLLOWS a
+/// dangling symlink at its destination - measured 9 Nov 2026, a link at
+/// `data.bin.1` had the backup written wherever it pointed - so the clone
+/// lands in a fresh directory (`create_dir` is exclusive and follows
+/// nothing), where nothing but this run can have put an entry, and an
+/// exclusive `link(2)` claims the slot from there.
+#[cfg(target_os = "macos")]
+struct StagedClone {
+    dir: std::path::PathBuf,
+    file: std::path::PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for StagedClone {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.file);
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+/// Clone `src` into a fresh private directory beside it, or `None` where
+/// that cannot be done (not APFS, a directory that refuses creation) and
+/// the slot is claimed by the plain create instead.
+#[cfg(target_os = "macos")]
+fn stage_clone(src: &std::path::Path) -> Option<StagedClone> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let parent = src.parent()?;
+    let dir = parent.join(format!(
+        ".parfast-backup.{}.{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&dir).ok()?;
+    let staged = StagedClone {
+        file: dir.join("clone"),
+        dir,
+    };
+    let s = std::ffi::CString::new(src.as_os_str().as_bytes()).ok()?;
+    let d = std::ffi::CString::new(staged.file.as_os_str().as_bytes()).ok()?;
+    // SAFETY: both pointers are NUL-terminated strings that live for
+    // the whole call; `clonefile` reads them and nothing else.
+    (unsafe { libc::clonefile(s.as_ptr(), d.as_ptr(), 0) } == 0).then_some(staged)
 }
 
 /// Copy lanes and only their newly selected destinations. Existing numbered
@@ -1261,11 +1615,30 @@ fn back_up_damaged(loaded: &verify::Loaded, survey: &verify::Survey) -> BackupBa
 struct BackupBatch {
     lanes: Vec<std::thread::JoinHandle<()>>,
     created: Vec<std::path::PathBuf>,
+    /// The member each of `created` is a copy of, by FileDesc name, in
+    /// the same order - what [`untouched_backups`] reads.
+    sources: Vec<String>,
     /// `(source, destination, error)` for every copy that did not land.
     /// Shared with the lanes, which is why it is behind a lock rather
     /// than returned by a join: a lane reports its own failure and the
     /// join collects them all.
     failed: BackupFailures,
+}
+
+impl BackupBatch {
+    /// [`join_backups`] that leaves the batch's PATHS behind: the lanes
+    /// are joined and the failures handed back, and `created` / `sources`
+    /// still say which `.n` files this run made. What the engine's
+    /// `before_write` calls, since the observer answers
+    /// `adoption_exclusions` from `created` until the repair returns.
+    fn join_in_place(&mut self) -> Vec<BackupFailure> {
+        let created = self.created.clone();
+        let sources = self.sources.clone();
+        let failed = join_backups(std::mem::take(self));
+        self.created = created;
+        self.sources = sources;
+        failed
+    }
 }
 
 /// Damaged originals this run could not keep, as
@@ -1479,6 +1852,159 @@ mod tests {
     }
 
     use super::wrote_bytes;
+    use nzbkit::par2repair::{RepairReport, RepairStatus};
+    use std::path::PathBuf;
+
+    fn report(patched: &[&str]) -> RepairReport {
+        RepairReport {
+            blocks_rebuilt: 0,
+            blocks_adopted: 0,
+            adopted_from: Vec::new(),
+            files_patched: patched.iter().map(|s| s.to_string()).collect(),
+            files_created: Vec::new(),
+            files_renamed: Vec::new(),
+            consumed_sources: Vec::new(),
+            per_file: Vec::new(),
+        }
+    }
+
+    fn short(patched: &[&str]) -> RepairStatus {
+        RepairStatus::Unrepairable {
+            needed: 9,
+            have: 1,
+            adopted: 0,
+            partial: report(patched),
+        }
+    }
+
+    /// `NoDamage` wrote nothing, so it claims nothing: the line the
+    /// sweep caught sitting above "Repair Failed.".
+    #[test]
+    fn no_damage_claims_no_write() {
+        let damaged = vec![("a.bin".to_string(), 10u64)];
+        let status = Ok(RepairStatus::NoDamage);
+        assert_eq!(
+            wrote_bytes(&damaged, super::published_of(&status), &[]),
+            None
+        );
+        // ...and a whole-set repair still claims every damaged member.
+        let status = Ok(RepairStatus::Repaired(report(&["a.bin"])));
+        assert_eq!(
+            wrote_bytes(&damaged, super::published_of(&status), &[]),
+            Some(10)
+        );
+    }
+
+    /// A22: which of this run's backups go once the engine has answered.
+    /// Every one on `NoDamage`; on a shortfall, those of members it did
+    /// not publish; on a completed repair or any error, none.
+    #[test]
+    fn only_the_backups_of_untouched_members_are_discarded() {
+        let created = vec![PathBuf::from("a.bin.1"), PathBuf::from("b.bin.1")];
+        let of = vec!["a.bin".to_string(), "b.bin".to_string()];
+        let gone = |s: Result<RepairStatus, nzbkit::par2repair::RepairError>| {
+            super::untouched_backups(&s, &created, &of)
+        };
+        assert_eq!(gone(Ok(RepairStatus::NoDamage)), created);
+        assert_eq!(gone(Ok(short(&[]))), created);
+        assert_eq!(gone(Ok(short(&["b.bin"]))), vec![PathBuf::from("a.bin.1")]);
+        assert!(gone(Ok(RepairStatus::Repaired(report(&[])))).is_empty());
+        assert!(
+            gone(Err(nzbkit::par2repair::RepairError::Io(
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+            )))
+            .is_empty()
+        );
+    }
+
+    /// The observer's `before_write` joins the copies but must keep the
+    /// paths: `adoption_exclusions` reads `created` for the whole repair,
+    /// including the engine's fold retry after `before_write`.
+    #[test]
+    fn joining_the_backups_in_place_keeps_their_paths() {
+        let failed: super::BackupFailures = Default::default();
+        let lane_failed = std::sync::Arc::clone(&failed);
+        let lane = std::thread::spawn(move || {
+            lane_failed.lock().unwrap().push((
+                PathBuf::from("b.bin"),
+                PathBuf::from("b.bin.1"),
+                "denied".to_string(),
+            ));
+        });
+        let mut batch = super::BackupBatch {
+            lanes: vec![lane],
+            created: vec![PathBuf::from("a.bin.1"), PathBuf::from("b.bin.1")],
+            sources: vec!["a.bin".to_string(), "b.bin".to_string()],
+            failed,
+        };
+        let first = batch.join_in_place();
+        assert_eq!(first.len(), 1, "the lane's failure comes back once");
+        assert!(batch.lanes.is_empty());
+        assert_eq!(
+            batch.created,
+            [PathBuf::from("a.bin.1"), PathBuf::from("b.bin.1")]
+        );
+        assert_eq!(batch.sources, ["a.bin", "b.bin"]);
+        // The leftover join after the scope finds nothing more to report.
+        assert!(super::join_backups(batch).is_empty());
+    }
+
+    /// A1 on the RE-SURVEYING route: the load's set declares a member
+    /// nothing describes, so the survey has nothing to call damaged. The
+    /// route must stop on the repair's sentence and exit 5, never reach
+    /// "All files are correct" (and a `-p` purge) or the engine.
+    #[test]
+    fn the_resurveying_route_refuses_an_undescribed_member_with_exit_5() {
+        let dir = std::env::temp_dir().join(format!("parfast-resurvey-a1.{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let loaded = crate::verify::Loaded {
+            set: nzbkit::par2::Par2Set {
+                recovery_set_id: [7; 16],
+                block_size: 4096,
+                files: Vec::new(),
+                undescribed: vec![(0, [9; 16])],
+                nonrecovery: Vec::new(),
+                recovery_blocks_seen: 4,
+                comment: None,
+            },
+            dir: dir.clone(),
+            data_dir: dir.clone(),
+            par_files: Vec::new(),
+            deferred: Vec::new(),
+            recovery_validated: Some(4),
+        };
+        let opts = crate::cli::Options {
+            purge: true,
+            ..Default::default()
+        };
+        let mut sink = crate::out::Sink::buffered();
+        let code = super::run_resurveying(&loaded, &opts, &mut sink);
+        let (out, err) = sink.take();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, crate::EXIT_REPAIR_FAILED, "{out}{err}");
+        assert!(
+            err.contains("No details available for recoverable file number 1."),
+            "{out}{err}"
+        );
+        assert!(!out.contains("All files are correct"), "{out}{err}");
+        assert!(!out.contains("Purge par files."), "{out}{err}");
+    }
+
+    /// A11: one directory under two spellings is one directory, and two
+    /// directories are still two.
+    #[test]
+    fn same_dir_resolves_spellings_and_keeps_distinct_dirs_apart() {
+        let base = std::env::temp_dir().join(format!("parfast-same-dir.{}", std::process::id()));
+        let other = base.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let canon = std::fs::canonicalize(&base).unwrap();
+        assert!(super::same_dir(&base, &canon));
+        assert!(super::same_dir(&base, &other.join("..")));
+        assert!(!super::same_dir(&base, &other));
+        // Unresolvable on either side keeps the old byte compare.
+        assert!(!super::same_dir(&base.join("absent"), &base));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// The full-rebuild shortfall this function exists for: every member
     /// missing, the engine short of recovery blocks, nothing published.
@@ -1520,8 +2046,6 @@ mod tests {
         let damaged = vec![("a.bin".to_string(), 10u64), ("b.bin".to_string(), 32u64)];
         let renamed = ["a.bin".to_string()];
         assert_eq!(wrote_bytes(&damaged, None, &renamed), Some(32));
-        // Every member a rename: the reference's "Wrote 0 bytes to
-        // disk", which it still prints.
         // Every member a rename is the whole obfuscated post, and the
         // reference prints NO line for it - it never enters the write
         // its "Wrote" comes from.

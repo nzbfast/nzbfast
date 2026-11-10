@@ -230,6 +230,7 @@ pub fn job_json(j: &Job) -> Value {
         "eat_volumes_ok": j.eat_volumes_ok,
         "zip_packed": j.zip_packed,
         "unpack_blocked_by": j.unpack_blocked_by,
+        "not_delivered": j.not_delivered,
         // Persisted because it is the only record that the payload is
         // in two places: nothing can work that out after the fact once
         // the move's own log line has rolled out of the ring.
@@ -476,6 +477,7 @@ pub fn job_from_json(v: &Value) -> Option<Job> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         demote: false,
+        dispatch_reset_gen: None,
         password: s("password"),
         // Records written before verification became nullable stored 0
         // for BOTH "nothing verified this" and "verified, nothing bad",
@@ -531,6 +533,18 @@ pub fn job_from_json(v: &Value) -> Option<Job> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         unpack_blocked_by: s("unpack_blocked_by").unwrap_or_default(),
+        // Absent on every record written before item 15, which reads as
+        // "nothing was left undelivered" - true of every one of them
+        // that the old tolerance did not hide.
+        not_delivered: v
+            .get("not_delivered")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
         move_split: s("move_split").unwrap_or_default(),
         move_failed: s("move_failed").unwrap_or_default(),
         move_attempts: nar_u32(v, "move_attempts"),

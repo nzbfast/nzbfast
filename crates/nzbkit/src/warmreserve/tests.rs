@@ -543,6 +543,7 @@ fn bare() -> ServerConfig {
         block_account: false,
         bind_ip: None,
         socks5: None,
+        http_proxy: None,
         enabled: true,
         warm_pool: false,
         idle_release_secs: None,
@@ -552,4 +553,35 @@ fn bare() -> ServerConfig {
         tls_hostname: None,
         warm_reserve: None,
     }
+}
+
+/// Sweep 9 Nov 2026 (C, warmreserve.rs:457): the post-dial re-check
+/// asked only whether ANY spare was left. A fleet that trims the spares
+/// from three to one while three dials are out leaves `spares() == 0`
+/// false for every answer, so all three parked - two sockets past what
+/// the account still licenses, and nothing trims a parked surplus. The
+/// answers have to be held to the same floor `tick` dials against.
+///
+/// `fill` is driven directly with the trim already landed, which is the
+/// state every answer of that race finds.
+#[tokio::test(flavor = "multi_thread")]
+async fn answers_that_land_after_a_trim_park_only_up_to_the_spares() {
+    let mock = provider().await;
+    let sc = cfg(&mock, 8, 3);
+    let warm = pool();
+    let budget = ConnBudget::new();
+    let reserve = WarmReserve::new(warm.clone(), budget.clone());
+    let lease = budget.lease(&ConnBudget::key(&sc), 8);
+    // Three asked for, then the fleet took the room for two of them.
+    assert_eq!(lease.set_spares(3), 3);
+    assert_eq!(lease.set_spares(1), 1);
+
+    reserve.fill(&sc, &lease, 3).await;
+
+    assert_eq!(
+        warm.parked_for(&sc).await,
+        1,
+        "one spare is licensed, so one session may sit parked"
+    );
+    assert_eq!(reserve.counts(), (1, 0), "the other two said goodbye");
 }

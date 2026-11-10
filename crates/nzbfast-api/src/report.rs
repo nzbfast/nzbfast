@@ -69,7 +69,10 @@ fn scrub(s: &str, home: Option<&str>) -> String {
         let start = cursor + i + 3;
         let rest = &out[start..];
         let stop = rest.find(['/', '?', ' ', '"', '\'']).unwrap_or(rest.len());
-        match rest[..stop].find('@') {
+        // The LAST `@` before the path: the host cannot contain one, and
+        // a password with a raw `@` in it is common enough that taking
+        // the first left its tail beside the host (bug sweep 9 Nov 2026).
+        match rest[..stop].rfind('@') {
             Some(at) => {
                 out.replace_range(start..start + at, "[redacted]");
                 cursor = start + "[redacted]".len();
@@ -378,6 +381,12 @@ fn render_report(d: &Daemon, nzo_id: &str, job: &Arc<Mutex<Job>>) -> String {
         line(&mut o, "password", "required, and none worked");
     }
     line(&mut o, "still packed", &j.unpack_blocked_by);
+    // Item 15 (TODO 358): members outside the main payload a Completed
+    // job left packed. Archive NAMES only, the same class of fact as
+    // the line above.
+    if j.state == JobState::Completed {
+        line(&mut o, "not delivered", j.not_delivered.join(", "));
+    }
     // §282 item 14. Both attempts, on whichever of the two rows the
     // reader happens to have opened: what was tried, why it was
     // abandoned, what replaced it. Nothing is printed for the
@@ -808,6 +817,12 @@ mod tests {
         assert_eq!(
             scrub("a http://u:p@h1/ b https://h2/ c ftp://u2:p2@h3/", None),
             "a http://[redacted]@h1/ b https://h2/ c ftp://[redacted]@h3/"
+        );
+        // A raw `@` inside the password: the host is what follows the
+        // LAST one, and nothing of the secret may survive.
+        assert_eq!(
+            scrub("GET https://joe:p@ss@w0rd@news.example.com/x ok", None),
+            "GET https://[redacted]@news.example.com/x ok"
         );
     }
 

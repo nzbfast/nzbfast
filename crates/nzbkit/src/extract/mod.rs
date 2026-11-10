@@ -1422,7 +1422,9 @@ struct Inner {
     /// parameters; a `Some` return is a check-VERIFIED password (the
     /// hook does the KDFs and only surrenders a candidate the stored
     /// check accepts). Root level only - a nested level's sidecars are
-    /// inner files the disk pass's password-chain already covers.
+    /// inner files the disk pass's password-chain already covers. The 7z
+    /// chase worker calls it too, from its own thread, for a
+    /// header-encrypted container (`Extractor::sevenz_await_password`).
     pw_probe: Option<PwProbeHook>,
     /// True while any slot is `pw_await` and a probe attempt is due:
     /// set at blocker onset and re-armed by the cadence check in
@@ -1464,12 +1466,14 @@ struct Inner {
     fwd_windows: Vec<FwdWindow>,
 }
 
-/// Increment A: caller-supplied candidate probe. Given the blocked
-/// archive's RAR5 crypt parameters, harvest + test candidates and
-/// return one the stored check VERIFIES (never an unverified guess -
-/// a wrong password past this point writes garbage).
+/// Increment A: caller-supplied candidate probe. Given something a
+/// candidate can be checked against - a blocked RAR5 archive's stored
+/// check, or (TODO 358 item 9) a header-encrypted 7z container's
+/// encrypted end header - harvest + test candidates and return one the
+/// archive VERIFIES (never an unverified guess - a wrong password past
+/// this point writes garbage).
 pub type PwProbeHook =
-    std::sync::Arc<dyn Fn(&crate::rar::CryptProbe) -> Option<String> + Send + Sync>;
+    std::sync::Arc<dyn Fn(&dyn crate::rar::CandidateCheck) -> Option<String> + Send + Sync>;
 
 impl Extractor {
     /// `n_slots` = number of slots in the download; `enabled=false` makes
@@ -2581,7 +2585,7 @@ impl Extractor {
                 && matches!(inner.slots[slot].mode, SlotMode::Unknown)
                 && inner.slots[slot].size_agreed() != 0
             {
-                routed_rar |= self.resniff_parked_head(inner, slot, &mut *jobs, &mut *fwd)?;
+                routed_rar |= self.resniff_parked_head(inner, slot)?;
             }
 
             match inner.slots[slot].mode {

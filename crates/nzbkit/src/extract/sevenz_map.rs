@@ -53,13 +53,35 @@
 //!      [`Extractor::direct_attach`] instead of joining the
 //!      frontier set.
 //!
+//! HEADER-ENCRYPTED STORED SETS (TODO 358 item 9). A `7z a -mhe=on -p..
+//! -mx=0` container is Copy under AES-256-CBC: each folder's pack stream
+//! is one CBC stream starting at the folder coder's IV, padded to 16 only
+//! at its very end - byte for byte the shape of an encrypted stored RAR
+//! member, which the stored-member machinery already decrypts span by
+//! span as articles land (`CryptoState`). Once the end header has
+//! DECRYPTED under a password (`Extractor::sevenz_open` - which waits on
+//! the in-stream candidate probe when no password in hand opens it), the
+//! members' ciphertext ranges are known and [`plan`] places them like any
+//! other, each carrying a [`crate::rar::SevenZCrypt`] whose proof is the
+//! header decrypt. The plaintext is CRC-checked at finish against the
+//! archive's stored CRC32, exactly as a RAR4 encrypted store member is.
+//!
 //! What it deliberately does NOT take, each falling through to the
 //! worker path untouched (and pinned by a test):
 //!
-//!   * any folder whose coder chain is not exactly one Copy coder -
-//!     LZMA2, BZip2, PPMd, Delta, BCJ/BCJ2, and AES256 (encrypted
-//!     entries, `-p` and `-mhe` alike) all still decode through the
-//!     engine;
+//!   * any folder whose coder chain is not exactly one Copy coder, or
+//!     Copy under one AES256 coder in a container whose header proved
+//!     the password - LZMA2, BZip2, PPMd, Delta, BCJ/BCJ2, and any
+//!     compressed chain under AES all still decode through the engine;
+//!   * AES over a PLAIN header (`-p` without `-mhe`): nothing proves the
+//!     password before the data is decrypted, so the worker's own
+//!     decode (and its CRC verdict) keeps that shape;
+//!   * an AES folder holding MORE THAN ONE member (`-ms=on` on a stored
+//!     set): the members share one CBC chain, so every member after the
+//!     first starts mid-block with a previous ciphertext block as its
+//!     IV, which a per-member decrypt state cannot express. 7-Zip writes
+//!     `-mx=0` sets non-solid by default - one folder per file - so the
+//!     shipped shape is the single-member one;
 //!   * an archive with an EMPTY member or an entry with no stream: the
 //!     worker creates those files with an explicit empty write, and a
 //!     direct map has no byte to route that would create them;
@@ -103,8 +125,15 @@ pub(super) struct DirectMember {
     pub(super) name: String,
     /// Container offset of the member's first byte.
     pub(super) start: u64,
-    /// Its length. Copy, so packed length == unpacked length.
+    /// Its UNPACKED length - the output file's size.
     pub(super) size: u64,
+    /// Its length in the container. Equal to `size` for a plain Copy
+    /// member; `align16(size)` for an AES + Copy one (the CBC padding is
+    /// part of the member's ciphertext, never header bytes).
+    pub(super) packed: u64,
+    /// The member's decryption record, for an AES + Copy member of a
+    /// header-encrypted container; None for a plain one.
+    pub(super) crypt: Option<crate::rar::EntryCrypt>,
     /// The archive's stored CRC32 of the member, when it has one: what
     /// the settle-time composition gate checks the routed bytes against
     /// (`file_crc` on the member's LAST piece, exactly as a RAR5 store
@@ -121,10 +150,15 @@ pub(super) struct DirectMember {
 /// SFX stub's length, 0 otherwise) and `total` the container's whole
 /// length; both are the ctl's, so the ranges this returns are directly
 /// comparable with the byte space the set maps parts onto.
+///
+/// `proven` is the password the container's ENCRYPTED end header
+/// decrypted under, when it had one (see `Extractor::sevenz_open`). Only
+/// then may a folder be AES + Copy; None refuses every AES folder.
 pub(super) fn plan(
     archive: &sevenz_rust2::Archive,
     archive_base: u64,
     total: u64,
+    proven: Option<&str>,
 ) -> Option<Vec<DirectMember>> {
     // 7z stores pack-stream offsets relative to the end of the 32-byte
     // signature header, so every absolute offset below is
@@ -147,13 +181,11 @@ pub(super) fn plan(
     // pack stream refuses the whole archive - a mixed container (some
     // folders Copy, some LZMA2) would need the engine for its other
     // half anyway, and half a container cannot be handed over.
-    let mut block_at: Vec<(u64, u64)> = Vec::with_capacity(nblocks);
+    // (start, packed length, unpacked length, crypt) per block.
+    let mut block_at: Vec<(u64, u64, u64, Option<crate::rar::EntryCrypt>)> =
+        Vec::with_capacity(nblocks);
     for (b, block) in archive.blocks.iter().enumerate() {
-        if block.coders.len() != 1
-            || block.coders[0].encoder_method_id() != sevenz_rust2::EncoderMethod::ID_COPY
-        {
-            return None;
-        }
+        let crypt = block_crypt(block, proven)?;
         let fp = first_pack[b];
         // Exactly one pack stream: the next block's first stream (or the
         // end of the list) must be the very next index. `packed_streams`
@@ -163,17 +195,25 @@ pub(super) fn plan(
             return None;
         }
         let len = *sizes.get(fp)?;
+        let unpack = block.get_unpack_size();
         // Copy is the identity coder: a folder whose declared unpacked
         // length differs from its packed one is not one, whatever its
-        // coder id says.
-        if block.get_unpack_size() != len {
+        // coder id says. Under AES the pack stream is the plaintext
+        // padded to the cipher block, exactly - anything else is not a
+        // CBC stream of this member.
+        let want = if crypt.is_some() {
+            unpack.checked_next_multiple_of(16)?
+        } else {
+            unpack
+        };
+        if len != want {
             return None;
         }
         let start = pack_base.checked_add(*offsets.get(fp)?)?;
         if start.checked_add(len)? > total {
             return None;
         }
-        block_at.push((start, len));
+        block_at.push((start, len, unpack, crypt));
     }
 
     // Members, in file order. Within a folder the sub-streams tile the
@@ -198,8 +238,11 @@ pub(super) fn plan(
             return None;
         }
         let b = (*archive.stream_map.file_block_index.get(fi)?)?;
-        let (bstart, blen) = *block_at.get(b)?;
+        let (bstart, blen, bunpack, ref bcrypt) = *block_at.get(b)?;
         let at = match cur {
+            // A second member in an encrypted folder starts mid-chain;
+            // see the module doc.
+            Some((cb, _)) if cb == b && bcrypt.is_some() => return None,
             Some((cb, off)) if cb == b => off,
             // Blocks are assigned to files in increasing order by the
             // parse; a cursor that went backwards would place two
@@ -208,16 +251,22 @@ pub(super) fn plan(
             _ => 0,
         };
         let end = at.checked_add(f.size)?;
-        if end > blen {
+        if end > bunpack {
             return None;
         }
         cur = Some((b, end));
         covered[b] = end;
+        // A plain member is its own slice of the folder; an encrypted
+        // one is the whole folder's ciphertext, padding included (it is
+        // the folder's only member, so `at` is 0).
+        let packed = if bcrypt.is_some() { blen } else { f.size };
         out.push(DirectMember {
             name: f.name.clone(),
             start: bstart.checked_add(at)?,
             size: f.size,
+            packed,
             crc: f.has_crc.then_some(f.crc as u32),
+            crypt: bcrypt.clone(),
         });
     }
     if out.is_empty() {
@@ -231,18 +280,17 @@ pub(super) fn plan(
     // containers tile exactly; a header that declares a folder with no
     // sub-streams, or members that come up short of one, keeps the
     // worker.
-    if covered
-        .iter()
-        .zip(block_at.iter())
-        .any(|(&c, &(_, len))| c != len)
-    {
+    if covered.iter().zip(block_at.iter()).any(|(&c, b)| c != b.2) {
         return None;
     }
     // The routing map, the settle gate and `map_span_into`'s own
     // debug-assert all require ordered, disjoint data areas. The walk
     // above produces them for a well-formed archive; a header that
     // declares otherwise is refused here rather than trusted.
-    if out.windows(2).any(|w| w[0].start + w[0].size > w[1].start) {
+    if out
+        .windows(2)
+        .any(|w| w[0].start + w[0].packed > w[1].start)
+    {
         return None;
     }
     // Two members under ONE name would share a single output: routing
@@ -257,6 +305,34 @@ pub(super) fn plan(
         return None;
     }
     Some(out)
+}
+
+/// Which coder chain is this folder, as far as the map cares: `Some(None)`
+/// for exactly one Copy coder, `Some(Some(crypt))` for Copy under one
+/// AES256 coder when `proven` says the header decrypted under that
+/// password, `None` (decline) for everything else.
+///
+/// The two-coder case accepts either listing order: with exactly one pack
+/// stream and two one-in/one-out coders the folder can only be a chain,
+/// and Copy is the identity, so AES-then-Copy and Copy-then-AES decode to
+/// the same bytes. A lone AES coder (the vendored writer's shape when it
+/// is handed AES alone) is the same chain without the no-op.
+fn block_crypt(
+    block: &sevenz_rust2::Block,
+    proven: Option<&str>,
+) -> Option<Option<crate::rar::EntryCrypt>> {
+    use sevenz_rust2::EncoderMethod as M;
+    let is = |c: &sevenz_rust2::Coder, id: &[u8]| c.encoder_method_id() == id;
+    let aes = match block.coders.as_slice() {
+        [c] if is(c, M::ID_COPY) => return Some(None),
+        [a] if is(a, M::ID_AES256_SHA256) => a,
+        [x, y] if is(x, M::ID_AES256_SHA256) && is(y, M::ID_COPY) => x,
+        [x, y] if is(x, M::ID_COPY) && is(y, M::ID_AES256_SHA256) => y,
+        _ => return None,
+    };
+    let pw = proven?;
+    let c = crate::rar::SevenZCrypt::proven(aes.properties().to_vec(), pw)?;
+    Some(Some(crate::rar::EntryCrypt::SevenZ(c)))
 }
 
 impl Extractor {
@@ -350,7 +426,7 @@ impl Extractor {
         // need to reason about it ever again.
         if members
             .iter()
-            .any(|m| m.start.saturating_add(m.size) > total)
+            .any(|m| m.start.saturating_add(m.packed) > total)
         {
             return Ok(false);
         }
@@ -490,18 +566,22 @@ impl Extractor {
         let mut bases: Vec<u64> = Vec::new();
         for m in map.iter() {
             let s = m.start.max(pstart);
-            let e = (m.start + m.size).min(pend);
+            let e = (m.start + m.packed).min(pend);
             if s >= e {
                 continue;
             }
             let split_before = s > m.start;
-            let split_after = e < m.start + m.size;
+            let split_after = e < m.start + m.packed;
             entries.push(FileEntry {
                 name: m.name.clone(),
                 unpacked_size: m.size,
                 method: Method::Store,
-                encrypted: false,
-                crypt: None,
+                // An AES member's pieces are CIPHERTEXT ranges, exactly
+                // as an encrypted stored RAR member's are: the routing
+                // path keys a `CryptoState` off the head piece's record
+                // and decrypts each span as it lands.
+                encrypted: m.crypt.is_some(),
+                crypt: m.crypt.clone(),
                 // The whole-file CRC belongs to the LAST piece, which is
                 // where the settle gate looks for it (`hdr` is taken
                 // only from a piece with `split_after` clear).
@@ -610,6 +690,10 @@ pub(super) fn direct_mapped_parts(ex: &Extractor) -> usize {
     drop(inner);
     here + child.map_or(0, |c| direct_mapped_parts(&c))
 }
+
+#[cfg(test)]
+#[path = "sevenz_mhe_tests.rs"]
+mod sevenz_mhe_tests;
 
 #[cfg(test)]
 mod tests {
@@ -893,7 +977,7 @@ mod tests {
         .clone();
         // The control arm: unmutated, this IS the shape the map takes,
         // and both members are placed inside the container.
-        let members = plan(&base, 0, total).expect("the control archive must plan");
+        let members = plan(&base, 0, total, None).expect("the control archive must plan");
         assert_eq!(members.len(), 2);
         assert_eq!(members[0].size, a.len() as u64);
         assert_eq!(members[1].start, members[0].start + members[0].size);
@@ -904,60 +988,73 @@ mod tests {
         let mut m = base.clone();
         m.files[1].has_stream = false;
         m.files[1].size = 0;
-        assert!(plan(&m, 0, total).is_none(), "empty member");
+        assert!(plan(&m, 0, total, None).is_none(), "empty member");
 
         // A second coder in the chain - the shape every filter and every
         // AES256 container has.
         let mut m = base.clone();
         let dup = m.blocks[0].coders[0].clone();
         m.blocks[0].coders.push(dup);
-        assert!(plan(&m, 0, total).is_none(), "two coders");
+        assert!(plan(&m, 0, total, None).is_none(), "two coders");
 
         // A member declaring more bytes than its folder holds.
         let mut m = base.clone();
         m.files[1].size = total * 4;
-        assert!(plan(&m, 0, total).is_none(), "member past its folder");
+        assert!(plan(&m, 0, total, None).is_none(), "member past its folder");
 
         // A container the declared geometry runs off the end of - the
         // set's own total is the only thing that bounds an attacker's
         // pack_pos, and a range past it would map onto parts that do not
         // exist.
-        assert!(plan(&base, 0, 64).is_none(), "member past the container");
+        assert!(
+            plan(&base, 0, 64, None).is_none(),
+            "member past the container"
+        );
 
         // Two members under one name - one output, two claims on it.
         let mut m = base.clone();
         m.files[1].name = m.files[0].name.clone();
-        assert!(plan(&m, 0, total).is_none(), "duplicate member name");
+        assert!(plan(&m, 0, total, None).is_none(), "duplicate member name");
 
         // A folder with bytes no member accounts for: they would be kept
         // in RAM as header bytes for the life of the slot.
         let mut m = base.clone();
         m.files[1].size -= 1;
-        assert!(plan(&m, 0, total).is_none(), "folder not fully claimed");
+        assert!(
+            plan(&m, 0, total, None).is_none(),
+            "folder not fully claimed"
+        );
 
         // Not a container at all: no folders, nothing to place.
         let mut m = base.clone();
         m.blocks.clear();
-        assert!(plan(&m, 0, total).is_none(), "no blocks");
+        assert!(plan(&m, 0, total, None).is_none(), "no blocks");
     }
 
-    /// An AES-256 container (`7z -p`) keeps the worker: its pack stream
-    /// is ciphertext, so a member's bytes are not the container's bytes
-    /// and there is nothing to route directly.
+    /// An AES-256 container whose HEADER is plain (`7z -p` without
+    /// `-mhe`) keeps the worker: nothing proves the password before its
+    /// data is decrypted, so the map has no proof to key a member with.
+    ///
+    /// Until TODO 358 item 9 this test covered every AES container and
+    /// fed the vendored writer's default, which encrypts the header too;
+    /// that shape is direct-mapped now (`sevenz_mhe_tests`), so this one
+    /// turns the header encryption off to keep pinning the shape that
+    /// still declines.
     #[test]
-    fn an_encrypted_container_keeps_the_worker() {
+    fn a_plain_header_aes_container_keeps_the_worker() {
         let f = payload(200_000, 157);
-        let arch = sevenz_archive(
-            &[("F.bin", &f)],
-            Some(vec![
-                sevenz_rust2::EncoderConfiguration::new(sevenz_rust2::EncoderMethod::COPY),
-                sevenz_rust2::encoder_options::AesEncoderOptions::new(
-                    sevenz_rust2::Password::from("benchpw"),
-                )
-                .into(),
-            ]),
-            false,
-        );
+        let mut w = sevenz_rust2::ArchiveWriter::new(std::io::Cursor::new(Vec::new())).unwrap();
+        w.set_encrypt_header(false);
+        w.set_content_methods(vec![
+            sevenz_rust2::EncoderConfiguration::new(sevenz_rust2::EncoderMethod::COPY),
+            sevenz_rust2::encoder_options::AesEncoderOptions::new(sevenz_rust2::Password::from(
+                "benchpw",
+            ))
+            .into(),
+        ]);
+        w.push_archive_entry(sevenz_rust2::ArchiveEntry::new_file("F.bin"), Some(&f[..]))
+            .unwrap();
+        let arch = w.finish().unwrap().into_inner();
         let dir = tmpdir("7z-direct-aes");
         let ex = Arc::new(Extractor::new(&dir, 1, true));
         ex.anchor();

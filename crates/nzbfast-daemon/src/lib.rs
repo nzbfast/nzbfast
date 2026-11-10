@@ -443,6 +443,9 @@ pub mod finish_action;
 pub mod job_finalize;
 use job_finalize::FinalizeOutcome;
 
+// TODO 358 item 13: the executable refusal the finalize pass asks first.
+pub mod exerefuse;
+
 pub mod hooks;
 
 // TODO 280: the container post - a finished download whose own payload
@@ -621,6 +624,14 @@ pub static STOP_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 /// thread for a run is spawned. The CLI daemon never arms (both stay 0
 /// and `request_stop` is never called there).
 pub static STOP_BASELINE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Unit tests only: held by every test that moves [`STOP_EPOCH`]
+/// (`stop_seam_tests`) and by every test whose subject reads a
+/// [`RunStop`] it took with `RunStop::current` (the pause-timer tests).
+/// Both are process-global, so in a one-process `cargo test` run a bump
+/// landing under a reader is a stop that reader never asked for.
+#[cfg(test)]
+pub(crate) static STOP_SEAM: Mutex<()> = Mutex::new(());
 
 /// Set by [`arm_embedded_stop`], i.e. true exactly when a host app owns
 /// this process rather than the CLI owning it. Latches on: a process
@@ -904,7 +915,32 @@ mod stop_seam_tests {
     /// deliberately do NOT call `arm_embedded_stop` - that latches the
     /// EMBEDDED flag for the whole binary - and take their baseline off
     /// the epoch directly instead, which is all arming does anyway.
-    static SEAM: Mutex<()> = Mutex::new(());
+    ///
+    /// The lock is the crate's [`crate::STOP_SEAM`], not one of their
+    /// own, and they put the baseline back on the way out: a bumped epoch
+    /// left above a baseline of 0 is a stop every LATER `RunStop::current`
+    /// in this process reads as already requested, which is how the
+    /// pause-timer tests failed in a one-process run (9 Nov 2026 sweep).
+    fn seam() -> SeamGuard {
+        SeamGuard {
+            _lock: crate::STOP_SEAM.lock().unwrap_or_else(|p| p.into_inner()),
+        }
+    }
+
+    /// Holds the seam and, on drop, re-arms the baseline at the current
+    /// epoch - the state of a process nobody has asked to stop.
+    struct SeamGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for SeamGuard {
+        fn drop(&mut self) {
+            STOP_BASELINE.store(
+                STOP_EPOCH.load(std::sync::atomic::Ordering::SeqCst),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+    }
 
     fn arm_here() -> RunStop {
         RunStop {
@@ -914,7 +950,7 @@ mod stop_seam_tests {
 
     #[test]
     fn a_stop_wakes_a_parked_lane_instead_of_waiting_out_its_interval() {
-        let _seam = SEAM.lock().unwrap_or_else(|p| p.into_inner());
+        let _seam = seam();
         let stop = arm_here();
         let lane = std::thread::spawn(move || {
             let at = Instant::now();
@@ -945,7 +981,7 @@ mod stop_seam_tests {
     /// before it waits, not only after.
     #[test]
     fn a_stop_that_lands_in_the_park_window_is_not_lost() {
-        let _seam = SEAM.lock().unwrap_or_else(|p| p.into_inner());
+        let _seam = seam();
         let stop = arm_here();
         let held = stop_gate().0.lock().unwrap_or_else(|p| p.into_inner());
         let (tx, rx) = std::sync::mpsc::channel();
@@ -965,7 +1001,7 @@ mod stop_seam_tests {
 
     #[test]
     fn an_unstopped_run_still_sleeps_out_its_interval() {
-        let _seam = SEAM.lock().unwrap_or_else(|p| p.into_inner());
+        let _seam = seam();
         let stop = arm_here();
         let at = Instant::now();
         assert!(stop.sleep(Duration::from_millis(150)), "no stop pending");

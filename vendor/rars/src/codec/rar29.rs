@@ -84,6 +84,17 @@ const MAX_VM_AUDIO_FILTER_BLOCK_SIZE: usize = 120_000;
 const MAX_VM_GLOBAL_DATA: usize = 0x2000;
 const MAX_VM_CODE_SIZE: usize = 64 * 1024;
 const MAX_VM_PROGRAMS: usize = 8192;
+// nzbfast: the GENERIC (non-standard) VM code the program table may hold
+// at once, in code bytes. `MAX_VM_PROGRAMS` x `MAX_VM_CODE_SIZE` let the
+// table reach 512 MiB of code, and a parsed `rarvm::Program` costs up to
+// ~43x its code (a 6-bit zero-operand instruction is a 32-byte
+// `Instruction`), so ~512 MiB of packed input could pin ~22 GB. The six
+// RAR 3 standard filters are recognised by `identify_standard_filter` and
+// store no code, and no known writer emits any other program (unrar 5 and
+// later run standard filters only), so sixteen maximal generic programs is
+// headroom, not a limit a real archive meets. (9 Nov 2026 sweep, section C;
+// nzbfast-local change, see vendor/rars/VENDORING.md.)
+const MAX_VM_GENERIC_CODE_TOTAL: usize = 16 * MAX_VM_CODE_SIZE;
 const MAX_VM_FILTERS: usize = 8192;
 
 const LENGTH_BASES: [usize; LENGTH_SLOTS] = [
@@ -1998,6 +2009,9 @@ pub struct Rar29Decoder {
     ppmd_esc: u8,
     filters: Vec<VmFilter>,
     programs: Vec<VmProgram>,
+    /// nzbfast: code bytes of the `Generic` programs in `programs`, held to
+    /// `MAX_VM_GENERIC_CODE_TOTAL`; zeroed with the table.
+    generic_code_bytes: usize,
     last_filter: usize,
     base_offset: usize,
     output: Vec<u8>,
@@ -2109,6 +2123,7 @@ impl Rar29Decoder {
             ppmd_esc: 2,
             filters: Vec::new(),
             programs: Vec::new(),
+            generic_code_bytes: 0,
             last_filter: 0,
             base_offset: 0,
             output: Vec::new(),
@@ -2864,6 +2879,7 @@ impl Rar29Decoder {
             if value == 0 {
                 self.filters.clear();
                 self.programs.clear();
+                self.generic_code_bytes = 0;
                 0
             } else {
                 usize::try_from(value - 1)
@@ -2937,12 +2953,22 @@ impl Rar29Decoder {
             }
             #[cfg(feature = "bench-internals")]
             filter_program_census::define(&code, self.programs.len());
-            let kind = identify_standard_filter(&code)
-                .map(VmProgramKind::Standard)
-                .map_or_else(
-                    || rarvm::Program::parse(&code).map(VmProgramKind::Generic),
-                    Ok,
-                )?;
+            let kind = match identify_standard_filter(&code) {
+                Some(standard) => VmProgramKind::Standard(standard),
+                None => {
+                    // nzbfast: see MAX_VM_GENERIC_CODE_TOTAL. Checked before
+                    // the parse, which is where the cost is.
+                    let total = self.generic_code_bytes.saturating_add(code_size);
+                    if total > MAX_VM_GENERIC_CODE_TOTAL {
+                        return Err(Error::InvalidData(
+                            "RAR 2.9 VM generic program code exceeds its budget",
+                        ));
+                    }
+                    let program = rarvm::Program::parse(&code)?;
+                    self.generic_code_bytes = total;
+                    VmProgramKind::Generic(program)
+                }
+            };
             self.programs.push(VmProgram {
                 kind,
                 block_size,
@@ -3058,6 +3084,20 @@ impl Rar29Decoder {
                         exec_count: program.exec_count,
                     })?;
                     program.globals = result.globals;
+                    // nzbfast: a generic program sets its own output length
+                    // (anywhere up to RARVM's 256 KiB memory) and that
+                    // output REPLACES the block, so a 1-byte block declared
+                    // a few bytes of packed input apart could emit 256 KiB
+                    // each, and the 8192 filters a span may carry built one
+                    // 2 GiB `out` here. Growth is refused; a standard filter
+                    // never changes the length, and unrar 5 and later run
+                    // no generic program at all. (9 Nov 2026 sweep, section
+                    // C; see vendor/rars/VENDORING.md.)
+                    if result.output.len() > filter_size {
+                        return Err(Error::InvalidData(
+                            "RAR 2.9 VM filter output is longer than its block",
+                        ));
+                    }
                     block = result.output;
                 }
             }
@@ -4142,6 +4182,21 @@ fn rgb_predict(prev: u8, upper: u8, upper_left: u8) -> u8 {
 fn audio_decode(data: &[u8], channels: usize) -> Result<Vec<u8>> {
     let mut out = vec![0u8; data.len()];
     let mut src = 0usize;
+    // nzbfast: `channels` is the filter's raw `regs[0]`, a u32 the stream
+    // chooses, and a channel at or past `data.len()` writes nothing (its
+    // `while` never enters), so clamping changes no output - it only stops
+    // ~4 billion empty passes per filter. (9 Nov 2026 sweep, section C.)
+    //
+    // Clamped ONCE, here, and not only in the loop bound: the stride
+    // `i += channels` below used the raw value, and on a 32-bit target
+    // `u32::MAX as usize` IS `usize::MAX`, so channel 1's first step
+    // wrapped to 0 - a debug overflow panic, and in release channel 1
+    // re-decoding from offset 0 over channel 0's output (nightly
+    // armv7-cross, 10 Nov 2026). With `channels <= data.len()` the stride
+    // stays under twice the block length, so it cannot wrap, and the
+    // output is unchanged: a stride at or past the end leaves the `while`
+    // after one step either way.
+    let channels = channels.min(data.len());
     for channel in 0..channels {
         let mut prev_byte = 0u32;
         let mut prev_delta = 0i32;
@@ -6591,6 +6646,106 @@ exercise LZSS block table selection.</P></BODY></HTML>\n"
                 "RAR 2.9 VM filter block is too large to hold"
             ))
         );
+    }
+
+    /// nzbfast, 9 Nov 2026 sweep: the program table held up to 8192
+    /// programs of 64 KiB code each with no total, and a parsed generic
+    /// program costs many times its code. The generic code a table may
+    /// hold is now budgeted, and a table reset gives the budget back.
+    #[test]
+    fn vm_generic_program_code_is_budgeted() {
+        let define = |decoder: &mut Rar29Decoder| {
+            let mut data = BitWriter::default();
+            data.write_encoded_u32(decoder.programs.len() as u32 + 1); // a new program, no reset
+            data.write_encoded_u32(0); // block start
+            data.write_encoded_u32(2); // code size
+            data.write_bits(0, 8); // xor check byte
+            data.write_bits(0, 8); // no static data, no instructions: an implicit RET
+            decoder.parse_vm_code(0x80, data.finish())
+        };
+        let refused = Err(Error::InvalidData(
+            "RAR 2.9 VM generic program code exceeds its budget",
+        ));
+        let mut decoder = Rar29Decoder::new();
+        assert_ne!(define(&mut decoder), refused);
+        assert!(matches!(
+            decoder.programs.last().map(|p| &p.kind),
+            Some(VmProgramKind::Generic(_))
+        ));
+        assert_eq!(decoder.generic_code_bytes, 2);
+
+        decoder.generic_code_bytes = super::MAX_VM_GENERIC_CODE_TOTAL - 1;
+        assert_eq!(define(&mut decoder), refused);
+
+        // Index 0 resets the table, and with it the budget.
+        let mut reset = BitWriter::default();
+        reset.write_encoded_u32(0);
+        reset.write_encoded_u32(0);
+        reset.write_encoded_u32(2);
+        reset.write_bits(0, 8);
+        reset.write_bits(0, 8);
+        assert_ne!(decoder.parse_vm_code(0x80, reset.finish()), refused);
+        assert_eq!(decoder.generic_code_bytes, 2);
+    }
+
+    /// nzbfast, 9 Nov 2026 sweep: a generic program chooses its own
+    /// output length and that output replaced the block, so a 3-byte block
+    /// came back as 4 KiB. Growth is refused.
+    #[test]
+    fn generic_vm_filter_may_not_grow_its_block() {
+        let mut decoder = Rar29Decoder::new();
+        decoder.output.extend_from_slice(&[0x11, 0x22, 0x33]);
+        decoder.programs.push(VmProgram {
+            kind: VmProgramKind::Generic(Program {
+                static_data: Vec::new(),
+                instructions: vec![
+                    Instruction {
+                        opcode: Opcode::Mov,
+                        byte_mode: false,
+                        // GLOBAL_BASE + 0x1c: the output length the VM reports.
+                        operands: vec![Operand::Absolute(0x3c01c), Operand::Immediate(0x1000)],
+                    },
+                    Instruction {
+                        opcode: Opcode::Ret,
+                        byte_mode: false,
+                        operands: Vec::new(),
+                    },
+                ],
+            }),
+            block_size: 3,
+            exec_count: 0,
+            globals: Vec::new(),
+        });
+        decoder.filters.push(VmFilter {
+            program: 0,
+            start: 0,
+            size: 3,
+            regs: [0; 7],
+            global_data: Vec::new(),
+        });
+        assert_eq!(
+            decoder.filtered_range(0, 3, 0),
+            Err(Error::InvalidData(
+                "RAR 2.9 VM filter output is longer than its block"
+            ))
+        );
+    }
+
+    /// nzbfast, 9 Nov 2026 sweep: AUDIO's channel count is the stream's
+    /// raw u32, and every channel past the block's length was an empty
+    /// pass - ~4 billion of them for `u32::MAX`. The clamp changes no
+    /// output: past `data.len()` channels, each channel holds one byte.
+    #[test]
+    fn audio_filter_channel_count_is_clamped_to_the_block() {
+        let data: Vec<u8> = (0..97u8).collect();
+        let reference = super::audio_decode(&data, data.len()).unwrap();
+        assert_eq!(super::audio_decode(&data, u32::MAX as usize).unwrap(), reference);
+        assert_eq!(super::audio_decode(&data, data.len() + 1).unwrap(), reference);
+        // The 32-bit shape on EVERY host: `u32::MAX as usize` is
+        // `usize::MAX` on armv7, and a stride of that wrapped. Asserting
+        // it here keeps the regression visible on 64-bit boxes, which
+        // otherwise never run the width that broke.
+        assert_eq!(super::audio_decode(&data, usize::MAX).unwrap(), reference);
     }
 
     #[test]

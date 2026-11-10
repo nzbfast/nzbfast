@@ -1053,3 +1053,65 @@ fn the_scale_kernel_its_availability_and_its_remedy_agree() {
         assert!(!r.contains('\u{2014}') && !r.contains('\u{2013}'), "{r:?}");
     }
 }
+
+/// `xor_mul_multi_into` is a SAFE `pub fn`, so a caller that hands it a
+/// source shorter than `dst` must get a shorter fold, never a read past
+/// the source. The x86 kernels clamp to the shortest source; the aarch64
+/// kernels sized their chunk count from `dst` alone and trusted a
+/// precondition only a `debug_assert` stated - unsound in safe code
+/// (9 Nov 2026 Fable sweep, PAR2 residue lead 7). The short source is a
+/// prefix of a larger allocation so the over-read, if it happens, reads
+/// mapped memory: the WORD COUNT is what this pins, deterministically.
+/// The same call must also fold every source it is given: the aarch64
+/// kernels hold sixteen coefficient registers and silently dropped any
+/// source past the sixteenth while reporting the whole chunk range done.
+#[test]
+fn xor_mul_multi_honours_short_sources_and_wide_groups() {
+    roster_once();
+    let words = 2048usize;
+    let backing: Vec<u8> = (0..words * 2).map(|i| (i * 7 + 3) as u8).collect();
+    let full: Vec<u8> = (0..words * 2).map(|i| (i * 13 + 1) as u8).collect();
+    for short_bytes in [0usize, 31, 32, 200, 2047, words * 2 - 1] {
+        let short = &backing[..short_bytes];
+        for coeffs in [[0x1234u16, 0x5678], [1, 1]] {
+            let mut dst = vec![0u16; words];
+            let done = xor_mul_multi_into(&mut dst, &[&full, short], &coeffs);
+            assert!(
+                done * 2 <= short_bytes,
+                "folded {done} words over a {short_bytes}-byte source (coeffs {coeffs:x?})"
+            );
+            let mut want = vec![0u16; done];
+            MulTable::new(coeffs[0]).xor_mul_into(&mut want, &full[..done * 2]);
+            MulTable::new(coeffs[1]).xor_mul_into(&mut want, &short[..done * 2]);
+            assert_eq!(&dst[..done], &want[..], "short={short_bytes} {coeffs:x?}");
+            assert!(dst[done..].iter().all(|&w| w == 0), "nothing past `done`");
+        }
+    }
+    for n in [16usize, 17, 33] {
+        let srcs_owned: Vec<Vec<u8>> = (0..n)
+            .map(|s| (0..words * 2).map(|i| (i * (s + 3) + s) as u8).collect())
+            .collect();
+        let srcs: Vec<&[u8]> = srcs_owned.iter().map(|v| v.as_slice()).collect();
+        for ones in [false, true] {
+            let coeffs: Vec<u16> = (0..n)
+                .map(|s| {
+                    if ones {
+                        1
+                    } else {
+                        0x100B ^ (s as u16 * 0x0101)
+                    }
+                })
+                .collect();
+            let mut want = vec![0u16; words];
+            for (s, c) in srcs.iter().zip(&coeffs) {
+                MulTable::new(*c).xor_mul_into(&mut want, s);
+            }
+            let mut got = vec![0u16; words];
+            let done = xor_mul_multi_into(&mut got, &srcs, &coeffs);
+            for (s, c) in srcs.iter().zip(&coeffs) {
+                MulTable::new(*c).xor_mul_into(&mut got[done..], &s[done * 2..]);
+            }
+            assert_eq!(got, want, "n={n} ones={ones} done={done}");
+        }
+    }
+}

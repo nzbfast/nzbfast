@@ -681,6 +681,30 @@ impl PacketCatalog {
         self.scan_rest()
     }
 
+    /// The set a directory-scoped repair (`want = None`) means: the first
+    /// set, in walk order, that carries a Main packet - scanning further
+    /// files lazily only until one turns up. `None` when no set on disk
+    /// has one, which the repair then reports as `NoMainPacket`.
+    ///
+    /// The repair used to bind to whichever set id the FIRST packet of
+    /// the walk carried, so a stray packet of another set sorting first
+    /// (a leftover recovery volume of a deleted set, a neighbour's
+    /// extensionless hex volume) made a complete set answer
+    /// `NoMainPacket` (9 Nov 2026 Fable sweep, PAR2 residue lead 3). A set
+    /// with no Main cannot be repaired at all, so it is never the answer
+    /// while one that can is on disk.
+    pub(super) fn first_set_with_main(&mut self) -> Result<Option<[u8; 16]>, RepairError> {
+        loop {
+            let found = self
+                .walk()
+                .find(|(_, occ)| matches!(self.crit(&occ.md5), Some(Crit::Main(..))))
+                .map(|(_, occ)| occ.set_id);
+            if found.is_some() || !self.scan_next()? {
+                return Ok(found);
+            }
+        }
+    }
+
     /// Scan the first not-yet-scanned file, if any. Returns whether one
     /// was scanned.
     pub(super) fn scan_next(&mut self) -> Result<bool, RepairError> {
@@ -1320,6 +1344,129 @@ pub(super) fn selected_exponents<V>(by_exp: &HashMap<u32, V>, needed: usize) -> 
     select_consecutive_run(&exps, needed)
 }
 
+/// The recovery rows to solve with once the ordinary selection has
+/// proved SINGULAR: the lexicographically smallest `missing.len()`
+/// exponents among `by_exp`'s whose rows are linearly independent over
+/// the missing columns, or `None` when no such set exists (which is the
+/// set genuinely being short of independent parity).
+///
+/// PARFAST SWEEP A27, 9 Nov 2026. A singular selection used to be
+/// terminal, whatever spare recovery the set held. It is reachable only
+/// on [`select_consecutive_run`]'s FALLBACK: a consecutive run is a
+/// Vandermonde times a diagonal over distinct nonzero bases, which is
+/// never singular, while a gapped selection is a generalized Vandermonde
+/// with no such guarantee - two missing slices whose bases' ratio has
+/// order dividing the gap between two selected exponents is enough
+/// (input logs 1 and 4 differ by 3, so `2^3` has order 21,845, and
+/// exponents 0 and 21,845 select a singular pair).
+///
+/// Greedy and ascending, by forward elimination: a row joins the basis
+/// when it is not in the span of the rows before it. So where the
+/// smallest `m` ARE independent this returns exactly them - the ordinary
+/// fallback selection - and it only ever differs where that selection
+/// failed. `O(k * m^2)` word operations for `k` candidate rows, the same
+/// order as the Gauss-Jordan inverse the failed attempt already paid,
+/// and paid only after a failure that used to end the repair - and only
+/// when its `m x m` basis fits the solve-window budget.
+pub(super) fn independent_rows<V>(
+    n_inputs: usize,
+    missing: &[usize],
+    by_exp: &HashMap<u32, V>,
+    control: &super::control::RepairControl,
+) -> Result<Option<Vec<u32>>, RepairError> {
+    let m = missing.len();
+    if m == 0 || by_exp.len() <= m {
+        return Ok(None);
+    }
+    // THE BASIS IS `m x m` WORDS - 2 GiB at m = 32,768 - and it is priced
+    // against the same solve-window budget the failed attempt's own
+    // inverse was, and charged to the repair's gauge while it lives. One
+    // that does not fit is no reselect at all: `None`, and the caller
+    // keeps the original `SingularMatrix` rather than allocating past the
+    // budget the rest of the repair is held to.
+    let basis_bytes = m.saturating_mul(m).saturating_mul(2);
+    if basis_bytes > super::reconstruct::solve_window_budget() {
+        return Ok(None);
+    }
+    let _charge =
+        crate::memgauge::Charge::new(crate::memgauge::Sub::RepairWork, basis_bytes as u64);
+    let mut exps: Vec<u32> = by_exp.keys().copied().collect();
+    exps.sort_unstable();
+    let logs = super::input_base_logs(n_inputs)?;
+    // Each basis row is normalized to 1 at its pivot column and reduced
+    // against every row before it, so one forward pass decides a
+    // candidate.
+    let mut basis: Vec<(usize, Vec<u16>)> = Vec::with_capacity(m);
+    let mut picked: Vec<u32> = Vec::with_capacity(m);
+    for e in exps {
+        control.check()?;
+        let mut row: Vec<u16> = missing
+            .iter()
+            .map(|&j| crate::gf16::pow2(logs[j] as u64 * e as u64))
+            .collect();
+        for (p, b) in &basis {
+            let f = row[*p];
+            if f != 0 {
+                crate::gf16::MulTable::new(f).xor_mul_words(&mut row, b);
+            }
+        }
+        let Some(p) = row.iter().position(|&x| x != 0) else {
+            continue;
+        };
+        let f = crate::gf16::inv(row[p]);
+        if f != 1 {
+            for x in &mut row {
+                *x = crate::gf16::mul(*x, f);
+            }
+        }
+        basis.push((p, row));
+        picked.push(e);
+        if picked.len() == m {
+            return Ok(Some(picked));
+        }
+    }
+    Ok(None)
+}
+
+/// The re-attempt's half of [`independent_rows`]: narrow `by_exp` to the
+/// rows a singular attempt pinned, so the ordinary selection returns
+/// exactly them. Rows that no longer fit this attempt (a different
+/// `needed`, or a slice that has since dropped out) are ignored and the
+/// ordinary selection runs. Returns whether rows were handed in at all,
+/// which is what stops a second reselect.
+pub(super) fn pin_rows<V>(
+    by_exp: &mut HashMap<u32, V>,
+    rows: Option<Vec<u32>>,
+    needed: usize,
+) -> bool {
+    let handed = rows.is_some();
+    if let Some(rows) =
+        rows.filter(|r| r.len() == needed && r.iter().all(|e| by_exp.contains_key(e)))
+    {
+        by_exp.retain(|e, _| rows.contains(e));
+    }
+    handed
+}
+
+/// The failing attempt's half: on a `SingularMatrix` from the FIRST
+/// sweep's solve plan, and only when `may` (no rows were pinned for this
+/// attempt), record the independent selection in `pinned` for the
+/// re-attempt. The error itself passes through either way.
+pub(super) fn note_singular<T>(
+    built: Result<T, RepairError>,
+    may: bool,
+    pinned: &mut Option<Vec<u32>>,
+    rows: impl FnOnce() -> Result<Option<Vec<u32>>, RepairError>,
+) -> Result<T, RepairError> {
+    match built {
+        Err(RepairError::SingularMatrix) if may => {
+            *pinned = rows()?;
+            Err(RepairError::SingularMatrix)
+        }
+        r => r,
+    }
+}
+
 /// Load the selected exponents' payloads, one `block_size` buffer each -
 /// [`select_consecutive_run`] chooses which. With `revalidate`, every
 /// slice is re-proven against its packet MD5 as it is read; a slice that
@@ -1568,7 +1715,9 @@ pub(super) fn harvest_donor_recovery(
                 shortest = shortest.min(len);
                 continue;
             }
-            if let std::collections::hash_map::Entry::Vacant(v) = by_exp.entry(exp) {
+            if let std::collections::hash_map::Entry::Vacant(v) =
+                by_exp.entry(crate::par2::recovery_row(exp))
+            {
                 let next = paths.len();
                 let pi = *listed.entry(file).or_insert(next);
                 if pi == next {
@@ -1622,14 +1771,16 @@ pub(super) fn load_mapped_recovery(
                 shortest = shortest.min(len);
                 continue;
             }
-            by_exp.entry(exp).or_insert(RecLoc {
-                file,
-                exp,
-                off,
-                len,
-                md5: occ.md5,
-                src: SliceSrc::Own,
-            });
+            by_exp
+                .entry(crate::par2::recovery_row(exp))
+                .or_insert(RecLoc {
+                    file,
+                    exp,
+                    off,
+                    len,
+                    md5: occ.md5,
+                    src: SliceSrc::Own,
+                });
         }
     }
     warn_short_slices(refused, shortest, bs);
@@ -1802,13 +1953,25 @@ impl SetReplay {
     /// The price is bounded and falls only on malformed sets: a set
     /// carrying an unbound contradiction reads its remaining `.par2`
     /// files before failing.
+    ///
+    /// AND A SINGLE UNBOUND READING IS NOT DECIDED EITHER, for the same
+    /// reason. Counting any held FileDesc as decided stopped the scan at
+    /// the index file when it held one unbound forgery, so the binder in
+    /// the next volume was never read and the repair answered from the
+    /// forgery while verify answered from the binder - measured on a
+    /// real CLI run on 9 Nov 2026 (`parfast v` 0 and `r` 5 on one set)
+    /// and fixed under the Fable sweep's PAR2 residue lead 4. Only a
+    /// binder decides a FileDesc early now. The price: a set whose
+    /// creator does not bind its ids (the spec says it must) reads its
+    /// critical packets from every `.par2` file before the verify pass
+    /// starts, instead of overlapping the volume scan with it.
     pub(super) fn criticals_complete(&self) -> bool {
         if self.main_contradicted {
             return true;
         }
         self.main.as_ref().is_some_and(|(_, ids)| {
             ids.iter().all(|fid| {
-                (self.descs.contains_key(fid) || self.descs_bound.contains(fid))
+                self.descs_bound.contains(fid)
                     && (self.ifscs.contains_key(fid) || self.ifscs_contradicted.contains(fid))
             })
         })

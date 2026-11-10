@@ -537,8 +537,29 @@ pub fn parse_caps(xml: &str) -> Caps {
     caps
 }
 
+/// [`parse_results`] for a caller that reports the answer: a body that
+/// is not a feed at all is an ERROR, not "nothing found".
+///
+/// An indexer whose key was revoked, or one behind a Cloudflare
+/// challenge, answers HTTP 200 with a login page or a challenge page,
+/// and the tolerant item parser reads that as a feed with no items - so
+/// the search said "0 results" with the cause thrown away, the same
+/// failure `rss::parse_feed_checked` was written to stop on the feed
+/// side. Same check, same message. A genuinely empty feed has a feed
+/// root and stays an empty `Ok`. Call [`parse_error`] first: a newznab
+/// `<error>` document has its own, better answer.
+pub fn parse_results_checked(xml: &str) -> Result<Vec<SearchResult>, NewznabError> {
+    const FEED_ROOTS: [&str; 4] = ["rss", "feed", "rdf", "channel"];
+    match crate::rss::wrong_document(xml, &FEED_ROOTS, "an RSS or Atom feed") {
+        Some(what) => Err(NewznabError::Api(0, what)),
+        None => Ok(parse_results(xml)),
+    }
+}
+
 /// Parse a search response into result items. Call [`parse_error`]
-/// first; a feed with zero items is a valid "nothing found".
+/// first; a feed with zero items is a valid "nothing found". This
+/// cannot tell an empty feed from a body that is not a feed: a caller
+/// that reports the outcome wants [`parse_results_checked`].
 pub fn parse_results(xml: &str) -> Vec<SearchResult> {
     let mut out = Vec::new();
     // The shared lexer, never a `find("<item")` of this reader's own: that
@@ -1088,6 +1109,31 @@ mod tests {
             "<item><title>t</title><link>http://x</link><newznab:attr name=\"size\"/></item>",
         );
         assert_eq!(odd[0].size, 0);
+    }
+
+    /// A 200 that is not a feed is an error with its cause, never "0
+    /// results"; an empty feed is still a clean zero. NEGATIVE CONTROL,
+    /// run: with `parse_results_checked` returning `Ok(parse_results(..))`
+    /// unconditionally, the three non-feed bodies all read as empty.
+    #[test]
+    fn a_non_feed_200_is_an_error_and_an_empty_feed_is_not() {
+        for body in [
+            "<!DOCTYPE html><html><body>Please log in</body></html>",
+            "<html><head><title>Just a moment...</title></head></html>",
+            r#"{"error":"bad key"}"#,
+            "",
+        ] {
+            assert!(
+                matches!(parse_results_checked(body), Err(NewznabError::Api(0, _))),
+                "{body:?} read as a feed"
+            );
+        }
+        let empty =
+            r#"<?xml version="1.0"?><rss version="2.0"><channel><title>x</title></channel></rss>"#;
+        assert_eq!(parse_results_checked(empty).map(|v| v.len()).ok(), Some(0));
+        let one =
+            r#"<rss><channel><item><title>t</title><link>http://x</link></item></channel></rss>"#;
+        assert_eq!(parse_results_checked(one).map(|v| v.len()).ok(), Some(1));
     }
 
     #[test]

@@ -173,6 +173,19 @@ pub struct PoolConfig {
     /// measurement - see `supply_ceiling`'s doc for what this word does
     /// and does not prove.
     pub line_anchor_measured: bool,
+    /// 9 Nov 2026: `line_cap_fleet` is the fleet the LAST job on this
+    /// line settled at, not the curve's own number, and this is the
+    /// number the curve would have seeded instead. 0 = not a recalled
+    /// seed. A recalled run that reads a slow line at its first judgement
+    /// falls back to this fleet (`linecap::recall_check`). Producer:
+    /// the daemon's `linecarry` store; always 0 on a CLI run. MAX-folded.
+    pub line_cap_recall_from: usize,
+    /// 9 Nov 2026: the fleet the last job on this line STEPPED BACK to
+    /// (`linecap::regret_step`), which this run starts holding instead of
+    /// climbing into the same loss again. 0 = no hold. The producer
+    /// expires it after a day, so a line that has changed is re-tested.
+    /// MAX-folded.
+    pub line_cap_hold: usize,
     /// Shared pool-level speed limiter; None = unlimited.
     pub rate: Option<Arc<RateLimit>>,
     /// M29 availability oracle: per-article hit/430 outcomes accumulate
@@ -542,6 +555,25 @@ pub struct PoolConfig {
     /// the pool never reads it back, and a `None` here is exactly the
     /// behaviour every caller had before the field existed.
     pub loss_doubt: Option<Arc<crate::lossdoubt::LossDoubt>>,
+    /// TODO 358 item 12: the newsgroup a session selects when a server
+    /// answers an article command with `412 no newsgroup selected`. The
+    /// job's FIRST newsgroup, in NZB document order.
+    ///
+    /// Never sent unprompted: RFC 3977 serves `BODY <message-id>` with
+    /// no group selected, nearly every provider does, and a GROUP on
+    /// every connect would cost each session a round trip it does not
+    /// need. Only a 412 sends it, at most once per connection (see
+    /// `pool::session::relogin`). One group for the whole job rather
+    /// than one per file because the server only needs SOME group
+    /// selected before it will look a message-id up - the selection is
+    /// a gate, not a lookup scope - and the files of one post are
+    /// cross-posted to the same set in practice.
+    ///
+    /// None everywhere but the `get` pipeline, which sets it from the
+    /// parsed NZB; a None pool that meets a 412 behaves exactly as
+    /// every pool did before the field existed (the session ends and
+    /// the article requeues).
+    pub group: Option<Arc<str>>,
 }
 
 impl Default for PoolConfig {
@@ -571,6 +603,8 @@ impl Default for PoolConfig {
             line_cap_knee: None,
             line_anchor_bps: 0,
             line_anchor_measured: false,
+            line_cap_recall_from: 0,
+            line_cap_hold: 0,
             rate: None,
             oracle: None,
             inflight_cap: 0,
@@ -649,6 +683,7 @@ impl Default for PoolConfig {
                 .ok()
                 .is_some_and(|v| v == "1"),
             loss_doubt: None,
+            group: None,
         }
     }
 }

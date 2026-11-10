@@ -232,4 +232,10 @@ fn over_row_with_an_unfetchable_message_id_is_dropped() {
     // must keep parsing, or every row from such a server is dropped.
     let bare = super::parse_over_line(&row("a@news.example")).expect("bare id parses");
     assert_eq!(bare.message_id, "a@news.example");
+    // ...but only with the '@' every Message-ID has. A bare `12345`
+    // goes out as `BODY 12345`, which RFC 3977 reads as an article
+    // NUMBER in the selected group: another post's bytes, filed under
+    // this row.
+    assert!(super::parse_over_line(&row("12345")).is_none());
+    assert!(super::parse_over_line(&row("abc")).is_none());
 }

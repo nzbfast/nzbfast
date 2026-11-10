@@ -784,6 +784,18 @@ fn sab_servers(d: &Daemon, ctx: &ApiCtx<'_>) -> Vec<Value> {
         .enumerate()
         .map(|(i, s)| {
             let l = key_of[i].and_then(|k| live.get(k));
+            // TODO 358 item 14: a tripped kill switch is "out of action"
+            // in SAB's split, so it is the error, read from the interface
+            // table now rather than from a run that may not exist. A live
+            // PERMANENT refusal still wins, being the provider's own
+            // words; the warning is cleared so the pool's copy of this
+            // same refusal is not printed twice. Only for an enabled
+            // server: a switched-off one is not dialled anyway.
+            let kill = s
+                .enabled
+                .then(|| nzbkit::nntp::route::bind_ip_down(s.bind_ip.as_deref()))
+                .flatten()
+                .map(|d| d.to_string());
             json!({
                 // SAB's `displayname`, which defaults to the host and is
                 // the only name a server has here.
@@ -826,8 +838,16 @@ fn sab_servers(d: &Daemon, ctx: &ApiCtx<'_>) -> Vec<Value> {
                 // rather than an invented address.
                 "serveripaddress": Value::Null,
                 "servercanonname": Value::Null,
-                "serverwarning": l.map(|l| l.warning.clone()).unwrap_or_default(),
-                "servererror": l.map(|l| l.error.clone()).unwrap_or_default(),
+                "serverwarning": if kill.is_some() {
+                    String::new()
+                } else {
+                    l.map(|l| l.warning.clone()).unwrap_or_default()
+                },
+                "servererror": l
+                    .map(|l| l.error.clone())
+                    .filter(|e| !e.is_empty())
+                    .or(kill)
+                    .unwrap_or_default(),
                 // Same convention as SAB's: 0 is the primary and a
                 // higher number is consulted later. `level` is that
                 // number here (M14e, NZBGet's "Level").

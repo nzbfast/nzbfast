@@ -711,12 +711,28 @@ pub(crate) fn rescue_split_of_container(
     }
     let sub = nest_scratch_dir(dir)?;
     let (joined, moved_all) = stage_joined_into(joined, &sub);
+    // Which joined files an arm in the scratch pass will OPEN, decided
+    // before it runs: `is_extractable_archive` asks the disk, and the
+    // arms may consume what they read, so asked afterwards it would
+    // describe what is left rather than what arrived (the same reason
+    // `extract_nested_capped` captures its `entry_archives` first). This
+    // is the ownership the cleanup below needs and `inner` does not
+    // carry - see the note there.
+    let owned: Vec<PathBuf> = joined
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| sub.join(n)))
+        .filter(|p| is_extractable_archive(p))
+        .collect();
     // `false`: no second rescue. The parts are spent, so a nested one could
     // only ever fire on something an extraction just produced.
     // No reason channel: the caller this rescue answers to (step 8 of
     // `extract_one_level_at`) has already taken its own, and the join
     // publishes one container from parts that are already on disk.
-    let inner = extract_one_level_at(&sub, password, depth, false, &mut Vec::new(), &mut None)?;
+    // `refused` IS kept: an arm that looked at a joined file and declined
+    // it (a tar refusal, an obfuscated stray) claims `Produced` without
+    // having opened it, so the cleanup below must not count it spent.
+    let mut refused: Vec<PathBuf> = Vec::new();
+    let inner = extract_one_level_at(&sub, password, depth, false, &mut refused, &mut None)?;
     if inner == Some(NestOutcome::Produced) {
         // The container we built is spent - its bytes now sit beside it as
         // the extracted payload, and we made the file seconds ago, so there
@@ -736,12 +752,27 @@ pub(crate) fn rescue_split_of_container(
         // name they decline must be a name this one preserves. Deleting one loses it outright: the parts went with the
         // join. Any other joined container that no arm claimed makes the
         // aggregate `Failed`, so this branch does not run for it.
+        //
+        // That last sentence was NOT true, and the bug sweep of 9 Nov 2026
+        // found the hole: only a RAR/7z head reaches the stray door, and
+        // the zip arm never sniffs a NAMED file, so a joined zip-headed
+        // file under a name of its own (`mod.pk3`, a `.jar`) is claimed by
+        // nobody and fails nothing - and a sibling's `Produced` deleted
+        // it. So the guard is now ownership, not a name list: a joined
+        // file is removed only when an arm was going to open it (`owned`,
+        // captured above) and did not decline it (`refused`). The name
+        // guard stays as well; it is the narrower of the two and costs
+        // nothing.
         for p in &joined {
             if !nzbkit::extract::archive_sniff_eligible(p) || nzbkit::zip::is_final_file(p) {
                 continue;
             }
             if let Some(name) = p.file_name() {
-                let _ = std::fs::remove_file(sub.join(name));
+                let staged = sub.join(name);
+                if !owned.contains(&staged) || refused.contains(&staged) {
+                    continue;
+                }
+                let _ = std::fs::remove_file(staged);
             }
         }
     }

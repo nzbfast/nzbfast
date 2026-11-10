@@ -74,10 +74,25 @@ public final class MockCore: CoreClient {
     private var jobs: [MockJob] = []
     private var nextId: Int64 = 1
     private var queuePaused = false
-    private var concurrency = 1
-    private var postAction: PostAction = .none
     private var postActionDue = false
     private var settings = CoreSettings()
+    /// The concurrency and the post-queue action live INSIDE the settings, as
+    /// they do in the real core (`Session::set_concurrency` and
+    /// `set_post_action` write `settings.concurrency` and
+    /// `settings.post_queue_action`, and `set_settings` replaces the lot).
+    /// They were two fields of their own here, which made a settings write
+    /// unable to reset them - so the mock could not show sweep finding A30,
+    /// a stale settings struct written back over the queue's own controls,
+    /// and every test over it passed on the mock while the app reset the
+    /// real engine's concurrency on each toggle.
+    private var concurrency: Int {
+        get { max(1, settings.concurrency) }
+        set { settings.concurrency = newValue }
+    }
+    private var postAction: PostAction {
+        get { settings.post_queue_action }
+        set { settings.post_queue_action = newValue }
+    }
     private var _lastError: CoreError?
     private var wake: (@Sendable () -> Void)?
     private var timer: DispatchSourceTimer?
@@ -135,7 +150,13 @@ public final class MockCore: CoreClient {
 
     public func cancel(job id: Int64) throws {
         try mutate(id) { job in
-            guard !job.state.isFinished else { return }
+            // The core refuses a FINISHED job (`PF_ERR_NOT_FOUND`, code
+            // `not_found`, since 9 Nov 2026) and leaves its state and result
+            // alone; this returned quietly, so the app's handling of that
+            // refusal had nothing to run against.
+            guard !job.state.isFinished else {
+                throw CoreError(code: "not_found", message: "no job \(id), or its state forbids it")
+            }
             job.state = .cancelled
             job.error = CoreError(code: "cancelled", message: "Stopped before it finished.")
             job.log.append("Cancelled.")
@@ -273,7 +294,12 @@ public final class MockCore: CoreClient {
     public func settingsGet() throws -> CoreSettings { lock.withLock { settings } }
 
     public func settingsSet(_ newValue: CoreSettings) throws {
-        lock.withLock { settings = newValue }
+        // A plain replace, concurrency and post action included, and a kick
+        // for the scheduler - `Session::set_settings` does both.
+        lock.withLock {
+            settings = newValue
+            scheduleLocked()
+        }
         notify()
     }
 

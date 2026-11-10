@@ -272,6 +272,30 @@ fn merge_parts(merged: &mut BTreeMap<u32, (String, u64)>, parts: BTreeMap<u32, (
     }
 }
 
+/// The most `files.bytes` will record for one file: 1 TiB, far past any
+/// real posting and far enough below `i64::MAX` that SQLite's `SUM` over
+/// a release's file rows (`RelAgg::recompute`) cannot overflow short of
+/// eight million files at the cap.
+const MAX_FILE_BYTES: u64 = 1 << 40;
+
+/// A file's stored byte count: the sum of its parts' counts, saturating
+/// and capped at [`MAX_FILE_BYTES`].
+///
+/// Every part count is untrusted - an OVER `:bytes` field is whatever
+/// the server says, and a promoted spot's is whatever its NZB says - and
+/// both writers used a plain `sum()` and `as i64`. Two counts near
+/// `u64::MAX` overflowed the sum (a panic in a debug build, a wrap in
+/// release), one alone cast to a NEGATIVE `bytes`, and a few large
+/// files tipped SQLite's integer `SUM` into an overflow error, which
+/// fails the whole write every time the row is touched.
+pub(super) fn file_bytes(parts: impl IntoIterator<Item = u64>) -> i64 {
+    let sum = parts
+        .into_iter()
+        .fold(0u64, |acc, b| acc.saturating_add(b))
+        .min(MAX_FILE_BYTES);
+    sum as i64
+}
+
 /// One `files` row a release already holds, for a filename a batch is
 /// about to write. `bytes` and `nsegs` are the row's stored aggregate
 /// contribution, carried so the merge can subtract exactly what the
@@ -2240,7 +2264,7 @@ impl Index {
                     (eff, p.total, p.bytes)
                 });
                 merge_parts(&mut merged, parts);
-                let bytes: u64 = merged.values().map(|v| v.1).sum();
+                let bytes = file_bytes(merged.values().map(|v| v.1));
                 let seg_blob = segcodec::encode(
                     &merged
                         .iter()
@@ -2258,7 +2282,7 @@ impl Index {
                     rid,
                     fname,
                     total,
-                    bytes as i64,
+                    bytes,
                     seg_blob,
                     merged.len() as i64
                 ])?;
@@ -2272,13 +2296,7 @@ impl Index {
                 // exactly the values the UPSERT stored, so the result
                 // matches what a full scan would say.
                 if let Some(a) = agg.as_mut() {
-                    a.apply_file(
-                        &fname,
-                        old_contrib,
-                        merged.len() as i64,
-                        total,
-                        bytes as i64,
-                    );
+                    a.apply_file(&fname, old_contrib, merged.len() as i64, total, bytes);
                 }
             }
             // Release aggregates: carried incrementally through the

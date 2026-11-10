@@ -44,8 +44,18 @@ use tracing::{info, warn};
 /// itself and the install `rename` both propagate with `?`, and all
 /// three call sites `.await?` this, so a wedged side fetch or a failed
 /// rename ends the job rather than leaving the holes to the disk pass.
-/// Deliberate for the rename, which means the volume is neither the old
-/// copy nor the new one; the fetch arm is simply what `?` does.
+/// Deliberate for the rename, though not for the reason this note gave
+/// until 9 Nov 2026 ("the volume is neither the old copy nor the new
+/// one" - a rename is atomic, so a failed one leaves both files exactly
+/// as they were). The real reason: the whole copy is then sitting beside
+/// the holed one under the POSTED name, so carrying on would hand the
+/// disk pass two copies of one volume under two names, and ending the
+/// job keeps the journal for a retry that installs it cleanly. The fetch
+/// arm is simply what `?` does. (Read-only sweep, 9 Nov 2026: the
+/// `note_dropped_refetched` below marking a FAILED refetch done is also
+/// deliberate and safe - it clears only the refetch-pending claim
+/// `dropped_volumes` reads, never a completeness fact, and the holes it
+/// leaves are found off disk by the PAR2 read-back or the unpack.)
 pub(super) async fn refetch_dropped_volumes(
     extractor: &Arc<nzbkit::extract::Extractor>,
     slot_file: &[usize],

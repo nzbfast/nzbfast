@@ -61,6 +61,19 @@ const STREAM_INITIAL_WINDOW_CAP: usize = 64 * 1024 * 1024;
 // overlapping-but-not-identical filters fall back via FilteredMember.
 const STREAM_FILTER_HOLD_LIMIT: usize = 8 * 1024 * 1024;
 const STREAM_MAX_PENDING_FILTERS: usize = 8192;
+// nzbfast: the buffered decoder's filter WORK budget. Each filter record is
+// a few bytes of packed input and its range may span the whole member
+// output, and filters may overlap, so unbounded records cost
+// records x output in filter passes (the streaming paths are bounded by
+// their pending-filter cap and hold limit; the buffered one had nothing).
+// Each filter is charged its length, at least `FILTER_MIN_COST`, against
+// `FILTER_WORK_PER_OUTPUT_BYTE` x the member's output plus
+// `FILTER_WORK_SLACK`. Conforming filters are disjoint (their total is at
+// most the output), so this admits four full overlapping layers plus 64
+// tiny filters. (9 Nov 2026 sweep, section C; see vendor/rars/VENDORING.md.)
+const FILTER_MIN_COST: usize = 4096;
+const FILTER_WORK_PER_OUTPUT_BYTE: usize = 4;
+const FILTER_WORK_SLACK: usize = 64 * FILTER_MIN_COST;
 const MAX_ENCODER_MATCH_OFFSET: usize = DEFAULT_DICTIONARY_SIZE;
 const MAX_ENCODER_MATCH_LENGTH: usize = 4096;
 pub(crate) const MAX_COMPRESSED_BLOCK_OUTPUT: usize = 4 * 1024 * 1024;
@@ -6119,6 +6132,11 @@ impl Rar50Decoder {
 
         let mut output = Vec::with_capacity(output_size.min(MAX_INITIAL_OUTPUT_CAPACITY));
         let mut filters = Vec::new();
+        // nzbfast: see FILTER_WORK_PER_OUTPUT_BYTE.
+        let filter_budget = output_size
+            .saturating_mul(FILTER_WORK_PER_OUTPUT_BYTE)
+            .saturating_add(FILTER_WORK_SLACK);
+        let mut filter_work = 0usize;
 
         let mut payload_buf = Vec::new();
         loop {
@@ -6169,7 +6187,14 @@ impl Rar50Decoder {
                 match symbol {
                     0..=255 => output.push(symbol as u8),
                     256 if mode.uses_lz() => {
-                        filters.push(parse_filter_record(&mut bits, output.len())?);
+                        let filter = parse_filter_record(&mut bits, output.len())?;
+                        filter_work = filter_work.saturating_add(filter.length.max(FILTER_MIN_COST));
+                        if filter_work > filter_budget {
+                            return Err(Error::InvalidData(
+                                "RAR 5 filters exceed their work budget",
+                            ));
+                        }
+                        filters.push(filter);
                     }
                     257 if mode.uses_lz() => {
                         if self.previous_match_length != 0 {
@@ -13386,6 +13411,29 @@ mod tests {
 
     fn encode_lz_member_with_filter(data: &[u8], kind: Rar50FilterKind) -> Result<Vec<u8>> {
         Rar50Encoder::new().encode_member_with_filter(data, 0, Rar50FilterSpec::new(kind))
+    }
+
+    /// nzbfast, 9 Nov 2026 sweep: the buffered decoder took any number of
+    /// filter records, overlapping or not, and ran every one over its whole
+    /// range - records x output of work from a few bytes per record. The
+    /// encoder happily writes N identical full-range E8 records (it applies
+    /// each in turn, so the stream round-trips); a few still decode, and
+    /// enough to pass the work budget are refused.
+    #[test]
+    fn buffered_decoder_budgets_overlapping_filter_work() {
+        let data: Vec<u8> = (0..4096u32).map(|i| (i * 31 % 251) as u8).collect();
+        let layered = |n: usize| {
+            let specs = vec![Rar50FilterSpec::range(Rar50FilterKind::E8, 0..data.len()); n];
+            let packed = Rar50Encoder::new()
+                .encode_member_with_filters(&data, 0, &specs)
+                .unwrap();
+            decode_lz(&packed, 0, data.len())
+        };
+        assert_eq!(layered(3).unwrap(), data);
+        assert_eq!(
+            layered(100),
+            Err(Error::InvalidData("RAR 5 filters exceed their work budget"))
+        );
     }
 
     #[test]

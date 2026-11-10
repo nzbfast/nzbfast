@@ -64,9 +64,71 @@ fn queue_facts(
         .unwrap_or_default()
 }
 
+/// Where one file's facts came from, handed to a row renderer beside
+/// the NZB half ([`crate::streamhub::JobFileRow`]).
+///
+/// The renderer is a parameter because two dialects list the same
+/// files: SAB's `mode=get_files` below and NZBGet's `listfiles`
+/// (`sabcompat::nzbget_lists`). The SOURCE choice - the active table,
+/// a retired tail, or the spooled `.nzb` - and its gates are the part
+/// that has been wrong before (see TODO 274 (e) below), so it is
+/// walked once, here, and each dialect only says how a row looks.
+pub(crate) enum FileSrc<'a> {
+    /// A job with no plan yet, answered from its spooled `.nzb`.
+    /// `recovery` is the NZB's own classification, which is not `Data`
+    /// for the index `.par2` as well as the volumes; `volume` is the
+    /// narrower "a `.volNN+MM.par2` fetched only for repair".
+    Queued { recovery: bool, volume: bool },
+    /// A job WITH a plan, live or retired. `counts` is None for an
+    /// NZB-classified recovery volume the plan never gave a slot.
+    /// `published` is §296's set of handles already AT the destination.
+    Planned {
+        counts: Option<&'a crate::streamhub::FileSlotCounts>,
+        published: &'a std::collections::HashSet<String>,
+    },
+}
+
 /// The listing rows for `nzo_id`, or None when no queue row has that id.
 fn listing(d: &Arc<Daemon>, nzo_id: &str) -> Option<Vec<Value>> {
+    listing_with(d, nzo_id, |r, src| match src {
+        FileSrc::Queued { recovery, .. } => queued_row(r, recovery),
+        FileSrc::Planned { counts, published } => live_row(r, counts, published),
+    })
+}
+
+/// Every file of queue row `nzo_id`, rendered by `render`, or None when
+/// no queue row has that id. See [`FileSrc`].
+pub(crate) fn listing_with<T>(
+    d: &Arc<Daemon>,
+    nzo_id: &str,
+    render: impl FnMut(&crate::streamhub::JobFileRow, FileSrc<'_>) -> T,
+) -> Option<Vec<T>> {
     let (published, path) = queue_facts(d, nzo_id);
+    listing_from(d, nzo_id, &published, path, render)
+}
+
+/// [`listing_with`] for a caller that already holds the job's spool
+/// path and published set, so a walk over the whole queue (NZBGet's
+/// `listgroups`) need not re-find each row under the queue lock - which
+/// is O(queue) per job, and a DEADLOCK if the caller still holds that
+/// lock. The source choice is the same code either way.
+pub(crate) fn listing_from<T>(
+    d: &Arc<Daemon>,
+    nzo_id: &str,
+    published: &std::collections::HashSet<String>,
+    path: Option<PathBuf>,
+    mut render: impl FnMut(&crate::streamhub::JobFileRow, FileSrc<'_>) -> T,
+) -> Option<Vec<T>> {
+    let mut planned = |r: &crate::streamhub::JobFileRow,
+                       c: Option<&crate::streamhub::FileSlotCounts>| {
+        render(
+            r,
+            FileSrc::Planned {
+                counts: c,
+                published,
+            },
+        )
+    };
     // The ACTIVE job first: its table is already built, so nothing is
     // parsed on a poll. The owner tag inside `job_files_for` is what
     // makes this safe to consult before the record lookup - a stale
@@ -80,7 +142,7 @@ fn listing(d: &Arc<Daemon>, nzo_id: &str) -> Option<Vec<Value>> {
         return Some(
             t.rows
                 .iter()
-                .map(|r| live_row(r, counts(r).as_ref(), &published))
+                .map(|r| planned(r, counts(r).as_ref()))
                 .collect(),
         );
     }
@@ -107,7 +169,7 @@ fn listing(d: &Arc<Daemon>, nzo_id: &str) -> Option<Vec<Value>> {
             t.rows
                 .iter()
                 .zip(t.counts.iter())
-                .map(|(r, c)| live_row(r, c.as_ref(), &published))
+                .map(|(r, c)| planned(r, c.as_ref()))
                 .collect(),
         );
     }
@@ -115,27 +177,115 @@ fn listing(d: &Arc<Daemon>, nzo_id: &str) -> Option<Vec<Value>> {
     // the request thread like `/jobnzb` does, and unreadable or
     // unparseable is an empty listing rather than a 500 - the record
     // exists, we just cannot describe it.
-    let rows = std::fs::read(&path)
-        .ok()
-        .and_then(|b| nzbkit::nzb::Nzb::parse(&b).ok())
-        .map(|nzb| {
-            nzb.files
-                .iter()
-                .enumerate()
-                .map(|(i, f)| {
-                    // The NZB's own classification, which is the same one
-                    // the plan will apply the moment this job starts
-                    // (`get/plan.rs` reads `kind()` too). Without it a
-                    // queued listing calls the recovery set payload, and a
-                    // reader counting "what did I queue" counts a par2 set
-                    // that may be a third of the rows.
-                    let rec = !matches!(f.kind(), nzbkit::nzb::FileKind::Data);
-                    queued_row(&crate::streamhub::job_file_row(i, f), rec)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    Some(rows)
+    let rows = queued_rows(&path);
+    Some(
+        rows.iter()
+            .map(|q| {
+                let src = FileSrc::Queued {
+                    recovery: q.recovery,
+                    volume: q.volume,
+                };
+                render(&q.row, src)
+            })
+            .collect(),
+    )
+}
+
+/// One file of a queued job's spooled NZB, with the NZB's own
+/// classification - the same one the plan will apply the moment the
+/// job starts (`get/plan.rs` reads `kind()` too). Without it a queued
+/// listing calls the recovery set payload, and a reader counting "what
+/// did I queue" counts a par2 set that may be a third of the rows.
+/// `recovery` is not `Data` (the index `.par2` as well as the volumes);
+/// `volume` is the narrower "a `.volNN+MM.par2` fetched only for repair".
+pub(crate) struct QueuedFile {
+    pub(crate) row: crate::streamhub::JobFileRow,
+    pub(crate) recovery: bool,
+    pub(crate) volume: bool,
+}
+
+/// What one cache entry was parsed from: the spool's (mtime, length).
+/// A rewritten spool changes one or both, and a stale entry is simply
+/// re-parsed; a spool whose metadata cannot be read is never cached.
+type SpoolStamp = (std::time::SystemTime, u64);
+
+/// How many spools the parse cache holds before it starts over. A
+/// queued job's rows are its NZB's names and sizes, so an entry is a
+/// few KB per hundred files; the cap bounds a pathological queue, and
+/// clearing (rather than LRU) is enough because every entry is cheap to
+/// rebuild and a queue walk refills it in one pass.
+const QUEUED_ROWS_CAP: usize = 512;
+
+type QueuedRowsCache = std::collections::HashMap<PathBuf, (SpoolStamp, Arc<Vec<QueuedFile>>)>;
+
+/// Parsed queued spools, keyed by path and stamped by [`SpoolStamp`].
+///
+/// TODO 358 sweep E1/E3: NZBGet clients poll `listgroups` - which now
+/// carries each group's real file count - every second or two, and an
+/// unfiltered `listfiles` lists every queued job. Both would answer a
+/// queued job by parsing its whole NZB per call, which for a deep queue
+/// is the request thread re-reading megabytes of XML that has not
+/// changed since it was spooled. The spool is written once at add, so
+/// the parse is memoized; a spool that is rewritten moves its stamp
+/// and is parsed again.
+static QUEUED_ROWS: std::sync::LazyLock<Mutex<QueuedRowsCache>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn spool_stamp(path: &std::path::Path) -> Option<SpoolStamp> {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
+
+/// A queued job's files off its spooled `.nzb`, parsed at most once per
+/// spool revision. Empty when the spool is unreadable or unparseable.
+pub(crate) fn queued_rows(path: &std::path::Path) -> Arc<Vec<QueuedFile>> {
+    let stamp = spool_stamp(path);
+    if let Some(stamp) = stamp
+        && let Some((s, rows)) = QUEUED_ROWS.lock_ok().get(path)
+        && *s == stamp
+    {
+        return Arc::clone(rows);
+    }
+    // Parsed with the cache lock RELEASED: a large NZB takes a while,
+    // and the cache is shared by every request thread.
+    let rows: Arc<Vec<QueuedFile>> = Arc::new(
+        std::fs::read(path)
+            .ok()
+            .and_then(|b| nzbkit::nzb::Nzb::parse(&b).ok())
+            .map(|nzb| {
+                nzb.files
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let kind = f.kind();
+                        QueuedFile {
+                            row: crate::streamhub::job_file_row(i, f),
+                            recovery: !matches!(kind, nzbkit::nzb::FileKind::Data),
+                            volume: matches!(kind, nzbkit::nzb::FileKind::Par2Volume),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    );
+    // Cached under the stamp read BEFORE the parse: a write landing
+    // mid-parse moves the stamp, so the next call misses and parses the
+    // new bytes rather than trusting these.
+    if let Some(stamp) = stamp {
+        let mut cache = QUEUED_ROWS.lock_ok();
+        if cache.len() >= QUEUED_ROWS_CAP {
+            cache.clear();
+        }
+        cache.insert(path.to_path_buf(), (stamp, Arc::clone(&rows)));
+    }
+    rows
+}
+
+/// Whether `path` has a cached parse - for tests that prove a call
+/// did NOT parse a spool.
+#[cfg(test)]
+pub(crate) fn queued_rows_cached(path: &std::path::Path) -> bool {
+    QUEUED_ROWS.lock_ok().contains_key(path)
 }
 
 /// SAB's own `mb`/`mbleft` formatting, so a client that parses one of
@@ -198,6 +348,25 @@ fn queued_row(r: &crate::streamhub::JobFileRow, recovery: bool) -> Value {
     Value::Object(o)
 }
 
+/// What is left of one planned file, in the NZB's own byte unit.
+///
+/// Bytes are the NZB's declaration, so what is left is the same
+/// declaration scaled by the segments still owed. Approximate by
+/// construction - articles of one file are not exactly equal - and
+/// quoted in the same unit as the queue's own denominator. Both
+/// dialects' renderers read it here, so they cannot disagree about one
+/// file.
+pub(crate) fn bytes_left(
+    r: &crate::streamhub::JobFileRow,
+    s: &crate::streamhub::FileSlotCounts,
+) -> u64 {
+    if s.total_segments == 0 {
+        0
+    } else {
+        (r.bytes as u128 * s.remaining as u128 / s.total_segments as u128) as u64
+    }
+}
+
 /// A file of a job that HAS a plan, with the slot counters overlaid.
 ///
 /// A row with no slot is an NZB-classified recovery volume: the plan
@@ -234,15 +403,7 @@ fn live_row(
         .saturating_sub(missing)
         .saturating_sub(deferred)
         .saturating_sub(abandoned);
-    // Bytes are the NZB's declaration, so what is left is the same
-    // declaration scaled by the segments still owed. Approximate by
-    // construction - articles of one file are not exactly equal - and
-    // quoted in the same unit as the queue's own denominator.
-    let left = if total == 0 {
-        0
-    } else {
-        (r.bytes as u128 * remaining as u128 / total as u128) as u64
-    };
+    let left = bytes_left(r, s);
     o.insert("mbleft".into(), json!(mb(left)));
     o.insert("bytes_left".into(), json!(left));
     // SAB's three words, and only those: a client that switches on

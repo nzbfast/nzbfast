@@ -394,3 +394,159 @@ fn the_refusals_are_refusals() {
     .finish(3, CreatePlan::ENGINE, None);
     assert!(r.is_err(), "more recovery than the stream was sized for");
 }
+
+/// TODO 358 sweep F5: a stream sized for more recovery slices than the
+/// file create will write (`check_recovery_count`, 32,768) is refused,
+/// so the one-pass posting route cannot write a set the two-pass route
+/// and `parfast c` refuse. It used to check only the 65,535 exponent
+/// limit, and 32,769 rows of 4 bytes fit any budget.
+#[test]
+fn a_stream_refuses_the_recovery_count_the_file_create_refuses() {
+    let t = Tmp::new("refuse-count");
+    let over = MAX_INPUT_SLICES + 1;
+    let r = StreamCreate::new(
+        &t.0,
+        "set",
+        "set.rar",
+        4,
+        over,
+        0,
+        0,
+        CreateControl::default(),
+    );
+    let e = r.err().expect("refused");
+    assert!(
+        e.to_string().contains("recovery slices exceeds"),
+        "the file create's own message: {e}"
+    );
+    assert!(
+        check_recovery_count(over as u64).is_err(),
+        "the same predicate"
+    );
+    StreamCreate::new(
+        &t.0,
+        "set",
+        "set.rar",
+        4,
+        MAX_INPUT_SLICES,
+        0,
+        0,
+        CreateControl::default(),
+    )
+    .expect("the limit itself is allowed");
+}
+
+/// Every set file in `dir` (index, volumes, anything hidden), with bytes.
+fn set_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("set.") && n.ends_with(".par2") || n.starts_with('.'))
+        .map(|n| {
+            let b = std::fs::read(dir.join(&n)).unwrap();
+            (n, b)
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// One streamed set of `data` into `dir`: 7 recovery slices of 1 KiB in
+/// the variable split (volumes of 1, 2 and 4), under `control`.
+fn stream_set(
+    dir: &Path,
+    data: &[u8],
+    control: CreateControl,
+) -> Result<Vec<String>, Par2GenError> {
+    let bs = 1024u64;
+    let mut s = StreamCreate::start(
+        dir,
+        "set",
+        "set.rar",
+        bs,
+        7,
+        0,
+        data.len() as u64,
+        control,
+        4 * bs as usize,
+    )?;
+    feed(&mut s, data, &[3000, 777]);
+    s.finish(7, CreatePlan::ENGINE, None)
+}
+
+/// A control whose sink runs `act` once a volume has really been written,
+/// and records whether this run's staging volumes were on disk then.
+fn on_written_volume(
+    dir: PathBuf,
+    gate: Option<Arc<crate::par2repair::PauseGate>>,
+    act: impl Fn() + Send + Sync + 'static,
+) -> (CreateControl, Arc<std::sync::atomic::AtomicBool>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let seen = Arc::new(AtomicBool::new(false));
+    let once = AtomicBool::new(false);
+    let s2 = seen.clone();
+    let sink = move |phase: CreatePhase, done: u64, _total: u64| {
+        if phase != CreatePhase::Write || done == 0 || once.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let staged = std::fs::read_dir(&dir).unwrap().flatten().any(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with(".set.vol") && n.ends_with(".tmp")
+        });
+        s2.store(staged, Ordering::SeqCst);
+        act();
+    };
+    (CreateControl::new(Some(Arc::new(sink)), gate), seen)
+}
+
+/// THE GUI POSTING PATH'S CREATE (`StreamCreate::finish`), re-created over
+/// a set it has already written, and stopped once a volume of the new set
+/// is down - CANCELLED (the last poll after the volume writes is what
+/// answers it, since every volume of the stream's one batch is in flight by
+/// then) and PANICKING (the unwind guard). Either way the previous set,
+/// index and every volume, is byte-identical and nothing of the run is
+/// left. Same plan both times, so every name collides and is staged.
+#[test]
+fn a_stopped_stream_re_create_keeps_the_previous_set_whole() {
+    use std::sync::atomic::Ordering;
+    let t = Tmp::new("recreate");
+    let a = payload(50 * 1024, 31);
+    let b = payload(50 * 1024, 32);
+    stream_set(&t.0, &a, CreateControl::default()).expect("the previous set");
+    let before = set_files(&t.0);
+    assert_eq!(before.len(), 4, "index and three volumes: {before:?}");
+
+    let gate = Arc::new(crate::par2repair::PauseGate::default());
+    let g = gate.clone();
+    let (control, staged) = on_written_volume(t.0.clone(), Some(gate), move || g.cancel());
+    let r = stream_set(&t.0, &b, control);
+    assert!(matches!(r, Err(Par2GenError::Cancelled)), "{r:?}");
+    assert!(
+        staged.load(Ordering::SeqCst),
+        "no volume was staged when the cancel landed"
+    );
+    assert_eq!(
+        set_files(&t.0),
+        before,
+        "a cancelled stream re-create changed the previous set"
+    );
+
+    let (control, staged) = on_written_volume(t.0.clone(), None, || panic!("a sink that panics"));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        stream_set(&t.0, &b, control)
+    }));
+    assert!(r.is_err(), "the stream did not unwind");
+    assert!(staged.load(Ordering::SeqCst));
+    assert_eq!(
+        set_files(&t.0),
+        before,
+        "a panicking stream re-create changed the previous set"
+    );
+
+    // And one that finishes replaces it with exactly the file create's set.
+    let names = stream_set(&t.0, &b, CreateControl::default()).expect("finishes");
+    assert_eq!(names.len(), 4);
+    assert!(set_files(&t.0).iter().all(|(n, _)| !n.starts_with('.')));
+    assert_ne!(set_files(&t.0), before);
+}

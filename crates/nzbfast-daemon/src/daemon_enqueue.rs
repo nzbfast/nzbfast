@@ -161,14 +161,22 @@ impl Daemon {
     /// hold. A spare that downloads payload is the one outcome §282
     /// forbids outright.
     ///
-    /// `id` is the id chosen by the caller. Only
-    /// `recover_orphaned_spool` passes `Some`: an orphaned spool file is
-    /// named by the id its job was accepted under, and re-adopting it
-    /// under that id keeps an *arr's handle and the job's stream token
-    /// valid across the restart, and makes "recovered exactly once" a
-    /// plain id lookup. A recovered id is always below the restored
-    /// allocator (the wall-clock floor in `load_queue`), so it can never
-    /// be handed out again.
+    /// `id` is the id chosen by the caller. Two callers pass `Some`.
+    /// `recover_orphaned_spool`: an orphaned spool file is named by the
+    /// id its job was accepted under, and re-adopting it under that id
+    /// keeps an *arr's handle and the job's stream token valid across the
+    /// restart, and makes "recovered exactly once" a plain id lookup. A
+    /// recovered id is always below the restored allocator (the
+    /// wall-clock floor in `load_queue`), so it can never be handed out
+    /// again. And `spend_cancel_undo` (GH #86), which puts a cancelled
+    /// row back under its ORIGINAL id for the same *arr-handle reason -
+    /// and can do so while the cancelled record has not parked yet, which
+    /// is why `park_gen` removes by pointer and checks
+    /// `id_taken_by_another` before every write it makes by id.
+    ///
+    /// Nothing here refuses an id that is already listed: each caller
+    /// owns that question (recovery's "exactly once" lookup, the undo's
+    /// twin check), because only the caller knows which answer is right.
     #[expect(clippy::too_many_arguments)]
     pub fn enqueue_as(
         &self,
@@ -230,7 +238,14 @@ impl Daemon {
             zip_packed,
             tv_sort,
             smart_rule,
-        } = self.resolve_add_identity(&nzb, &nzo_id, name, category, password);
+        } = self.resolve_add_identity(
+            &nzb,
+            &nzo_id,
+            name,
+            category,
+            password,
+            &extras.header_password,
+        );
         let mut priority = priority;
         let HookVerdict {
             pp: hook_pp,
@@ -516,6 +531,7 @@ impl Daemon {
             defer_count: 0,
             repair_deferred: false,
             demote: false,
+            dispatch_reset_gen: None,
             bad_blocks: None,
             verify_blocks: 0,
             tv_sort,
@@ -529,6 +545,7 @@ impl Daemon {
             eat_volumes_ok: false,
             zip_packed,
             unpack_blocked_by: String::new(),
+            not_delivered: Vec::new(),
             alt_from: String::new(),
             alt_from_name: String::new(),
             alt_why: String::new(),
@@ -553,8 +570,12 @@ impl Daemon {
             auto_retry_at: None,
             auto_retry_why: None,
             pp_params: extras.pp_params,
-            sab_pp: hook_pp,
-            script_override: hook_script,
+            sab_pp: extras.sab_pp.or(hook_pp),
+            script_override: if extras.script_override.is_empty() {
+                hook_script
+            } else {
+                extras.script_override
+            },
             replaces,
             // §77: filled in by the health prober on its next idle tick.
             // Deliberately not probed inline here - enqueue is called
@@ -1015,6 +1036,7 @@ impl Daemon {
         name: &str,
         category: &str,
         password: Option<&str>,
+        header_password: &str,
     ) -> AddIdentity {
         let mut stem = name.trim_end_matches(".nzb").to_string();
         // Archive password: an explicit param (SAB API) wins; the
@@ -1023,6 +1045,13 @@ impl Daemon {
         // filesystem); the NZB's own <meta type="password"> is the
         // fallback (the engine would find it again at download time -
         // capturing it here surfaces has_password to the UI).
+        //
+        // The indexer's `X-DNZB-Password` (a URL grab only) shares that
+        // last rung: both are the release's SOURCE saying what the
+        // password is, below anything the user typed. The job holds one
+        // password, so a tie needs a rule - the NZB's own meta wins,
+        // which leaves every NZB that already carried one doing exactly
+        // what it did before the header was read.
         let mut password: Option<String> = password.filter(|p| !p.is_empty()).map(str::to_string);
         // All three name conventions - {{pw}}, password=pw, {pw} - are
         // recognized and stripped (crate::smart::name_password).
@@ -1032,6 +1061,21 @@ impl Daemon {
         }
         if password.is_none() {
             password = nzb.password().map(str::to_string);
+            if let (Some(meta), false) = (&password, header_password.is_empty())
+                && meta != header_password
+            {
+                // Values never logged: both are secrets. Saying that the
+                // two disagreed is what lets a failed unlock be traced to
+                // the rung that lost the tie.
+                info!(
+                    target: "password",
+                    "{nzo_id}: the NZB's meta password and the indexer's \
+                     X-DNZB-Password differ - using the NZB's"
+                );
+            }
+        }
+        if password.is_none() && !header_password.is_empty() {
+            password = Some(header_password.to_string());
         }
         // Zip-packed post, spotted from the NZB's own file list before a
         // single byte is fetched. Store and deflate zips unpack natively

@@ -138,6 +138,28 @@ pub struct Chaos {
     /// the real thing (`481 max simultaneous IP addresses reached`)
     /// rather than a code.
     pub auth_refusal_text: Option<String>,
+    /// TODO 358 item 2: a login that LAPSES mid-session. Once a
+    /// connection has served this many bodies, its next article command
+    /// (BODY, ARTICLE, STAT) and every one after it is answered
+    /// `480 authentication required` until the client sends AUTHINFO
+    /// USER/PASS again on that same connection; after that it serves
+    /// normally for the rest of its life (one lapse per connection).
+    /// `Some(0)` lapses before the FIRST body, the shape of a login
+    /// that expired while the connection sat parked. Pipelined commands
+    /// already on the wire behind the first 480 get a 480 each, which
+    /// is what makes this "mid-batch". None = off.
+    pub auth_lapse_after: Option<u64>,
+    /// With `auth_lapse_after`: refuse the RE-login. A connection's
+    /// second AUTHINFO PASS is answered "481 authentication failed" and
+    /// the connection closed - the server that will not take a fresh
+    /// login on an old socket, which drives the client's fallback.
+    pub reauth_rejected: bool,
+    /// TODO 358 item 12: a frontend that will not look a message-id up
+    /// until some group is selected. Every article command is answered
+    /// `412 no newsgroup selected` until the connection has sent a
+    /// GROUP; any group name is accepted. Every GROUP is recorded in
+    /// [`SessionCounters::group_log`].
+    pub require_group: bool,
     /// Upload-side failure injection (POST/IHAVE).
     pub post: PostChaos,
     /// Bandwidth model (all zero = off, existing tests unaffected).
@@ -344,6 +366,38 @@ pub struct Chaos {
     /// turns the window into one the TEST closes, so no amount of load
     /// can close it early.
     pub hold: Option<Hold>,
+    /// Articles the server does not keep: asked by id (WITH angle
+    /// brackets) whenever the stored map has no entry for it, and
+    /// answered as if they had been stored all along. A `None` from it
+    /// is a missing article like any other.
+    ///
+    /// For fixtures too big to hold. The map is `HashMap<String,
+    /// Vec<u8>>` of ENCODED bodies, so a 10 GB post costs 10 GB of the
+    /// test process's RAM before the client under test has asked for a
+    /// byte - on a shared box that is the number that decides whether
+    /// the rig can run at all. A generator computes each body per
+    /// request instead, which costs CPU per BODY and no memory at all
+    /// (the volume-size ladder in `crates/nzbfast/tests/e2e_ladder`).
+    ///
+    /// Not a fault, like `hold` and `throttle` are not: it rides here
+    /// because `Chaos` is the one value every connection already
+    /// carries, so a source needs no plumbing through `start_bound`.
+    pub lazy: Option<LazyArticles>,
+}
+
+/// A per-request article generator for [`Chaos::lazy`].
+#[derive(Clone)]
+pub struct LazyArticles(pub Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>);
+
+impl LazyArticles {
+    /// Wrap a generator: id WITH angle brackets in, encoded body out.
+    pub fn new<F: Fn(&str) -> Option<Vec<u8>> + Send + Sync + 'static>(f: F) -> LazyArticles {
+        LazyArticles(Arc::new(f))
+    }
+
+    fn get(chaos: &Chaos, id: &str) -> Option<Vec<u8>> {
+        chaos.lazy.as_ref().and_then(|l| (l.0)(id))
+    }
 }
 
 /// The fire-once fault sets, as one value.
@@ -662,6 +716,27 @@ struct Counters {
     /// fenced" is observable at all, and its LAST entry against the
     /// final `served` is what says fencing stopped for good.
     date_log: Arc<std::sync::Mutex<Vec<u64>>>,
+    /// TODO 358: the session-state traffic, shared with the
+    /// [`MockServer`] fields of the same names.
+    session: SessionCounters,
+}
+
+/// TODO 358 items 2 and 12: what the session-state chaos
+/// ([`Chaos::auth_lapse_after`], [`Chaos::require_group`]) put on the
+/// wire and what the client answered it with, across every connection.
+/// None of it leaves a trace in `served` or `body_log`, which count
+/// answered articles only.
+#[derive(Default, Clone)]
+pub struct SessionCounters {
+    /// `480` and `412` refusals sent to article commands.
+    pub refusals: Arc<AtomicU64>,
+    /// Logins accepted on a connection whose login had lapsed - the
+    /// client's same-socket re-login, as the server saw it.
+    pub relogins: Arc<AtomicU64>,
+    /// Every GROUP command as `(connection number, group name)`, in
+    /// arrival order. Connection numbers are [`MockServer::accepted`]'s
+    /// 1-based accept order.
+    pub group_log: Arc<std::sync::Mutex<Vec<(u64, String)>>>,
 }
 
 /// One overview row served for OVER/XOVER (spot-ingestion tests).
@@ -894,6 +969,9 @@ pub struct MockServer {
     /// a test reads whether this server is being fenced, and where it
     /// stopped being fenced.
     pub date_log: Arc<std::sync::Mutex<Vec<u64>>>,
+    /// TODO 358: the 480/412 refusals sent, the re-logins accepted and
+    /// every GROUP - see [`SessionCounters`].
+    pub session: SessionCounters,
     /// Body bytes this server put on the wire, across all connections -
     /// the independent witness for the §129 3c provider-accounting
     /// clause (see `ThrottleState::bytes_out`).
@@ -1091,6 +1169,7 @@ impl MockServer {
         let counters: Arc<Counters> = Default::default();
         let stats = counters.stats.clone();
         let date_log = counters.date_log.clone();
+        let session = counters.session.clone();
         let throttle_state = ThrottleState::new();
         let bytes_out = throttle_state.bytes_out.clone();
         let throttle_state2 = throttle_state.clone();
@@ -1281,6 +1360,7 @@ impl MockServer {
             accepted,
             stats,
             date_log,
+            session,
             bytes_out,
             body_log,
             pause,
@@ -1453,6 +1533,7 @@ impl MockServer {
             block_account: false,
             bind_ip: None,
             socks5: None,
+            http_proxy: None,
             enabled: true,
             warm_pool: false,
             idle_release_secs: None,
@@ -1688,7 +1769,11 @@ async fn serve_article(
     // bytes - so the swap applies after the missing checks and
     // the status line still echoes what was ASKED for.
     let stored = chaos.swap.get(id).map_or(id, String::as_str);
-    let Some(article) = articles.lock_ok().get(stored).cloned() else {
+    // The stored map first, then the generator (see [`Chaos::lazy`]).
+    // The lock is dropped before the generator runs: it encodes a whole
+    // body, and the POST arm takes the same lock.
+    let stored_body = articles.lock_ok().get(stored).cloned();
+    let Some(article) = stored_body.or_else(|| LazyArticles::get(chaos, stored)) else {
         refuse_delay(chaos).await;
         w.write_all(refusal(chaos, id).as_bytes()).await?;
         // TODO 315: every refusal arm, not just the `missing` one - a
@@ -1861,6 +1946,14 @@ async fn serve_conn(
     let mut bodies_served = 0u64;
     // Per-connection header-compression state (XFEATURE COMPRESS GZIP).
     let mut gzip_on = false;
+    // TODO 358: this connection's session state, for the 480/412 chaos.
+    // `lapsed` is the login being void right now; `lapse_spent` keeps it
+    // to one lapse per connection; `logins` counts AUTHINFO PASS so the
+    // second one is recognisable as a re-login.
+    let mut lapsed = false;
+    let mut lapse_spent = false;
+    let mut logins = 0u32;
+    let mut group_selected = false;
     loop {
         while pause.load(Ordering::Acquire) {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -1871,10 +1964,32 @@ async fn serve_conn(
         }
         let cmd = line.trim_end();
         let upper = cmd.to_ascii_uppercase();
+        let article_cmd = ["BODY ", "ARTICLE ", "STAT "]
+            .iter()
+            .any(|p| upper.starts_with(p));
+        if article_cmd && !lapse_spent && chaos.auth_lapse_after.is_some_and(|n| bodies_served >= n)
+        {
+            lapsed = true;
+            lapse_spent = true;
+        }
+        if article_cmd && (lapsed || (chaos.require_group && !group_selected)) {
+            // Refused for the SESSION's state: the article is never
+            // looked up, so nothing reaches `served` or `body_log`.
+            counters.session.refusals.fetch_add(1, Ordering::Relaxed);
+            let refusal: &[u8] = match lapsed {
+                true => b"480 authentication required\r\n",
+                false => b"412 no newsgroup selected\r\n",
+            };
+            w.write_all(refusal).await?;
+            w.flush().await?;
+            continue;
+        }
         if upper.starts_with("AUTHINFO USER") {
             w.write_all(b"381 password required\r\n").await?;
         } else if upper.starts_with("AUTHINFO PASS") {
+            logins += 1;
             if chaos.auth_rejected
+                || (chaos.reauth_rejected && logins > 1)
                 || (chaos.auth_reject_ms > 0
                     && (throttle.started.elapsed().as_millis() as u64) < chaos.auth_reject_ms)
             {
@@ -1885,6 +2000,10 @@ async fn serve_conn(
                 w.write_all(format!("{line}\r\n").as_bytes()).await?;
                 return Ok(());
             }
+            if lapsed {
+                lapsed = false;
+                counters.session.relogins.fetch_add(1, Ordering::Relaxed);
+            }
             w.write_all(b"281 welcome\r\n").await?;
         } else if upper.starts_with("QUIT") {
             if chaos.mute_quit {
@@ -1893,6 +2012,11 @@ async fn serve_conn(
             w.write_all(b"205 bye\r\n").await?;
             return Ok(());
         } else if upper.starts_with("GROUP") {
+            group_selected = true;
+            counters.session.group_log.lock_ok().push((
+                conn_no,
+                cmd.split_whitespace().nth(1).unwrap_or("").to_string(),
+            ));
             // Snapshot under the lock, answer outside it: the guard is
             // not Send and this connection is a spawned task.
             let span = {
@@ -2065,7 +2189,7 @@ async fn serve_conn(
                 return Ok(());
             }
             if nth > chaos.post.stat_miss
-                && articles.lock_ok().contains_key(id)
+                && (articles.lock_ok().contains_key(id) || LazyArticles::get(&chaos, id).is_some())
                 && !chaos.missing.contains(id)
                 && !vanished(&chaos, &served)
             {

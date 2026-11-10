@@ -1,6 +1,6 @@
 use super::{
-    MAX_REPLAY_MINUTES, SchedAction, Tick, WEEK_MINUTES, catch_up_state, classify_tick,
-    effective_state, next_resume_in, parse_days, parse_schedule,
+    MAX_REPLAY_MINUTES, SchedAction, SchedEffect, Tick, WEEK_MINUTES, catch_up_state,
+    classify_tick, effective_state, next_resume_in, parse_days, parse_schedule, sched_step,
 };
 use crate::parse_size;
 
@@ -434,28 +434,128 @@ fn the_window_is_open_at_the_far_edge_and_closed_at_the_near_one() {
 }
 
 /// DST fall back: local time repeats an hour, so the minute cursor runs
-/// nearly a whole week "forward" while one real minute passed. The old
-/// guard read this correctly and it must stay read correctly - and the
-/// span must be the real minute, never the apparent week.
+/// nearly a whole week "forward" while one real minute passed. That must
+/// never read as a week to replay - and since every minute of the
+/// repeated hour has already been walked once, the cursor HOLDS rather
+/// than walking it again.
 #[test]
-fn a_dst_fall_back_resyncs_without_replaying_the_week() {
+fn a_dst_fall_back_holds_without_replaying_the_week() {
     let t = 1_793_509_200;
-    let tick = classify_tick(mow(6, 2, 0), mow(6, 1, 0), t, t + 60);
-    assert_eq!(tick, Tick::Reconcile { span: 1 });
-    // One minute of window: nothing in `nightly()` fires at 01:00.
-    let Tick::Reconcile { span } = tick else {
-        unreachable!()
-    };
-    assert_eq!(catch_up_state(&nightly(), mow(6, 1, 0), span), (None, None));
+    let tick = classify_tick(mow(6, 1, 59), mow(6, 1, 0), t, t + 30);
+    assert_eq!(tick, Tick::Hold);
+    // The cursor stays put and nothing fires.
+    let (next, _, effects) = sched_step(&nightly(), mow(6, 1, 59), mow(6, 1, 0), t, t + 30);
+    assert_eq!((next, effects), (mow(6, 1, 59), vec![]));
 }
 
 /// A DST spring forward moves local time an hour ahead of real time. The
-/// skipped local hour never existed, so its rules must not fire.
+/// skipped local hour never existed, so its rules must not fire - but the
+/// landing minute did, and it arrives with one real minute boundary in a
+/// 30 s tick.
 #[test]
 fn a_dst_spring_forward_does_not_fire_the_hour_that_never_happened() {
     let t = 1_772_953_200;
-    let tick = classify_tick(mow(6, 1, 59), mow(6, 3, 0), t, t + 60);
-    assert_eq!(tick, Tick::Reconcile { span: 1 });
+    // 01:59:45 -> 03:00:15 local, across the UTC boundary at t.
+    let tick = classify_tick(mow(6, 1, 59), mow(6, 3, 0), t - 15, t + 15);
+    assert_eq!(tick, Tick::Jump { span: 1 });
+}
+
+/// One simulated night at the loop's REAL cadence: a tick every 30 s,
+/// local time derived from a UTC clock and an offset that changes at
+/// `switch`. Returns every rule fired, with the local minute it fired at.
+fn drive_night(
+    entries: &[super::SchedEntry],
+    phase: u64,
+    before: i64,
+    after: i64,
+) -> Vec<(u32, SchedAction)> {
+    // A UTC instant on a minute boundary that reads Sunday 00:30 local;
+    // the offset changes when local time first reads 02:00.
+    let utc0: u64 = 1_772_953_200;
+    let switch = utc0 + 90 * 60;
+    let local = |utc: u64| -> u32 {
+        let off = if utc >= switch { after } else { before } - before;
+        let secs = (utc as i64 - utc0 as i64) + off + i64::from(mow(6, 0, 30)) * 60;
+        ((secs / 60) as u32) % WEEK_MINUTES
+    };
+    let mut fired = Vec::new();
+    let (mut last_utc, end) = (utc0 + phase, utc0 + 5 * 3600);
+    let mut last = local(last_utc);
+    while last_utc < end {
+        let now_utc = last_utc + 30;
+        let now = local(now_utc);
+        let (next, _, effects) = sched_step(entries, last, now, last_utc, now_utc);
+        for e in effects {
+            match e {
+                SchedEffect::Fire(a) => fired.push((now, a)),
+                SchedEffect::Reconcile { .. } => panic!("no reconcile on a DST night: {e:?}"),
+            }
+        }
+        last = next;
+        last_utc = now_utc;
+    }
+    fired
+}
+
+/// A15: "pause 23:00, resume 03:00" on the night 02:00 becomes 03:00.
+/// The loop ticks every 30 s, so seconds-over-sixty saw no real time
+/// pass across the jump, reconciled over an empty window, and moved the
+/// cursor past 03:00: the resume never fired and the queue stayed paused
+/// all day. The one-shot at the landing minute must fire too, and the
+/// rule inside the hour that never existed must not.
+#[test]
+fn a_spring_forward_at_the_real_cadence_fires_the_landing_minute_once() {
+    let e = parse_schedule(
+        r#"[
+          {"days": "all", "time": "03:00", "action": "resume"},
+          {"days": "all", "time": "03:00", "action": "quota_reset"},
+          {"days": "all", "time": "02:30", "action": "pause"},
+          {"days": "all", "time": "04:00", "action": "speedlimit", "value": 0}
+        ]"#,
+    )
+    .unwrap();
+    for phase in [0, 1, 14, 15, 29] {
+        // Standard time, then an hour ahead from local 02:00.
+        let fired = drive_night(&e, phase, 0, 3600);
+        assert_eq!(
+            fired,
+            vec![
+                (mow(6, 3, 0), SchedAction::Resume),
+                (mow(6, 3, 0), SchedAction::QuotaReset),
+                (mow(6, 4, 0), SchedAction::SpeedLimit(0)),
+            ],
+            "phase {phase}s"
+        );
+    }
+}
+
+/// The fall-back mirror: local 02:00 becomes 01:00 again, and every rule
+/// in the repeated hour - one-shots included - fires exactly once.
+#[test]
+fn a_fall_back_at_the_real_cadence_fires_the_repeated_hour_once() {
+    let e = parse_schedule(
+        r#"[
+          {"days": "all", "time": "01:15", "action": "pause"},
+          {"days": "all", "time": "01:30", "action": "quota_reset"},
+          {"days": "all", "time": "01:45", "action": "resume"},
+          {"days": "all", "time": "02:00", "action": "speedlimit", "value": 0}
+        ]"#,
+    )
+    .unwrap();
+    for phase in [0, 1, 14, 15, 29] {
+        // An hour ahead, then standard time from local 02:00.
+        let fired = drive_night(&e, phase, 3600, 0);
+        assert_eq!(
+            fired,
+            vec![
+                (mow(6, 1, 15), SchedAction::Pause),
+                (mow(6, 1, 30), SchedAction::QuotaReset),
+                (mow(6, 1, 45), SchedAction::Resume),
+                (mow(6, 2, 0), SchedAction::SpeedLimit(0)),
+            ],
+            "phase {phase}s"
+        );
+    }
 }
 
 /// An absolute clock step backwards is not a suspend: nothing elapsed,

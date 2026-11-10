@@ -48,6 +48,14 @@ mod scratch;
 /// tree hid an 8.6x verify scheduling defect until 16 Sep 2026. Holds
 /// every outer width to the same lines and the same verdicts.
 mod skewed_set;
+/// The 9 Nov 2026 sweep's front-end findings that need the built binary
+/// or a whole repair: `-a` keeping its donor, a non-UTF-8 argument
+/// refused rather than a panic, and an inherited ignored SIGINT.
+mod sweep_cli;
+/// The verify + repair findings of the 9 Nov 2026 sweep: an undescribed
+/// member, `-B` spellings, volume case, argv donors, crafted lengths,
+/// Unrepairable backups and `-O` on an empty member.
+mod sweep_vr;
 // The whole module is unix-only, not just its one test: it reaches the
 // engine fold by making a recovery volume unreadable, which is a
 // `PermissionsExt` 0o000 and has no Windows equivalent. Gated on the

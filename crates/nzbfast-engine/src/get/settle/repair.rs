@@ -1155,6 +1155,94 @@ async fn fill_from_duplicates_off_materialized_volumes(
     healed
 }
 
+/// Read-only sweep A2 (9 Nov 2026): the damaged set members the RAR
+/// recovery-record rung cannot speak for, after it answered `Ok`.
+///
+/// # The hole this closes
+///
+/// The rung runs only when PAR2 could NOT repair the set, and `Ok` from it
+/// means one thing: the RAR volumes in `out_dir` extract. That proves the
+/// RAR volumes and nothing else. Until this check the arm set `all_good`
+/// straight from that `Ok`, and [`judge_repaired_job`] then re-checked the
+/// slots OUTSIDE the set (`uncovered_pairs`) and the in-set slots that
+/// never got a report (`in_set_bad`) - and an in-set member that DID get a
+/// report, carrying bad blocks, and is not a RAR volume was in neither
+/// list. `partition_short_slots` builds both from slots WITHOUT a report,
+/// by design. So a RAR set plus a set-covered plain file (a sample, an
+/// `.nfo`, a second payload) whose own article was lost, on a post whose
+/// parity was short, finished Completed with the hole in it.
+///
+/// It did not need a recovery record to do it. With PAR2's verdict in hand
+/// the rung SKIPS every volume the verifier proved intact, and a pass that
+/// skipped volumes and opened none is not "nothing done"
+/// (`rrhint.rs`, the `nothing_done` test), so the rung goes straight on to
+/// extract - which succeeds, because the RAR volumes were never damaged.
+///
+/// # The predicate
+///
+/// A report with bad blocks is still unhealed unless one of these speaks
+/// for it:
+///
+/// * it IS one of the volumes the rung walked ([`rr_volume_names`]),
+///   matched by its FileDesc name or by its slot's live on-disk name (a
+///   GH #63 deferral keeps the posted name on disk) - the extraction is
+///   that volume's proof, the same one this arm has always taken;
+/// * another set's successful repair already proved it (`proven`, the
+///   `set_files_proven` list [`judge_repaired_job`] reads);
+/// * its file, read back off disk now, matches the FileDesc's whole-file
+///   MD5. This is what keeps the check from failing a good job: a member
+///   the failed repair published whole anyway, or the second-entry fill
+///   healed after the reports were taken, is byte-exact and passes here.
+///
+/// A report with no `par2_name` is skipped: it names no FileDesc, so it
+/// has no MD5 to be held to and the rung's hint never named it either.
+///
+/// Names come back in report order, deduplicated.
+fn rr_unhealed_members(
+    sets: &[&nzbkit::par2::Par2Set],
+    reports: &[(usize, nzbkit::live::SlotReport)],
+    rar_volumes: &std::collections::HashSet<String>,
+    proven: &[String],
+    out_dir: &Path,
+    slot_path: impl Fn(usize) -> Option<PathBuf>,
+) -> Vec<String> {
+    let mut left: Vec<String> = Vec::new();
+    for (sidx, r) in reports {
+        if r.bad_blocks.is_empty() {
+            continue;
+        }
+        let Some(name) = r.par2_name.as_deref() else {
+            continue;
+        };
+        if left.iter().any(|n| n == name) || proven.iter().any(|p| p == name) {
+            continue;
+        }
+        let by_name = nzbkit::disk::join_out_name(out_dir, &nzbkit::disk::sanitize_out_name(name));
+        let live = slot_path(*sidx);
+        let walked =
+            |p: &Path| rar_volumes.contains(&nzbkit::disk::out_name_of(out_dir, p).to_lowercase());
+        if walked(&by_name) || live.as_deref().is_some_and(walked) {
+            continue;
+        }
+        // The slot's live path first, then the FileDesc spelling: a
+        // member renamed onto its FileDesc name and one left under its
+        // posted name are the same file to the MD5.
+        let whole = sets
+            .iter()
+            .flat_map(|s| s.files.iter())
+            .filter(|f| f.name == name)
+            .any(|desc| {
+                live.iter()
+                    .chain(std::iter::once(&by_name))
+                    .any(|p| nzbkit::par2::verify_file_md5_path(p, desc).unwrap_or(false))
+            });
+        if !whole {
+            left.push(name.to_string());
+        }
+    }
+    left
+}
+
 /// Judge the JOB once, over the union of what every set's repair proved.
 ///
 /// Out of line since 31 Aug 2026, when [`run_set_repair`] sat at 464 of
@@ -1688,9 +1776,11 @@ pub(super) async fn run_set_repair(
             // Only the vouched-and-still-packed case reaches the arm
             // below.
             all_good = match reextract_dir_outcome(out_dir, password)? {
-                Ok(packed) => {
-                    use crate::rarfix::vouch::{VouchVerdict, failure_sentence, judge};
-                    match judge(&packed, Some(set_names)) {
+                Ok(outcome) => {
+                    use crate::rarfix::vouch::{
+                        VouchVerdict, failure_sentence, judge, main_payload_sentence,
+                    };
+                    match judge(&outcome.packed, Some(set_names), outcome.largest_produced) {
                         VouchVerdict::Failed { names, reason } => {
                             // A group's own refusal outranks the
                             // sentence, exactly as it does in
@@ -1701,7 +1791,18 @@ pub(super) async fn run_set_repair(
                                 Some(unpack_failure(reason, &failure_sentence(&names)));
                             false
                         }
-                        VouchVerdict::Tolerated | VouchVerdict::Locked(_) => true,
+                        // G2 (TODO 358): an unvouched leftover larger
+                        // than what unpacked is the main payload.
+                        VouchVerdict::MainPayload { names, reason } => {
+                            reextract_failed =
+                                Some(unpack_failure(reason, &main_payload_sentence(&names)));
+                            false
+                        }
+                        // Item 15's names are NOT carried out of this
+                        // arm: it has no owner handle, so a repaired
+                        // job's extras are logged by the ladder's
+                        // leftovers warning only.
+                        VouchVerdict::Tolerated(_) | VouchVerdict::Locked(_) => true,
                     }
                 }
                 Err(why) => {
@@ -1749,6 +1850,13 @@ pub(super) async fn run_set_repair(
                 // reach it. One volume whose repair never returned held a
                 // job in Repairing for 14 hours, and every other job's
                 // repair and unpack tail waited behind the permit.
+                //
+                // Read-only sweep A2 (9 Nov 2026): the rung's `Ok` proves the
+                // RAR volumes and nothing else, so a damaged set member that
+                // is not one of them still has to be proved here - see
+                // [`rr_unhealed_members`]. The volume list is taken BEFORE
+                // the rung, so it is the population the rung walked.
+                let rar_volumes = rr_volume_names(out_dir);
                 all_good = match crate::lanegate::off_worker(|| {
                     crate::rarfix::try_rar_rr_repair_hinted_why(
                         out_dir,
@@ -1757,7 +1865,29 @@ pub(super) async fn run_set_repair(
                         cancel,
                     )
                 }) {
-                    Ok(()) => true,
+                    Ok(()) => {
+                        let sets: Vec<&nzbkit::par2::Par2Set> =
+                            plans.iter().map(|p| p.set.as_ref()).collect();
+                        let left = rr_unhealed_members(
+                            &sets,
+                            reports,
+                            &rar_volumes,
+                            &set_files_proven,
+                            out_dir,
+                            |s| extractor.slot_path(s),
+                        );
+                        if !left.is_empty() {
+                            warn!(
+                                target: "repair",
+                                "✘ the RAR archive extracts after the recovery-record pass, but \
+                                 {} damaged file(s) the PAR2 set covers are not RAR volumes and \
+                                 were never repaired: {}",
+                                left.len(),
+                                left.join(", ")
+                            );
+                        }
+                        left.is_empty()
+                    }
                     Err(why) => {
                         if let Some(why) = why {
                             reextract_failed = Some(why);
@@ -1790,3 +1920,6 @@ pub(super) async fn run_set_repair(
 
 #[cfg(test)]
 mod band_tests;
+
+#[cfg(test)]
+mod rr_member_tests;

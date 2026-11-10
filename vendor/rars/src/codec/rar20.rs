@@ -11,6 +11,13 @@ const AUDIO_COUNT: usize = 257;
 const MAX_CHANNELS: usize = 4;
 const OLD_LEVEL_COUNT: usize = AUDIO_COUNT * MAX_CHANNELS;
 const MAX_HISTORY: usize = 1024 * 1024;
+/// How much output `decode_member_from_reader` decodes between flushes
+/// (nzbfast-local change, 9 Nov 2026). Smaller in a test build so a test
+/// can cross several steps cheaply.
+#[cfg(not(test))]
+const RAR20_FLUSH_STEP: usize = 4 * 1024 * 1024;
+#[cfg(test)]
+const RAR20_FLUSH_STEP: usize = 64 * 1024;
 
 const LENGTH_BASES: [usize; LENGTH_SLOTS] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128,
@@ -1543,16 +1550,34 @@ impl Rar20Decoder {
                 })?;
             self.in_block = true;
         }
-        self.decode_until(target).map_err(|error| match error {
-            Error::NeedMoreInput => Error::InvalidData("RAR 2.0 bitstream is truncated"),
-            error => error,
-        })?;
+        // nzbfast: decode and flush in steps of `RAR20_FLUSH_STEP`, keeping
+        // only the 1 MiB window between them. This entry point used to
+        // decode the WHOLE member into `output` before writing a byte, so a
+        // member's declared unpacked size - a header field, reached by a
+        // few bytes of matches - was the decoder's resident size (9 Nov 2026
+        // sweep, section C). A step boundary is exactly a solid member
+        // boundary to the decoder: `copy_match` parks the rest of a match in
+        // `pending_match` and `decode_until` drains it on the next call, and
+        // no RAR 2.0 match reaches past `MAX_HISTORY` (the last offset slot
+        // ends at 2^20), which `trim_history` keeps. The PACKED input is
+        // still read whole above; that is real archive bytes, not an
+        // amplification, and making the bit reader refill mid-member is the
+        // redesign the RAR 2.9 decoder got on 16 Sep 2026.
+        // (nzbfast-local change, 9 Nov 2026; see vendor/rars/VENDORING.md.)
+        let mut flushed = start;
+        while self.current_pos() < target {
+            let step = target.min(self.current_pos().saturating_add(RAR20_FLUSH_STEP));
+            self.decode_until(step).map_err(|error| match error {
+                Error::NeedMoreInput => Error::InvalidData("RAR 2.0 bitstream is truncated"),
+                error => error,
+            })?;
+            let now = self.current_pos();
+            out.write_all(self.raw_range(flushed, now)?)
+                .map_err(|_| Error::InvalidData("RAR 2.0 output write failed"))?;
+            self.trim_history(now, now);
+            flushed = now;
+        }
         self.take_trailing_table_switch()?;
-
-        let decoded = self.raw_range(start, target)?;
-        out.write_all(decoded)
-            .map_err(|_| Error::InvalidData("RAR 2.0 output write failed"))?;
-        self.trim_history(target, target);
         Ok(())
     }
 
@@ -2494,6 +2519,57 @@ mod tests {
             .unwrap();
 
         assert_eq!(output, expected_text());
+    }
+
+    /// nzbfast, 9 Nov 2026 sweep: the reader entry point decoded a whole
+    /// member before writing any of it, so its resident size was the
+    /// member's declared size. It now flushes every `RAR20_FLUSH_STEP`;
+    /// the input repeats a block at distances past one step and inside the
+    /// 1 MiB window, so matches cross the trimmed boundaries.
+    #[test]
+    fn decode_member_from_reader_flushes_in_steps() {
+        let mut seed = 0x2545_f491u32;
+        let block: Vec<u8> = (0..200_000)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                (seed >> 24) as u8
+            })
+            .collect();
+        let mut input = Vec::new();
+        for _ in 0..4 {
+            input.extend_from_slice(&block);
+            input.extend_from_slice(b"separator between repeats");
+        }
+        let packed = super::encode_rar20_auto(&input).unwrap();
+
+        struct Recording {
+            data: Vec<u8>,
+            largest_write: usize,
+        }
+        impl std::io::Write for Recording {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.largest_write = self.largest_write.max(buf.len());
+                self.data.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut out = Recording {
+            data: Vec::new(),
+            largest_write: 0,
+        };
+        let mut decoder = Rar20Decoder::new();
+        decoder
+            .decode_member_from_reader(&mut packed.as_slice(), input.len(), &mut out)
+            .unwrap();
+        assert_eq!(out.data, input);
+        assert!(
+            out.largest_write <= super::RAR20_FLUSH_STEP.min(input.len() / 4),
+            "one write of {} bytes: the member was buffered whole",
+            out.largest_write
+        );
     }
 
     #[test]

@@ -290,9 +290,21 @@ fn edit_settings(
         );
         return false;
     }
-    let mut doc = crate::persist::load_json_with_backup(&settings)
-        .filter(|v| v.is_object())
-        .unwrap_or_else(|| json!({}));
+    let mut doc = match crate::persist::load_json_with_backup(&settings) {
+        Some(v) if v.is_object() => v,
+        // Valid JSON that is not an object parses, so the guard above
+        // lets it through; writing `{}` plus one edit over it is the
+        // same wipe (9 Nov 2026 sweep, A16).
+        Some(_) => {
+            println!(
+                "  (not recording {what}: {} is not a settings object - \
+                 fix or remove it first)",
+                settings.display()
+            );
+            return false;
+        }
+        None => json!({}),
+    };
     if !edit(&mut doc) {
         return false;
     }

@@ -941,6 +941,7 @@ mod shutdown_sidecar_tests {
                 block_account: false,
                 bind_ip: None,
                 socks5: None,
+                http_proxy: None,
                 enabled: true,
                 warm_pool: false,
                 idle_release_secs: None,
@@ -1106,9 +1107,18 @@ mod pause_timer_tests {
     /// The aux-thread census is process-global, and these tests both
     /// spawn into it and count what is in it, so they run one at a time.
     /// Taken as the FIRST statement of each, so it drops last.
-    fn one_pause_timer_test_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    fn one_pause_timer_test_at_a_time() -> (
+        std::sync::MutexGuard<'static, ()>,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
         static GATE: Mutex<()> = Mutex::new(());
-        GATE.lock_ok()
+        let gate = GATE.lock_ok();
+        // It also holds `crate::STOP_SEAM`: the worker under test exits on
+        // `RunStop::stopping`, and `stop_seam_tests` move the process-global
+        // stop epoch. Without the seam a one-process run that put a seam
+        // test first handed these a worker that retired at once as
+        // "stopped" and never lifted the pause (9 Nov 2026 sweep).
+        (gate, crate::STOP_SEAM.lock_ok())
     }
 
     /// Auto-resume workers alive right now. Nothing else in this process
@@ -1257,6 +1267,74 @@ mod pause_timer_tests {
             "and it leaves no deadline behind for `pause_int` to report"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 6 Nov 2026 sweep F4: opposite Offline and Online requests landing
+    /// together must leave the queue in the state the LAST one decided.
+    ///
+    /// `set_offline` swapped the public flag before it took the lock that
+    /// moves the pause, so an Offline that stalled between the two let an
+    /// Online swap the flag back and apply its own transition first; the
+    /// Offline then applied its stale one. The result read online while
+    /// the queue sat paused by offline, and a second Online returned early
+    /// on the flag and never resumed it. The test holds an Offline in
+    /// that window (`OFFLINE_SWAP_BARRIER`), lands an Online, then lets
+    /// the Offline go: the Online came last, so the queue must end online
+    /// and running with the pool open.
+    #[test]
+    fn racing_offline_and_online_leave_the_flag_and_the_pause_agreeing() {
+        let _serial = one_pause_timer_test_at_a_time();
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _rt = rt.enter();
+        let dir = scratch("offlinerace");
+        let d = crate::testutil::test_daemon(&dir);
+        let call = |want: bool| {
+            let (d, h) = (d.clone(), rt.handle().clone());
+            std::thread::spawn(move || {
+                let _rt = h.enter();
+                d.set_offline(want);
+            })
+        };
+
+        // Offline swaps the flag, then stalls in the window.
+        let open = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        *crate::daemon::daemon_idle::OFFLINE_SWAP_BARRIER.lock_ok() = Some((
+            Arc::as_ptr(&d) as usize,
+            true,
+            open.clone(),
+            release.clone(),
+        ));
+        let offline = call(true);
+        open.wait();
+        // Online lands while it is stalled. Before the fix it ran to the
+        // end here; now it waits for the Offline to finish.
+        let online = call(false);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        release.wait();
+        offline.join().expect("offline thread");
+        online.join().expect("online thread");
+        *crate::daemon::daemon_idle::OFFLINE_SWAP_BARRIER.lock_ok() = None;
+
+        let state = |d: &Arc<Daemon>| {
+            (
+                d.offline.load(Ordering::SeqCst),
+                d.paused.load(Ordering::SeqCst),
+                d.paused_by_offline.load(Ordering::SeqCst),
+            )
+        };
+        assert_eq!(
+            state(&d),
+            (false, false, false),
+            "the Online that came last must leave the queue online and running"
+        );
+        let accepting = d.hub.warm.get().map(|p| p.accepting());
+        assert_ne!(accepting, Some(false), "and the warm pool open");
+
+        // Idempotent: a second Online changes nothing.
+        d.set_offline(false);
+        assert_eq!(state(&d), (false, false, false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

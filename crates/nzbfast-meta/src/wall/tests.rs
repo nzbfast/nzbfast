@@ -1450,3 +1450,31 @@ fn an_art_host_that_failed_is_told_apart_from_one_with_no_art() {
     assert_eq!(fetch_image_res("not a url"), Err(ArtMiss::NoImage));
     assert_eq!(fetch_image("not a url"), None);
 }
+
+/// A retry loop may not go out again inside a `Retry-After` longer than
+/// the minute `acquire` parks for: past that it answers "could not ask"
+/// and leaves the row for a later pass. Inside a minute it still
+/// retries, because the park itself waits the window out.
+///
+/// `DvdsReleaseDates` because no other test in the binary penalises it
+/// (the cooldown table is process-global - see the AniList note above).
+/// NEGATIVE CONTROL, run: with `retry_would_cut_in` answering `false`,
+/// the second assert fails.
+#[test]
+fn a_retry_never_cuts_into_a_long_retry_after() {
+    clear_unreachable();
+    crate::ratelimit::penalise(Provider::DvdsReleaseDates, 30);
+    assert!(
+        !retry_would_cut_in(Provider::DvdsReleaseDates),
+        "a 30 s wait is inside the park, so the loop may retry"
+    );
+    crate::ratelimit::penalise(Provider::DvdsReleaseDates, 900);
+    assert!(
+        retry_would_cut_in(Provider::DvdsReleaseDates),
+        "a 900 s Retry-After was retried inside its own window"
+    );
+    assert!(
+        matches!(outcome(false), Outcome::Transient { .. }),
+        "giving up on a refusal is could-not-ask, never an answer"
+    );
+}

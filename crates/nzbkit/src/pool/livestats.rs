@@ -180,6 +180,21 @@ pub struct LiveStats {
     /// Written only by `Shared::line_cap_tick`, once a second, under
     /// the CAS that already serializes that tick.
     pub line_carry_bps: AtomicU64,
+    /// 9 Nov 2026: the fleet this run SETTLED at, 0 = no verdict yet.
+    /// Set when the cold-start probe stops (a rung that did not pay, or
+    /// the ceiling reached), when the step-back check undoes a raise,
+    /// when a recalled seed falls back (`linecap::recall_check`), and at
+    /// queue-dry on a run whose fleet was raised and that had no verdict
+    /// yet (a short job ends before its probe does). The
+    /// daemon banks it (`linecarry`) so the next job on this line starts
+    /// here instead of walking the same climb. A run that never reaches a
+    /// verdict leaves the last job's memory as it was.
+    pub line_cap_settled: AtomicUsize,
+    /// 9 Nov 2026: the step-back ceiling this run is holding, 0 = none:
+    /// either one it stepped back to itself or the one it was started
+    /// with (`PoolConfig::line_cap_hold`), so the memory survives a job
+    /// that never re-tested it.
+    pub line_cap_hold: AtomicUsize,
 }
 
 /// One thing that happened to the pool, at a moment.
@@ -671,6 +686,8 @@ impl LiveStats {
             line_cap_refused: std::sync::atomic::AtomicBool::new(false),
             line_cap_knee: super::linecap::seed_knee(servers),
             line_carry_bps: AtomicU64::new(0),
+            line_cap_settled: AtomicUsize::new(0),
+            line_cap_hold: AtomicUsize::new(super::linecap::seed_hold(servers)),
         })
     }
 

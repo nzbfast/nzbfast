@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -14,9 +15,20 @@ namespace Parfast.App;
 /// ShowAsync, because there is no package identity for the shell to hang the
 /// dialog on. That is the single most common way a WinUI 3 desktop app fails at
 /// its first file open, and it is why every picker in this app goes through here.
+/// <para>
+/// A PICKER THAT THROWS ANSWERS "NOTHING PICKED". Every caller is an
+/// <c>async void</c> click handler, where an exception escaping the await is
+/// unhandled and takes the process down - and the process is the one running the
+/// user's jobs. The shell refusing a dialog (policy, a broken shell extension, a
+/// stale owner) is a cancelled pick, not a crash.
+/// </para>
 /// </remarks>
 public static class Pickers
 {
+    /// <summary>The failures a WinRT dialog can raise at ShowAsync.</summary>
+    internal static bool IsDialogFailure(Exception e) =>
+        e is COMException or InvalidOperationException or ArgumentException or UnauthorizedAccessException;
+
     public static async Task<string?> PickFileAsync(UIElement owner, IReadOnlyList<string> extensions)
     {
         var picker = new FileOpenPicker { SuggestedStartLocation = PickerLocationId.ComputerFolder };
@@ -31,8 +43,15 @@ public static class Pickers
         }
 
         Own(owner, picker);
-        var file = await picker.PickSingleFileAsync();
-        return file?.Path;
+        try
+        {
+            var file = await picker.PickSingleFileAsync();
+            return file?.Path;
+        }
+        catch (Exception e) when (IsDialogFailure(e))
+        {
+            return null;
+        }
     }
 
     public static async Task<IReadOnlyList<string>> PickFilesAsync(UIElement owner)
@@ -40,8 +59,15 @@ public static class Pickers
         var picker = new FileOpenPicker { SuggestedStartLocation = PickerLocationId.ComputerFolder };
         picker.FileTypeFilter.Add("*");
         Own(owner, picker);
-        var files = await picker.PickMultipleFilesAsync();
-        return files.Select(f => f.Path).ToList();
+        try
+        {
+            var files = await picker.PickMultipleFilesAsync();
+            return files.Select(f => f.Path).ToList();
+        }
+        catch (Exception e) when (IsDialogFailure(e))
+        {
+            return [];
+        }
     }
 
     public static async Task<string?> PickFolderAsync(UIElement owner)
@@ -49,8 +75,15 @@ public static class Pickers
         var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.ComputerFolder };
         picker.FileTypeFilter.Add("*");
         Own(owner, picker);
-        var folder = await picker.PickSingleFolderAsync();
-        return folder?.Path;
+        try
+        {
+            var folder = await picker.PickSingleFolderAsync();
+            return folder?.Path;
+        }
+        catch (Exception e) when (IsDialogFailure(e))
+        {
+            return null;
+        }
     }
 
     public static async Task<string?> SaveFileAsync(
@@ -63,8 +96,15 @@ public static class Pickers
         };
         picker.FileTypeChoices.Add(typeLabel, extensions.ToList());
         Own(owner, picker);
-        var file = await picker.PickSaveFileAsync();
-        return file?.Path;
+        try
+        {
+            var file = await picker.PickSaveFileAsync();
+            return file?.Path;
+        }
+        catch (Exception e) when (IsDialogFailure(e))
+        {
+            return null;
+        }
     }
 
     private static void Own(UIElement owner, object picker)
@@ -81,17 +121,50 @@ public static class Pickers
 }
 
 /// <summary>The two dialogs: a message, and a confirmation.</summary>
+/// <remarks>
+/// NEITHER THROWS, for the reason <see cref="Pickers"/> gives: their callers are
+/// <c>async void</c> handlers. WinUI allows ONE ContentDialog open at a time and
+/// raises a COMException for a second (the progress sheet is a ContentDialog, so
+/// this is reachable by a job finishing under a confirmation), and a dialog with
+/// no XamlRoot throws too. A message that could not be shown is dropped; a
+/// confirmation that could not be asked answers NO, which is the safe reading
+/// for every caller - nothing destructive happens without a yes.
+/// </remarks>
 public static class Dialogs
 {
-    public static Task ShowAsync(UIElement owner, string title, string body) =>
-        Build(owner, title, body, Strings.CommonClose, null).ShowAsync().AsTask();
+    public static async Task ShowAsync(UIElement owner, string title, string body)
+    {
+        try
+        {
+            await Build(owner, title, body, Strings.CommonClose, null).ShowAsync();
+        }
+        catch (Exception e) when (Pickers.IsDialogFailure(e))
+        {
+        }
+    }
 
-    /// <summary>True when the user chose the primary action.</summary>
+    /// <summary>True when the user chose the primary action; false if the dialog could not be shown.</summary>
     public static async Task<bool> ConfirmAsync(
+        UIElement owner, string title, string body, string primary, string secondary) =>
+        await TryConfirmAsync(owner, title, body, primary, secondary) == true;
+
+    /// <summary>
+    /// The user's answer, or NULL when the dialog could not be shown at all - for
+    /// the one caller (closing the window) whose safe answer to "could not ask"
+    /// is not simply no.
+    /// </summary>
+    public static async Task<bool?> TryConfirmAsync(
         UIElement owner, string title, string body, string primary, string secondary)
     {
-        var dialog = Build(owner, title, body, secondary, primary);
-        return await dialog.ShowAsync() == ContentDialogResult.Primary;
+        try
+        {
+            var dialog = Build(owner, title, body, secondary, primary);
+            return await dialog.ShowAsync() == ContentDialogResult.Primary;
+        }
+        catch (Exception e) when (Pickers.IsDialogFailure(e))
+        {
+            return null;
+        }
     }
 
     private static ContentDialog Build(

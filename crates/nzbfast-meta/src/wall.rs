@@ -964,6 +964,9 @@ fn get_json_ua(p: Provider, url: &str) -> Option<serde_json::Value> {
                     note_unreachable();
                     return None;
                 }
+                if retry_would_cut_in(p) {
+                    return None;
+                }
             }
             Err(e) => {
                 note_http_err(&e);
@@ -1044,6 +1047,23 @@ fn note_refusal(p: Provider, e: &crate::netfetch::Refusal, fallback: u64) -> u64
     ratelimit::penalise(p, wait);
     note_retry_after(wait);
     wait
+}
+
+/// Would the next retry go out inside the `Retry-After` just given?
+///
+/// The retry loops sleep in `ratelimit::acquire`, and `penalise` clamps
+/// that sleep to a minute so no lane thread parks longer (see its doc).
+/// A provider that asked for MORE than a minute would therefore be
+/// asked again inside its own window - the request it told us not to
+/// make, spent on being told again. Past the clamp the honest answer is
+/// "could not ask": the row stays for a later pass and [`cooling_off`]
+/// keeps the rest of the batch away from the provider until it is due.
+fn retry_would_cut_in(p: Provider) -> bool {
+    if ratelimit::cooling(p) <= std::time::Duration::from_secs(60) {
+        return false;
+    }
+    note_unreachable();
+    true
 }
 
 /// Is this provider inside a `Retry-After` it has already given us?
@@ -1437,6 +1457,9 @@ fn get_json_paced(p: Provider, url: &str) -> Option<serde_json::Value> {
                     // which is exactly what this function's patience is
                     // for - do not let the caller record it as "nothing".
                     note_unreachable();
+                    return None;
+                }
+                if retry_would_cut_in(p) {
                     return None;
                 }
             }
@@ -1845,10 +1868,14 @@ pub fn imdb_ratings_fetch() -> Option<Vec<(String, f64, u64)>> {
     Some(parse_imdb_ratings(&tsv, 100))
 }
 
-/// Fetch a poster/backdrop image by full URL (any provider). Routed
-/// through the SSRF-guarded agent: metadata providers are public hosts,
-/// and a "set poster from URL" value must not become a request into the
-/// host's own network (cloud metadata, LAN services).
+/// Fetch a poster/backdrop image by full URL (any provider), on the
+/// shared enrich agent, whose resolver is the SSRF guard
+/// (`netfetch::EnrichResolver`): a "set poster from URL" value cannot
+/// reach a cloud-metadata endpoint or the rest of link-local. Loopback
+/// and the LAN stay reachable, as on every guarded fetch here - a
+/// self-hosted media server's artwork lives there - so this is not a
+/// LAN fence, and a caller that needs one wants
+/// `netfetch::OriginBoundResolver`'s rule instead.
 pub fn fetch_image(url: &str) -> Option<Vec<u8>> {
     fetch_image_res(url).ok()
 }

@@ -342,6 +342,7 @@ async fn flap_breaker_clamps_a_flapping_server_to_one_keeper() {
                 block_account: false,
                 bind_ip: None,
                 socks5: None,
+                http_proxy: None,
                 enabled: true,
                 warm_pool: false,
                 idle_release_secs: None,
@@ -413,6 +414,7 @@ async fn flap_keeper_target_follows_observed_cap() {
                 block_account: false,
                 bind_ip: None,
                 socks5: None,
+                http_proxy: None,
                 enabled: true,
                 warm_pool: false,
                 idle_release_secs: None,
@@ -2476,10 +2478,31 @@ async fn a_zero_based_post_re_earns_the_same_verdict_once_per_file() {
          paying: {standdown} stand-downs for {nfiles} files",
         queue::RUN_WIDE_AFTER
     );
+    // And once it has, nothing more is steered. That is the arm's whole
+    // promise, stated exactly: this rig's collector reports verdicts one
+    // at a time, so every steer after the run-wide note would be a body
+    // the arm let through. Without the arm the note never appears.
+    //
+    // It replaced `steers < total / 2`, which measured the RUNNER: how
+    // many fetched bodies the consumer still owed when the second
+    // verdict landed. The 9 Nov 2026 nightly windows-one-process run
+    // read 80 steers with both stand-downs earned and the arm working,
+    // and a collector starved on purpose here reads 50-80 at the
+    // harness's 64-deep queue and 80 at 8 - a starved consumer, not the
+    // latch, sets that number. The println above still reports it.
+    let run_wide = notes
+        .iter()
+        .position(|n| n.contains("part gate off for the rest of the run"))
+        .unwrap_or_else(|| panic!("the run-wide arm never took: {notes:?}"));
+    let late: Vec<&String> = notes[run_wide..]
+        .iter()
+        .filter(|n| n.contains("wrong article"))
+        .collect();
     assert!(
-        steers < total / 2,
-        "{steers} steers over {total} articles - the run-wide arm is not cutting \
-         the per-file adjudication windows, which is its whole purpose: {notes:?}"
+        late.is_empty(),
+        "{} steers AFTER the run-wide stand-down - the arm is not cutting the \
+         per-file adjudication windows, which is its whole purpose: {late:?}",
+        late.len()
     );
 }
 
@@ -2722,4 +2745,30 @@ fn wire_charge_stays_off_the_hot_path() {
             new - old
         );
     }
+}
+
+/// Sweep 9 Nov 2026 (C, pool.rs): `finished` fires from the completion
+/// that lands `pending` on zero, so a run BORN at zero - an empty
+/// request list, or every article outside every server's retention -
+/// never fired it. Its workers still retired, but the drain marker the
+/// graph reads never went down and the join deadline that bounds a
+/// straggler never armed. The marker is the visible half, so it is the
+/// one pinned.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_born_with_nothing_pending_still_reports_it_drained() {
+    let srv = crate::mock::MockServer::start(
+        std::collections::HashMap::new(),
+        crate::mock::Chaos::default(),
+    )
+    .await;
+    let (_, done, notes) = payout_leg(
+        vec![payout_server(&srv, 2, PoolConfig::default())],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(done, 0);
+    assert!(
+        notes.iter().any(|n| n.contains("nothing left to download")),
+        "an empty run drained and must say so: {notes:?}"
+    );
 }

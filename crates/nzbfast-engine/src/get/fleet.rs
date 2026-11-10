@@ -39,6 +39,18 @@ fn line_evidence(hub: &Option<Arc<StreamHub>>) -> (u64, bool, u64) {
     )
 }
 
+/// 9 Nov 2026: the `(fleet, hold)` the last job on this line left, as
+/// the runner stamped it on the hub; `(0, 0)` off the daemon hub.
+fn line_recall(hub: &Option<Arc<StreamHub>>) -> (usize, usize) {
+    use std::sync::atomic::Ordering;
+    hub.as_ref().map_or((0, 0), |h| {
+        (
+            h.line_recall_fleet.load(Ordering::Relaxed),
+            h.line_recall_hold.load(Ordering::Relaxed),
+        )
+    })
+}
+
 /// TODO 112: the live connection tuner's handle for ONE server ROW,
 /// minted on the hub the first time that row is built and reused by
 /// every job after it - which is the whole point of the map living on
@@ -322,9 +334,21 @@ pub(super) async fn build_fleet(
         anchor_measured,
         carry_bps,
         cfg_all.servers.iter().map(|s| s.level).collect(),
+        line_recall(hub),
     );
     let (line_cap, line_cap_auto, curve_fleet) =
         (plan.line_cap, plan.line_cap_auto, plan.curve_fleet);
+    // 9 Nov 2026: say when the seed is a remembered fleet, and what the
+    // curve would have started at instead, so a reader of the log can
+    // tell the two apart.
+    if plan.recall_from > 0 {
+        info!(target: "tune", "line cap: starting at fleet {line_cap}, where the last job on \
+               this line settled (the line alone seeds {})", plan.recall_from);
+    }
+    if plan.hold > 0 {
+        info!(target: "tune", "line cap: holding the fleet at {} or under for this run, where \
+               the last job on this line stepped back", plan.hold);
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -576,6 +600,8 @@ pub(super) async fn build_fleet(
                 line_cap_knee,
                 line_anchor_bps: anchor_bps,
                 line_anchor_measured: anchor_measured,
+                line_cap_recall_from: plan.recall_from,
+                line_cap_hold: plan.hold,
                 window,
                 // The get pipeline's drain releases this charge
                 // (drain_outcome_batch); see the field doc for why only
@@ -1220,7 +1246,9 @@ mod line_cap_seed {
 
     /// The curve's FLOOR is fleet 25 over five servers = 5 each at
     /// 100 Mbit, and the pinned server keeps the number it was given.
-    /// The spawn is twenty apiece - the SECOND ceiling's share since
+    /// The spawn is each server's own 100 since 8 Nov 2026, so the probe
+    /// has a slot for every connection the primaries' grant lets it
+    /// reach (`linecap::probe_ceiling`). Before that it was twenty apiece - the SECOND ceiling's share since
     /// 12 Oct 2026 (`conntune::line_cap_headroom_fleet`), so the
     /// cold-start probe has slots past 50 to wake - and the four capped
     /// servers run at 5 with 15 parked behind each.
@@ -1233,7 +1261,7 @@ mod line_cap_seed {
         let got = build(&five(), &Some(hub)).await;
         let want: Vec<(String, usize, Option<usize>)> = ["a", "b", "c", "d"]
             .iter()
-            .map(|h| (format!("{h}.example"), 20, Some(5)))
+            .map(|h| (format!("{h}.example"), 100, Some(5)))
             .chain(std::iter::once(("e.example".to_string(), 100, None)))
             .collect();
         assert_eq!(got, want);
@@ -1250,7 +1278,8 @@ mod line_cap_seed {
     /// server's EQUAL share of it, which is what the pool raises it to
     /// once the queue goes dry (`linecap::fill_tail_share`) - parked
     /// slots hold no connection, so this costs the fill account nothing
-    /// until then.
+    /// until then. Since 8 Nov 2026 every server spawns to its own account
+    /// instead, which covers both walks.
     #[tokio::test]
     async fn the_fill_tier_seeds_at_its_floor_and_spawns_for_the_tail() {
         let cfg: Config = serde_json::from_str(
@@ -1264,10 +1293,10 @@ mod line_cap_seed {
         .unwrap();
         let got = build(&cfg, &None).await;
         let want: Vec<(String, usize, Option<usize>)> = vec![
-            ("a.example".into(), 45, Some(8)),
-            ("b.example".into(), 45, Some(8)),
-            ("c.example".into(), 25, Some(5)),
-            ("d.example".into(), 25, Some(5)),
+            ("a.example".into(), 100, Some(8)),
+            ("b.example".into(), 50, Some(8)),
+            ("c.example".into(), 100, Some(5)),
+            ("d.example".into(), 50, Some(5)),
         ];
         assert_eq!(got, want);
     }
@@ -1285,7 +1314,7 @@ mod line_cap_seed {
                 got.iter().all(|(h, spawned, target)| if h == "e.example" {
                     *spawned == 100 && target.is_none()
                 } else {
-                    *spawned == 20 && *target == Some(5)
+                    *spawned == 100 && *target == Some(5)
                 }),
                 "{got:?}"
             );
@@ -1311,7 +1340,7 @@ mod line_cap_seed {
             got.iter().all(|(h, spawned, target)| if h == "e.example" {
                 *spawned == 100 && target.is_none()
             } else {
-                *spawned == 20 && *target == Some(10)
+                *spawned == 100 && *target == Some(10)
             }),
             "{got:?}"
         );
@@ -1324,7 +1353,8 @@ mod line_cap_seed {
     /// `line_cap_headroom_fleet` follows `LINE_CAP_SUPPLY_MAX_FLEET`
     /// (100): `server_share(100, 5)` is 20. Since 12 Oct 2026 the
     /// typed-anchor case spawns the same 20, so this pins that the
-    /// measured bit can never make the spawn SMALLER.
+    /// measured bit can never make the spawn SMALLER. Since 8 Nov 2026
+    /// both spawn each server's own 100.
     /// The TARGET must not move - `fleet_for_carry` still clamps the
     /// seed at the first ceiling - only the spawn widens, so the in-run
     /// governor has a parked slot to wake if it ever raises this fleet
@@ -1341,10 +1371,71 @@ mod line_cap_seed {
             got.iter().all(|(h, spawned, target)| if h == "e.example" {
                 *spawned == 100 && target.is_none()
             } else {
-                *spawned == 20 && *target == Some(10)
+                *spawned == 100 && *target == Some(10)
             }),
             "{got:?}"
         );
+    }
+
+    /// 9 Nov 2026: the fleet the last job on this line settled at is
+    /// where this one starts. Same config and line as the test above, so
+    /// the curve alone seeds 50 (10 a server); a recalled 100 seeds 20 a
+    /// server, and a recall the curve already beats changes nothing.
+    #[tokio::test]
+    async fn a_recalled_fleet_seeds_the_next_job_on_the_same_line() {
+        if std::env::var_os("NZBFAST_LINE_CAP").is_some() {
+            eprintln!("skipped: NZBFAST_LINE_CAP overrides the fixture");
+            return;
+        }
+        let hub_with = |fleet: usize| {
+            Arc::new(StreamHub {
+                line_anchor_bps: std::sync::atomic::AtomicU64::new(1_250_000_000),
+                line_anchor_measured: std::sync::atomic::AtomicBool::new(true),
+                line_recall_fleet: std::sync::atomic::AtomicUsize::new(fleet),
+                ..Default::default()
+            })
+        };
+        for (recall, share) in [(100, 20), (25, 10), (0, 10)] {
+            let got = build(&five(), &Some(hub_with(recall))).await;
+            assert!(
+                got.iter().all(|(h, _, target)| match h == "e.example" {
+                    true => target.is_none(),
+                    false => *target == Some(share),
+                }),
+                "recall {recall}: {got:?}"
+            );
+        }
+    }
+
+    /// The plan half: a recalled seed names what the curve would have
+    /// seeded, so the run can fall back to it, and carries the hold; a
+    /// TYPED fleet takes neither.
+    #[test]
+    fn a_recall_is_a_seed_only_on_an_automatic_cap() {
+        if std::env::var_os("NZBFAST_LINE_CAP").is_some() {
+            eprintln!("skipped: NZBFAST_LINE_CAP overrides the fixture");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("nzbfast-recall-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.local.json");
+        let plan = line_cap_plan(&config, 1_250_000_000, true, 0, vec![0; 5], (100, 100));
+        assert_eq!((plan.line_cap, plan.recall_from, plan.hold), (100, 50, 100));
+        let plan = line_cap_plan(&config, 1_250_000_000, true, 0, vec![0; 5], (25, 0));
+        assert_eq!((plan.line_cap, plan.recall_from), (50, 0), "the curve wins");
+        std::fs::write(
+            config.with_file_name("settings.json"),
+            r#"{"line_cap_fleet":40}"#,
+        )
+        .unwrap();
+        let plan = line_cap_plan(&config, 1_250_000_000, true, 0, vec![0; 5], (100, 60));
+        assert_eq!(
+            (plan.line_cap, plan.recall_from, plan.hold),
+            (40, 0, 0),
+            "a typed fleet pinned the rule"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Sweep 9, finding 6: the SETTING's arm gets the same headroom.
@@ -1373,7 +1464,7 @@ mod line_cap_seed {
         let got = build(&five(), &Some(hub)).await;
         let want: Vec<(String, usize, Option<usize>)> = ["a", "b", "c", "d"]
             .iter()
-            .map(|h| (format!("{h}.example"), 20, Some(5)))
+            .map(|h| (format!("{h}.example"), 100, Some(5)))
             .chain(std::iter::once(("e.example".to_string(), 100, None)))
             .collect();
         assert_eq!(

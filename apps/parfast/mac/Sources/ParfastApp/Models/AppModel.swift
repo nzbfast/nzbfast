@@ -75,7 +75,19 @@ final class AppModel: ObservableObject {
 
     private var timer: Timer?
     private var seenFinished: Set<Int64> = []
+    /// False until the first snapshot has been read. The jobs already finished
+    /// in it came back from the queue store (a previous run's), and they are
+    /// marked seen without a notification: posting one for each of them at
+    /// launch replayed every old completion as if it had just happened.
+    private var sawFirstSnapshot = false
     private var notificationsAsked = false
+    /// The name of each job this run submitted, from its spec: the fallback
+    /// for a core before 9 Nov 2026, which sent no `title`, and for a store
+    /// job loaded with an empty one (sweep finding A37; see
+    /// `JobSnapshot.title`). A job restored from the store was submitted by
+    /// an earlier run and is not in here; it falls back to its survey's set
+    /// name where it has one.
+    private var submittedTitles: [Int64: String] = [:]
 
     init(core: CoreClient) {
         self.core = core
@@ -112,7 +124,8 @@ final class AppModel: ObservableObject {
     // MARK: - The poll
 
     func refresh() {
-        guard let snapshot = try? core.queueSnapshot() else { return }
+        guard var snapshot = try? core.queueSnapshot() else { return }
+        fillTitles(&snapshot)
         queue = snapshot
         verify.apply(queue: snapshot)
         autoRepairIfDue()
@@ -122,10 +135,42 @@ final class AppModel: ObservableObject {
         noteCompletions(snapshot)
     }
 
-    private func noteCompletions(_ snapshot: QueueSnapshot) {
+    /// A title for every job the core left untitled: the spec's name for a job
+    /// this run submitted, else the survey's set name. The core's own value,
+    /// when a core sends one, always wins.
+    private func fillTitles(_ snapshot: inout QueueSnapshot) {
+        for i in snapshot.jobs.indices where (snapshot.jobs[i].title ?? "").isEmpty {
+            let job = snapshot.jobs[i]
+            let name = submittedTitles[job.id] ?? job.survey?.set_name ?? ""
+            if !name.isEmpty { snapshot.jobs[i].title = name }
+        }
+    }
+
+    /// The jobs that finished since the last snapshot, each reported once.
+    /// The first snapshot reports NONE: whatever is finished in it came back
+    /// from the queue store, and announcing those at launch replayed every
+    /// old completion as news (sweep, section B).
+    func newlyFinished(in snapshot: QueueSnapshot) -> [JobSnapshot] {
+        if !sawFirstSnapshot {
+            sawFirstSnapshot = true
+            for job in snapshot.jobs where job.state.isFinished {
+                seenFinished.insert(job.id)
+            }
+        }
+        var out: [JobSnapshot] = []
         for job in snapshot.jobs where job.state.isFinished && !seenFinished.contains(job.id) {
             seenFinished.insert(job.id)
-            if settings.general.auto_close_progress && job.state == .done && progressJob == job.id {
+            out.append(job)
+        }
+        return out
+    }
+
+    private func noteCompletions(_ snapshot: QueueSnapshot) {
+        for job in newlyFinished(in: snapshot) {
+            // Not when the job left something out: the sheet is where those
+            // lines are shown, and closing it on Done would hide them (A36).
+            if settings.general.auto_close_progress && job.state == .done
+                && progressJob == job.id && (job.result?.leftOut.isEmpty ?? true) {
                 progressJob = nil
             }
             if settings.general.notifications {
@@ -186,9 +231,13 @@ final class AppModel: ObservableObject {
         let name = job.title ?? ""
         content.title = S.notifyDoneTitle(job: displayKind(job.kind))
         switch (job.kind, job.state) {
-        case (_, .failed), (_, .cancelled):
-            content.title = S.notifyFailed(job: displayKind(job.kind),
-                                           reason: job.error?.message ?? "")
+        // `.interrupted` belongs here too: it is a job that did NOT finish
+        // (the app quit under it), and it used to fall through to the kind's
+        // success arm and be announced as done.
+        case (_, .failed), (_, .cancelled), (_, .interrupted):
+            let reason = job.error?.message
+                ?? (job.state == .interrupted ? S.queueStateInterrupted : "")
+            content.title = S.notifyFailed(job: displayKind(job.kind), reason: reason)
             content.body = name
         case (.verify, _):
             switch job.survey?.verdict {
@@ -215,6 +264,11 @@ final class AppModel: ObservableObject {
             } else {
                 content.body = name
             }
+        }
+        // What the job left out (A36), in the core's own words, under the
+        // body: a Done that skipped files must not read as a plain Done.
+        if job.state == .done, let first = job.result?.leftOut.first {
+            content.body += content.body.isEmpty ? first : "\n" + first
         }
         let request = UNNotificationRequest(identifier: "job-\(job.id)", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
@@ -246,11 +300,20 @@ final class AppModel: ObservableObject {
     /// The ONE router. A Finder drop, a dock drop, `application(_:open:)`, the
     /// `parfast://open?path=` URL and the demo menu all come through here, so
     /// there is one set of rules and one place to change them.
-    func open(paths: [String]) {
+    ///
+    /// `fromURL` is the one difference a URL makes, and it only ever takes
+    /// something AWAY. Any web page can fire a `parfast://` link at this app,
+    /// so a URL may open a set and verify it - a read - but never starts the
+    /// repair that Settings' "verify, then repair" would start after a Finder
+    /// open: a repair writes into a folder of the link's choosing and, with
+    /// the purge default on, deletes recovery files there (sweep finding A34).
+    /// The Repair button is still offered when the verify says repairable, so
+    /// the user is the one who confirms it.
+    func open(paths: [String], fromURL: Bool = false) {
         guard !paths.isEmpty else { return }
         let lower = paths.map { ($0 as NSString).pathExtension.lowercased() }
         if let index = lower.firstIndex(of: "par2") {
-            openPar2(paths[index])
+            openPar2(paths[index], allowAutoRepair: !fromURL)
             return
         }
         if let index = lower.firstIndex(where: { Self.checksumExtensions.contains($0) }) {
@@ -267,14 +330,31 @@ final class AppModel: ObservableObject {
         create.addSources(paths)
     }
 
-    func openPar2(_ path: String) {
+    /// The paths a `parfast://open?path=...` URL names, and NOTHING for any
+    /// other URL. The host used to be ignored, so `parfast://anything?path=`
+    /// was an open too; `open` is the one host this route answers (the
+    /// `demo` host is `DemoRoute`'s, which runs first). Only absolute paths
+    /// are taken - a relative one would resolve against whatever directory
+    /// the app happened to be started in.
+    nonisolated static func pathsFromOpenURL(_ url: URL) -> [String] {
+        guard url.scheme?.lowercased() == "parfast",
+              url.host?.lowercased() == "open" else { return [] }
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        return items.filter { $0.name == "path" }
+            .compactMap(\.value)
+            .filter { $0.hasPrefix("/") }
+    }
+
+    func openPar2(_ path: String, allowAutoRepair: Bool = true) {
         mode = .verify
         verify.setTarget(path)
         // Settings' "Opening a .par2: verify, then repair". The setting was
         // stored and offered on this platform and acted on by nothing, so a
         // Mac user who chose it got a verify and a Repair button (Gemini
-        // sweep M18.2). Windows has had it since chip D.
-        verify.autoRepairPending = settings.general.open_par2 == .verifyThenRepair
+        // sweep M18.2). Windows has had it since chip D. Never armed by a
+        // `parfast://` URL - see `open(paths:fromURL:)`.
+        verify.autoRepairPending = allowAutoRepair
+            && settings.general.open_par2 == .verifyThenRepair
         startVerify()
     }
 
@@ -294,6 +374,10 @@ final class AppModel: ObservableObject {
         mode = .checksums
         checksums.subMode = .verify
         checksums.file = path
+        // The previous file's result must not stand under this file's name
+        // if the submit below is refused.
+        checksums.verifyJobId = nil
+        checksums.verifySnapshot = nil
         startChecksumVerify()
     }
 
@@ -303,6 +387,8 @@ final class AppModel: ObservableObject {
     func submit(_ spec: JobSpec, showSheet: Bool = true) -> Int64? {
         do {
             let id = try core.submit(spec)
+            let name = spec.displayName
+            if !name.isEmpty { submittedTitles[id] = name }
             refresh()
             if showSheet { progressJob = id }
             return id
@@ -382,12 +468,34 @@ final class AppModel: ObservableObject {
         if let id = submit(.checksumVerify(ChecksumVerifySpec(file: checksums.file)),
                            showSheet: false) {
             checksums.jobId = id
+            checksums.verifyJobId = id
+            checksums.apply(queue: queue)
         }
     }
 
+    /// A Cancel that lands on a job which finished a moment ago is refused
+    /// by the core (`not_found`, API.md: it keeps the job's state and its
+    /// result). That is the race between the click and the job, not a fault,
+    /// so it is not an alert: the refresh shows the job as it finished.
     func cancel(_ id: Int64) {
-        do { try core.cancel(job: id) } catch { report(error) }
+        do { try core.cancel(job: id) } catch {
+            if !Self.isAlreadyFinished(error) { report(error) }
+        }
         refresh()
+    }
+
+    nonisolated static func isAlreadyFinished(_ error: Error) -> Bool {
+        if let core = error as? CoreError { return core.code == "not_found" }
+        if case ClientError.noSuchJob = error { return true }
+        return false
+    }
+
+    /// `pf_queue_open_store` refused the store - written by a newer parfast
+    /// and left alone (nothing is saved this run), or unreadable and moved
+    /// aside to the path the message names. Either way the user's old queue
+    /// is not on screen, so the core's own sentence is shown once, at launch.
+    func reportStoreOpenFailure(_ error: Error) {
+        report(error)
     }
 
     func pause(_ id: Int64) {
@@ -443,9 +551,48 @@ final class AppModel: ObservableObject {
         refresh()
     }
 
-    func apply(settings newValue: CoreSettings) {
-        settings = newValue
-        do { try core.settingsSet(newValue) } catch { report(error) }
+    /// Re-read the core's settings into `settings`. The Settings window calls
+    /// this as it opens, so it edits what the core has NOW rather than the
+    /// copy this model took at launch - the queue's stepper and "When
+    /// finished" change the core's settings without passing through here.
+    func reloadSettings() {
+        if let fresh = try? core.settingsGet() { settings = fresh }
+    }
+
+    /// Write ONE edit: the fields that differ between `old` and `new`, over
+    /// the core's settings as they are at this moment, and nothing at all when
+    /// that changes nothing.
+    ///
+    /// This replaced `apply(settings:)`, which wrote the caller's whole struct.
+    /// The caller's struct was always this model's launch-time copy, and
+    /// `pf_settings_set` is a plain replace, so every toggle in Settings (and
+    /// merely OPENING Settings, or the progress sheet with notifications off)
+    /// put the queue's concurrency back to its launch value and restored or
+    /// dropped "Shut down when finished" - sweep finding A30. See
+    /// `CoreSettings.applyingChanges(from:to:)` for why the diff is per field.
+    func apply(changesFrom old: CoreSettings, to new: CoreSettings) {
+        guard old != new else { return }
+        // No fallback to the cached `settings` when the read fails: that copy
+        // can be stale, and writing over it is the bug this function fixes.
+        let fresh: CoreSettings
+        do { fresh = try core.settingsGet() } catch {
+            report(error)
+            return
+        }
+        let merged = fresh.applyingChanges(from: old, to: new)
+        let previous = settings
+        settings = merged
+        verify.applyChangedDefaults(from: previous, to: merged)
+        guard merged != fresh else { return }
+        do { try core.settingsSet(merged) } catch { report(error) }
+    }
+
+    /// One field changed in place, by a control that is not the Settings
+    /// window (the progress sheet's "Notify me").
+    func updateSettings(_ edit: (inout CoreSettings) -> Void) {
+        var new = settings
+        edit(&new)
+        apply(changesFrom: settings, to: new)
     }
 
     /// "Clear remembered checksums". True when the store is clear; a failure

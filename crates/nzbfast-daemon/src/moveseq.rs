@@ -568,7 +568,13 @@ mod harness {
         assert!(d.save_queue(), "the empty queue has to exist on disk");
 
         // The kill: the queue write lands, the tombstone never happens.
+        // The rescue rewrite is cut as well, because a killed process
+        // runs no rescue either: it is outside `arm_cut`'s budget, and
+        // until the rescue carried the refused tombstone (9 Nov 2026
+        // sweep) this torn state was reached only because the rewrite
+        // re-published the row it should have buried.
         super::super::storecut::arm_cut(1);
+        super::super::storecut::arm_store_cut(&[super::super::storecut::Store::HistoryRewrite]);
         assert!(d.retry("nzo_r1"), "retry refused the record");
         super::super::storecut::disarm();
 
@@ -642,7 +648,10 @@ mod harness {
             g.priority = 2;
             g.paused = false;
         }
+        // The rescue rewrite cut too, for the reason the retry twin
+        // above gives.
         super::super::storecut::arm_cut(1);
+        super::super::storecut::arm_store_cut(&[super::super::storecut::Store::HistoryRewrite]);
         d.activate_parked(&j);
         super::super::storecut::disarm();
 

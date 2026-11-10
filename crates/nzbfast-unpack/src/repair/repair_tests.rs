@@ -26,6 +26,7 @@ fn pset(files: Vec<Par2File>) -> Par2Set {
         recovery_set_id: [0u8; 16],
         block_size: 4096,
         files,
+        undescribed: Vec::new(),
         nonrecovery: Vec::new(),
         recovery_blocks_seen: 3,
     }
@@ -206,6 +207,7 @@ fn speculative_prefetch_side_pool_is_one_connection_per_server() {
         block_account: false,
         bind_ip: None,
         socks5: None,
+        http_proxy: None,
         enabled: true,
         warm_pool: false,
         idle_release_secs: None,

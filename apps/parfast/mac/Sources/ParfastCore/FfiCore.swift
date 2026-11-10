@@ -17,11 +17,20 @@ import CParfastFFI
 public final class FfiCore: CoreClient {
 
     private let session: OpaquePointer
-    private let lock = NSLock()
-    /// Retained for the lifetime of the session: the C side holds this
-    /// pointer and calls through it from arbitrary threads.
-    private final class WakeBox {
-        var handler: (@Sendable () -> Void)?
+    /// The C side holds a pointer to this and calls through it from
+    /// arbitrary threads, while `setWake` replaces the handler from the main
+    /// one. So the handler is read AND written under the box's own lock: the
+    /// callback used to read it bare, a data race on a closure reference
+    /// against every `setWake` (sweep, section B, "Swift wake handler read
+    /// without its lock"). The callback copies the handler out under the lock
+    /// and calls it outside, so a handler that calls back into the session -
+    /// which is what a polling host does - can never deadlock on it.
+    private final class WakeBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var handler: (@Sendable () -> Void)?
+
+        func set(_ new: (@Sendable () -> Void)?) { lock.withLock { handler = new } }
+        func fire() { lock.withLock { handler }?() }
     }
     private let wakeBox = WakeBox()
 
@@ -35,10 +44,19 @@ public final class FfiCore: CoreClient {
         // "poll". The session never holds a lock across it, so calling
         // straight back in from the handler is allowed and is exactly what a
         // polling host does.
-        let box = Unmanaged.passUnretained(wakeBox).toOpaque()
+        // RETAINED, AND NEVER RELEASED, on purpose. It was `passUnretained`,
+        // so the box died with this object - and `deinit` cannot know that no
+        // worker thread is still inside a wake call that read the pointer
+        // before `pf_session_set_wake(nil)` cleared it, which made teardown a
+        // use-after-free of host memory (sweep, section B). The box is one
+        // lock and one closure reference, there is one per session, and the
+        // app makes one session for its lifetime; leaking it is the price of
+        // a callback that can never touch freed memory. Its handler is
+        // cleared in `deinit`, so a late wake is a call to nothing.
+        let box = Unmanaged.passRetained(wakeBox).toOpaque()
         pf_session_set_wake(session, { ctx in
             guard let ctx else { return }
-            Unmanaged<WakeBox>.fromOpaque(ctx).takeUnretainedValue().handler?()
+            Unmanaged<WakeBox>.fromOpaque(ctx).takeUnretainedValue().fire()
         }, box)
     }
 
@@ -47,6 +65,7 @@ public final class FfiCore: CoreClient {
         // memory goes when the last of them lets go. Nothing else may touch
         // the session concurrently with this.
         pf_session_set_wake(session, nil, nil)
+        wakeBox.set(nil)
         pf_session_free(session)
     }
 
@@ -84,7 +103,7 @@ public final class FfiCore: CoreClient {
     // MARK: - CoreClient
 
     public func setWake(_ handler: (@Sendable () -> Void)?) {
-        lock.withLock { wakeBox.handler = handler }
+        wakeBox.set(handler)
     }
 
     public func submit(_ spec: JobSpec) throws -> Int64 {

@@ -663,7 +663,9 @@ public sealed class CreateViewModel : Observable
             return null;
         }
 
-        var separator = dirs[0].Contains('\\', StringComparison.Ordinal) ? '\\' : '/';
+        // From the PATH, not its folder: C:\x.bin has the folder "C:", which
+        // carries no separator to read one from.
+        var separator = paths[0].Contains('\\', StringComparison.Ordinal) ? '\\' : '/';
         var parts = PathUtil.Split(dirs[0]);
         var take = parts.Length;
         foreach (var dir in dirs.Skip(1))
@@ -679,15 +681,32 @@ public sealed class CreateViewModel : Observable
             take = i;
         }
 
-        if (take == 0)
+        // THE ROOT IS PUT BACK, because Split drops every leading separator. A
+        // slash-rooted path keeps its "/", and a UNC share ("\\server\share") or a
+        // long-path prefix ("\\?\C:\") keeps its "\\": dropping that turned the
+        // parent into "server\share\a", a RELATIVE path the core then resolved
+        // against its own working directory. A root shorter than the prefix needs
+        // is no common parent at all - "\\server" alone names no folder.
+        var lead = dirs[0][..(dirs[0].Length - dirs[0].TrimStart('\\', '/').Length)];
+        if (dirs.Any(d => !d.StartsWith(lead, StringComparison.Ordinal)
+                          || d.Length - d.TrimStart('\\', '/').Length != lead.Length))
         {
             return null;
         }
 
-        var joined = string.Join(separator, parts.Take(take));
-        // A drive-rooted Windows path keeps its root ("C:\\a"), and a
-        // slash-rooted one keeps its leading slash, which Split dropped.
-        return separator == '/' && dirs[0].StartsWith('/') ? "/" + joined : joined;
+        var minimum = lead.Length < 2 ? 1
+            : parts.Length > 2 && parts[0] == "?" && parts[1].Equals("UNC", StringComparison.OrdinalIgnoreCase) ? 4
+            : 2;
+        if (take < minimum)
+        {
+            return null;
+        }
+
+        var joined = lead + string.Join(separator, parts.Take(take));
+
+        // A bare drive ("C:") means "the current folder on C:", not its root, so
+        // a set whose files sit at the top of a drive gets "C:\".
+        return take == 1 && lead.Length == 0 && joined.EndsWith(':') ? joined + separator : joined;
     }
 
     /// <summary>

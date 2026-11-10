@@ -71,6 +71,7 @@ public sealed partial class MainWindow : Window, IShellHost, IUiDispatcher
         // notification (plan 5.2). Tracked here because only the window knows.
         Activated += (_, e) => _shell.WindowActive = e.WindowActivationState != WindowActivationState.Deactivated;
         AppWindow.Changed += OnAppWindowChanged;
+        AppWindow.Closing += OnAppWindowClosing;
         Closed += (_, _) =>
         {
             SaveWindowFrame();
@@ -89,6 +90,21 @@ public sealed partial class MainWindow : Window, IShellHost, IUiDispatcher
 
         ApplyForcedTheme();
         Sync();
+
+        // A saved queue the core could not read is said out loud, once the window
+        // can show a dialog at all (a ContentDialog needs a loaded XamlRoot). The
+        // shell also keeps it at the top of the log drawer, so dismissing this
+        // does not lose it.
+        if (_shell.QueueStoreError is { } storeError && Content is FrameworkElement loadedRoot)
+        {
+            void ShowStoreError(object sender, RoutedEventArgs e)
+            {
+                loadedRoot.Loaded -= ShowStoreError;
+                _ = Dialogs.ShowAsync(loadedRoot, Strings.ErrorTitle, storeError);
+            }
+
+            loadedRoot.Loaded += ShowStoreError;
+        }
 
         if (_options.IsScreenshot)
         {
@@ -316,6 +332,13 @@ public sealed partial class MainWindow : Window, IShellHost, IUiDispatcher
     {
         get
         {
+            // A window running beside another instance never opens the store
+            // that instance owns (see SingleInstance).
+            if (_options.NoQueueStore)
+            {
+                return null;
+            }
+
             try
             {
                 var dir = Path.Combine(
@@ -477,8 +500,17 @@ public sealed partial class MainWindow : Window, IShellHost, IUiDispatcher
             areas.Add(ToRect(primary.WorkArea));
         }
 
-        foreach (var area in DisplayArea.FindAll())
+        // INDEXED, NEVER foreach. Enumerating the list FindAll returns kills the
+        // process with a stowed exception (0xc000027b in Microsoft.UI.Xaml.dll,
+        // nothing catchable): the projected vector view does not survive being
+        // iterated, a known Windows App SDK defect. Count and the indexer are
+        // the documented workaround. This ran on every launch that had a saved
+        // frame - every launch after the first - so the app could not be opened
+        // twice; found on its first real Windows run, 9 Nov 2026.
+        var all = DisplayArea.FindAll();
+        for (var i = 0; i < all.Count; i++)
         {
+            var area = all[i];
             if (primary is null || area.DisplayId.Value != primary.DisplayId.Value)
             {
                 areas.Add(ToRect(area.WorkArea));
@@ -828,22 +860,133 @@ public sealed partial class MainWindow : Window, IShellHost, IUiDispatcher
             return;
         }
 
-        _sheet = new Views.ProgressSheet(_shell.Progress, root);
+        var sheet = new Views.ProgressSheet(_shell.Progress, root);
+        _sheet = sheet;
+        Task? shown = null;
         try
         {
-            await _sheet.ShowAsync();
+            shown = sheet.ShowAsync().AsTask();
+            _sheetShown = shown;
+            await shown;
         }
-        catch (Exception e) when (e is InvalidOperationException or ArgumentException)
+        catch (Exception e) when (Pickers.IsDialogFailure(e))
         {
-            // Another dialog is already up (WinUI allows exactly one), or the
-            // XamlRoot went away mid show. Either way the job is still running and
-            // visible on the Queue tab, so the right answer is to give up on the
-            // sheet rather than to fail the job.
+            // Another dialog is already up (WinUI allows exactly one, and says so
+            // with a COMException, which this filter did not name until the
+            // 2026-11-09 sweep), or the XamlRoot went away mid show. Either way
+            // the job is still running and visible on the Queue tab, so the right
+            // answer is to give up on the sheet rather than to fail the job.
         }
         finally
         {
+            // Detached here as well as on Closed: a ShowAsync that THREW never
+            // raises Closed, and the sheet would stay subscribed to the view model.
+            sheet.Detach();
+            if (ReferenceEquals(_sheetShown, shown))
+            {
+                _sheetShown = null;
+            }
+
             _sheet = null;
             _shell.Progress.Close();
+        }
+    }
+
+    /// <summary>
+    /// The progress sheet's ShowAsync while it is on screen, or null. Kept apart
+    /// from <see cref="_sheet"/>, which is dropped the moment the sheet is ASKED
+    /// to hide: a ContentDialog holds WinUI's one-dialog slot until its hide has
+    /// completed, and this is what completes then.
+    /// </summary>
+    private Task? _sheetShown;
+
+    /// <summary>Set once the user has agreed to stop running work by closing.</summary>
+    private bool _closeConfirmed;
+
+    /// <summary>Set while the close question is being asked; see OnAppWindowClosing.</summary>
+    private bool _confirmingClose;
+
+    /// <summary>
+    /// Asks before a close that would stop a running or paused job.
+    /// </summary>
+    /// <remarks>
+    /// Closing disposes the core, and the core cancels every job it holds; they
+    /// come back Interrupted and start over. That used to happen on the title
+    /// bar's X with no question asked (sweep 2026-11-09 A42). The close is
+    /// cancelled HERE, synchronously, and redone by <see cref="Window.Close"/>
+    /// once the user says yes; <see cref="_closeConfirmed"/> lets that close
+    /// through whether or not it raises Closing a second time, so this cannot
+    /// loop.
+    /// <para>
+    /// A SECOND X OR ALT+F4 WHILE THE QUESTION IS UP IS SWALLOWED. It used to ask
+    /// again; the second dialog could not be shown (one at a time), and "could not
+    /// ask" was read as yes, so the window closed unconfirmed. Now a close arriving
+    /// mid-question is cancelled and the question already on screen answers it.
+    /// </para>
+    /// </remarks>
+    private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        if (_closeConfirmed || Content is null)
+        {
+            return;
+        }
+
+        if (_confirmingClose)
+        {
+            args.Cancel = true;
+            return;
+        }
+
+        if (!_shell.CloseNeedsConfirmation)
+        {
+            return;
+        }
+
+        args.Cancel = true;
+        ConfirmClose();
+    }
+
+    private async void ConfirmClose()
+    {
+        _confirmingClose = true;
+        try
+        {
+            // The progress sheet is a ContentDialog too, and the commonest way
+            // here is clicking X with it open. Put it away and WAIT for its show
+            // to complete, which is when it gives up the one-dialog slot; asking
+            // at once (or after a low-priority tick) lost that race. Bounded, so
+            // a sheet that never finishes hiding cannot leave the window unable
+            // to ask at all - the question then simply fails to show, below.
+            if (_sheetShown is { IsCompleted: false } sheet)
+            {
+                _shell.Progress.Close();
+                await Task.WhenAny(sheet, Task.Delay(TimeSpan.FromSeconds(2)));
+            }
+
+            if (Content is not { } owner)
+            {
+                return;
+            }
+
+            var answer = await Dialogs.TryConfirmAsync(
+                owner,
+                Strings.ProgressCancelConfirm,
+                Strings.ProgressCancelConfirmBody,
+                Strings.ProgressCancelConfirmStop,
+                Strings.ProgressCancelConfirmKeep);
+
+            // ONLY A YES CLOSES. A question that could not be shown (null) keeps
+            // the window open: the user can dismiss whatever dialog is up and
+            // close again, while an unasked close stops every job for good.
+            if (answer == true)
+            {
+                _closeConfirmed = true;
+                Close();
+            }
+        }
+        finally
+        {
+            _confirmingClose = false;
         }
     }
 
@@ -905,6 +1048,13 @@ public sealed partial class MainWindow : Window, IShellHost, IUiDispatcher
             {
                 _shell.Drop(paths);
             }
+        }
+        catch (Exception ex) when (Pickers.IsDialogFailure(ex))
+        {
+            // The shell could not hand the items over (a source that went away
+            // mid drag, a virtual folder with no file system path). This is an
+            // async void handler, so letting it escape would end the process and
+            // every job in it; a drop that did nothing is the honest outcome.
         }
         finally
         {

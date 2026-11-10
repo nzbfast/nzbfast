@@ -178,6 +178,17 @@ impl Daemon {
             }
         }
         let claim = MoveClaim(self.clone(), nzo_id.to_string());
+        // Still in history, asked AFTER the marker and under the history
+        // lock - the lookup above was before it, and a retry or delete
+        // that sampled `moving` in between found nothing, took the record
+        // out and re-queued it. Retry stamps `Queued` only after an
+        // unlocked stretch (its directory claim), so the state test below
+        // can still read `Completed` for a record that has already left.
+        // `Daemon::mover_process` carries the whole argument (9 Nov 2026
+        // sweep).
+        if !self.history.lock_ok().iter().any(|x| Arc::ptr_eq(x, &job)) {
+            return false; // claim drops here, releasing the fence
+        }
         let (out_dir, cat) = {
             let mut g = job.lock_ok();
             if g.state != JobState::Completed || g.finalizing || g.move_failed.is_empty() {
@@ -443,6 +454,12 @@ impl Daemon {
             // it there at all, and this is the belt to that brace - a
             // failed record's pause flag describes nothing either way.
             j.paused = false;
+            // TODO 358 item 1: read before `clear_failure` takes the
+            // code - see where `health` is cleared below.
+            let gave_up = j.fail_code == Some(FailKind::Gone)
+                && j.health
+                    .as_ref()
+                    .is_some_and(crate::health::PostHealth::no_server_can_supply);
             j.clear_failure();
             // §207: the verdict goes with the run it explained. `stamp`
             // only overwrites on Some, so a re-run too short (or too
@@ -494,7 +511,27 @@ impl Daemon {
             // what the servers said before the last attempt. Cleared rather
             // than aged out: the prober re-samples a job with no verdict on
             // its next idle tick, which is the answer worth having here.
-            j.health = None;
+            //
+            // EXCEPT a retry of the opt-in give-up's own failure (TODO 358
+            // item 1). Since the start sample, a give-up no longer needs a
+            // verdict on the record to fire: cleared here, the next start
+            // would re-sample the same dead post and fail the job again
+            // seconds after the user asked for it to run. So the verdict
+            // stays, WAIVED - the same flag a reorder sets, which both the
+            // give-up and the auto-defer already honour - with its probe
+            // count reset so the prober still re-samples it as fresh, and
+            // that re-sample carries the waiver forward
+            // (`tasks::health`). Pressing Retry on a give-up is the user
+            // asserting they want the download; the bar says nothing
+            // about that.
+            j.health = match (gave_up, j.health.take()) {
+                (true, Some(mut h)) => {
+                    h.waived = true;
+                    h.probes = 0;
+                    Some(h)
+                }
+                _ => None,
+            };
         }
         // The reservation that flag owned dies with it. A delete of an
         // active/lane/finalizing job sets `del_on_drop` AND reserves the

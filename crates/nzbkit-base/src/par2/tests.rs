@@ -274,6 +274,96 @@ fn a_deferred_parse_settles_to_the_same_recovery_count_once_validated() {
     assert_eq!(fell_back.expect("still a set").recovery_blocks_seen, 3);
 }
 
+/// Parfast sweep (9 Nov 2026): a recovery packet whose LENGTH field is
+/// damaged swallows the packets behind it. The deferring walk framed it
+/// by that false length and never hashed it, so no MD5 failed, nothing
+/// fell back, and the swallowed packet was never seen; the hashing walk
+/// failed its MD5 and the serial `+1` resume found the swallowed one.
+/// Validation now rescans a failed span's interior, so the two agree.
+#[test]
+fn a_damaged_recovery_length_cannot_hide_the_packet_behind_it_from_a_deferred_parse() {
+    let set = [0x7Fu8; 16];
+    let fid = [0x43u8; 16];
+    let mut vol = pkt(set, TYPE_MAIN, &main_ids(64, &[fid]));
+    vol.extend(pkt(set, TYPE_FILEDESC, &desc_body(fid, 0xDD, 192, "d.bin")));
+    let first = vol.len();
+    for e in 0..3u32 {
+        vol.extend(pkt(set, TYPE_RECVSLIC, &slice_body(e, e as u8 + 1)));
+    }
+    // The first recovery packet now claims to run over the second: still
+    // a multiple of four and still inside the file, so it frames.
+    let packet_len = pkt(set, TYPE_RECVSLIC, &slice_body(0, 0)).len() as u64;
+    let mut broken = vol.clone();
+    broken[first + 8..first + 16].copy_from_slice(&(2 * packet_len).to_le_bytes());
+
+    let hashing = Par2Set::parse(&[&broken]).expect("set parses");
+    assert_eq!(
+        hashing.recovery_blocks_seen, 2,
+        "the hashing walk loses the damaged packet and finds the one behind it"
+    );
+    let (deferred, _, spans) = Par2Set::parse_deferred(&[&broken]);
+    deferred.expect("the deferred parse settles the same set");
+    assert_eq!(
+        spans[0].len(),
+        2,
+        "the damaged length swallowed a packet - the shape under test"
+    );
+    let found = validate_recovery_spans(&broken, &spans[0], &set, 64);
+    assert_eq!(
+        found.len(),
+        hashing.recovery_blocks_seen,
+        "a deferred parse must settle to the hashing walk's count: {found:?}"
+    );
+    assert!(
+        found.contains_key(&1) && found.contains_key(&2),
+        "{found:?}"
+    );
+}
+
+/// The ON-DISK twin of the test above: the seeking walk (`sparse_frame`,
+/// what parfast's loader takes for a large volume) frames the damaged
+/// span too - the next header sits exactly at its false end - and
+/// `validate_recovery_file` must settle to the hashing walk's count.
+#[test]
+fn a_damaged_recovery_length_cannot_hide_the_packet_behind_it_on_disk_either() {
+    let set = [0x80u8; 16];
+    let fid = [0x45u8; 16];
+    let mut vol = pkt(set, TYPE_MAIN, &main_ids(64, &[fid]));
+    vol.extend(pkt(set, TYPE_FILEDESC, &desc_body(fid, 0xDD, 192, "e.bin")));
+    let first = vol.len();
+    for e in 0..3u32 {
+        vol.extend(pkt(set, TYPE_RECVSLIC, &slice_body(e, e as u8 + 1)));
+    }
+    let packet_len = pkt(set, TYPE_RECVSLIC, &slice_body(0, 0)).len() as u64;
+    vol[first + 8..first + 16].copy_from_slice(&(2 * packet_len).to_le_bytes());
+    let hashing = Par2Set::parse(&[&vol]).expect("set parses");
+    assert_eq!(hashing.recovery_blocks_seen, 2);
+
+    let dir = std::env::temp_dir().join(format!("par2-ondisk-swallow-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("set.vol00+3.par2");
+    std::fs::write(&path, &vol).unwrap();
+    let f = std::fs::File::open(&path).unwrap();
+    let frame = sparse_frame(&f, vol.len() as u64).expect("the damaged span still frames");
+    assert_eq!(
+        frame.recovery.len(),
+        2,
+        "the damaged length swallowed a packet"
+    );
+    let spans: Vec<(u64, u64)> = frame.recovery.iter().map(|r| (r.offset, r.len)).collect();
+    let found = validate_recovery_file(&path, &spans, &set, 64);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        found.len(),
+        hashing.recovery_blocks_seen,
+        "the on-disk door must settle to the hashing walk's count: {found:?}"
+    );
+    assert!(
+        found.contains_key(&1) && found.contains_key(&2),
+        "{found:?}"
+    );
+}
+
 /// A deferred parse over inputs where ONE fell back to the hashing
 /// walk and another deferred: the two populations overlap, so the
 /// count the caller settles must not add the same exponent twice.

@@ -168,9 +168,18 @@ public sealed class VerifyViewModel : Observable
 
     public Survey? Survey => _job?.Survey;
 
-    public string SetName => Survey?.SetName ?? PathUtil.FileName(Par2Path ?? string.Empty);
+    // EMPTY IS ABSENT, not only null. The core's survey for a REPAIR job
+    // carries an empty set_name and folder, so `??` kept the empty string: after
+    // every repair the header lost the set's name and folder and "Show in folder"
+    // (both the folder link and the summary button) did nothing, its target
+    // being empty. Found on the first real Windows run, 9 Nov 2026.
+    public string SetName => Survey is { SetName: { Length: > 0 } name }
+        ? name
+        : PathUtil.FileName(Par2Path ?? string.Empty);
 
-    public string Folder => Survey?.Folder ?? PathUtil.DirectoryName(Par2Path ?? string.Empty);
+    public string Folder => Survey is { Folder: { Length: > 0 } folder }
+        ? folder
+        : PathUtil.DirectoryName(Par2Path ?? string.Empty);
 
     public string FileCountText => Fmt.Count(Survey?.Files.Count(f => f.Status != FileStatus.Extra) ?? 0);
 
@@ -204,24 +213,78 @@ public sealed class VerifyViewModel : Observable
             // parity is short, so the data cannot be rebuilt, but files found
             // under other names can still be renamed to what the set expects.
             // Refusing it would make the user do by hand what the engine can do.
-            || (Verdict is Verdict.Unrepairable && Options.RenameOnly && Map.Misnamed > 0));
+            || (Verdict is Verdict.Unrepairable && Options.RenameOnly && Map.Misnamed > 0
+                && !UnrepairableWithoutShortfall));
 
-    public string StatusText => Verdict switch
+    /// <summary>
+    /// Unrepairable with NO block shortfall: the core's verdict for a set whose
+    /// Main packet declares a member with no FileDesc, beside exit code 6 (API.md,
+    /// 9 Nov 2026). The repair refuses such a set outright, renames included, so
+    /// nothing is offered; and "needs 0 more blocks" would be a false sentence.
+    /// </summary>
+    private bool UnrepairableWithoutShortfall =>
+        Verdict is Verdict.Unrepairable
+        && ((Survey?.RecoveryNeeded ?? 0) - (Survey?.RecoveryAvailable ?? 0) <= 0
+            || _job?.Result?.ExitCode == 6);
+
+    /// <summary>
+    /// True when the job ended without settling a verdict: a verify that failed to
+    /// load the set, or one that was stopped. The core leaves the PENDING survey
+    /// on such a job, whose verdict still reads Verifying, so the pill said
+    /// "Verifying 0%" in the busy colour for ever and the reason was never shown.
+    /// A failed VERIFY whose survey does say Failed (the mock's shape) lands here
+    /// too, because the Failed pill's copy is "Repair failed", which a verify
+    /// that never got as far as a repair is not.
+    /// </summary>
+    private bool EndedUnsettled =>
+        _job is { IsFinished: true, State: not JobState.Done } job
+        && (Verdict is Verdict.Verifying or Verdict.Unknown
+            || (Verdict is Verdict.Failed && job.Kind != JobKind.Repair));
+
+    public string StatusText => EndedUnsettled ? UnsettledText : Verdict switch
     {
         Verdict.Verifying => Strings.Fill(Strings.VerifyPillVerifying, "percent", Fmt.Percent(Progress)),
         Verdict.Complete => Strings.VerifyPillComplete,
         Verdict.Repairable => Strings.Fill(Strings.VerifyPillRepairable,
             "needed", Fmt.Count(Survey?.RecoveryNeeded ?? 0),
             "available", Fmt.Count(Survey?.RecoveryAvailable ?? 0)),
+        // The shared pill carries a block count; with no shortfall to count, the
+        // sentence's own lead-in is used alone rather than "needs 0 more blocks".
+        // A dedicated string for this case is owed to the shared table.
+        Verdict.Unrepairable when UnrepairableWithoutShortfall => UnrepairableLeadIn,
         Verdict.Unrepairable => Strings.Fill(Strings.VerifyPillUnrepairable,
             "short", Fmt.Count(Math.Max(0, (Survey?.RecoveryNeeded ?? 0) - (Survey?.RecoveryAvailable ?? 0)))),
         Verdict.Repaired => Strings.VerifyPillRepaired,
-        Verdict.Failed => Strings.Fill(Strings.VerifyPillRepairFailed,
-            "reason", _job?.Error?.Message ?? "reason unknown"),
+        // No reason means no suffix: an English "reason unknown" in a localised
+        // pill was the one string here that no translation could reach.
+        Verdict.Failed => string.IsNullOrEmpty(_job?.Error?.Message)
+            ? Strings.QueueStateFailed
+            : Strings.Fill(Strings.VerifyPillRepairFailed, "reason", _job.Error.Message),
         _ => string.Empty,
     };
 
-    public PillTone StatusTone => Verdict switch
+    private static string UnrepairableLeadIn
+    {
+        get
+        {
+            var text = Strings.VerifyPillUnrepairable;
+            var cut = text.IndexOf(" - ", StringComparison.Ordinal);
+            return cut > 0 ? text[..cut] : text.Split('{')[0].TrimEnd(' ', '-');
+        }
+    }
+
+    private string UnsettledText => _job!.State switch
+    {
+        JobState.Failed => string.IsNullOrEmpty(_job.Error?.Message)
+            ? Strings.QueueStateFailed
+            : Strings.Fill(Strings.NotifyFailed, "job", SetName, "reason", _job.Error.Message),
+        JobState.Interrupted => Strings.QueueStateInterrupted,
+        _ => Strings.VerifyPillCancelled,
+    };
+
+    public PillTone StatusTone => EndedUnsettled
+        ? (_job!.State == JobState.Failed ? PillTone.Bad : PillTone.Neutral)
+        : Verdict switch
     {
         Verdict.Verifying => PillTone.Busy,
         Verdict.Complete => PillTone.Good,
@@ -262,6 +325,20 @@ public sealed class VerifyViewModel : Observable
     /// <summary>Settings: verify only, or verify then repair if repairable.</summary>
     public bool AutoRepairWhenRepairable { get; set; }
 
+    /// <summary>
+    /// The verify job whose repairable verdict should start a repair, or -1.
+    /// Armed when the verify is SUBMITTED and spent the first time that job is
+    /// seen finished, whatever its verdict.
+    /// </summary>
+    /// <remarks>
+    /// It was "the previous snapshot said Running", which a fast verify never
+    /// satisfies: a small set can go from queued to done between two polls, and
+    /// the first snapshot this screen sees of it is already Done, so verify then
+    /// repair silently did only the verify. Keying on the job id fires exactly
+    /// once however many states the screen missed.
+    /// </remarks>
+    private long _autoRepairJob = -1;
+
     public void AddExtraDir(string dir)
     {
         if (!ExtraDirs.Contains(dir))
@@ -282,21 +359,21 @@ public sealed class VerifyViewModel : Observable
             return;
         }
 
-        var wasVerifying = _job?.State == JobState.Running;
         _job = job;
         Map.Update(job.Survey, mapCells);
         RebuildRows();
         RaiseEverything();
 
-        // Verify then repair, from Settings. Fired exactly once, on the
-        // transition into a finished verify with a repairable verdict: doing it
-        // on every snapshot would submit a repair per poll.
-        if (AutoRepairWhenRepairable
-            && wasVerifying
-            && job is { State: JobState.Done, Kind: JobKind.Verify }
-            && Verdict == Verdict.Repairable)
+        // Verify then repair, from Settings. Fired exactly once per verify job:
+        // the arm is spent the first time the job is seen finished, so a repair
+        // is never submitted per poll (see _autoRepairJob).
+        if (job.Id == _autoRepairJob && job.IsFinished)
         {
-            Start(repair: true);
+            _autoRepairJob = -1;
+            if (job is { State: JobState.Done, Kind: JobKind.Verify } && Verdict == Verdict.Repairable)
+            {
+                Start(repair: true);
+            }
         }
     }
 
@@ -324,6 +401,7 @@ public sealed class VerifyViewModel : Observable
         JobId = _core.Submit(repair
             ? JobSpec.ForRepair(RepairSpec.From(verify, Options.Purge, Options.KeepDamaged))
             : JobSpec.ForVerify(verify));
+        _autoRepairJob = !repair && AutoRepairWhenRepairable && JobId >= 0 ? JobId : -1;
         RaiseEverything();
     }
 

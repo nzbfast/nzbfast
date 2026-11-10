@@ -160,18 +160,36 @@ pub(crate) struct ObfReport {
     /// the level succeeds, and this arm has just made a level succeed
     /// with a file in it that nothing opened.
     pub(crate) strays: Vec<PathBuf>,
+    /// G2 (TODO 358 pre-release sweep, review lane 4 item 4): the on-disk
+    /// bytes of the LARGEST member-bearing set that extracted, weighed
+    /// before its volumes were spent. Zero when nothing produced.
+    pub(crate) largest_produced: u64,
+    /// ...and the on-disk bytes of every stray, which is what that
+    /// yardstick is held against: a set that lost its first volume
+    /// arrives as one headless fragment PER remaining volume, so only
+    /// their sum is the size of what was not delivered.
+    pub(crate) stray_bytes: u64,
 }
 
 impl ObfReport {
-    /// The bool the two payload-path callers (`repair::reextract_dir`,
-    /// `rarfix`) read: did the pass deliver what was packed here? A
-    /// stray beside a set that extracted is forgiven, as in the nested
-    /// pass; a directory whose obfuscated content was NOTHING BUT
-    /// fragments is not - on those two paths those volumes are the job's
-    /// own payload, so "not one usable set could be formed from them"
-    /// has to stay a failure.
+    /// Did the pass deliver what was packed here? A small stray beside a
+    /// set that extracted is forgiven, as in the nested pass; a directory
+    /// whose obfuscated content was NOTHING BUT fragments is not, and
+    /// since the 9 Nov 2026 sweep neither is one whose fragments OUTWEIGH
+    /// what extracted (the line `rarfix::vouch::judge` holds a
+    /// `PackedGroup::remnant` to) - that is a main set that lost its
+    /// first volume beside a sample, and "the sample unpacked" is not a
+    /// delivery.
+    ///
+    /// Read by the nested pass (`extract_one_level`, which forgives at
+    /// depth >= 1 anyway). The two payload-path callers
+    /// (`repair::reextract_dir_outcome`, `rarfix::try_unrar_outcome`)
+    /// take `rarfix::obf_outcome` instead, which carries the strays out
+    /// by name for `vouch::judge`.
     pub(crate) fn ok(&self) -> bool {
-        !self.failed && (self.produced || self.strays.is_empty())
+        !self.failed
+            && (self.strays.is_empty()
+                || (self.produced && self.stray_bytes <= self.largest_produced))
     }
 }
 
@@ -449,6 +467,9 @@ pub(crate) fn extract_obfuscated_rar(
         // Taken per set, immediately before the extraction that fills it:
         // the diff against it names exactly what THIS set published.
         let before = snapshot_recursive(dir).ok();
+        // G2: weighed now, while every source is still on disk - a
+        // single-set eat consumes them as it reads.
+        let set_bytes = crate::rarfix::vouch::group_bytes(&sources);
         // `sources` and `archives` came off the same unzip, so index i of
         // one is index i of the other - the mapping §101's eating mode
         // needs to delete each volume as the extractor finishes with it.
@@ -499,6 +520,7 @@ pub(crate) fn extract_obfuscated_rar(
                 }
                 if has_member {
                     report.produced = true;
+                    report.largest_produced = report.largest_produced.max(set_bytes);
                 }
             }
             Err(e) => {
@@ -542,6 +564,7 @@ pub(crate) fn extract_obfuscated_rar(
                         names.join(", ")
                     );
                     report.strays.extend(sources.iter().cloned());
+                    report.stray_bytes = report.stray_bytes.saturating_add(set_bytes);
                 } else {
                     warn!(target: "extract", "obfuscated RAR unpack failed ({e})");
                     report.failed = true;

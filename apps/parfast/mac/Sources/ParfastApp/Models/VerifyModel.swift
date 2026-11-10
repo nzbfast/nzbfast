@@ -63,6 +63,27 @@ final class VerifyModel: ObservableObject {
         options.threads = settings.performance.threads
     }
 
+    /// Follow a CHANGED default, and only a changed one. `applyDefaults` ran
+    /// once at launch and never again, so a user who turned the purge or
+    /// keep-damaged default off in Settings still got a repair that purged or
+    /// did not keep copies for the rest of the run (sweep, section B). A
+    /// default that did not move leaves the pane's own toggle alone, so a
+    /// choice made in this pane's Options menu survives an unrelated setting.
+    func applyChangedDefaults(from old: CoreSettings, to new: CoreSettings) {
+        if old.general.purge_after_repair != new.general.purge_after_repair {
+            purge = new.general.purge_after_repair
+        }
+        if old.general.keep_damaged_copies != new.general.keep_damaged_copies {
+            keepDamaged = new.general.keep_damaged_copies
+        }
+        if old.performance.fast_solver != new.performance.fast_solver {
+            options.fast_solver = new.performance.fast_solver
+        }
+        if old.performance.threads != new.performance.threads {
+            options.threads = new.performance.threads
+        }
+    }
+
     func setTarget(_ path: String) {
         par2Path = path
         excluded = []
@@ -100,6 +121,17 @@ final class VerifyModel: ObservableObject {
     }
 
     var survey: Survey? { snapshot?.survey }
+
+    /// The job ENDED without a verdict: failed, cancelled or interrupted with
+    /// no survey, or with only the pending one the core publishes while it
+    /// reads the set (verdict `verifying`). Keyed on the job's STATE: a failed
+    /// load can leave that pending survey on the snapshot, and reading the
+    /// survey alone drew a map of a set that was never verified.
+    var endedWithoutVerdict: Bool {
+        guard let s = snapshot, s.state.isFinished else { return false }
+        guard let survey = s.survey else { return true }
+        return survey.verdict == .verifying && s.state != .done
+    }
 
     var isBusy: Bool {
         guard let s = snapshot else { return false }

@@ -44,9 +44,23 @@ public sealed partial class ProgressSheet : ContentDialog
         ConfirmStop.Content = Strings.ProgressCancelConfirmStop;
         ConfirmKeep.Content = Strings.ProgressCancelConfirmKeep;
 
-        vm.PropertyChanged += (_, _) => Sync();
+        // UNSUBSCRIBED WHEN THE SHEET CLOSES. The view model outlives every sheet
+        // (MainWindow makes a fresh one per job), so a lambda left on its event
+        // kept each closed sheet alive and syncing - and calling Hide on itself -
+        // for the life of the window.
+        vm.PropertyChanged += OnVmChanged;
+        Closed += (_, _) => Detach();
         Sync();
     }
+
+    /// <summary>
+    /// Stops following the view model. Idempotent; called on Closed and by the
+    /// window after ShowAsync returns or throws, because a show that threw never
+    /// raises Closed.
+    /// </summary>
+    public void Detach() => _vm.PropertyChanged -= OnVmChanged;
+
+    private void OnVmChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e) => Sync();
 
     private bool _syncing;
 
@@ -68,6 +82,8 @@ public sealed partial class ProgressSheet : ContentDialog
             Bar.IsIndeterminate = _vm.IsIndeterminate;
             Bar.ShowPaused = _vm.IsPaused;
             StatusLine.Text = _vm.StatusLine;
+            WarningsBar.IsOpen = _vm.HasWarnings;
+            WarningsBar.Message = _vm.WarningsText;
             PercentText.Text = _vm.PercentText;
             ElapsedValue.Text = _vm.ElapsedText;
             RemainingValue.Text = _vm.RemainingText;

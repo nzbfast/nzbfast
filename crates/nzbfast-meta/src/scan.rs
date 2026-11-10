@@ -11,7 +11,20 @@ use tracing::{info, warn};
 // index / search - the built-in indexer (M12)
 // ---------------------------------------------------------------------------
 
+/// The longest age [`parse_age`] answers, in seconds: a thousand years.
+/// Far past any server's retention, so no real limit is changed, and
+/// small enough that every caller's `now - age as i64` stays a past
+/// instant. A larger figure used to saturate at `u64::MAX`, which is
+/// `-1` as an i64, so "1e30d" put the cutoff ONE SECOND IN THE FUTURE
+/// and a scan asked for everything bisected to the newest thousand
+/// articles.
+const MAX_AGE_SECS: u64 = 1000 * 31_557_600;
+
 /// "90d" / "26w" / "6m" / "2y" (bare number = days) → seconds; ""/0 = 0.
+///
+/// A negative, NaN or infinite figure is refused: `-5d` used to read as
+/// 0, which every caller takes as "no limit" - the opposite of a
+/// tighter one.
 pub fn parse_age(s: &str) -> Result<u64> {
     let s = s.trim();
     if s.is_empty() || s == "0" {
@@ -33,7 +46,32 @@ pub fn parse_age(s: &str) -> Result<u64> {
     let n: f64 = num
         .parse()
         .map_err(|_| anyhow::anyhow!("can't parse age {s:?}"))?;
-    Ok((n * per) as u64)
+    if !n.is_finite() || n < 0.0 {
+        anyhow::bail!("can't parse age {s:?}");
+    }
+    Ok(((n * per) as u64).min(MAX_AGE_SECS))
+}
+
+#[cfg(test)]
+mod parse_age_tests {
+    use super::{MAX_AGE_SECS, parse_age};
+
+    /// NEGATIVE CONTROL, run: without the sign/finite check `-5d` reads
+    /// 0 ("no limit") and `nan` reads 0; without the cap `1e30d` reads
+    /// `u64::MAX`, a cutoff in the future.
+    #[test]
+    fn a_negative_or_absurd_age_is_refused_or_capped() {
+        assert_eq!(parse_age("90d").unwrap(), 90 * 86_400);
+        assert_eq!(parse_age("2").unwrap(), 2 * 86_400);
+        assert_eq!(parse_age("").unwrap(), 0);
+        for bad in ["-5d", "-1", "nan", "inf", "-inf"] {
+            assert!(parse_age(bad).is_err(), "{bad:?} parsed");
+        }
+        let huge = parse_age("1e30d").unwrap();
+        assert_eq!(huge, MAX_AGE_SECS);
+        let now = 1_800_000_000_i64;
+        assert!(now - (huge as i64) < now, "the cutoff must be in the past");
+    }
 }
 
 /// First article number whose Date ≥ cutoff, found by bisecting the

@@ -48,7 +48,23 @@ pub fn reextract_dir_why(
     dir: &std::path::Path,
     password: Option<&str>,
 ) -> Result<std::result::Result<(), Option<String>>> {
-    Ok(reextract_dir_outcome(dir, password)?.map(|_| ()))
+    // The leftovers are JUDGED here rather than dropped (TODO 358
+    // pre-release sweep, review lane 4 item 3): since the re-extract feed
+    // carries a failed group out beside one it unpacked instead of
+    // refusing outright, mapping every `Ok` to success would let a
+    // password that opened only the sample report the release unlocked.
+    // No recovery set is in scope on this route, so only the size rule
+    // speaks; an extra stays a success, as it always was.
+    use crate::rarfix::vouch::{VouchVerdict, judge};
+    Ok(match reextract_dir_outcome(dir, password)? {
+        Ok(o) => match judge(&o.packed, None, o.largest_produced) {
+            VouchVerdict::Tolerated(_) | VouchVerdict::Locked(_) => Ok(()),
+            VouchVerdict::MainPayload { reason, .. } | VouchVerdict::Failed { reason, .. } => {
+                Err(reason)
+            }
+        },
+        Err(why) => Err(why),
+    })
 }
 
 /// Post-repair: run the store-mode extraction over repaired volume files
@@ -75,7 +91,7 @@ pub fn reextract_dir_why(
 pub fn reextract_dir_outcome(
     dir: &std::path::Path,
     password: Option<&str>,
-) -> Result<std::result::Result<Vec<crate::rarfix::PackedGroup>, Option<String>>> {
+) -> Result<std::result::Result<crate::rarfix::UnpackOutcome, Option<String>>> {
     use nzbkit::extract::{Extractor, release_stem, vol_sort_key};
     let mut rars: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(dir)? {
@@ -137,17 +153,19 @@ pub fn reextract_dir_outcome(
             // this function's contract for a set it extracted (the named
             // branch below removes its own on the same terms) and what the
             // nested pass does with them today.
-            return Ok(extract_obfuscated_rar(dir, &obf, password, 1)
-                .ok()
-                .then(Vec::new)
-                .ok_or(None));
+            // Strays travel out by name and weight - see
+            // `crate::rarfix::obf_outcome`.
+            return Ok(crate::rarfix::obf_outcome(
+                extract_obfuscated_rar(dir, &obf, password, 1),
+                password.is_some(),
+            ));
         }
         // Genuinely nothing packed: a bare recreated payload, an already
         // extracted directory. That IS a legitimate no-op and stays a
         // success - but it is said out loud, so no log or reader can take
         // it for "extracted".
         info!(target: "extract", "no archive volumes on disk - nothing to re-extract");
-        return Ok(Ok(Vec::new()));
+        return Ok(Ok(crate::rarfix::UnpackOutcome::default()));
     }
     rars.sort_by_cached_key(|p| {
         let name = p.file_name().unwrap_or_default().to_string_lossy();
@@ -220,7 +238,7 @@ pub fn reextract_dir_outcome(
             Ok(consumed) => {
                 info!(target: "extract", "native re-extract complete ✔");
                 remove_spent_volumes(&consumed);
-                return Ok(Ok(Vec::new()));
+                return Ok(Ok(crate::rarfix::UnpackOutcome::default()));
             }
             Err(e) => {
                 warn!(target: "extract", "native re-extract failed ({e})");
@@ -349,14 +367,14 @@ pub fn reextract_dir_outcome(
             let _ = std::fs::remove_file(path);
         }
         info!(target: "extract", "removed {} volume file(s) after extraction", rars.len());
-        return Ok(Ok(Vec::new()));
+        return Ok(Ok(crate::rarfix::UnpackOutcome::default()));
     }
     if rep.fallbacks.iter().all(|(_, w)| w.contains("password"))
         && !rep.fallbacks.is_empty()
         && password.is_none()
     {
         warn!(target: "extract", "volumes are verified on disk - password required to unpack");
-        return Ok(Ok(Vec::new()));
+        return Ok(Ok(crate::rarfix::UnpackOutcome::default()));
     }
     // Same floor as the ladder in `try_unrar_spent_why`, one level up:
     // this pass demoted because the extraction would not fit on the disk,
@@ -384,6 +402,8 @@ pub fn reextract_dir_outcome(
     // the volume-side grouping cannot answer this. A slot whose headers
     // never parsed answers `None` and is left alone - unknown is not
     // extracted, and the unrar rung is exactly what such a volume is for.
+    let mut streamed_bytes: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
     if !rep.extracted.is_empty() {
         let demoted: std::collections::HashSet<&str> =
             rep.fallbacks.iter().map(|(g, _)| g.as_str()).collect();
@@ -395,6 +415,11 @@ pub fn reextract_dir_outcome(
             if demoted.contains(group.as_str()) {
                 continue;
             }
+            // G2: weighed before the delete, so the unrar rung's
+            // leftovers below are judged against the group that
+            // unpacked HERE too - see `crate::rarfix::vouch`.
+            let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            *streamed_bytes.entry(group).or_insert(0) += len;
             if std::fs::remove_file(path).is_ok() {
                 spent += 1;
             }
@@ -414,7 +439,12 @@ pub fn reextract_dir_outcome(
     match try_unrar_outcome(dir, password) {
         Ok(outcome) => {
             remove_spent_volumes(&outcome.spent);
-            Ok(Ok(outcome.packed))
+            let streamed = streamed_bytes.values().copied().max().unwrap_or(0);
+            Ok(Ok(crate::rarfix::UnpackOutcome {
+                spent: Vec::new(),
+                largest_produced: outcome.largest_produced.max(streamed),
+                packed: outcome.packed,
+            }))
         }
         // TODO 211's third and last call site. A repaired set can be a byte
         // SPLIT of one container (`stage.rar.001`..`.062`) exactly as often
@@ -437,7 +467,31 @@ pub fn reextract_dir_outcome(
         // never by what the volumes did, and `collect_container_split_sets`
         // will not join a `.par2`/`.par`/`.rev`/`.sfv` base in the first
         // place. A refusal anywhere leaves every part exactly where it was.
-        Err(_) if rescue_split_after_failed_unpack(dir, password) => Ok(Ok(Vec::new())),
+        Err(_) if rescue_split_after_failed_unpack(dir, password) => {
+            Ok(Ok(crate::rarfix::UnpackOutcome::default()))
+        }
+        // G2 (TODO 358 pre-release sweep, review lane 4 item 3): the feed
+        // above already unpacked a group and spent its volumes, so the
+        // unrar rung's refusal is over the LEFTOVERS only - and a small
+        // demoted sample failing there used to fail the job "the verified
+        // volumes on disk could not be extracted" with the release on
+        // disk. Carry them out as leftovers weighed against what the feed
+        // delivered, and let `vouch::judge` decide them exactly as it
+        // decides the fresh-run ladder's: a failed main payload still
+        // fails, an extra is named. A refusal with a reason (a bomb) rides
+        // on each group, as the ladder's own does. Nothing recordable -
+        // no named group left - keeps the refusal verbatim.
+        Err(why) if !streamed_bytes.is_empty() => {
+            let packed = crate::rarfix::record_leftovers(dir, password.is_some(), why.clone());
+            if packed.is_empty() {
+                return Ok(Err(why));
+            }
+            Ok(Ok(crate::rarfix::UnpackOutcome {
+                spent: Vec::new(),
+                largest_produced: streamed_bytes.values().copied().max().unwrap_or(0),
+                packed,
+            }))
+        }
         // Whatever the ladder refused with, verbatim: `Some` only for a
         // bomb verdict, which is the one refusal that must not be
         // reworded by the caller.

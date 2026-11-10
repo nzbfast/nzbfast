@@ -85,6 +85,7 @@ fn set_over(files: &[(&str, &[u8])], bs: usize) -> Par2Set {
         recovery_set_id: [0u8; 16],
         block_size: bs as u64,
         files,
+        undescribed: Vec::new(),
         nonrecovery: Vec::new(),
         recovery_blocks_seen: 0,
     }

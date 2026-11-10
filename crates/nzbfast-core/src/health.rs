@@ -406,6 +406,33 @@ impl PostHealth {
             && self.sampled > 0
             && self.absent == self.sampled
     }
+
+    /// TODO 358 item 1 (decision D1): may this verdict END a job, given
+    /// that the post declares `population` payload articles?
+    ///
+    /// [`Self::no_server_can_supply`] AND [`wide_enough`], nothing else.
+    /// The bar is the same bar, unanimous across every configured server
+    /// and every sampled article, with the age gate riding in via Red and
+    /// the waiver honoured. What this adds is the WIDTH: the k=8 takedown
+    /// detector reads "all missing" on a 90%-dead post 0.9^8 = 43% of the
+    /// time, and a 90%-dead post can be repairable, so eight unanimous
+    /// misses are a reason to look harder, never a reason to fail. At 64
+    /// the same post reads unanimous 0.9^64, about 0.1% of the time.
+    pub fn fails_job(&self, population: usize) -> bool {
+        self.no_server_can_supply() && wide_enough(self.sampled, population)
+    }
+}
+
+/// TODO 358 item 1: is a sample of `sampled` articles from a post of
+/// `population` WIDE enough for a verdict that fails a job?
+/// [`ESCALATE_K`] articles, or the whole post when it has fewer: a
+/// 30-article post sampled in full has nothing left to escalate to.
+///
+/// A record read back without its population (a verdict on the queue
+/// row, from before a restart) is judged with `usize::MAX`, which asks
+/// for the full [`ESCALATE_K`].
+pub fn wide_enough(sampled: u32, population: usize) -> bool {
+    sampled as usize >= ESCALATE_K.min(population).max(1)
 }
 
 /// The union both verdicts in this module are built from: who answered,
@@ -1284,6 +1311,129 @@ mod tests {
         s.waived = true;
         assert!(!s.no_server_can_supply());
         assert!(!s.sinks());
+    }
+
+    /// TODO 358 item 1: `fails_job` over synthetic availability maps at
+    /// the width the start sample actually runs. A 64-article sample
+    /// missing on every server of three is the one shape that fails.
+    #[test]
+    fn fails_job_needs_a_unanimous_64_wide_sample() {
+        let all_m = vec![M; ESCALATE_K];
+        let fleet = [
+            answer("a", &all_m),
+            answer("b", &all_m),
+            answer("c", &all_m),
+        ];
+        let v = score(&fleet, 30, 0, 1).unwrap();
+        assert!(v.fails_job(9_000), "unanimous 64-wide red must fail");
+        assert!(
+            v.fails_job(usize::MAX),
+            "and a record read back with no population"
+        );
+
+        // ONE server holding ONE article is not a dead post.
+        for host in 0..3 {
+            for at in [0, 31, ESCALATE_K - 1] {
+                let mut f = fleet.clone();
+                f[host].cells[at] = H;
+                let v = score(&f, 30, 0, 1).unwrap();
+                assert_eq!(v.bucket, Bucket::Red, "still red - {host}/{at}");
+                assert!(!v.fails_job(9_000), "server {host} has article {at}");
+            }
+        }
+
+        // Unknown is never Missing: one cell nobody got an answer for,
+        // on one server, and that article is not absent.
+        let mut f = fleet.clone();
+        f[1].cells[17] = U;
+        let v = score(&f, 30, 0, 1).unwrap();
+        assert_eq!(v.absent, ESCALATE_K as u32 - 1);
+        assert!(!v.fails_job(9_000), "an Unknown cell manufactured a miss");
+
+        // A server that never answered at all has not voted, so the
+        // fleet is not unanimous however loudly the others agree.
+        let mut f = fleet.clone();
+        f[2].cells = vec![U; ESCALATE_K];
+        assert!(!score(&f, 30, 0, 1).unwrap().fails_job(9_000));
+
+        // The deadline cutting a slow server short (the 4.2 defect's
+        // shape: xsnews answered ~9 of 64 inside the old 20 s): that
+        // server's unanswered cells block the verdict for those articles.
+        let mut f = fleet.clone();
+        for c in f[0].cells.iter_mut().skip(9) {
+            *c = U;
+        }
+        let v = score(&f, 30, 0, 1).unwrap();
+        assert_eq!(v.absent, 9);
+        assert!(!v.fails_job(9_000));
+
+        // The age gate: below GONE_MIN_AGE_DAYS the same map is amber.
+        assert!(
+            !score(&fleet, GONE_MIN_AGE_DAYS - 1, 0, 1)
+                .unwrap()
+                .fails_job(9_000)
+        );
+        // The waiver.
+        let mut w = score(&fleet, 30, 0, 1).unwrap();
+        w.waived = true;
+        assert!(!w.fails_job(9_000));
+    }
+
+    /// The width rule: the k=8 takedown detector can never fail a job on
+    /// a post bigger than its sample, however unanimous it is (the 43%
+    /// misfire on a 90%-dead post), but a small post sampled WHOLE can.
+    #[test]
+    fn fails_job_refuses_the_k8_shortcut_except_on_a_post_sampled_whole() {
+        let v = score(
+            &[answer("a", &[M; SAMPLE_K]), answer("b", &[M; SAMPLE_K])],
+            30,
+            0,
+            1,
+        )
+        .unwrap();
+        assert!(v.no_server_can_supply(), "the bar itself is met");
+        assert!(!v.fails_job(9_000), "k=8 of 9000 is the shortcut");
+        assert!(!v.fails_job(usize::MAX), "nor a narrow record verdict");
+        assert!(!v.fails_job(SAMPLE_K + 1), "one article unsampled");
+        assert!(v.fails_job(SAMPLE_K), "the whole post was sampled");
+        assert!(wide_enough(64, 64) && wide_enough(64, 100_000) && !wide_enough(63, 100_000));
+        assert!(wide_enough(3, 3) && !wide_enough(0, 0));
+    }
+
+    /// The misfire suite, synthetic half: the damaged-but-repairable
+    /// shapes the torture rows exercise (tv4-dmg5/20/60) - a fraction of
+    /// the post missing on some servers, every article still on at least
+    /// one - must never fail, at any fraction, with every server voting.
+    #[test]
+    fn damaged_but_suppliable_shapes_never_fail_the_job() {
+        for pct in [5usize, 20, 60, 90, 99] {
+            // Server a misses `pct`% of the sample, server b misses a
+            // DIFFERENT `pct`% overlapping it as much as possible while
+            // leaving one copy of each article somewhere.
+            let n = ESCALATE_K;
+            let miss = n * pct / 100;
+            let a: Vec<Avail> = (0..n).map(|i| if i < miss { M } else { H }).collect();
+            let b: Vec<Avail> = (0..n)
+                .map(|i| if i >= n - miss.min(n - 1) { M } else { H })
+                .collect();
+            let fleet = [answer("a", &a), answer("b", &b)];
+            let v = score(&fleet, 400, 0, 1).unwrap();
+            assert!(
+                !v.fails_job(20_000),
+                "{pct}% damaged was failed: {}",
+                v.reason
+            );
+            // And the shape where the post is simply short everywhere
+            // by that fraction (repairable by PAR2 at the low end):
+            // still not unanimous, still not failed.
+            if miss < n {
+                let short = [answer("a", &a), answer("b", &a)];
+                assert!(
+                    !score(&short, 400, 0, 1).unwrap().fails_job(20_000),
+                    "{pct}% short"
+                );
+            }
+        }
     }
 
     /// The give-up sentence has to keep leading with `post is gone`:

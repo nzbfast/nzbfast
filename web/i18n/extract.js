@@ -259,6 +259,8 @@ Object.assign(out, {
   'err.proxy address: expected host:port': 'proxy address: expected host:port',
   'err.proxy address: put the user and password in their own boxes':
     'proxy address: put the user and password in their own boxes',
+  // TODO 358 item 14: a save filling both proxy boxes (servers.rs).
+  'err.proxy: choose SOCKS5 or HTTP, not both': 'proxy: choose SOCKS5 or HTTP, not both',
   'err.move failed (files in use, or target exists?)': 'move failed (files in use, or target exists?)',
   // M32's route controls. These reach the form through the same tErr()
   // path; hand-editing them into en.reference.json instead left them out

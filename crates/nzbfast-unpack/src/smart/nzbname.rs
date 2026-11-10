@@ -564,15 +564,113 @@ pub(super) fn rename_dir(parent: &Path, out_dir: &Path, base: &str) -> Option<Pa
 /// `to` is a sibling of `from`, so the parent is there by construction,
 /// and a call that would have to build one is a caller bug rather than
 /// a directory to conjure.
+///
+/// AND A PARTIAL FAILURE IS ROLLED BACK (bug sweep 9 Nov 2026). The
+/// paragraph above was the whole contract until then, and it is two
+/// defects as read from the caller: an entry Windows will not move (a
+/// subfolder holding a file the extractor still has open) left the job
+/// SPLIT across `from` and `to` while the caller carried on under
+/// `from`'s name, with half its files gone from it; and an emptied
+/// `from` that would not delete answered `Err` after everything had
+/// moved, so the caller kept a path that held nothing. Now the entries
+/// already moved go back before the error is reported, so "not renamed"
+/// means the job is whole under its old name; and an emptied `from`
+/// that only refuses to go is a rename that happened, reported as one.
+/// A rollback that itself fails is the one ending that can still leave
+/// entries in both places - nothing is deleted either way - and it is
+/// reported as `Other`, never as the `AlreadyExists` that would send
+/// the caller round its ladder into a third folder.
 fn move_dir_contents(from: &Path, to: &Path) -> std::io::Result<()> {
+    move_dir_contents_with(
+        from,
+        to,
+        |a, b| std::fs::rename(a, b),
+        |d| std::fs::remove_dir(d),
+    )
+}
+
+/// [`move_dir_contents`] with its two filesystem calls as seams, so the
+/// failure arms - which on a Unix box only a Windows open handle can
+/// reach - are testable everywhere.
+fn move_dir_contents_with(
+    from: &Path,
+    to: &Path,
+    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+    remove_dir: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     std::fs::create_dir(to)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
-        std::fs::rename(entry.path(), to.join(entry.file_name()))?;
+    let mut moved: Vec<std::ffi::OsString> = Vec::new();
+    let pass = (|| -> std::io::Result<()> {
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            rename(&entry.path(), &to.join(entry.file_name()))?;
+            moved.push(entry.file_name());
+        }
+        Ok(())
+    })();
+    if let Err(e) = pass {
+        return Err(roll_back(from, to, &moved, &mut rename, e));
     }
     // Only removes it if it really is empty, so a missed entry surfaces as a
     // leftover directory rather than as a deletion.
-    std::fs::remove_dir(from)
+    match remove_dir(from) {
+        Ok(()) => Ok(()),
+        // Emptied but not removable (Windows keeps a directory with an
+        // open handle on it): every entry is in `to`, so the rename DID
+        // happen. Reporting it as a failure is what left the caller on a
+        // path that held nothing.
+        Err(e) if std::fs::read_dir(from).is_ok_and(|mut d| d.next().is_none()) => {
+            warn!(
+                target: "smart",
+                "moved every entry of {} into {} but could not remove the empty folder: {e}",
+                from.display(),
+                to.display()
+            );
+            Ok(())
+        }
+        // Not empty: something landed in `from` while we moved. Leaving
+        // it there splits the job, so the move is undone instead.
+        Err(e) => Err(roll_back(from, to, &moved, &mut rename, e)),
+    }
+}
+
+/// Move the entries named in `moved` back from `to` into `from`, then
+/// drop `to` if that emptied it. Returns the error the caller reports:
+/// `cause` itself when the rollback restored everything, and an `Other`
+/// naming both folders when it did not (see [`move_dir_contents`]).
+fn roll_back(
+    from: &Path,
+    to: &Path,
+    moved: &[std::ffi::OsString],
+    rename: &mut impl FnMut(&Path, &Path) -> std::io::Result<()>,
+    cause: std::io::Error,
+) -> std::io::Error {
+    let mut stranded = 0usize;
+    for name in moved {
+        let back = from.join(name);
+        // Never over something that appeared under the old name since:
+        // the rename below would replace it.
+        if back.symlink_metadata().is_ok() || rename(&to.join(name), &back).is_err() {
+            stranded += 1;
+        }
+    }
+    if stranded == 0 {
+        // `to` is ours and now empty; a failure here leaves an empty
+        // folder and nothing else.
+        let _ = std::fs::remove_dir(to);
+        return cause;
+    }
+    warn!(
+        target: "smart",
+        "could not move {stranded} entr(y/ies) back from {} into {} - the job is split \
+         across both folders, nothing was deleted",
+        to.display(),
+        from.display()
+    );
+    std::io::Error::other(format!(
+        "{cause}; and {stranded} entr(y/ies) could not be moved back from {}",
+        to.display()
+    ))
 }
 
 #[cfg(test)]

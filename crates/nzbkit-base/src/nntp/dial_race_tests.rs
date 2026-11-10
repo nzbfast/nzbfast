@@ -91,3 +91,14 @@ async fn the_walk_reaches_a_live_third_candidate() {
         "one SYN per candidate, no more"
     );
 }
+
+/// `dial_in_order` is public, so an empty candidate list is something a
+/// caller can hand it - and the per-candidate slice divides the connect
+/// budget by the count. Refused as an error, never a divide-by-zero
+/// panic on the dialling task.
+#[tokio::test]
+async fn an_empty_candidate_list_is_an_error_not_a_panic() {
+    let r = dial_in_order(&[], |_| async { Ok::<(), std::io::Error>(()) }).await;
+    let e = r.expect_err("nothing to dial");
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+}

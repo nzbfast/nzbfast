@@ -298,10 +298,19 @@ pub fn try_acquire(p: Provider, max_wait: Duration) -> bool {
 /// a bogus or hostile header cannot retire a provider for a week.
 const COOL_MAX: u64 = 3600;
 
-/// Push this provider's next slot out by `secs`, on top of whatever is
-/// already queued. For an explicit "you are going too fast" from
-/// upstream (HTTP 429/503 + Retry-After), where carrying on at the
-/// nominal rate is what gets a client banned.
+/// Push this provider's next slot out to at least `secs` from now. For
+/// an explicit "you are going too fast" from upstream (HTTP 429/503 +
+/// Retry-After), where carrying on at the nominal rate is what gets a
+/// client banned.
+///
+/// AT LEAST, not "on top of whatever is already queued", which is what
+/// it was: `tat.max(now) + secs` let every refusal add its own minute,
+/// so a few lane threads drawing 429s together - one refused window,
+/// one instruction - stacked `tat` to several minutes, and the next
+/// [`acquire`] slept past the one-minute park the clamp below exists to
+/// guarantee. Callers already asleep in `acquire` computed their wait
+/// at claim time, so nothing queued is moved either way; the only
+/// thing the old sum bought was the compounding.
 ///
 /// TWO horizons come out of one header, and they are different on
 /// purpose (TODO 26c):
@@ -323,7 +332,13 @@ pub fn penalise(p: Provider, secs: u64) {
         tat: now,
         cool_until: now,
     });
-    b.tat = b.tat.max(now) + Duration::from_secs(secs.clamp(1, 60));
+    // Plus the burst tolerance, because `acquire` lets a caller go that
+    // much ahead of `tat`: without it a provider with a burst would be
+    // called again inside the wait it just asked for.
+    let (_, tolerance) = timings(p);
+    b.tat = b
+        .tat
+        .max(now + Duration::from_secs(secs.clamp(1, 60)) + tolerance);
     b.cool_until = b
         .cool_until
         .max(now + Duration::from_secs(secs.clamp(1, COOL_MAX)));
@@ -532,6 +547,33 @@ mod tests {
         // A bogus header cannot retire a provider for a week.
         penalise(Provider::Omdb, 400 * 24 * 3600);
         assert!(cooling(Provider::Omdb) <= Duration::from_secs(COOL_MAX));
+    }
+
+    /// Three refusals of one window - three lane threads drawing the
+    /// same 429 - must leave the next slot a minute out, not three.
+    /// `WikidataSparql` because no other test in this crate names it
+    /// (see the disjoint-buckets note above). NEGATIVE CONTROL, run:
+    /// with `penalise` summing onto `tat`, the horizon reads ~180 s.
+    #[test]
+    fn concurrent_refusals_do_not_stack_the_park() {
+        for _ in 0..3 {
+            penalise(Provider::WikidataSparql, 60);
+        }
+        // What the next `acquire` would sleep: `tat` less the tolerance.
+        let (_, tolerance) = timings(Provider::WikidataSparql);
+        let ahead = buckets()
+            .lock_ok()
+            .get(&Provider::WikidataSparql)
+            .map(|b| b.tat.saturating_duration_since(Instant::now() + tolerance))
+            .expect("penalise made the bucket");
+        assert!(
+            ahead <= Duration::from_secs(60),
+            "three refusals parked the next caller {ahead:?} out"
+        );
+        assert!(
+            ahead > Duration::from_secs(55),
+            "the penalty was lost: {ahead:?}"
+        );
     }
 
     #[test]

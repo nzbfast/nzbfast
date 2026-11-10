@@ -34,12 +34,14 @@ use super::*;
 /// generous drop session while keeping the map too small to matter.
 const PREVIEW_CACHE_CAP: usize = 32;
 
-/// The handler's whole wall-clock budget. Probing opens one connection
-/// per server with a 20 s per-server ceiling, so a fleet of mute hosts
-/// could hold a burst for minutes; the dialog would rather hear
-/// "could not check" in 25 s than a verdict in three minutes, and the
-/// worker goes back in the pool either way (dropping the future closes
-/// the probe's sockets - `probe_server` is written for exactly that).
+/// The handler's whole wall-clock budget. Probing asks every server at
+/// once under a 20 s deadline for the first burst and a 30 s one for
+/// the escalation (`postprobe::Spread`), so a fleet of mute hosts could
+/// hold a probe for most of a minute; the dialog would rather hear
+/// "could not check" in 25 s than a verdict later, and the worker goes
+/// back in the pool either way (dropping the future closes the probe's
+/// sockets - `postprobe::split_burst` holds them in a JoinSet, which
+/// aborts every session when it is dropped, for exactly that).
 const PREVIEW_TIMEOUT_SECS: u64 = 25;
 
 /// Clears the daemon-wide busy latch on every exit path, panic and

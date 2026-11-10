@@ -306,6 +306,44 @@ fn keep_media_only_spares_obfuscated_rar_volumes() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Bug sweep 9 Nov 2026: the row above, for an obfuscated volume that
+/// kept an EXTENSION of no meaning (`<hash>.dat`). The RAR sniff here
+/// fired only on a name with no extension at all, while the extractor
+/// treats any sniff-eligible name with `Rar!` magic as an archive - and
+/// the 7z twin of this guard sniffs every name - so a set nothing could
+/// unpack was deleted when it was posted as `<hash>.dat` and kept when
+/// it was posted as `<hash>`.
+#[test]
+fn keep_media_only_spares_obfuscated_rar_volumes_that_kept_an_extension() {
+    let _steady = trash_globals_steady();
+    let dir = std::env::temp_dir().join(format!("nzbfast-keepobfext-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let vols = [
+        "301c0186f3bbdc58ac03a8739f989391c4.dat",
+        "a845657a411e3164c9d1e3f2c93235de3c.dat",
+    ];
+    for v in vols {
+        let mut body = b"Rar!\x1a\x07\x01\x00".to_vec();
+        body.extend_from_slice(&[0u8; 64]);
+        std::fs::write(dir.join(v), body).unwrap();
+    }
+    std::fs::write(dir.join("teaser.mkv"), vec![0u8; 4096]).unwrap();
+    // Same name shape, no magic: still clutter. The magic decides.
+    std::fs::write(
+        dir.join("cc98d076ce474159bec6a0fe670059ee32.dat"),
+        b"not an archive",
+    )
+    .unwrap();
+    let n = keep_media_only(&dir);
+    assert_eq!(n, 1, "only the non-archive blob goes");
+    for v in vols {
+        assert!(dir.join(v).exists(), "{v} is the only copy of the payload");
+    }
+    assert!(!dir.join("cc98d076ce474159bec6a0fe670059ee32.dat").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The junk sweep never removes an archive - named or obfuscated -
 /// because it cannot tell a volume the job has finished with from the
 /// only copy of a payload nothing unpacked. Spent volumes are the

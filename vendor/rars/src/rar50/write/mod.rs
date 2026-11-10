@@ -4053,6 +4053,14 @@ fn block_header_image(
     }
     body.extend_from_slice(type_specific);
     body.extend_from_slice(extra);
+    // The reader refuses a header body past the format's three-byte size
+    // field, so writing one would produce an archive nothing here reads
+    // back. (nzbfast-local change, 9 Nov 2026; see vendor/rars/VENDORING.md.)
+    if body.len() as u64 > super::RAR5_MAX_HEADER_BODY {
+        return Err(Error::InvalidHeader(
+            "RAR 5 header size exceeds the format's three-byte limit",
+        ));
+    }
 
     let mut header_size = Vec::new();
     write_vint(&mut header_size, body.len() as u64);

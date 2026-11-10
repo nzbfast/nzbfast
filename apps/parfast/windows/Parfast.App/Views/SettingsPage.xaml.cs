@@ -197,6 +197,15 @@ public sealed partial class SettingsPage : UserControl
         }
     }
 
+    // THE BATCH HANDLERS BELOW assign every control in their group on a change to
+    // any one of them, and each assignment that CHANGES something raises the view
+    // model's empty-name notification, which runs Sync() and rewrites every
+    // control from the view model before the handler's next line reads one. That
+    // is correct only because the view model treats a write of the value it
+    // already holds as a no-op (SettingsViewModel.Update and AutomaticThreads):
+    // the untouched controls are no-ops, the touched one applies, and Sync then
+    // leaves the rest agreeing with it. Until the 2026-11-09 sweep (A32) every
+    // write raised, so only the FIRST control of each handler could ever change.
     private void OnGeneralChanged(object sender, RoutedEventArgs e)
     {
         if (_syncing)

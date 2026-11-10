@@ -1437,11 +1437,12 @@ impl LiveRangeReader {
     /// The whole uncovered hole under the cursor, bounded to `scan`
     /// bytes: the span a dead-span verdict should be taken over, ending
     /// at the next covered byte so real data resumes right behind it.
-    /// The cursor byte itself must be uncovered (both callers serve a
-    /// covered head as a short read first) - a covered interval AT the
-    /// cursor would be clipped to start exactly at `pos` and the
-    /// `> pos` filter below would skip it, mistaking real bytes for
-    /// hole.
+    /// The cursor byte itself must be uncovered, and the CALLER must make
+    /// it so: `read` shrinks a straddling window to its covered head at
+    /// entry, and the blocked loop re-checks before its verdict because
+    /// bytes land while it waits. A covered interval AT the cursor would
+    /// be clipped to start exactly at `pos` and the `> pos` filter below
+    /// would skip it, mistaking real bytes for hole.
     fn uncovered_hole_len(&self, scan: u64) -> u64 {
         let next_covered = self
             .w
@@ -1658,7 +1659,7 @@ impl std::io::Read for LiveRangeReader {
         // below judged a straddling window by its hole and zero-filled
         // from `pos`, replacing up to a read's worth of real, landed
         // bytes with zeros.
-        let n = match self.covered(self.pos, n as u64) {
+        let mut n = match self.covered(self.pos, n as u64) {
             true => n,
             false => match self.covered_prefix(n as u64) {
                 0 => n,
@@ -1747,6 +1748,19 @@ impl std::io::Read for LiveRangeReader {
                     && !self.covered(self.pos, n as u64)
                     && let Some(sc) = &self.seek
                 {
+                    // The cursor byte can have landed while this read
+                    // waited, with the rest of the window still a hole.
+                    // Serve the landed head as a short read, exactly as
+                    // the entry check would have: the verdict below
+                    // measures its hole from a cursor that must be IN
+                    // one, and taken from a landed cursor it zero-filled
+                    // real bytes (and a dead tail behind them would
+                    // otherwise hold the read to the five-minute cap).
+                    let head = self.covered_prefix(n as u64);
+                    if head > 0 {
+                        n = head as usize;
+                        break;
+                    }
                     // The verdict spans the WHOLE hole (cursor to the
                     // next covered byte, runway-bounded) so one grace
                     // period condemns it once; the fast path above then
@@ -1757,7 +1771,7 @@ impl std::io::Read for LiveRangeReader {
                         None => waited >= stream_dead_grace_ms(),
                     };
                     dead_votes = if dead { dead_votes + 1 } else { 0 };
-                    if dead_votes >= dead_span_votes() && !self.covered(self.pos, n as u64) {
+                    if dead_votes >= dead_span_votes() && !self.covered(self.pos, 1) {
                         let gap = nzbkit::disk::chunk_len(self.uncovered_hole_len(runway), n);
                         self.dead_until = self.pos + hole;
                         buf[..gap].fill(0);

@@ -441,3 +441,118 @@ async fn a_completed_renamed_job_never_requeues() {
     .await
     .unwrap();
 }
+
+/// TODO 358 item 3: the soak with an INJECTED STALL. Three jobs queued at
+/// once on a provider that goes silent on every connection after a few
+/// bodies (`Chaos::mute_after_bodies`), with the pool's own dead-air
+/// escapes off, so every job's first fleet stalls with work still queued.
+/// The dispatch-stall watchdog must reset each one at most once, through
+/// the cross-job overlap (job N's tail beside job N+1's start, the
+/// hand-over the watchdog stands down for), and all three must land
+/// Completed byte-identical with no Failed row and no engine abort.
+#[tokio::test(flavor = "multi_thread")]
+async fn three_jobs_through_an_injected_dispatch_stall_all_complete() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-qsoak-stall-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+    let mut articles = HashMap::new();
+    // 24 x 20 kB per job, 8 bodies per connection before it goes mute,
+    // 2 connections: a first fleet lands about 16, a reset fleet has room
+    // for the rest.
+    let payloads: Vec<Vec<u8>> = (0..3).map(|i| payload(480_000, 70 + i as u8)).collect();
+    let all_segs: Vec<_> = payloads
+        .iter()
+        .enumerate()
+        .map(|(i, data)| {
+            make_file_articles(
+                &format!("s{i}.bin"),
+                data,
+                20_000,
+                &format!("qx{i}"),
+                &mut articles,
+            )
+        })
+        .collect();
+    let srv = MockServer::start(
+        articles,
+        Chaos {
+            mute_after_bodies: 8,
+            ..Chaos::default()
+        },
+    )
+    .await;
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .env("NZBFAST_DISPATCH_RESET_SECS", "4")
+            .env("NZBFAST_STALL_ABORT_SECS", "60")
+            .env("NZBFAST_READ_TIMEOUT_SECS", "600")
+            .env("NZBFAST_ADAPTIVE_TIMEOUT", "0")
+            .env("NZBFAST_HEDGE", "0")
+            .env("NZBFAST_TAIL_FANOUT", "0")
+            .env("NZBFAST_RECYCLE_SLOPE", "0")
+            .env("NZBFAST_DEFER_WINDOW_SECS", "6")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--connections")
+            .arg("2");
+        c
+    })
+    .await;
+    let port = d.port;
+    tokio::task::spawn_blocking(move || {
+        for (i, segs) in all_segs.iter().enumerate() {
+            addfile(
+                port,
+                &format!("stall{i}.nzb"),
+                &nzb_xml(&format!("s{i}.bin"), segs),
+            );
+        }
+        let mut done = false;
+        for _ in 0..600 {
+            let h = http(port, "/api?mode=history&output=json", None);
+            assert!(!h.contains("\"Failed\""), "{h}\n--- log ---\n{}", d.log());
+            if h.matches("\"Completed\"").count() >= 3 {
+                done = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let log = d.log();
+        assert!(
+            done,
+            "queue never drained to 3 Completed\n--- log ---\n{log}"
+        );
+        let resets = log.matches("Resetting dispatch").count();
+        assert!(
+            (1..=3).contains(&resets),
+            "{resets} resets for three jobs\n--- log ---\n{log}"
+        );
+        assert!(!log.contains("not resetting twice"), "{log}");
+        assert!(!log.contains("download stalled"), "{log}");
+        eprintln!("QSOAK-STALL resets={resets}");
+    })
+    .await
+    .unwrap();
+    for (i, data) in payloads.iter().enumerate() {
+        let out = dir.join(format!("complete/stall{i}/s{i}.bin"));
+        assert_eq!(&std::fs::read(&out).unwrap(), data, "stall{i} differs");
+    }
+}

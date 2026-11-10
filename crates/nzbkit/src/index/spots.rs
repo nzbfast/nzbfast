@@ -18,7 +18,10 @@ use super::*;
 ///
 /// The incoming copy wins the identity - it is the one whose message-ids
 /// are about to be keyed into the reverse map - and the LARGER byte
-/// count wins the size, exactly as `merge_parts` decides it. A fresh
+/// count wins the size, exactly as `merge_parts` decides it. Since
+/// 9 Nov 2026 "wins" only ever settles spelling: a part the row holds
+/// under a genuinely different id never reaches this merge, because
+/// `spot_contradicts_row` sends that spot to a row of its own. A fresh
 /// release passes `held` empty and the answer is the spot's own parts.
 fn merge_spot_parts(held: Vec<segcodec::Seg>, incoming: &[segcodec::Seg]) -> Vec<segcodec::Seg> {
     let mut merged: std::collections::BTreeMap<u32, (String, u64)> =
@@ -28,6 +31,64 @@ fn merge_spot_parts(held: Vec<segcodec::Seg>, incoming: &[segcodec::Seg]) -> Vec
         merged.insert(*n, (id.clone(), bytes));
     }
     merged.into_iter().map(|(n, (id, b))| (n, id, b)).collect()
+}
+
+/// Has `rid` been PROVEN to hold a different posting than a spot's NZB?
+///
+/// The spot-side twin of `ingest::contradicts`, and only proof counts,
+/// never silence: a file the row does not hold, or a held file sharing
+/// no part number with the spot, adopts, because the scanner may simply
+/// not have seen it yet (that is what [`merge_spot_parts`] exists for).
+///
+/// The two proofs:
+/// - a part number the row holds under a DIFFERENT message-id. A
+///   message-id is globally unique, so the same part of the same file
+///   under two ids is two postings, and the merge would otherwise let
+///   the spot's id replace the row's.
+/// - a part numbered PAST the row's known total. `ingest` compares the
+///   two totals instead, but both of its totals are posted `(x/y)`
+///   values; a spot's is inferred from the very part numbers it names,
+///   so an honest NZB missing its tail would read as a disagreement.
+///   A part beyond a total the row already knows cannot be honest, and
+///   is the one-segment way to make a release permanently incomplete.
+fn spot_contradicts_row<'a, P>(
+    db: &Connection,
+    rid: i64,
+    files: impl Iterator<Item = (&'a str, P)>,
+) -> rusqlite::Result<bool>
+where
+    P: Iterator<Item = (u32, &'a str)>,
+{
+    let mut q = db.prepare_cached(
+        "SELECT segments, total_parts FROM files WHERE release_id=?1 AND filename=?2",
+    )?;
+    for (fname, parts) in files {
+        let Some((raw, total)) = q
+            .query_row(rusqlite::params![rid, fname], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
+            })
+            .optional()?
+        else {
+            continue;
+        };
+        let held: HashMap<u32, String> = segcodec::decode(&raw)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(n, id, _)| (n, id))
+            .collect();
+        for (n, id) in parts {
+            if total > 0 && i64::from(n) > total {
+                return Ok(true);
+            }
+            if held
+                .get(&n)
+                .is_some_and(|mine| claims::norm_msgid(mine) != claims::norm_msgid(id))
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 impl Index {
@@ -46,7 +107,9 @@ impl Index {
             s.title,
             s.category,
             s.subcats,
-            s.size as i64,
+            // The record's size is signed, not sane: a `u64` past
+            // `i64::MAX` cast to a negative size.
+            i64::try_from(s.size).unwrap_or(i64::MAX),
             s.date,
             s.spotter_id,
             s.verified,
@@ -627,13 +690,20 @@ impl Index {
         let poster = by_count(&posters).unwrap_or_default();
 
         // Dedup: the identity substrate's reverse message-id lookup
-        // (the same join E3 measured at ~0.6%). The CALLER owns the
-        // quorum - a hostile spot NZB can embed one real id - so two
-        // matched ids always suffice, and a single-file spot (which can
-        // only ever match one) must ALSO agree on the posted stem. The
-        // hit is booked through apply_proven_name as MsgidSet evidence,
-        // so a conflicting or weaker existing name is arbitrated and
-        // ledgered instead of silently dropped.
+        // (the same join E3 measured at ~0.6%). The CALLER of that
+        // lookup - this function - owns the quorum, because a hostile
+        // spot NZB can embed one real id: two matched ids always
+        // suffice, and a single-file spot (which can only ever match
+        // one) must ALSO agree on the posted stem. The hit is booked
+        // through apply_proven_name as MsgidSet evidence, so a
+        // conflicting or weaker existing name is arbitrated and ledgered
+        // instead of silently dropped.
+        //
+        // The quorum guards the RENAME only. One embedded real id still
+        // reaches the fresh-row path below with overlap, and overlap is
+        // what adopts a (stem, poster, grp) row there; what stops that
+        // one id from rewriting the row's manifest is the contradiction
+        // test at that site, not this quorum (sweep A4, 9 Nov 2026).
         let hits = self.find_releases_by_msgids(payload.iter().map(String::as_str))?;
         let set_key = msgid_set_key(payload.iter());
         if let Some(&(rid, matched)) = hits.first() {
@@ -706,7 +776,40 @@ impl Index {
             .prepare_cached("SELECT id FROM releases WHERE stem=?1 AND poster=?2 AND grp=?3")?
             .query_row(rusqlite::params![stem, poster, grp], |r| r.get(0))
             .optional()?;
+        // Overlap licenses adoption; CONTRADICTION forbids it, whatever
+        // the overlap. A spot NZB is attacker-supplied (Spotnet keys are
+        // free), and the NZB's From and group are whatever its author
+        // typed, so one real message-id lifted from any NZB of a post
+        // was enough to adopt that post's row below the naming quorum -
+        // and then the merge handed the spot every part number it named
+        // and the UPSERT its total. The scanner's ingest has refused
+        // exactly this since `contradicts` landed; this is the same two
+        // proofs, read against the spot's shape (see
+        // `spot_contradicts_row`). A contradicted row is a different
+        // posting, so the spot gets a generation-marked row of its own,
+        // as the zero-overlap case below does.
+        let contradicted = match prior {
+            Some(prior) => {
+                let incoming = files.iter().map(|f| {
+                    (
+                        f.fname.as_str(),
+                        f.parts.iter().map(|(n, id, _)| (*n, id.as_str())),
+                    )
+                });
+                spot_contradicts_row(&self.db, prior, incoming)?
+            }
+            None => false,
+        };
         if let Some(prior) = prior
+            && contradicted
+        {
+            poster_key = format!("{poster}{POSTER_GEN_MARK}{}", &set_key[..GEN_HEX]);
+            warn!(
+                target: "index",
+                "spot {spot_msgid}: {stem} by {poster} in {grp} is already release \
+                 {prior} and this spot's NZB contradicts its articles - indexing it separately"
+            );
+        } else if let Some(prior) = prior
             && !hits.iter().any(|&(r, n)| r == prior && n > 0)
         {
             let keyed: bool = self
@@ -795,21 +898,32 @@ impl Index {
                 .and_then(|raw| segcodec::decode(&raw))
                 .unwrap_or_default();
             let parts = merge_spot_parts(held, &f.parts);
-            let bytes: u64 = parts.iter().map(|(_, _, b)| *b).sum();
+            let bytes = ingest::file_bytes(parts.iter().map(|(_, _, b)| *b));
             let seg_blob = segcodec::encode(&parts);
+            // `total_parts`: a row that already knows its total keeps it.
+            // The spot's total is INFERRED (highest part number, or the
+            // declared count, both the NZB author's to choose), where a
+            // scanned row's comes from the posted `(x/y)`; letting the
+            // spot overwrite it let an honest but truncated NZB mark an
+            // incomplete file complete, and a hostile one push the total
+            // past anything that will ever arrive. A part numbered past a
+            // known total never gets here - `spot_contradicts_row` sent
+            // that spot to a row of its own.
             self.db
                 .prepare_cached(
                     "INSERT INTO files(release_id, filename, total_parts, bytes, segments, nsegs)
                      VALUES(?1, ?2, ?3, ?4, ?5, ?6)
                      ON CONFLICT(release_id, filename) DO UPDATE SET
-                       total_parts=excluded.total_parts, bytes=excluded.bytes,
+                       total_parts=CASE WHEN files.total_parts > 0 THEN files.total_parts
+                                        ELSE excluded.total_parts END,
+                       bytes=excluded.bytes,
                        segments=excluded.segments, nsegs=excluded.nsegs",
                 )?
                 .execute(rusqlite::params![
                     rid,
                     f.fname,
                     f.total,
-                    bytes as i64,
+                    bytes,
                     seg_blob,
                     parts.len() as i64
                 ])?;
@@ -1882,6 +1996,188 @@ mod tests {
         teardown(&d, ix);
     }
 
+    /// Part byte counts are the spot NZB author's to choose, and the
+    /// files write summed them with a plain `sum()` and cast with `as
+    /// i64`: two near `u64::MAX` panicked a debug build (wrapped in
+    /// release), and one alone stored a NEGATIVE size.
+    ///
+    /// NEGATIVE CONTROL, run: put back the plain `sum()` / `as i64` and
+    /// this panics with an arithmetic overflow at the files write.
+    #[test]
+    fn a_spot_nzb_with_absurd_part_sizes_stores_a_sane_one() {
+        let d = dir("absurd");
+        let mut ix = Index::open(&d.join("index.db")).unwrap();
+        let s = spot("<big@spot>", "Absurd.Sizes.2026.1080p.WEB.x264-GRP", "a09");
+        ix.insert_spot(&s).unwrap();
+        let nzb = crate::nzb::Nzb {
+            files: vec![nzb_file(
+                r#""Absurd.Sizes.2026.1080p.WEB.x264-GRP.part01.rar" yEnc (1/2)"#,
+                "alt.binaries.misc",
+                &[(1, "big1", u64::MAX), (2, "big2", u64::MAX)],
+            )],
+            meta: Vec::new(),
+        };
+        let rid = match ix.promote_spot(&s.msgid, &s.title, &nzb, 2000).unwrap() {
+            SpotPromotion::Promoted(rid) => rid,
+            other => panic!("expected a fresh release, got {other:?}"),
+        };
+        let (fb, tb): (i64, i64) = ix
+            .db
+            .query_row(
+                "SELECT f.bytes, r.total_bytes FROM files f JOIN releases r ON r.id=f.release_id
+                  WHERE r.id=?1",
+                [rid],
+                |x| Ok((x.get(0)?, x.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(fb, ingest::file_bytes([u64::MAX]));
+        assert!(fb > 0 && tb > 0, "sizes must not go negative: {fb} {tb}");
+        teardown(&d, ix);
+    }
+
+    /// A spot NZB that shares ONE real article with a release, below the
+    /// naming quorum, must not rewrite that release's manifest.
+    ///
+    /// The adopt-on-any-overlap rule handed the spot the row, and then
+    /// `merge_spot_parts` let its ids win every part number it named and
+    /// the UPSERT its total: `make_nzb` emitted the spot author's
+    /// articles under the trusted card, or one segment numbered 1000
+    /// made the release incomplete forever. An overlapping spot that
+    /// AGREES with the row still adopts and merges - the honest case
+    /// below - and a truncated honest NZB no longer lowers the total.
+    ///
+    /// NEGATIVE CONTROL, run: make `spot_contradicts_row` return
+    /// `Ok(false)` and the first case fails (the hostile spot adopts the
+    /// row); disable only its past-the-total arm and the second case
+    /// fails the same way; put back `total_parts=excluded.total_parts`
+    /// and the honest case fails (total 3 lowered to 2).
+    #[test]
+    fn a_spot_sharing_one_article_cannot_rewrite_the_release() {
+        let d = dir("contradict");
+        let mut ix = Index::open(&d.join("index.db")).unwrap();
+        let subj = |vol: u32, n: u32| {
+            format!(r#""Trusted.Release.2026.1080p.WEB.x264-GRP.part0{vol}.rar" yEnc ({n}/3)"#)
+        };
+        let mut over = Vec::new();
+        for vol in 1..=2u32 {
+            for n in 1..=3u32 {
+                over.push(entry(
+                    &subj(vol, n),
+                    "spotter@x",
+                    &format!("t{vol}{n}"),
+                    1 << 20,
+                ));
+            }
+        }
+        ix.ingest("alt.binaries.misc", &over, 1000).unwrap();
+        let first: i64 = ix
+            .db
+            .query_row("SELECT id FROM releases", [], |x| x.get(0))
+            .unwrap();
+        let complete = |ix: &Index, rid: i64| -> i64 {
+            ix.db
+                .query_row("SELECT complete FROM releases WHERE id=?1", [rid], |x| {
+                    x.get(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(complete(&ix, first), 1, "the fixture must start complete");
+        let title = "Trusted.Release.2026.1080p.WEB.x264-GRP";
+        let vol =
+            |v: u32, segs: &[(u32, &str, u64)]| nzb_file(&subj(v, 1), "alt.binaries.misc", segs);
+
+        // Hostile: the real part 1 of vol 1, then its own ids for parts 2
+        // and 3, and a vol 2 of its own - payload [t11, evil4], one match.
+        ix.insert_spot(&spot("<h1@spot>", title, "a09")).unwrap();
+        let nzb = crate::nzb::Nzb {
+            files: vec![
+                vol(
+                    1,
+                    &[
+                        (1, "t11", 1 << 20),
+                        (2, "evil2", 1 << 20),
+                        (3, "evil3", 1 << 20),
+                    ],
+                ),
+                vol(2, &[(1, "evil4", 1 << 20)]),
+            ],
+            meta: Vec::new(),
+        };
+        let got = ix.promote_spot("<h1@spot>", title, &nzb, 2000).unwrap();
+        assert_ne!(
+            got,
+            SpotPromotion::Promoted(first),
+            "the hostile spot adopted the row"
+        );
+        let one = ix.make_nzb(first).unwrap();
+        for id in ["t12", "t13", "t21"] {
+            assert!(one.contains(id), "the release lost {id}");
+        }
+        for id in ["evil2", "evil3", "evil4"] {
+            assert!(!one.contains(id), "the release swallowed {id}");
+        }
+
+        // Hostile, the other proof: one part numbered past the known
+        // total. Payload [t11, evil5] again matches once.
+        ix.insert_spot(&spot("<h2@spot>", title, "a09")).unwrap();
+        let nzb = crate::nzb::Nzb {
+            files: vec![
+                vol(1, &[(1, "t11", 1 << 20), (1000, "evil1000", 1 << 20)]),
+                nzb_file(
+                    r#""Trusted.Release.2026.1080p.WEB.x264-GRP.part03.rar" yEnc (1/1)"#,
+                    "alt.binaries.misc",
+                    &[(1, "evil5", 1 << 20)],
+                ),
+            ],
+            meta: Vec::new(),
+        };
+        let got = ix.promote_spot("<h2@spot>", title, &nzb, 2000).unwrap();
+        assert_ne!(got, SpotPromotion::Promoted(first));
+        assert_eq!(
+            complete(&ix, first),
+            1,
+            "one segment made the release incomplete"
+        );
+        assert!(!ix.make_nzb(first).unwrap().contains("evil1000"));
+
+        // Honest: agrees with every part it shares, is missing vol 1's
+        // tail, and carries a vol 3 the scanner has not seen (payload
+        // [t11, n31], one match, so this is the adopt path and not the
+        // quorum rename). It adopts, merges, and leaves the posted total
+        // alone.
+        ix.insert_spot(&spot("<ok@spot>", title, "a09")).unwrap();
+        let nzb = crate::nzb::Nzb {
+            files: vec![
+                vol(1, &[(1, "t11", 1 << 20), (2, "t12", 1 << 20)]),
+                nzb_file(
+                    r#""Trusted.Release.2026.1080p.WEB.x264-GRP.part03.rar" yEnc (1/1)"#,
+                    "alt.binaries.misc",
+                    &[(1, "n31", 1 << 20)],
+                ),
+            ],
+            meta: Vec::new(),
+        };
+        assert_eq!(
+            ix.promote_spot("<ok@spot>", title, &nzb, 2000).unwrap(),
+            SpotPromotion::Promoted(first),
+            "an agreeing spot must still adopt the row"
+        );
+        let total: i64 = ix
+            .db
+            .query_row(
+                "SELECT total_parts FROM files WHERE release_id=?1 AND filename LIKE '%part01.rar'",
+                [first],
+                |x| x.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, 3, "a truncated NZB must not lower the posted total");
+        let one = ix.make_nzb(first).unwrap();
+        for id in ["t11", "t12", "t13", "t21", "t22", "t23", "n31"] {
+            assert!(one.contains(id), "the honest merge lost {id}");
+        }
+        teardown(&d, ix);
+    }
+
     /// Same name, same poster, same group, DIFFERENT articles - a plain
     /// repost. The (stem, poster, grp) upsert used to hand generation 2
     /// generation 1's row: manifest overwritten through
@@ -2024,6 +2320,14 @@ mod tests {
     ///
     /// The backfill flag is what makes "still filling" a fact rather
     /// than a guess; see the converged case below.
+    ///
+    /// The spot names the row's OWN article. Until 9 Nov 2026 it named a
+    /// fresh id for the same part number, which is not an unknown at
+    /// all: the row's `files` say part 1 is `old1`, so a spot calling it
+    /// `new1` is proven to be another posting, and adopting it rewrote
+    /// the manifest (sweep A4, `spot_contradicts_row`). What this test
+    /// is about - an empty map reads as no overlap, and no overlap on an
+    /// unconverged map adopts - is unchanged, and is still all it tests.
     #[test]
     fn an_unkeyed_row_still_adopts_the_spot_in_place() {
         let d = dir("unkeyed");
@@ -2056,7 +2360,7 @@ mod tests {
             files: vec![nzb_file(
                 r#""Dark.Row.2026.1080p.WEB.x264-GRP.part01.rar" yEnc (1/1)"#,
                 "alt.binaries.misc",
-                &[(1, "new1", 4 << 30)],
+                &[(1, "old1", 4 << 30)],
             )],
             meta: Vec::new(),
         };

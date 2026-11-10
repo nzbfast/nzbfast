@@ -853,6 +853,14 @@ fn walk_out_dirs(root: &Path, out_name: &str, root_link: RootLink) -> io::Result
 mod disambiguate;
 pub use disambiguate::disambiguated_out_name;
 
+/// The Windows output-leaf open's ride over a BRIEF access-denied or
+/// sharing-violation (a scanner's hold, a delete-pending name), so only
+/// a lasting refusal reaches the write halt. Product code on the
+/// non-unix (Windows) arm only; the unix build compiles it for its
+/// policy tests. See `relpath/transient.rs`'s module doc.
+#[cfg(any(not(unix), test))]
+mod transient;
+
 /// [`walk_out_dirs`]'s racing-window test seam - in its own file so a
 /// bare `drop(f)` elsewhere in this one can never be mistaken for a
 /// reference to it. See `relpath/seam.rs`'s module doc for why.
@@ -1015,7 +1023,11 @@ pub fn open_out_leaf_under(root: &Path, out_name: &str, mode: LeafOpen) -> io::R
     #[cfg(not(unix))]
     {
         create_out_dirs(root, out_name)?;
-        open_out_leaf(&join_out_name(root, out_name), mode)
+        let path = join_out_name(root, out_name);
+        // A brief hold (antivirus, a delete-pending name) answers with
+        // the same two codes a refusing folder does; reopen for ~500 ms
+        // so only a lasting one halts the job. `relpath/transient.rs`.
+        transient::open_riding_out_denial(|| open_out_leaf(&path, mode), std::thread::sleep)
     }
 }
 

@@ -65,7 +65,10 @@ public enum MockPlanner {
     /// The one quantity here read off the engine rather than derived.
     static let creatorPacketBytes: Int64 = 64 + 16
 
-    public static func plan(spec: CreateSpec, sources: [Source]) -> PlanPreview {
+    public static func plan(spec: CreateSpec, sources given: [Source]) -> PlanPreview {
+        // Each member under the name the create will STORE, which is what the
+        // description packets are sized from - `planner::par2_members`.
+        let sources = storedSources(spec: spec, sources: given)
         let totalBytes = sources.reduce(Int64(0)) { $0 + $1.size }
         var warnings: [String] = []
 
@@ -536,12 +539,84 @@ public enum MockPlanner {
         if let mb = spec.perf.memory_mb { parts.append("-m\(mb)") }
         if spec.path_mode == .relative, let base = spec.base_path, !base.isEmpty {
             parts.append("-B" + quote(base))
+        } else if spec.path_mode == .basename,
+                  let base = basenameBase(output: spec.output, paths: sources.map(\.path)) {
+            parts.append("-B" + quote(base))
         }
         if !spec.comment.isEmpty { parts.append("--comment=" + quote(spec.comment)) }
         parts.append(quote(spec.output.isEmpty
             ? "\(outputStem(spec.output, sources: sources)).par2" : spec.output))
         for s in sources { parts.append(quote(s.path)) }
         return parts.joined(separator: " ")
+    }
+
+    // MARK: - Stored names (`planner::basename_base`, `planner::stored_name`)
+
+    /// The `-B` Basename mode gives the run: the sources' one folder, or their
+    /// nearest common folder when there are several - and NONE when every
+    /// member already sits under the output folder, where the create names
+    /// them relative to the `.par2` (so `sub/a.bin`, not `a.bin`). The 9 Nov
+    /// 2026 sweep (A6) moved the engine to this rule and this mock kept naming
+    /// every member by its basename, so the preview's description packets came
+    /// out 8 bytes short per member per file for a set beside a subfolder -
+    /// `PlannerParityTests` caught it the first time it ran against the engine.
+    static func basenameBase(output: String, paths: [String]) -> String? {
+        let outDir = components((output as NSString).deletingLastPathComponent)
+        let parents = paths.map { components(($0 as NSString).deletingLastPathComponent) }
+        guard let first = parents.first else { return nil }
+        var common = first
+        var several = false
+        for p in parents.dropFirst() {
+            if p != first { several = true }
+            while !p.starts(with: common) {
+                if common.isEmpty { return nil }
+                common.removeLast()
+            }
+        }
+        if paths.allSatisfy({ components($0).starts(with: outDir) }) { return nil }
+        if !several { return joined(first) }
+        if common.isEmpty { return nil }
+        return joined(common)
+    }
+
+    /// The name the create stores: the path below the base, or with none below
+    /// the output folder, `/`-joined; the basename when neither strips.
+    static func storedName(output: String, base: String?, path: String) -> String {
+        let anchor = components(base ?? (output as NSString).deletingLastPathComponent)
+        let parts = components(path)
+        if parts.starts(with: anchor) && parts.count > anchor.count {
+            return parts.dropFirst(anchor.count).joined(separator: "/")
+        }
+        return (path as NSString).lastPathComponent
+    }
+
+    /// The sources renamed as the run stores them. Relative mode with a base
+    /// keeps the names the caller gave (that strip is the caller's).
+    static func storedSources(spec: CreateSpec, sources: [Source]) -> [Source] {
+        if spec.path_mode == .relative, let b = spec.base_path, !b.isEmpty { return sources }
+        // A mock scenario's synthetic paths have no folder to speak of.
+        guard sources.allSatisfy({ $0.path.hasPrefix("/") }) else { return sources }
+        let base = spec.path_mode == .basename
+            ? basenameBase(output: spec.output, paths: sources.map(\.path)) : nil
+        return sources.map {
+            var s = $0
+            s.name = storedName(output: spec.output, base: base, path: $0.path)
+            return s
+        }
+    }
+
+    /// Path components the way `Path::components` compares them: the root as
+    /// one component, empty and `.` components dropped.
+    private static func components(_ path: String) -> [String] {
+        var out: [String] = path.hasPrefix("/") ? ["/"] : []
+        out += path.split(separator: "/").map(String.init).filter { $0 != "." }
+        return out
+    }
+
+    private static func joined(_ parts: [String]) -> String {
+        guard let first = parts.first else { return "" }
+        if first == "/" { return "/" + parts.dropFirst().joined(separator: "/") }
+        return parts.joined(separator: "/")
     }
 
     /// `-r`'s scaled spelling for a byte count, largest unit first, or nil for a count

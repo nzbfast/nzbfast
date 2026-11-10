@@ -113,6 +113,16 @@ pub struct Cli {
     /// to go.
     #[arg(long)]
     pub accept_cap: Option<u64>,
+    /// A line that gets WORSE with more sockets: while more than this
+    /// many connections are open on this server, it runs at
+    /// --collapse-to instead (the mock's `collapse_above_conns`, GitHub
+    /// #103's shared path). 0 = off. For driving the line-cap step-back
+    /// check from a cold CLI run, which no other profile can make fire.
+    #[arg(long, default_value_t = 0)]
+    pub collapse_above: usize,
+    /// The line rate while --collapse-above is exceeded ("100M").
+    #[arg(long, default_value = "0")]
+    pub collapse_to: String,
     /// Article-ize real files from disk into the corpus (repeatable).
     /// A playable video here turns the chaos rig into a playback
     /// end-to-end fixture; --files 0 serves only these.
@@ -172,6 +182,8 @@ pub struct Opts {
     fault_count: Option<usize>,
     miss_delay_ms: Option<u64>,
     accept_cap: Option<u64>,
+    collapse_above: usize,
+    collapse_to_bps: u64,
     media: Vec<PathBuf>,
     /// Volume size in bytes for the RAR set, if one is asked for.
     rar_volume_size: Option<u64>,
@@ -209,6 +221,8 @@ impl Cli {
             fault_count: cli.fault_count,
             miss_delay_ms: cli.miss_delay_ms,
             accept_cap: cli.accept_cap,
+            collapse_above: cli.collapse_above,
+            collapse_to_bps: size(&cli.collapse_to, "--collapse-to")?,
             media: cli.media,
             rar_volume_size: match &cli.rar_volume_size {
                 Some(v) => Some(size(v, "--rar-volume-size")?),
@@ -1537,6 +1551,12 @@ pub async fn run(opts: Opts) -> Result<()> {
         if let Some(t) = &mut plan.twin {
             t.accept_cap = Some(cap);
         }
+    }
+    // --collapse-above, the same way: on the faulty (single) server only,
+    // since it models one provider's path that more sockets congest.
+    if opts.collapse_above > 0 {
+        plan.chaos.throttle.collapse_above_conns = opts.collapse_above;
+        plan.chaos.throttle.collapse_to_bps = opts.collapse_to_bps;
     }
     let twin_articles = plan.twin.is_some().then(|| articles.clone());
     // Under TLS the mocks move to their own loopback ports and the

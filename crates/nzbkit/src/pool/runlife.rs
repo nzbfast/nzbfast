@@ -330,7 +330,6 @@ pub(super) async fn worker(
     connects: Arc<AtomicU64>,
     reconnects: Arc<AtomicU64>,
     life: WorkerLife,
-    ramp: Duration,
     slot: u32,
 ) {
     // The ramp paces CONNECT bursts, which is what providers punish (a
@@ -414,8 +413,19 @@ pub(super) async fn worker(
     // The ramp sleep must yield to abort/finish: at 100 connections ×
     // 150 ms a still-ramping worker would otherwise outlive an aborted
     // run by up to 15 s.
+    //
+    // The wait is RESERVED from the server's pacer at the moment of
+    // admission, not `ramp_delay x slot` (8 Nov 2026). The two agree for
+    // a fleet admitted at spawn - each worker takes the next gap, so the
+    // dials land `ramp_delay` apart exactly as before - and differ for a
+    // slot the line-cap governor wakes mid-run: it is a HIGH slot, so the
+    // slot product made it wait 0.75-2.85 s after the raise before it
+    // even dialled, and a probe rung (judged once its sockets are up)
+    // waited with it. The pacer keeps what the ramp is for, no two
+    // connects on one host closer than `ramp_delay`, and drops the rest.
     let ramped = admitted
         && (warm_conn.is_some() || {
+            let ramp = dial_pace(&shared, ctx.idx, cfg.ramp_delay);
             tokio::select! {
                 _ = tokio::time::sleep(ramp) => true,
                 _ = fin.wait_for(|f| *f) => false,

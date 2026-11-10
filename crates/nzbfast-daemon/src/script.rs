@@ -116,9 +116,10 @@ pub fn run_capped_sieve(
 /// stderr is drained by its own thread rather than polled: a child that
 /// fills the 64 KB pipe buffer blocks on the write, so waiting on the
 /// process alone would turn any chatty script into a timeout. stdout is
-/// drained too, and thrown away - nothing reads it, and a script that
-/// prints for a living should not be able to spend the daemon's memory
-/// proving it.
+/// drained the same way, and kept only as `mode` says - its head for a
+/// pre-queue verdict, its `[NZB] ` / `[ERROR] ` / `[WARNING] ` lines for
+/// a post-processing chain - so a script that prints for a living still
+/// cannot spend the daemon's memory proving it.
 ///
 /// Only the LAST [`SCRIPT_ERR_TAIL`] bytes of stderr are kept. The whole
 /// stream used to accumulate in a `String`, so an accidental
@@ -157,9 +158,59 @@ pub fn run_capped_sieve(
 ///    single-process kill (a job object is the equivalent, and is a
 ///    bigger change than this fix warrants).
 fn run_capped_inner(
+    cmd: std::process::Command,
+    secs: u64,
+    mode: StdoutMode,
+) -> std::io::Result<(Option<std::process::ExitStatus>, String, String)> {
+    run_capped_core(cmd, secs, mode, std::time::Duration::ZERO)
+}
+
+/// How long the reap waits for a finished script's drains to reach EOF
+/// before it stops waiting and releases them. See the end of
+/// [`run_capped_core`].
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// One run's drain threads, counted so the reap can wait for them to
+/// finish instead of guessing how long that takes.
+#[derive(Default)]
+struct RunDrains {
+    live: Mutex<usize>,
+    cv: std::sync::Condvar,
+}
+
+impl RunDrains {
+    fn enter(self: &Arc<Self>) -> RunDrainGuard {
+        *self.live.lock_ok() += 1;
+        RunDrainGuard(self.clone())
+    }
+
+    /// Wait until every drain of this run has returned, or `grace` has
+    /// passed, whichever is first.
+    fn settle(&self, grace: std::time::Duration) {
+        let live = self.live.lock_ok();
+        let _ = self.cv.wait_timeout_while(live, grace, |n| *n > 0);
+    }
+}
+
+/// Moved into a drain thread; dropped after its last `sink` call, so
+/// whatever the run reads once [`RunDrains::settle`] returns is whole.
+struct RunDrainGuard(Arc<RunDrains>);
+
+impl Drop for RunDrainGuard {
+    fn drop(&mut self) {
+        *self.0.live.lock_ok() -= 1;
+        self.0.cv.notify_all();
+    }
+}
+
+/// [`run_capped_inner`] with a TEST SEAM: `slow_sink` is slept before
+/// every stdout chunk is handed on, which is what a drain thread the
+/// scheduler has not run yet looks like. Zero in production.
+fn run_capped_core(
     mut cmd: std::process::Command,
     secs: u64,
     mode: StdoutMode,
+    slow_sink: std::time::Duration,
 ) -> std::io::Result<(Option<std::process::ExitStatus>, String, String)> {
     use std::process::Stdio;
     cmd.stdin(Stdio::null())
@@ -181,33 +232,50 @@ fn run_capped_inner(
     // owns its pipe and exits when the last writer closes it OR when
     // this flag says we have stopped caring, whichever comes first.
     let stop = Arc::new(AtomicBool::new(false));
+    let run = Arc::new(RunDrains::default());
+    let slow = move || {
+        if !slow_sink.is_zero() {
+            std::thread::sleep(slow_sink);
+        }
+    };
     if let Some(r) = child.stdout.take() {
-        let (stop, g) = (stop.clone(), DrainGuard::new());
+        let (stop, g, rg) = (stop.clone(), DrainGuard::new(), run.enter());
         match mode {
             StdoutMode::Head => {
                 let head = head.clone();
                 std::thread::spawn(move || {
-                    let _g = g;
-                    drain_into_head(r, &stop, &head)
+                    let (_g, _rg) = (g, rg);
+                    drain(r, &stop, |bytes| {
+                        slow();
+                        head_push(&head, bytes)
+                    })
                 });
             }
             StdoutMode::Sieve => {
                 let sieve = sieve.clone();
                 std::thread::spawn(move || {
-                    let _g = g;
-                    drain_into_sieve(r, &stop, &sieve)
+                    let (_g, _rg) = (g, rg);
+                    drain(r, &stop, |bytes| {
+                        slow();
+                        sieve.lock_ok().push(bytes)
+                    })
                 });
             }
         }
     }
     if let Some(r) = child.stderr.take() {
-        let (stop, tail, g) = (stop.clone(), tail.clone(), DrainGuard::new());
+        let (stop, tail, g, rg) = (stop.clone(), tail.clone(), DrainGuard::new(), run.enter());
         std::thread::spawn(move || {
-            let _g = g;
+            let (_g, _rg) = (g, rg);
             drain_into(r, &stop, &tail)
         });
     }
-    let deadline = (secs > 0).then(|| Instant::now() + std::time::Duration::from_secs(secs));
+    // `checked_add`: the setting is any u64 a user can type, and a
+    // deadline past what an `Instant` can hold panicked the runner. A
+    // deadline that far out is no deadline, which is what `0` means.
+    let deadline = (secs > 0)
+        .then(|| Instant::now().checked_add(std::time::Duration::from_secs(secs)))
+        .flatten();
     let status = loop {
         if let Some(st) = child.try_wait()? {
             break Some(st);
@@ -236,11 +304,17 @@ fn run_capped_inner(
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     };
-    // The child is gone; its own writes are already in the ring or in
-    // flight. A short grace collects the tail end without waiting on any
-    // descendant that may still hold the pipe open - and then the drains
-    // are released, because nothing reads what arrives after this point.
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // The child is gone; its own writes are in the pipe or already read.
+    // Wait for the drains to reach EOF - immediate for an ordinary script,
+    // whose pipes close with it - and only then read what they kept. This
+    // was a flat 50 ms sleep, which a drain thread the scheduler had not
+    // run yet on a loaded box simply missed: the script's LAST lines,
+    // which for a post-processing chain are its `[NZB] FINALDIR=` and
+    // friends, were dropped. A descendant still holding the pipe never
+    // lets the drains reach EOF, so the wait is bounded by
+    // [`DRAIN_GRACE`], and then the drains are released, because nothing
+    // reads what arrives after this point.
+    run.settle(DRAIN_GRACE);
     stop.store(true, Ordering::Release);
     let stderr = tail.lock_ok().tail_text();
     let stdout = match mode {
@@ -429,26 +503,16 @@ pub(super) fn drain_into(r: impl PipeRead, stop: &AtomicBool, tail: &Mutex<Bound
     drain(r, stop, |bytes| tail.lock_ok().push(bytes));
 }
 
-pub(super) fn drain_into_sieve(
-    r: impl PipeRead,
-    stop: &AtomicBool,
-    sieve: &Mutex<crate::nzbget_script::LineSieve>,
-) {
-    drain(r, stop, |bytes| sieve.lock_ok().push(bytes));
-}
-
 /// How much of a captured stdout's HEAD is kept - the pre-queue verdict
 /// is seven short lines, so this is generous, and everything past it is
 /// drained to nowhere so a chatty script still cannot spend memory.
 pub(super) const SCRIPT_OUT_HEAD: usize = 8 << 10;
 
-pub(super) fn drain_into_head(r: impl PipeRead, stop: &AtomicBool, head: &Mutex<Vec<u8>>) {
-    drain(r, stop, |bytes| {
-        let mut h = head.lock_ok();
-        let room = SCRIPT_OUT_HEAD.saturating_sub(h.len());
-        h.extend_from_slice(&bytes[..bytes.len().min(room)]);
-        // Past the head: keep draining (the drop above), never store.
-    });
+fn head_push(head: &Mutex<Vec<u8>>, bytes: &[u8]) {
+    let mut h = head.lock_ok();
+    let room = SCRIPT_OUT_HEAD.saturating_sub(h.len());
+    h.extend_from_slice(&bytes[..bytes.len().min(room)]);
+    // Past the head: keep draining (the drop above), never store.
 }
 
 /// Which half of a record's generation a script run is fenced on.

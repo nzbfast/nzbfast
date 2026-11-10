@@ -96,11 +96,16 @@ public sealed class RegistryIntegration : IShellIntegration
                 // may still point at it, and deleting a live ProgID would break
                 // that association instead of this one. A ProgID with nothing
                 // pointing at it is inert.
+                //
+                // The pointer is DELETED, not emptied. An empty default value in
+                // HKCU\Software\Classes\<ext> still wins the merged HKCR view, so
+                // writing "" masked whatever HKLM associated the type with and
+                // left it opening with nothing, rather than handing it back.
                 using var classes = Registry.CurrentUser.OpenSubKey(@"Software\Classes", writable: true);
                 using var key = classes?.OpenSubKey(extension, writable: true);
                 if (key?.GetValue(null) as string == progId)
                 {
-                    key.SetValue(null, string.Empty);
+                    key.DeleteValue(string.Empty, throwOnMissingValue: false);
                 }
 
                 return;

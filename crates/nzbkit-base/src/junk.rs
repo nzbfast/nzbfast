@@ -81,24 +81,10 @@ pub fn junk_score(stem: &str, p: &crate::release::Parsed, total_bytes: u64, has_
     // ("aula.mp4", "misfits-wegedeutschensd") is a course rip, personal
     // file, or spam - nothing an indexer would list. The trailing
     // -group token deliberately does NOT count as evidence: any
-    // "words-blob" name grows one for free.
-    let no_evidence = p.year.is_none()
-        && p.season.is_none()
-        && p.episode.is_none()
-        // A parsed DATE is at least as much of a technical marker as the
-        // year this list already counts, and on a periodical it is
-        // strictly better: it is the identity of the issue. Added 2 Sep
-        // 2026 with the masthead date reading - a dated post gives its
-        // year token up to the date, so "The New York Times - 15 August
-        // 2026" posted somewhere with no media prior went from a
-        // year-bearing 0 to an evidence-free 60 purely because the
-        // parser got BETTER at it.
-        && p.date.is_none()
-        && p.res.is_none()
-        && p.source.is_none()
-        && p.vcodec.is_none()
-        && p.acodec.is_none()
-        && !p.remux;
+    // "words-blob" name grows one for free. The marker list itself is
+    // `Parsed::carries_media_evidence`, shared with the daemon's
+    // executable refusal (TODO 358 item 13).
+    let no_evidence = !p.carries_media_evidence();
     if no_evidence && matches!(p.kind, Kind::Movie | Kind::Tv) {
         s = s.max(60);
     }
@@ -183,8 +169,9 @@ pub fn junk_score(stem: &str, p: &crate::release::Parsed, total_bytes: u64, has_
     // M32 (Prowlarr#2329): an executable riding a media-shaped release is
     // the classic malware shape - no legitimate movie/episode/music post
     // carries an .exe. Software releases legitimately do, so only their
-    // Kind escapes the hammer.
-    if has_exe && !matches!(p.kind, Kind::Software) {
+    // Kind escapes the hammer. `may_carry_executables` is that scope's
+    // one copy: the daemon's completed-download refusal reads it too.
+    if has_exe && !p.kind.may_carry_executables() {
         s = s.max(85);
     }
     s.min(100)

@@ -377,9 +377,11 @@ pub struct SweepResult {
 }
 
 impl SweepResult {
-    /// Articles unavailable on every server that answered. An `Unknown`
-    /// (sweep error) counts as available - pre-flight must not produce
-    /// false IMPOSSIBLE verdicts.
+    /// Articles refused by EVERY server - not merely by every server that
+    /// answered: an `Unknown` (sweep error, or a leg that never dialled)
+    /// counts as available, so one server that could not be asked keeps
+    /// an article out of this list. Pre-flight must not produce false
+    /// IMPOSSIBLE verdicts.
     ///
     /// The bias runs one way on purpose, and the cost is the false
     /// GREEN in the module doc: an empty result means nothing the

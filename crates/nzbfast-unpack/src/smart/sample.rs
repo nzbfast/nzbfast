@@ -204,7 +204,7 @@ pub(super) fn is_teaser_beside(p: &Path, siblings: &[PathBuf]) -> bool {
 /// feature; a same-size file that merely has "proof"/"sample" in its title
 /// (the 2005 film "Proof", a "Proof" season pack, or a job that is itself
 /// only a sample) is NOT a teaser. Name alone silently deleted real content.
-const SAMPLE_MAX_FRACTION: f64 = 0.15;
+pub(crate) const SAMPLE_MAX_FRACTION: f64 = 0.15;
 
 /// A deletable teaser: a teaser OF something else in this directory AND
 /// much smaller than the feature. With `feature_len == 0` (no feature to

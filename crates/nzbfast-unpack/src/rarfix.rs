@@ -114,6 +114,13 @@ pub(crate) fn try_unrar_spent(
 /// the whole story on one screen and cannot go stale - and staleness is
 /// a real hazard here, because `try_unrar` and the split rescue re-enter
 /// this ladder without ever reading a reason.
+///
+/// `cfg(test)` since 9 Nov 2026 (bug sweep A13), on the same terms as
+/// [`try_unrar`]: its last two production callers - the named-RAR arm
+/// and the recovery-record rung - now take [`try_unrar_outcome`] whole,
+/// because a success that left a group packed has to be judged and this
+/// shape throws the packed list away.
+#[cfg(test)]
 pub(crate) fn try_unrar_spent_why(
     dir: &std::path::Path,
     password: Option<&str>,
@@ -255,13 +262,14 @@ pub fn try_unrar_outcome(
         // today, and it is `sweep_spent_obfuscated` doing it, so its three
         // refusals (a memberless `.rev`-shaped set, no before-snapshot,
         // nothing published) still decide each set on their own.
-        return extract_obfuscated_rar(dir, &obf, password, 1)
-            .ok()
-            .then(|| UnpackOutcome {
-                spent: Vec::new(),
-                packed: Vec::new(),
-            })
-            .ok_or(None);
+        //
+        // Its strays travel out by name and weight (`obf_outcome`), so
+        // `vouch::judge` can tell a small fragment from a main set that
+        // lost its first volume.
+        return obf_outcome(
+            extract_obfuscated_rar(dir, &obf, password, 1),
+            password.is_some(),
+        );
     };
     // Taken before anything unpacks: the after-diff is the proof-of-output
     // a spent-volume deletion needs, and the filter that keeps a file the
@@ -331,10 +339,16 @@ pub fn try_unrar_outcome(
         let mut produced = false;
         let mut failed: Vec<PackedGroup> = Vec::new();
         let mut bombed = false;
+        // G2: the yardstick `vouch::judge` measures a leftover against.
+        let mut largest_produced = 0u64;
         for (stem, group) in &groups {
             let Some(group_first) = first_rar_volume(group) else {
                 continue;
             };
+            // Measured BEFORE the unpack: a single-set eat consumes the
+            // volumes as it reads them.
+            let members = set_volumes(dir, &group_first, group);
+            let gbytes = vouch::group_bytes(&members);
             let what = if stem.is_empty() {
                 group_first.display().to_string()
             } else {
@@ -353,13 +367,14 @@ pub fn try_unrar_outcome(
                     info!(target: "extract", "native unpack complete ✔ ({})", group_first.display());
                     consumed_all.extend(consumed);
                     produced = true;
+                    largest_produced = largest_produced.max(gbytes);
                 }
                 Err(e) => {
                     warn!(target: "extract", "native unpack failed for '{what}' ({e})");
                     let bomb = nzbkit::disk::bomb_verdict(&e.to_string());
                     bombed |= bomb;
                     let reason = bomb.then(bomb_failure);
-                    failed.push(PackedGroup::record(what, group, pw.is_some(), reason));
+                    failed.push(PackedGroup::record(what, &members, pw.is_some(), reason));
                 }
             }
         }
@@ -368,6 +383,7 @@ pub fn try_unrar_outcome(
             return Ok(UnpackOutcome {
                 spent: spent(consumed_all),
                 packed: failed,
+                largest_produced,
             });
         }
         // A bomb verdict is the floor of this ladder, not a rung to pass.
@@ -559,14 +575,18 @@ pub fn try_unrar_outcome(
     // bomb beside a real release still unpacks the release, and only a
     // run where NOTHING produced can be reported as a disk refusal.
     let mut bombed = false;
+    let mut largest_produced = 0u64;
     for (stem, group) in &groups {
         let Some(group_first) = first_rar_volume(group) else {
             continue;
         };
+        let members = set_volumes(dir, &group_first, group);
+        let gbytes = vouch::group_bytes(&members);
         match unrar_group(&group_first, group) {
             Ok(consumed) => {
                 consumed_all.extend(consumed);
                 produced = true;
+                largest_produced = largest_produced.max(gbytes);
             }
             Err((why, had_pw)) => {
                 bombed |= why.is_some();
@@ -575,7 +595,7 @@ pub fn try_unrar_outcome(
                 } else {
                     stem.clone()
                 };
-                failed.push(PackedGroup::record(what, group, had_pw, why));
+                failed.push(PackedGroup::record(what, &members, had_pw, why));
             }
         }
     }
@@ -584,6 +604,7 @@ pub fn try_unrar_outcome(
         return Ok(UnpackOutcome {
             spent: spent(consumed_all),
             packed: failed,
+            largest_produced,
         });
     }
     Err(bombed.then(bomb_failure))
@@ -672,6 +693,128 @@ fn packed_groups(dir: &std::path::Path, first: &std::path::Path) -> Vec<(String,
     }
     groups.extend(by_stem);
     groups
+}
+
+/// Every volume of the set `group_first` leads, for WEIGHING it (G2).
+///
+/// [`packed_groups`] admits only `.rar` names and numeric ones, so an
+/// old-style set's group is `Movie.rar` alone and its `.r00`... `.r79`
+/// never join - which is fine for picking the lead volume (the engines
+/// find the rest themselves) and wrong for its size: `vouch::judge`
+/// weighed an 80-volume film at one volume (TODO 358 pre-release sweep,
+/// review lane 4 item 1). [`stem_volume_set`] is the set an unpack
+/// starting at `group_first` actually reads, and the re-extract feed
+/// weighs its in-stream groups over the same grammar, so both sides of
+/// the comparison now count the same files. The group's own members are
+/// kept even where the directory read misses one.
+fn set_volumes(
+    dir: &std::path::Path,
+    group_first: &std::path::Path,
+    group: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut v = stem_volume_set(dir, group_first).unwrap_or_default();
+    for p in group {
+        if !v.contains(p) {
+            v.push(p.clone());
+        }
+    }
+    v
+}
+
+/// G2 on the re-extract feed's last rung (TODO 358 pre-release sweep,
+/// review lane 4 item 3): the named stem groups still packed in `dir`,
+/// recorded as leftovers, for a caller that has already proved a group
+/// unpacked and must not let the unrar rung's refusal over the rest
+/// stand as the verdict. Same candidate rule as [`try_unrar_outcome`]'s
+/// lead pick, same grouping, same weighing.
+pub(crate) fn record_leftovers(
+    dir: &std::path::Path,
+    had_password: bool,
+    reason: Option<String>,
+) -> Vec<PackedGroup> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let rars: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let named = p.extension().is_some_and(|x| x.eq_ignore_ascii_case("rar"))
+                && !(unpack::rar_name_carries_no_set(p) && rar_magic(p));
+            let numeric = p
+                .file_name()
+                .and_then(|n| numeric_vol_base(&n.to_string_lossy().to_lowercase()).map(|_| ()))
+                .is_some()
+                && rar_magic(p);
+            named || numeric
+        })
+        .collect();
+    let Some(first) = first_rar_volume(&rars) else {
+        return Vec::new();
+    };
+    packed_groups(dir, &first)
+        .into_iter()
+        .filter_map(|(stem, group)| {
+            let group_first = first_rar_volume(&group)?;
+            let what = if stem.is_empty() {
+                group_first.display().to_string()
+            } else {
+                stem
+            };
+            let members = set_volumes(dir, &group_first, &group);
+            Some(PackedGroup::record(
+                what,
+                &members,
+                had_password,
+                reason.clone(),
+            ))
+        })
+        .collect()
+}
+
+/// The obfuscated arm's verdict as a ladder outcome (TODO 358 pre-release
+/// sweep, review lane 4 item 4). `ObfReport::ok` forgives every headless
+/// fragment once any set produced, and both payload-path callers used to
+/// answer an EMPTY outcome on it - so a post whose main set lost its
+/// first volume, beside a sample that extracted, completed with the film
+/// packed and nothing named. The fragments now travel out as ONE packed
+/// group weighed against the largest set that extracted, and
+/// `vouch::judge` decides them: OUTWEIGHING what unpacked is the main
+/// payload, anything less is tolerated and named (they are never a peer
+/// set - see `PackedGroup::remnant`). Never offered as LOCKED - a
+/// headless set cannot be opened by any password.
+pub(crate) fn obf_outcome(
+    report: unpack::ObfReport,
+    had_password: bool,
+) -> std::result::Result<UnpackOutcome, Option<String>> {
+    if report.failed || (!report.produced && !report.strays.is_empty()) {
+        return Err(None);
+    }
+    let packed = match report.strays.first() {
+        None => Vec::new(),
+        Some(first) => {
+            let name = first
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let what = match report.strays.len() {
+                1 => format!("{name} (a mid-set volume with no first part)"),
+                n => format!(
+                    "{name} and {} more (mid-set volumes with no first part)",
+                    n - 1
+                ),
+            };
+            let mut g = PackedGroup::record(what, &report.strays, had_password, None);
+            g.encrypted = false;
+            g.remnant = true;
+            vec![g]
+        }
+    };
+    Ok(UnpackOutcome {
+        spent: Vec::new(),
+        packed,
+        largest_produced: report.largest_produced,
+    })
 }
 
 /// Part B of the 2026-07-29 one-pass spec: a set that just unpacked has
@@ -771,8 +914,8 @@ impl From<rars::Error> for RevOpen {
     }
 }
 
-/// Rebuild missing or destroyed RAR5 volumes from `.rev` recovery volumes
-/// (WinRAR `rar rv`). Present volumes map onto the REV metadata's slots by
+/// Rebuild missing or destroyed volumes from `.rev` recovery volumes
+/// (WinRAR `rar rv`): RAR5 sets here, RAR 3.x sets in [`rev3`]. Present volumes map onto the REV metadata's slots by
 /// (size, crc32); every unmatched slot is reconstructed via Reed-Solomon
 /// and written under the set's `partNN` naming. Returns true when at least
 /// one volume was rebuilt (caller retries extraction afterwards).
@@ -834,6 +977,10 @@ pub(crate) fn try_rev_reconstruct(dir: &std::path::Path) -> bool {
             Err(RevOpen::Unreadable(e)) => {
                 warn!(target: "repair", "{name}: unreadable .rev ({e})");
             }
+            // A `.rev` without the RAR5 marker is the RAR 3.x format,
+            // which `rev3` below reads on its own terms and reports on
+            // itself; calling it unusable here would blame a good file.
+            Err(RevOpen::Unusable(_)) if !crate::archname::rar_recovery_volume_magic(path) => {}
             Err(RevOpen::Unusable(e)) => {
                 warn!(target: "repair", "{name}: unusable .rev ({e})");
             }
@@ -873,9 +1020,6 @@ pub(crate) fn try_rev_reconstruct(dir: &std::path::Path) -> bool {
             None => groups.push(vec![index]),
         }
     }
-    if groups.is_empty() {
-        return false;
-    }
     if groups.len() > 1 {
         info!(
             target: "repair",
@@ -896,6 +1040,12 @@ pub(crate) fn try_rev_reconstruct(dir: &std::path::Path) -> bool {
     for keep in &groups {
         rebuilt_any |= try_rev_group(dir, budget, keep, &rev_sources, &rev_meta);
     }
+    // RAR 3.x `.rev` sets (no leading signature) after the RAR5 ones, at
+    // the same rung and so in the same place relative to PAR2. Its working
+    // set is whole windows of every volume rather than the RAR5 fold's
+    // stripes, so it takes the repair cap the fold window above is carved
+    // from; see `rev3`'s module note.
+    rebuilt_any |= rev3::try_rev3_reconstruct(dir, nzbkit::mem::process_budget().repair_cap());
     rebuilt_any
 }
 
@@ -1517,6 +1667,124 @@ pub(crate) enum RrRepair {
     NoRecord,
 }
 
+/// Who decides a recovery-record repair's answer for one volume: the
+/// worker publishing it, or the pass walking away from it. Exactly one
+/// wins, and both sides learn which.
+///
+/// A bare "walked away" flag could not say that. The worker read it and
+/// then flushed and renamed, so a pass that raised it during the flush had
+/// been told nothing and returned anyway, and the rename landed afterwards
+/// over whatever the job had done to the volume since (6 Nov 2026 sweep
+/// F1). Here the worker CLAIMS the publish before the rename, the pass
+/// claims the walk-away, and a pass that finds a publish in progress waits
+/// for its answer instead - which is one rename, already flushed.
+///
+/// Per worker, not per volume: the worker repairs a group's volumes one at
+/// a time, so a finished publish hands the gate back as [`Self::OPEN`],
+/// and a walk-away is final for every volume after it.
+pub(crate) struct RrGate(std::sync::atomic::AtomicU8);
+
+impl RrGate {
+    const OPEN: u8 = 0;
+    const PUBLISHING: u8 = 1;
+    const LEFT: u8 = 2;
+
+    pub(crate) fn new() -> Self {
+        Self(std::sync::atomic::AtomicU8::new(Self::OPEN))
+    }
+
+    /// The pass has stopped waiting, for good.
+    pub(crate) fn left(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire) == Self::LEFT
+    }
+
+    /// Worker: claim the right to rename over the volume. False when the
+    /// pass has walked away, which forbids it.
+    fn begin_publish(&self) -> bool {
+        use std::sync::atomic::Ordering::AcqRel;
+        self.0
+            .compare_exchange(
+                Self::OPEN,
+                Self::PUBLISHING,
+                AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// A claim won by [`Self::begin_publish`], handed back however the
+    /// rename ends.
+    fn publishing(&self) -> RrPublishing<'_> {
+        RrPublishing(self)
+    }
+
+    /// Pass: stop waiting. False when a publish is in progress, and the
+    /// caller must then take the worker's answer rather than leave.
+    pub(crate) fn walk_away(&self) -> bool {
+        use std::sync::atomic::Ordering::AcqRel;
+        match self.0.compare_exchange(
+            Self::OPEN,
+            Self::LEFT,
+            AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(now) => now == Self::LEFT,
+        }
+    }
+}
+
+/// The publish claim, released on drop so an early return cannot leave a
+/// gate the pass would wait on forever.
+struct RrPublishing<'a>(&'a RrGate);
+
+impl Drop for RrPublishing<'_> {
+    fn drop(&mut self) {
+        self.0
+            .0
+            .store(RrGate::OPEN, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Test-only: hold a volume's publish on either side of the claim - the
+/// window 6 Nov 2026 sweep F1 lived in. Keyed by path so parallel tests
+/// cannot meet each other's barriers (an unkeyed two-party barrier hangs
+/// a parallel run rather than failing it). First barrier: the worker is
+/// there. Second: let it go.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RrStage {
+    BeforeClaim,
+    AfterClaim,
+}
+
+///
+/// A LIST, not one slot: two tests arming at once must not overwrite each
+/// other's entry, or the displaced one waits on a barrier nothing meets.
+#[cfg(test)]
+pub(crate) static RR_PUBLISH_BARRIER: std::sync::Mutex<
+    Vec<(
+        std::path::PathBuf,
+        RrStage,
+        std::sync::Arc<std::sync::Barrier>,
+        std::sync::Arc<std::sync::Barrier>,
+    )>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn rr_publish_hook(path: &std::path::Path, stage: RrStage) {
+    let hit = RR_PUBLISH_BARRIER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(p, s, _, _)| p == path && *s == stage)
+        .map(|(_, _, open, release)| (open.clone(), release.clone()));
+    if let Some((open, release)) = hit {
+        open.wait();
+        release.wait();
+    }
+}
+
 /// Repair one volume in place from its own recovery record.
 /// Ok(Rebuilt) = rewritten (atomic rename), Ok(PrefixIntact) = record says
 /// the prefix is already intact (original kept), Ok(NoRecord) = no RR /
@@ -1545,17 +1813,22 @@ pub(crate) fn rr_repair_volume(path: &std::path::Path, password: Option<&str>) -
 /// the session's password, spelled again only for the raw-scan fallback,
 /// which takes options of its own.
 ///
-/// `walked_away` is the RR pass saying it no longer waits for this answer
-/// (issue 115: `rrhint::rr_repair_volumes` runs each volume on a worker it
-/// can abandon on a cancel or a deadline). It is read once, at the last
-/// moment before the repaired copy is published, so a repair that comes
-/// back after the job moved on deletes its temp and renames NOTHING over a
-/// volume the job may already be judging, trashing or re-fetching.
+/// `gate` is the RR pass's claim on this answer (issue 115:
+/// `rrhint::rr_repair_volumes` runs each volume on a worker it can abandon
+/// on a cancel or a deadline). The publish is DECIDED through it: the
+/// rebuilt temp is flushed first, outside it, and then the rename runs only
+/// if [`RrGate::begin_publish`] wins against the pass's
+/// [`RrGate::walk_away`]. So a repair that comes back after the job moved
+/// on deletes its temp and renames NOTHING over a volume the job may
+/// already be judging, trashing or re-fetching - and a pass that walks away
+/// has really been answered, never merely told so while a rename is still
+/// coming (6 Nov 2026 sweep F1: the flag was read once, before the fsync,
+/// and a cancel landing during a slow fsync was overwritten after it).
 pub(crate) fn rr_repair_volume_in(
     session: &mut rars::ReadSession<'_>,
     path: &std::path::Path,
     password: Option<&str>,
-    walked_away: Option<&std::sync::atomic::AtomicBool>,
+    gate: Option<&RrGate>,
 ) -> Result<RrRepair> {
     // A UNIQUE temp we provably created, not `path.with_extension("rrtmp")`.
     //
@@ -1685,14 +1958,18 @@ pub(crate) fn rr_repair_volume_in(
                 cleanup(&tmp);
                 return Ok(RrRepair::PrefixIntact);
             }
-            if walked_away.is_some_and(|w| w.load(std::sync::atomic::Ordering::Acquire)) {
+            const LEFT: &str = "the recovery-record pass stopped waiting for this volume";
+            // Cheap early out: a pass already gone needs no flush.
+            if gate.is_some_and(RrGate::left) {
                 cleanup(&tmp);
-                anyhow::bail!("the recovery-record pass stopped waiting for this volume");
+                anyhow::bail!(LEFT);
             }
             // Flush the rebuild before the rename publishes it - the
             // rename replaces the original, so a torn temp published
             // over it would leave the copy as the only one. Same order
-            // as the .rev path above.
+            // as the .rev path above. OUTSIDE the publish claim: on slow
+            // storage this is the long wait, and the pass must stay free
+            // to walk away through all of it.
             if let Err(e) = std::fs::OpenOptions::new()
                 .write(true)
                 .open(&tmp)
@@ -1701,6 +1978,19 @@ pub(crate) fn rr_repair_volume_in(
                 cleanup(&tmp);
                 return Err(e.into());
             }
+            #[cfg(test)]
+            rr_publish_hook(path, RrStage::BeforeClaim);
+            // The decision. Losing it means the pass walked away while
+            // the flush ran: nothing is renamed, and the temp goes.
+            let _publishing = match gate {
+                Some(g) if !g.begin_publish() => {
+                    cleanup(&tmp);
+                    anyhow::bail!(LEFT);
+                }
+                g => g.map(RrGate::publishing),
+            };
+            #[cfg(test)]
+            rr_publish_hook(path, RrStage::AfterClaim);
             // `cleanup` before the `?`, like every other failure arm in
             // this function: a failed rename left a FULL-SIZE
             // `<stem>.rrtmpN` beside the set, carrying `Rar!` magic, so
@@ -1865,10 +2155,13 @@ pub(crate) fn stem_volume_set(
 }
 
 mod native;
+/// Weaver parity item 8: RAR 3.x `.rev` recovery volumes.
+pub(crate) mod rev3;
 mod rrhint;
 pub(crate) use native::{try_rars_native, write_archives_to, write_archives_to_spending};
 #[cfg(test)]
 pub(crate) use rrhint::try_rar_rr_repair_hinted;
+pub(crate) use rrhint::try_rar_rr_repair_hinted_outcome;
 pub use rrhint::{DamageHint, try_rar_rr_repair_hinted_why};
 
 /// TODO 164: the leftovers a successful ladder run names, and the
@@ -2711,6 +3004,10 @@ mod rarfix_numeric_volume_tests;
 #[cfg(test)]
 #[path = "rarfix_solid_overrun_tests.rs"]
 mod rarfix_solid_overrun_tests;
+
+#[cfg(test)]
+#[path = "rarfix_g2_ladder_tests.rs"]
+mod rarfix_g2_ladder_tests;
 
 #[cfg(test)]
 mod native_unrar_tests;

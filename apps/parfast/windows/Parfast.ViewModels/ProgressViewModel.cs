@@ -45,14 +45,29 @@ public sealed class ProgressViewModel : Observable
 
     public string Title => _job is null
         ? string.Empty
-        : Strings.Fill(Strings.ProgressTitle, "kind", KindWord(_job.Kind), "name", _job.Name);
+        : Strings.Fill(Strings.ProgressTitle, "kind", KindWord(_job.Kind), "name", _job.DisplayTitle);
 
     public double Progress => _highWater;
 
     public bool IsIndeterminate =>
         _job?.State == JobState.Running && (_highWater <= 0 || ProgressIsUnmeasured);
 
-    public string StatusLine => _job?.PhaseText ?? string.Empty;
+    /// <remarks>
+    /// A FAILED job shows the core's own message: an error code this build does
+    /// not know (the core added internal, not_utf8, output_is_a_source and
+    /// duplicate_name on 9 Nov 2026) still carries a sentence, and that is the
+    /// part a user can act on.
+    /// </remarks>
+    public string StatusLine => _job is { State: JobState.Failed, Error.Message: { Length: > 0 } message }
+        ? message
+        : _job?.PhaseText ?? string.Empty;
+
+    /// <summary>What the finished job could not take in (result.warnings), shown beside Done.</summary>
+    public IReadOnlyList<string> Warnings => _job?.Result?.Warnings ?? [];
+
+    public bool HasWarnings => Warnings.Count > 0;
+
+    public string WarningsText => string.Join(Environment.NewLine, Warnings);
 
     public string ElapsedText => Fmt.Duration(_job?.ElapsedMs ?? 0);
 
@@ -334,7 +349,8 @@ public sealed class ProgressViewModel : Observable
     {
         RaiseAll(nameof(IsOpen), nameof(JobId), nameof(Kind), nameof(Title), nameof(Progress),
             nameof(IsIndeterminate), nameof(StatusLine), nameof(ElapsedText), nameof(RemainingText),
-            nameof(RateText), nameof(PercentText), nameof(Log), nameof(IsPaused), nameof(IsActive),
+            nameof(RateText), nameof(PercentText), nameof(Log), nameof(Warnings), nameof(HasWarnings),
+            nameof(WarningsText), nameof(IsPaused), nameof(IsActive),
             nameof(CanPause), nameof(PauseText), nameof(LowPriority),
             nameof(PauseUnavailableReason), nameof(ProgressIsUnmeasured), nameof(ExitCode),
             nameof(Rates), nameof(ShowRateTrend), nameof(RateTrendText));

@@ -205,6 +205,7 @@ impl Extractor {
                     sink_slots: Mutex::new(Vec::new()),
                     outcome: Mutex::new(None),
                     direct: Mutex::new(None),
+                    pw_finish: Default::default(),
                 });
                 if !key.is_empty() {
                     inner.sevenz_sets.insert(key.clone(), c.clone());
@@ -401,18 +402,8 @@ impl Extractor {
         // to classify, so a single call at open would reach only the
         // parts already registered - and would double up with theirs.
         let _ = tail;
-        let result = Self::sevenz_run(&me, &ctl, password).map_err(|e| match e {
-            sevenz_rust2::Error::PasswordRequired => {
-                "inner 7z is encrypted (no password)".to_string()
-            }
-            sevenz_rust2::Error::MaybeBadPassword(_) => {
-                "inner 7z is encrypted (password rejected)".to_string()
-            }
-            sevenz_rust2::Error::UnsupportedCompressionMethod(m) => {
-                format!("inner 7z codec unsupported: {m}")
-            }
-            e => format!("inner 7z decode failed: {e}"),
-        });
+        let result = Self::sevenz_run(&me, &ctl, password)
+            .map_err(|e| sevenz_worker_reason(e, ctl.set.bytes_refused()));
         let mut st = ctl.outcome.lock_ok();
         *st = Some(result);
     }
@@ -478,11 +469,29 @@ impl Extractor {
             return Err(sevenz_rust2::Error::Other(reason.into()));
         }
         io::Seek::seek(&mut src, io::SeekFrom::Start(0))?;
-        let pw = match &password {
-            Some(p) => sevenz_rust2::Password::from(&**p),
-            None => sevenz_rust2::Password::empty(),
-        };
-        let mut reader = sevenz_rust2::ArchiveReader::new(src, pw)?;
+        // `proven` is the password a header-encrypted container's end
+        // header DECRYPTED under (None for a plain header): the one fact
+        // that lets the direct map below take an AES + Copy chain.
+        let (mut reader, proven) = Self::sevenz_open(me, ctl, src, password)?;
+        // The gate's content half again, over the PARSED header and
+        // before any payload byte is read: on a header-encrypted
+        // container the call above only sees ciphertext and stands
+        // aside, so the decrypted declarations (which the in-stream probe
+        // can now unlock with a harvested candidate) are judged here, by
+        // the same rule (TODO 358 sweep, lane 3 item 1).
+        if let Some(reason) = crate::nameprobe::sevenz_archive_content_bomb(
+            reader.archive(),
+            total.saturating_sub(ctl.archive_base),
+        ) {
+            return Err(sevenz_rust2::Error::Other(reason.into()));
+        }
+        // The library defaults to one LZMA2 worker per core, and since
+        // the vendored lzma-rust2 spawn fix (98082767aa) it really runs
+        // them: each holds a dictionary and a decoded block, so on a big
+        // box this chase alone could take several GB. The disk opener
+        // has bounded it since that fix; this path never did (sweep
+        // 9 Nov 2026). Same bound - see `sevenz_decode_threads`.
+        reader.set_thread_count(sevenz_decode_threads());
         // TODO 37 step 4: the direct map, at the seam between the parse
         // and the first payload read - the coder chains are known and not
         // one payload byte has been decoded. If every folder is Copy, the
@@ -502,7 +511,8 @@ impl Extractor {
         // and a promoted set has none. Deciding the map first means
         // `trim_ok` is never true for a container that goes this way, so
         // the window does not exist rather than being narrow.
-        if let Some(members) = sevenz_map::plan(reader.archive(), ctl.archive_base, total)
+        if let Some(members) =
+            sevenz_map::plan(reader.archive(), ctl.archive_base, total, proven.as_deref())
             && let Some(ex) = me.upgrade()
             && ex
                 .direct_promote(ctl, members, ChaseFormat::SevenZ)
@@ -578,6 +588,221 @@ impl Extractor {
             Ok(true)
         })
     }
+    /// A fresh blocking view of the container, for a parse that is NOT
+    /// the engine's read cursor: its watermark is private, so nothing it
+    /// reads can move the drop-behind trim the worker's own reader
+    /// publishes.
+    fn sevenz_side_reader(ctl: &SevenZCtl) -> ChainedSeekReader {
+        let total = ctl.set.total();
+        ChainedSeekReader {
+            set: ctl.set.clone(),
+            pos: 0,
+            base: ctl.archive_base,
+            total: total.saturating_sub(ctl.archive_base),
+            low_water: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Open the container's end header, waiting for a candidate password
+    /// when it is encrypted and none in hand opens it (TODO 358 item 9).
+    ///
+    /// Returns the reader and the password the header was PROVEN under:
+    /// `Some` exactly when the end header is AES-encrypted and decrypted
+    /// to bytes that passed its CRC with that password - which is what
+    /// lets `sevenz_map::plan` place an AES + Copy chain directly. A plain
+    /// header proves nothing (`-p` without `-mhe` opens under ANY
+    /// password), so it returns None and the map keeps refusing AES.
+    ///
+    /// The probe is the same hook the RAR mappers park on
+    /// (`Inner::pw_probe`), and the same gates apply: root level only,
+    /// never over protected sources. On a miss the worker's error is the
+    /// one it would have returned without the wait, so the demote reason
+    /// and the finish ladder's password remediation are unchanged.
+    fn sevenz_open(
+        me: &Weak<Extractor>,
+        ctl: &SevenZCtl,
+        src: ChainedSeekReader,
+        password: Option<std::sync::Arc<str>>,
+    ) -> Result<
+        (
+            sevenz_rust2::ArchiveReader<ChainedSeekReader>,
+            Option<String>,
+        ),
+        sevenz_rust2::Error,
+    > {
+        let open = |src: ChainedSeekReader, pw: Option<&str>| {
+            let pw = pw.map_or_else(sevenz_rust2::Password::empty, sevenz_rust2::Password::from);
+            sevenz_rust2::ArchiveReader::new(src, pw)
+        };
+        let hdr = |ctl: &SevenZCtl| {
+            crate::nameprobe::sevenz_encrypted_header(&mut Self::sevenz_side_reader(ctl))
+        };
+        let err = match open(src, password.as_deref()) {
+            Ok(r) => {
+                // Opened. Proven only if the header needed the password at
+                // all: a header-encrypted container cannot open under a
+                // wrong one (bar a 2^-32 CRC collision), a plain one opens
+                // under anything.
+                let proven = match &password {
+                    Some(p) if hdr(ctl).is_some() => Some(p.to_string()),
+                    _ => None,
+                };
+                return Ok((r, proven));
+            }
+            Err(e) => e,
+        };
+        // Only a header that REFUSED for want of the right password is
+        // worth a candidate. A wrong preset password does not always come
+        // back as `MaybeBadPassword` (garbage can fail the decoder or the
+        // CRC first), so with a password in hand the encrypted-header
+        // scan decides; without one, `PasswordRequired` is the only
+        // error an AES-encrypted header gives an empty password.
+        //
+        // But a read the byte space itself refused - the set sealed over a
+        // hole, or aborted - is no verdict on any key, though the library
+        // calls it `MaybeBadPassword` under a password: it is damage, and
+        // waiting for a candidate over it would only stall (TODO 358
+        // sweep, lane 3 item 4; see [`SevenZBytesUnavailable`]).
+        if sevenz_bytes_unavailable(&err) || ctl.set.bytes_refused() {
+            return Err(err);
+        }
+        let refused = match &err {
+            sevenz_rust2::Error::PasswordRequired => true,
+            _ => password.is_some() && hdr(ctl).is_some(),
+        };
+        if !refused {
+            return Err(err);
+        }
+        match Self::sevenz_await_password(me, ctl) {
+            Some(pw) => {
+                let r = open(Self::sevenz_side_reader(ctl), Some(&pw))?;
+                // A side reader served the parse; hand the engine one that
+                // publishes the drop-behind watermark again.
+                let r = sevenz_rust2::ArchiveReader::from_archive(
+                    r.archive().clone(),
+                    ChainedSeekReader {
+                        low_water: ctl.low_water.clone(),
+                        ..Self::sevenz_side_reader(ctl)
+                    },
+                    sevenz_rust2::Password::from(pw.as_str()),
+                );
+                Ok((r, Some(pw)))
+            }
+            // The header refused the password in hand, so say so in the
+            // words the finish ladder keys its password remediation on,
+            // whichever way the garbage happened to fail (a CRC miss or a
+            // decoder error under a wrong key is still a wrong key).
+            None => Err(match err {
+                e @ (sevenz_rust2::Error::PasswordRequired
+                | sevenz_rust2::Error::MaybeBadPassword(_)) => e,
+                e => sevenz_rust2::Error::MaybeBadPassword(io::Error::other(e.to_string())),
+            }),
+        }
+    }
+
+    /// The 7z half of the in-stream candidate probe (TODO 358 item 9): a
+    /// header-encrypted container's worker, refused by its end header,
+    /// asks the job's candidate hook for the password instead of
+    /// demoting, and re-asks on the RAR probe's cadence until a candidate
+    /// verifies or the download finishes.
+    ///
+    /// WHEN IT CAN FIRE. A 7z end header is the LAST thing in the
+    /// container, so on a split set it lives in the last part - and its
+    /// packed (encrypted) stream sits just before it. The attach already
+    /// front-loads the end-header window's articles; this raises a second
+    /// urgent promote for the packed stream, which can lie an article
+    /// earlier, then blocks until those bytes are present. So the first
+    /// probe runs as soon as the TAIL of the set has arrived - typically
+    /// in the first moments of the download, not at its end - and
+    /// candidates from sidecars, the job name, the operator's passwords
+    /// file or a password typed mid-download are all in reach then.
+    ///
+    /// Verification is the container's own: a candidate is VERIFIED only
+    /// if it decrypts the end header to bytes that pass the header's
+    /// CRC, through a side reader over bytes already retained (the trim
+    /// cannot arm before the header parses), so a probe never waits on
+    /// the wire once the warm-up read returned.
+    ///
+    /// While it waits the container's parts keep collecting into their
+    /// frontiers under the shared held-bytes budget, exactly as a parked
+    /// RAR set does; a breach demotes the set as it always would, to the
+    /// disk pass's own password ladder. On a hit the password is applied
+    /// extractor-wide through [`Extractor::apply_probed_password`], which
+    /// also re-keys any parked RAR set it verifies.
+    ///
+    /// None when no probe is possible (a nested level, no hook,
+    /// protected sources, a header the scan cannot place), when the set
+    /// demoted or aborted while waiting, or when the finish signal's last
+    /// probe also missed.
+    fn sevenz_await_password(me: &Weak<Extractor>, ctl: &SevenZCtl) -> Option<String> {
+        let hook = {
+            let ex = me.upgrade()?;
+            let inner = ex.inner.lock_ok();
+            if ex.depth != 0 || inner.protect_sources {
+                return None;
+            }
+            inner.pw_probe.clone()?
+        };
+        let hc = crate::nameprobe::sevenz_encrypted_header(&mut Self::sevenz_side_reader(ctl))?;
+        // Front-load the packed header stream, then wait for it: every
+        // probe after this reads only retained bytes.
+        let pack_from = ctl.archive_base.checked_add(hc.pack_off)?;
+        let pack_to = pack_from.checked_add(hc.pack_len)?;
+        if let Some(ex) = me.upgrade() {
+            for (slot, ls, le) in ctl.set.map_range(pack_from, pack_to) {
+                ex.promote_slot_spans(slot, &[(ls, le)], true);
+            }
+        }
+        {
+            let mut r = Self::sevenz_side_reader(ctl);
+            io::Seek::seek(&mut r, io::SeekFrom::Start(hc.pack_off)).ok()?;
+            io::copy(&mut io::Read::take(&mut r, hc.pack_len), &mut io::sink()).ok()?;
+        }
+        let check = SevenZHeaderCheck::new(ctl, &hc.aes_props);
+        loop {
+            let finishing = *ctl.pw_finish.0.lock_ok();
+            // Still a live chase? A demotion or an abort while we waited
+            // means nobody will read these bytes through this worker.
+            {
+                let ex = me.upgrade()?;
+                let inner = ex.inner.lock_ok();
+                let parts = ctl.set.member_slots();
+                if parts.is_empty()
+                    || !parts
+                        .iter()
+                        .all(|&m| matches!(inner.slots[m].mode, SlotMode::SevenZ))
+                {
+                    return None;
+                }
+            }
+            // The hook surrenders only a candidate it saw verify; the
+            // container re-checks it here, because a wrong password past
+            // this point would key the direct map.
+            if let Some(pw) = hook(&check)
+                && crate::rar::CandidateCheck::verify(&check, &pw)
+                    == crate::rar::PwVerdict::Verified
+            {
+                let ex = me.upgrade()?;
+                if ex.apply_probed_password(&pw).is_err() || ex.flush_pending_fwd().is_err() {
+                    return None;
+                }
+                tracing::info!(
+                    target: "password",
+                    "🔑 candidate password unlocked a header-encrypted 7z in-stream"
+                );
+                return Some(pw);
+            }
+            if finishing {
+                return None;
+            }
+            let (flag, cv) = &ctl.pw_finish;
+            let g = flag.lock_ok();
+            if !*g {
+                let _ = cv.wait_timeout(g, PW_REPROBE_EVERY);
+            }
+        }
+    }
+
     /// Drop-behind trim (TODO 37 step 2): release the bytes of a chased
     /// 7z slot that the decode engine has already read past, writing
     /// them into the slot's own archive file on the way out.
@@ -734,6 +959,15 @@ impl Extractor {
             // the worker demotes, while a truly complete set still serves
             // its worker to a clean finish (TODO 255).
             ctl.set.seal_parts();
+            // A worker waiting on a candidate password for an encrypted
+            // header (TODO 358 item 9) stops waiting: one last probe,
+            // then it either opens the container or reports the
+            // password verdict it was holding.
+            {
+                let (flag, cv) = &ctl.pw_finish;
+                *flag.lock_ok() = true;
+                cv.notify_all();
+            }
             let handle = ctl.worker.lock_ok().take();
             if let Some(h) = handle {
                 // A worker panic surfaces as a join error and leaves no
@@ -853,6 +1087,18 @@ pub(super) struct SetPart {
 pub(super) struct SevenZSet {
     pub(super) state: Mutex<SevenZSetState>,
     pub(super) arrived: Condvar,
+    /// Set the first time the byte space REFUSED a read (a sealed hole,
+    /// an abort, a read behind the trim), and never cleared. The tag
+    /// [`SevenZBytesUnavailable`] alone cannot carry that fact to the
+    /// worker's verdict: lzma-rust2's `RangeReader::read_u8` swallows
+    /// its source's error and returns 1 (`range_dec.rs`, a deliberate
+    /// hot-path trade), so a hole met by the range decoder comes back as
+    /// garbage, a short encoded header and an UNTAGGED
+    /// `MaybeBadPassword(UnexpectedEof)`. Whether the decoder met the
+    /// hole there or on a buffered read is timing, which is how the
+    /// tag-only check passed on the dev Mac and failed `windows-unit`
+    /// (9 Nov 2026, `a_missing_encrypted_header_article_is_not_a_password_verdict`).
+    pub(super) bytes_refused: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -881,6 +1127,7 @@ impl SevenZSet {
                 ..Default::default()
             }),
             arrived: Condvar::new(),
+            bytes_refused: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -893,7 +1140,13 @@ impl SevenZSet {
         SevenZSet {
             state: Mutex::new(SevenZSetState::default()),
             arrived: Condvar::new(),
+            bytes_refused: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Has the byte space refused any read of this set? See the field.
+    pub(super) fn bytes_refused(&self) -> bool {
+        self.bytes_refused.load(Ordering::Acquire)
     }
 
     pub(super) fn resolved(&self) -> bool {
@@ -1213,6 +1466,7 @@ impl SevenZCtl {
             sink_slots: Mutex::new(Vec::new()),
             outcome: Mutex::new(None),
             direct: Mutex::new(None),
+            pw_finish: Default::default(),
         }
     }
 }
@@ -1252,9 +1506,82 @@ pub(super) struct ChainedSeekReader {
     pub(super) low_water: Arc<AtomicU64>,
 }
 
+/// The marker on every error [`ChainedSeekReader`] raises: the container's
+/// byte space could not serve a read (the set aborted, a hole sealed at
+/// finish, an offset no part covers). Display is the inner error's, so the
+/// wording a demote reason carries is unchanged.
+///
+/// It exists because sevenz-rust2 cannot tell its source's failures from
+/// its decoders': under ANY non-empty password it reports every I/O error
+/// of the encoded-header decode, and of every entry read, as
+/// `MaybeBadPassword` (reader.rs `bad_password` / `maybe_bad_password`).
+/// A job whose password was right then demoted with "password rejected"
+/// over an article that simply never arrived, and the finish ladder went
+/// after the password (TODO 358 sweep, lane 3 item 4). Tagging at the one
+/// reader the library is handed lets [`sevenz_bytes_unavailable`] see the
+/// difference through whatever the library wrapped it in.
+#[derive(Debug)]
+pub(super) struct SevenZBytesUnavailable(io::Error);
+
+impl std::fmt::Display for SevenZBytesUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for SevenZBytesUnavailable {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+/// The demote reason a failed 7z worker run records, which the parent's
+/// nested-reason fold and the finish ladder's password remediation read.
+///
+/// Missing bytes, not a key, wherever the evidence says so: the tag
+/// ([`SevenZBytesUnavailable`]) when it survived the library's wrapping,
+/// or the set's own record that a read was refused (`refused`, see
+/// [`SevenZSet::bytes_refused`]) when a decoder swallowed it. Both are
+/// checked ahead of the password arms, which the library would otherwise
+/// land a hole in.
+pub(super) fn sevenz_worker_reason(e: sevenz_rust2::Error, refused: bool) -> String {
+    match e {
+        e if refused || sevenz_bytes_unavailable(&e) => format!("inner 7z decode failed: {e}"),
+        sevenz_rust2::Error::PasswordRequired => "inner 7z is encrypted (no password)".to_string(),
+        sevenz_rust2::Error::MaybeBadPassword(_) => {
+            "inner 7z is encrypted (password rejected)".to_string()
+        }
+        sevenz_rust2::Error::UnsupportedCompressionMethod(m) => {
+            format!("inner 7z codec unsupported: {m}")
+        }
+        e => format!("inner 7z decode failed: {e}"),
+    }
+}
+
+/// Did this 7z error come from the byte space rather than the archive -
+/// i.e. is it NOT a verdict on the password, whatever variant carries it?
+pub(super) fn sevenz_bytes_unavailable(e: &sevenz_rust2::Error) -> bool {
+    match e {
+        sevenz_rust2::Error::Io(e, _)
+        | sevenz_rust2::Error::FileOpen(e, _)
+        | sevenz_rust2::Error::MaybeBadPassword(e) => e
+            .get_ref()
+            .is_some_and(|x| x.is::<SevenZBytesUnavailable>()),
+        _ => false,
+    }
+}
+
 impl io::Read for ChainedSeekReader {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        let n = self.set.read_blocking(self.base + self.pos, out)?;
+        let n = self
+            .set
+            .read_blocking(self.base + self.pos, out)
+            .map_err(|e| {
+                // Recorded before the tag, because the tag can be lost
+                // on the way up (see `SevenZSet::bytes_refused`).
+                self.set.bytes_refused.store(true, Ordering::Release);
+                io::Error::new(e.kind(), SevenZBytesUnavailable(e))
+            })?;
         self.pos += n as u64;
         self.low_water
             .store(self.base + self.pos, Ordering::Relaxed);
@@ -1285,6 +1612,23 @@ impl io::Seek for ChainedSeekReader {
 /// 7z container magic at offset 0.
 pub(super) const SEVENZ_MAGIC: &[u8] = &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
 
+/// LZMA2 decode workers for the in-stream 7z chase: the bound the disk
+/// opener applies (`open_sevenz` in
+/// crates/nzbfast-unpack/src/rarfix/sevenz.rs, which carries the
+/// measurement - eight workers peaked at 2.7 GB on a 1 GiB member with a
+/// 32 MiB dictionary): the CPU worker count capped at 8, and at ~320 MiB
+/// per worker of the process budget's decoder allowance.
+/// A SECOND COPY of that rule, because the disk opener lives in a crate
+/// above this one; the two must move together until it is hoisted here.
+pub(super) fn sevenz_decode_threads() -> u32 {
+    // `decoder_allowance`, not `rar_execution_policy().working_memory_limit`
+    // (the same figure): the policy is behind the `rar` feature and this
+    // chase is not, so reading it there broke every build without `rar`.
+    let allowance = crate::mem::process_budget().decoder_allowance();
+    let by_memory = (allowance / (320 << 20)).clamp(1, 8) as usize;
+    crate::mem::cpu_workers().clamp(1, 8).min(by_memory) as u32
+}
+
 /// Parse the 32-byte 7z start header: `(end-header offset, size)`,
 /// CRC-checked - the offsets are relative to byte 32, so the end header
 /// (the archive map, which 7z keeps at the TAIL) occupies
@@ -1301,6 +1645,65 @@ pub(super) fn sevenz_start_header(data: &[u8]) -> Option<(u64, u64)> {
     let off = u64::from_le_bytes(data[12..20].try_into().unwrap());
     let size = u64::from_le_bytes(data[20..28].try_into().unwrap());
     Some((off, size))
+}
+
+/// A header-encrypted 7z container as a [`crate::rar::CandidateCheck`]:
+/// the argument [`Extractor::sevenz_await_password`] hands the job's
+/// candidate hook (TODO 358 item 9). A candidate verifies when the end
+/// header decrypts under it to bytes that pass the header's CRC - the
+/// archive's own word, the same weight a RAR5 stored check carries.
+pub(super) struct SevenZHeaderCheck {
+    set: Arc<SevenZSet>,
+    base: u64,
+    total: u64,
+    /// The header coder's SHA-256 work-factor power (7-Zip's default is
+    /// 19); 0 for the raw-key mode (`0x3F`), which derives nothing.
+    depth: u8,
+    /// First 16 bytes of SHA-256 over the header coder's properties.
+    key: [u8; 16],
+}
+
+impl SevenZHeaderCheck {
+    fn new(ctl: &SevenZCtl, props: &[u8]) -> SevenZHeaderCheck {
+        use sha2::Digest as _;
+        let power = props.first().map_or(0, |b| b & 0x3F);
+        let digest: [u8; 32] = sha2::Sha256::digest(props).into();
+        let mut key = [0u8; 16];
+        key.copy_from_slice(&digest[..16]);
+        let total = ctl.set.total();
+        SevenZHeaderCheck {
+            set: ctl.set.clone(),
+            base: ctl.archive_base,
+            total: total.saturating_sub(ctl.archive_base),
+            depth: if power == 0x3F { 0 } else { power },
+            key,
+        }
+    }
+}
+
+impl crate::rar::CandidateCheck for SevenZHeaderCheck {
+    fn kdf_depth(&self) -> u8 {
+        self.depth
+    }
+    fn tried_key(&self) -> [u8; 16] {
+        self.key
+    }
+    fn verify(&self, candidate: &str) -> crate::rar::PwVerdict {
+        if candidate.is_empty() {
+            return crate::rar::PwVerdict::Rejected;
+        }
+        let mut r = ChainedSeekReader {
+            set: self.set.clone(),
+            pos: 0,
+            base: self.base,
+            total: self.total,
+            low_water: Arc::new(AtomicU64::new(0)),
+        };
+        match sevenz_rust2::Archive::read(&mut r, &sevenz_rust2::Password::from(candidate)) {
+            Ok(_) => crate::rar::PwVerdict::Verified,
+            Err(_) => crate::rar::PwVerdict::Rejected,
+        }
+    }
 }
 
 /// One 7z chase = one inner .7z file (one child slot): the slot's
@@ -1352,6 +1755,11 @@ pub(super) struct SevenZCtl {
     /// or sees None and joins the frontier as before. `None` forever on
     /// every container the map declines.
     pub(super) direct: Mutex<Option<Arc<Vec<DirectMember>>>>,
+    /// TODO 358 item 9: raised (and signalled) by `sevenz_finish` before
+    /// it joins the worker. A worker parked in
+    /// [`Extractor::sevenz_await_password`] makes one last candidate
+    /// probe - every sidecar has landed by now - and stops waiting.
+    pub(super) pw_finish: (Mutex<bool>, std::sync::Condvar),
 }
 
 #[cfg(test)]

@@ -53,8 +53,10 @@ Notes:
 - The manifests cannot be validated end-to-end from this Mac
   (`winget validate` and the install test need Windows); the repo's CI
   is the real gate, so watch the PR checks rather than assuming.
-- ManifestVersion tracks winget-pkgs' current schema (1.12.0 as of
-  Aug 2026); bump it when their validation asks for it.
+- ManifestVersion tracks winget-pkgs' current schema (1.28.0 since
+  Nov 2026); bump it when their validation asks for it. Their bot
+  labels an older one `Manifest-Version-Deprecated` and names the
+  version it wants, and the PR then waits on Needs-Author-Feedback.
 - The installer is not yet code-signed, so the sandbox install relies on
   Defender not flagging the exe that day. If validation fails on a
   reputation hit, that is the known signing gap, not a manifest bug.

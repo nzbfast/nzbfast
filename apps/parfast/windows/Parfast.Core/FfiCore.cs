@@ -106,14 +106,57 @@ public sealed class FfiCore : ICoreClient
         }
     }
 
-    public long Submit(JobSpec spec) => pf_job_submit(Live(), ParfastJson.Write(spec));
+    /// <summary>pf_job_cancel's answer for a job that has already finished (or is gone).</summary>
+    private const int PfErrNotFound = -3;
 
-    public JobSnapshot? Snapshot(long id) => ReadJson<JobSnapshot>(pf_job_snapshot(Live(), id));
+    /// <summary>
+    /// The name each job submitted by THIS session was given, from its spec: the
+    /// fallback when the core's <c>title</c> is empty. A job restored from the
+    /// store is not in here, and the core titles those from their own spec.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, string> _names = new();
+
+    public long Submit(JobSpec spec)
+    {
+        var id = pf_job_submit(Live(), ParfastJson.Write(spec));
+        if (id > 0 && spec.DisplayName() is { Length: > 0 } name)
+        {
+            _names[id] = name;
+        }
+
+        return id;
+    }
+
+    public JobSnapshot? Snapshot(long id) =>
+        ReadJson<JobSnapshot>(pf_job_snapshot(Live(), id)) is { } job ? Named(job) : null;
 
     public QueueSnapshot QueueSnapshot() =>
-        ReadJson<QueueSnapshot>(pf_queue_snapshot(Live())) ?? Contracts.QueueSnapshot.Empty;
+        ReadJson<QueueSnapshot>(pf_queue_snapshot(Live())) is { } queue
+            ? queue with { Jobs = queue.Jobs.Select(Named).ToList() }
+            : Contracts.QueueSnapshot.Empty;
 
-    public bool Cancel(long id) => pf_job_cancel(Live(), id) == 0;
+    private JobSnapshot Named(JobSnapshot job) =>
+        string.IsNullOrEmpty(job.Title) && string.IsNullOrEmpty(job.Name) && _names.TryGetValue(job.Id, out var name)
+            ? job with { Name = name }
+            : job;
+
+    /// <remarks>
+    /// A cancel the core refuses because the job has ALREADY FINISHED
+    /// (PF_ERR_NOT_FOUND since 9 Nov 2026; it keeps its state and result) is
+    /// the outcome the user wanted, not an error, so it answers true and asks
+    /// the host to repoll, which shows the job as it finished.
+    /// </remarks>
+    public bool Cancel(long id)
+    {
+        var rc = pf_job_cancel(Live(), id);
+        if (rc == PfErrNotFound)
+        {
+            Wake?.Invoke();
+            return true;
+        }
+
+        return rc == 0;
+    }
 
     public bool Pause(long id) => pf_job_pause(Live(), id) == 0;
 

@@ -5,6 +5,9 @@
 
 use super::*;
 
+// TODO 358 item 1: the parallel start sample and the cap fix, in vivo.
+mod start_sample;
+
 /// TODO §138 (issue #29), the opt-in give-up: a post every configured
 /// server confirms missing fails BEFORE it is downloaded, and one that
 /// only a subset confirmed does not.

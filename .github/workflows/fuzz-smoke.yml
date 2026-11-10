@@ -33,7 +33,15 @@ concurrency:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 60, not the 45 it was, which the job had outgrown: 18 x 60 s of
+    # burst plus the SIMD and CRC kernel runs is ~26 min of fixed fuzzing,
+    # and the first `cargo fuzz run` rebuilds nzbkit under the sanitizer
+    # on every night its source moved - 7m13s to 11m26s ON A CACHE HIT,
+    # by runner. Measured over four nights 6-9 Nov 2026: 38m51s to 45m09s
+    # a job, and the 9 Nov run was cap-killed inside the CRC step with
+    # every target clean. A hang still runs past this; a slow builder no
+    # longer reads as one.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: nightly toolchain

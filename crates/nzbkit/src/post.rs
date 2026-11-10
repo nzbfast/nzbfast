@@ -30,17 +30,20 @@ pub enum PostError {
     #[error("{0}")]
     Retryable(String),
     /// A resend was rejected as a duplicate, but the provider's read farm
-    /// has not made the article visible to STAT yet. The Message-ID may
+    /// has not made the article visible to STAT yet - or the article went
+    /// out whole and its acknowledgement never arrived. The Message-ID may
     /// already be public and must ride in abort/rescue output even though it
     /// is not safe to call the upload successful.
     #[error("{0}")]
     Unconfirmed(String),
     /// The upload stopped partway with articles already on the server.
     /// `posted` carries every Message-ID the server accepted before the
-    /// abort - those articles are public, under random ids that exist
-    /// nowhere else, so the caller MUST surface or persist them. Losing
-    /// them means the operator can neither fetch nor cancel what they
-    /// just published.
+    /// abort, AND every one it may have accepted without saying so (an
+    /// [`PostError::Unconfirmed`] article: a duplicate claim STAT has not
+    /// confirmed yet, or an acknowledgement that never came) - those
+    /// articles are public, under random ids that exist nowhere else, so
+    /// the caller MUST surface or persist them. Losing them means the
+    /// operator can neither fetch nor cancel what they just published.
     #[error("{message}")]
     Aborted {
         message: String,
@@ -547,6 +550,21 @@ async fn stat_exists(conn: &mut Connection, message_id: &str) -> Result<bool, Po
     })
 }
 
+/// The article went out WHOLE - every byte and its terminator - and no
+/// acknowledgement came back. The server may well have filed it (the
+/// lost-acknowledgement shape `post_article`'s 441 arm exists for), so
+/// this is not a transport error like any other: it is
+/// [`PostError::Unconfirmed`], which the upload keeps in its rescue set
+/// if the article never gets a better answer. Reported as a plain
+/// transport error, an upload that ran out of attempts here dropped a
+/// Message-ID that may already be public, under a random id nothing
+/// else records.
+fn unacknowledged(message_id: &str, e: &NntpError) -> PostError {
+    PostError::Unconfirmed(format!(
+        "article <{message_id}> was sent whole but its acknowledgement never came ({e})"
+    ))
+}
+
 /// A POST 441 is free-form, so only the conventional leading secondary
 /// status (`441 435 Duplicate...`) is a claim that this exact Message-ID
 /// already exists. A later mention of "435" or "duplicate" can describe an
@@ -578,7 +596,10 @@ pub async fn post_article(
         match st.code {
             340 => {
                 conn.send_raw(wire).await?;
-                let st = conn.read_status().await?;
+                let st = conn
+                    .read_status()
+                    .await
+                    .map_err(|e| unacknowledged(message_id, &e))?;
                 if st.code != 240 {
                     // A 441 on a RE-send can mean the first attempt was
                     // accepted after all and we simply never saw the
@@ -685,7 +706,10 @@ pub async fn post_article(
     match st.code {
         335 => {
             conn.send_raw(wire).await?;
-            let st = conn.read_status().await?;
+            let st = conn
+                .read_status()
+                .await
+                .map_err(|e| unacknowledged(message_id, &e))?;
             match st.code {
                 235 => Ok(true),
                 // "transfer failed; try again later" - nothing was filed,
@@ -1573,6 +1597,39 @@ mod tests {
         assert_eq!(posted.files[0].segments.len(), 2);
         let nzb = Nzb::parse(emit_nzb(&posted).as_bytes()).expect("rescue NZB parses");
         assert_eq!(nzb.files[0].segments.len(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Sweep 9 Nov 2026 (C, post.rs:951-988): an article that went out
+    /// whole on EVERY attempt and never got an acknowledgement back may
+    /// be on the server three times over - and it left the rescue set,
+    /// because the last attempt's error was an ordinary transport one.
+    /// The server here files every copy, so the id is public and has to
+    /// come back out with the abort.
+    #[tokio::test]
+    async fn an_article_whose_every_acknowledgement_is_lost_is_rescued() {
+        let srv = crate::mock::MockServer::start(
+            std::collections::HashMap::new(),
+            crate::mock::Chaos {
+                post: crate::mock::PostChaos {
+                    ack_lost: 3,
+                    ack_lost_keeps: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+        let (dir, plan_files, opts) = corpus("acklost3", 1, 1000);
+        let err = post_files(&srv.server_config(), &plan_files, &opts, None)
+            .await
+            .expect_err("no attempt was ever acknowledged");
+        let PostError::Aborted { posted, .. } = &err else {
+            panic!("a possibly public id needs rescue output, got {err:?}");
+        };
+        assert_eq!(posted.files.len(), 1);
+        assert_eq!(posted.files[0].segments.len(), 1);
+        assert_all_present(&srv, posted).await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

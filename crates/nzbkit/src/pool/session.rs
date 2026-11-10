@@ -25,6 +25,10 @@ use super::*;
 #[cfg(test)]
 mod unit_tests;
 
+// TODO 358 items 2 and 12: answering a mid-session 480 or 412 on the
+// same socket instead of ending the session.
+mod relogin;
+
 /// One dial attempt: the `None` arm of `session_loop`'s warm-claim
 /// match, moved verbatim (TODO 113). Owns the connect, the AUTHINFO
 /// refusal taxonomy (permanent vs capacity, §15e / TODO 115) and the
@@ -181,6 +185,16 @@ pub(super) struct SessionState {
     /// moment `acquire_conn` returns rather than trusting the value this
     /// constructor left.
     pub(super) quiet_since: Instant,
+    /// TODO 358 item 2: `responses` as it stood at this session's last
+    /// mid-session re-login, None before the first. A 480 is answered
+    /// with a re-login only when the session has done useful work since
+    /// the previous one, so a server that 480s the re-asked article
+    /// straight back cannot hold a session in a login loop - it falls
+    /// through to the redial every 480 used to take. See [`relogin`].
+    pub(super) relogin_at: Option<u32>,
+    /// TODO 358 item 12: this session has already sent its one `GROUP`
+    /// in answer to a 412. A second 412 ends the session as before.
+    pub(super) group_sent: bool,
 }
 
 impl SessionState {
@@ -204,6 +218,8 @@ impl SessionState {
             fence_read_seen: false,
             inflight: VecDeque::with_capacity(window),
             quiet_since: now,
+            relogin_at: None,
+            group_sent: false,
         }
     }
 }
@@ -3094,6 +3110,18 @@ pub(super) async fn session_loop(
                     .await;
                 }
                 Ok(Err(e)) => {
+                    // TODO 358 items 2 and 12: a 480 or 412 refused the
+                    // SESSION, not the article. Log in again (or select
+                    // a group) on this socket and re-ask the whole
+                    // pipeline uncharged; only when that is not on offer
+                    // or fails does the session die the way it always
+                    // did, with the original error.
+                    if let Some(kind) = e.session_refusal()
+                        && relogin::recover(&mut conn, server, cfg, ctx, &mut sess, kind).await
+                    {
+                        drop(buf);
+                        continue;
+                    }
                     let code =
                         session_died_mid_read(cfg, ctx, &shared, &out, conn, buf, &e, &mut sess)
                             .await;

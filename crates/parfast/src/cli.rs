@@ -416,7 +416,15 @@ fn parse_options(command: Command, args: &[String]) -> Result<Options, ParseErro
         // the par2 file and answered "failed to set the main par file",
         // exit 3, on every job. The drop-in claim was untrue for the
         // largest caller of par2 there is.
-        if spell == 'B' && value.is_empty() {
+        //
+        // `-a <file>` is the reference's SECOND such switch, which this
+        // comment missed until 9 Nov 2026: par2cmdline 1.2.0 accepts
+        // `par2 c -R -a out.par2 dirA dirB` (exit 0, both directories
+        // stored), while parfast took the empty attached value as the
+        // archive name and refused on an empty base name - the exact
+        // command line the sweep's A5 report used, found re-running it
+        // after the A5 fix had landed against the attached `-aout.par2`.
+        if (spell == 'B' || spell == 'a') && value.is_empty() {
             let Some(v) = it.next() else {
                 return Err(ParseError::msg(format!("Option {arg} requires a value.")));
             };
@@ -764,6 +772,13 @@ fn read_listing(path: &str) -> Result<Vec<String>, ParseError> {
         std::fs::read_to_string(path)
             .map_err(|e| ParseError::msg(format!("Failed to open file list {path}: {e}")))?
     };
+    // A UTF-8 BYTE ORDER MARK comes off first. Windows editors commonly
+    // write one, and `str::trim` does not take
+    // it - U+FEFF is not White_Space - so the first line came out as
+    // `\u{feff}movie.mkv`, named no file, and fell out of the member list
+    // on the silent missing-literal drop below the parse: exit 0 with one
+    // file unprotected (sweep A16).
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     Ok(text
         .lines()
         .map(str::trim)

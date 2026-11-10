@@ -1810,10 +1810,42 @@ pub fn bomb_failure() -> String {
 /// with a fourth literal that would drift the first time the sentence
 /// is reworded.
 pub fn unlock_answers(fail_message: &str) -> bool {
-    fail_message == "password required to unpack"
+    fail_message == PASSWORD_REQUIRED
         || fail_message == "password did not unlock the archive"
         || fail_message == UNLOCK_LAYER_LEFT
+        || unlock_left_packed_says(fail_message)
         || nzbkit::disk::bomb_verdict(fail_message)
+}
+
+/// The reason a job carries when its encrypted set had no working
+/// password. Written by the completed tail, which files the job FAILED
+/// with it (TODO 358, 9 Nov 2026: what SABnzbd reports, so an *arr
+/// grabs another release), and answered by [`unlock_answers`] - so the
+/// unlock that files the record Completed again matches the same bytes
+/// the tail wrote. NZBGet's PASSWORD unpack status reads it too.
+pub const PASSWORD_REQUIRED: &str = "password required to unpack";
+
+/// The two fixed halves of [`unlock_left_packed`], so the sentence and
+/// its matcher cannot drift apart.
+const LEFT_PACKED_HEAD: &str = "the password opened the archive, but ";
+const LEFT_PACKED_TAIL: &str =
+    " inside it is still packed and could not be unpacked here, so it was left on disk";
+
+/// The unlock's named refusal when a password opened a container and
+/// exposed a layer the walk could not take (a plain RAR, a tar, one past
+/// the depth bound): `left` is that layer's file name. Owned here rather
+/// than inline in `unlockpw` so [`unlock_answers`] can recognise it - a
+/// later unlock that delivers the payload answers it, and a Completed
+/// row must not keep saying the archive is still packed.
+pub fn unlock_left_packed(left: &str) -> String {
+    format!("{LEFT_PACKED_HEAD}{left}{LEFT_PACKED_TAIL}")
+}
+
+/// Is this the [`unlock_left_packed`] sentence, for any layer name?
+fn unlock_left_packed_says(msg: &str) -> bool {
+    msg.len() > LEFT_PACKED_HEAD.len() + LEFT_PACKED_TAIL.len()
+        && msg.starts_with(LEFT_PACKED_HEAD)
+        && msg.ends_with(LEFT_PACKED_TAIL)
 }
 
 /// The manual unlock's answer when the typed password opened a container

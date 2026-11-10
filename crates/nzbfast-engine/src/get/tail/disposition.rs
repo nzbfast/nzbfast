@@ -261,23 +261,60 @@ pub(super) fn held_downloaded_files(
 /// Returns the names it could NOT remove - the caller must refuse to
 /// complete while any remain (a holed file that survived is exactly the
 /// false artifact the delete exists to prevent).
-pub(super) fn drop_spared_metadata(out_dir: &Path, spared: &[String]) -> Vec<String> {
+///
+/// THE FILE ON DISK, NOT ONLY THE SUBJECT'S NAME (read-only sweep, 9 Nov
+/// 2026). `spared` holds the census's names, which are the slots' NZB
+/// subject hints, and the writer opens a file under its yEnc `name=`
+/// unless that would give a real name up (`FileSlot::write_name`, GH
+/// #63). So `Movie.nfo` posted with `=ybegin name=movie-grp.nfo` lands as
+/// `movie-grp.nfo`, the join below finds nothing, NotFound counts as
+/// gone, and the job completed reporting the partial removed while the
+/// holed `movie-grp.nfo` sat in the directory. Every short slot carrying
+/// a spared name now has its live, rename-aware `slot_path` removed as
+/// well. "Short" is the census's own test (`missing` or `remaining`), so
+/// only the slots it spared are reached. The subject spelling is still
+/// tried: a slot whose every article was lost has no writer and no path.
+pub(super) fn drop_spared_metadata(
+    out_dir: &Path,
+    spared: &[String],
+    slots: &[Arc<FileSlot>],
+    extractor: &nzbkit::extract::Extractor,
+) -> Vec<String> {
     if spared.is_empty() {
         return Vec::new();
     }
     let mut gone = Vec::new();
     let mut kept = Vec::new();
     for name in spared {
-        let p = nzbkit::disk::join_out_name(out_dir, &nzbkit::disk::sanitize_out_name(name));
-        match std::fs::remove_file(&p) {
-            // Never written at all is the same outcome we want.
-            Ok(()) => gone.push(name.clone()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => gone.push(name.clone()),
-            Err(e) => {
-                warn!(target: "get", "could not remove the partial {}: {e}", p.display());
-                kept.push(name.clone());
+        let mut paths = vec![nzbkit::disk::join_out_name(
+            out_dir,
+            &nzbkit::disk::sanitize_out_name(name),
+        )];
+        for (i, s) in slots.iter().enumerate() {
+            let short =
+                s.missing.load(Ordering::Relaxed) > 0 || s.remaining.load(Ordering::Relaxed) > 0;
+            if &s.hint == name
+                && !s.is_par2()
+                && short
+                && let Some(p) = extractor.slot_path(i)
+                && !paths.contains(&p)
+            {
+                paths.push(p);
             }
         }
+        let mut removed = true;
+        for p in &paths {
+            match std::fs::remove_file(p) {
+                // Never written at all is the same outcome we want.
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    warn!(target: "get", "could not remove the partial {}: {e}", p.display());
+                    removed = false;
+                }
+            }
+        }
+        if removed { &mut gone } else { &mut kept }.push(name.clone());
     }
     if kept.is_empty() {
         info!(

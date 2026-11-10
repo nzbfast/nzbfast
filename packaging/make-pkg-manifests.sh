@@ -59,17 +59,17 @@ WG="$ROOT/packaging/winget/manifests/$VER"
 mkdir -p "$WG" "$ROOT/packaging/scoop"
 
 cat > "$WG/nzbfast.nzbfast.yaml" <<EOF
-# yaml-language-server: \$schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
+# yaml-language-server: \$schema=https://aka.ms/winget-manifest.version.1.28.0.schema.json
 
 PackageIdentifier: nzbfast.nzbfast
 PackageVersion: $VER
 DefaultLocale: en-US
 ManifestType: version
-ManifestVersion: 1.12.0
+ManifestVersion: 1.28.0
 EOF
 
 cat > "$WG/nzbfast.nzbfast.installer.yaml" <<EOF
-# yaml-language-server: \$schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+# yaml-language-server: \$schema=https://aka.ms/winget-manifest.installer.1.28.0.schema.json
 
 PackageIdentifier: nzbfast.nzbfast
 PackageVersion: $VER
@@ -93,11 +93,11 @@ Installers:
   InstallerUrl: $BASE/$SETUP
   InstallerSha256: $SETUP_SHA
 ManifestType: installer
-ManifestVersion: 1.12.0
+ManifestVersion: 1.28.0
 EOF
 
 cat > "$WG/nzbfast.nzbfast.locale.en-US.yaml" <<EOF
-# yaml-language-server: \$schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+# yaml-language-server: \$schema=https://aka.ms/winget-manifest.defaultLocale.1.28.0.schema.json
 
 PackageIdentifier: nzbfast.nzbfast
 PackageVersion: $VER
@@ -123,7 +123,7 @@ Tags:
 - usenet
 ReleaseNotesUrl: https://github.com/nzbfast/nzbfast/releases/tag/v$VER
 ManifestType: defaultLocale
-ManifestVersion: 1.12.0
+ManifestVersion: 1.28.0
 EOF
 
 cat > "$ROOT/packaging/scoop/nzbfast.json" <<EOF

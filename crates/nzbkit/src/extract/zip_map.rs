@@ -244,6 +244,10 @@ pub(super) fn plan(
             name: e.name.clone(),
             start,
             size: e.uncompressed_size,
+            // Stored and never encrypted (encrypted entries declined
+            // above), so the container range is the output's length.
+            packed: e.uncompressed_size,
+            crypt: None,
             // AE-2 zeroes the CRC field by spec; every encrypted entry
             // already declined above, so this is always true here - and
             // asking anyway keeps the rule in one place
@@ -258,7 +262,7 @@ pub(super) fn plan(
     // checked rather than assumed.
     if out
         .windows(2)
-        .any(|w| w[0].start.saturating_add(w[0].size) > w[1].start)
+        .any(|w| w[0].start.saturating_add(w[0].packed) > w[1].start)
     {
         return None;
     }

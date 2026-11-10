@@ -2134,8 +2134,11 @@ mod tests {
 
     /// The other half of what `granted` means, and the one nothing
     /// pinned: a fleet cannot be larger than its own RAMP had time to
-    /// dial. Worker slot k sleeps `ramp_delay * k` before it connects
-    /// (`pool.rs`'s `let ramp = cfg.ramp_delay * slot`), so a rung whose
+    /// dial. The k-th worker admitted on a server waits `ramp_delay * k`
+    /// before it connects (`admit::dial_pace`, which reserves each dial
+    /// `ramp_delay` after the last one on that host; it was `ramp_delay *
+    /// slot` until 8 Nov 2026 and is the same for a fleet admitted at
+    /// spawn, which is every ladder rung), so a rung whose
     /// window is W can never hold more than `floor(W / ramp_delay) + 1`
     /// sockets at once - whatever the provider allows, and with nothing
     /// anywhere saying so.

@@ -2214,6 +2214,44 @@ fn the_loop_shaped_builder_places_the_crc_per_piece_not_per_volume() {
     );
 }
 
+/// [`fixtures::rar5_store_frame`] is the slice builder with the data
+/// area left out: `head ++ data ++ tail` equals what
+/// `rar5_volume_n_crc_of_layout` writes under `FinalFragment`, for a
+/// first, an interior and a last volume. The e2e volume-size ladder
+/// builds 4 GB volumes from the frame alone, so a drift here would post
+/// volumes no archiver writes and nothing at that scale would say why.
+#[test]
+fn the_store_frame_is_the_slice_builder_without_the_data() {
+    let film = payload(30_000, 91);
+    let crc = crc32fast::hash(&film);
+    let cuts = [(0usize, 10_000usize), (10_000, 20_000), (20_000, 30_000)];
+    for (k, &(lo, hi)) in cuts.iter().enumerate() {
+        let (before, after) = (k > 0, k + 1 < cuts.len());
+        let piece = &film[lo..hi];
+        let built = fixtures::rar5_volume_n_crc_of_layout(
+            &[("film.mkv", 30_000, piece, before, after, Some(crc))],
+            k as u64,
+            3,
+            fixtures::Rar5Crc::FinalFragment,
+        );
+        let (head, tail) = fixtures::rar5_store_frame(
+            "film.mkv",
+            30_000,
+            piece.len() as u64,
+            Some(crc),
+            before,
+            after,
+            k as u64,
+            3,
+        );
+        let framed = [head.as_slice(), piece, tail.as_slice()].concat();
+        assert_eq!(
+            framed, built,
+            "volume {k}: the frame and the builder disagree"
+        );
+    }
+}
+
 /// `rar5_seal_set` rewrites an end-of-archive block that `rar5_volume_set`
 /// would have written in the first place, so the two routes must produce
 /// the same bytes - otherwise the loop-built call sites are testing a
@@ -2253,4 +2291,136 @@ fn sealing_a_built_run_matches_building_the_set_directly() {
         .map(|(k, pieces)| fixtures::rar5_volume_n_of(pieces, k as u64, 3))
         .collect();
     assert_eq!(by_of, direct, "the loop-shaped route must agree too");
+}
+
+/// The committed `-mhe -mx=0` 7-Zip set, joined, and the 7zAES coder
+/// properties of its first folder (TODO 358 item 9's fixture; see
+/// `nzbkit`'s `extract/sevenz_mhe_tests.rs` for how it was made).
+fn mhe_store_folder_props() -> Vec<u8> {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sevenz");
+    let mut joined = Vec::new();
+    for i in 1..=3 {
+        joined.extend(std::fs::read(format!("{dir}/mhe-store.7z.{i:03}")).unwrap());
+    }
+    let r = sevenz_rust2::ArchiveReader::new(
+        std::io::Cursor::new(joined),
+        sevenz_rust2::Password::from("wp9-mhe-key"),
+    )
+    .unwrap();
+    let coders = &r.archive().blocks[0].coders;
+    coders
+        .iter()
+        .find(|c| c.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_AES256_SHA256)
+        .expect("the fixture's folder is AES")
+        .properties()
+        .to_vec()
+}
+
+/// A 7z member's record verifies exactly the key its header proof
+/// derived: the same key the library's own decoder derives for that
+/// password, never another password's, and nothing at all without a
+/// proof. Its Debug form names no key byte.
+#[test]
+fn sevenz_crypt_verifies_only_the_proven_key() {
+    let props = mhe_store_folder_props();
+    let (want_key, want_iv) =
+        sevenz_rust2::aes256_sha256_key_iv(&props, &sevenz_rust2::Password::from("wp9-mhe-key"))
+            .unwrap();
+    let c = EntryCrypt::SevenZ(SevenZCrypt::proven(props.clone(), "wp9-mhe-key").unwrap());
+    let k = c.derive("wp9-mhe-key").unwrap();
+    assert!(k.aes == rarcrypt::AesKey::Aes256(want_key) && k.iv == want_iv);
+    assert!(k.hash_key.is_none() && k.psw_check.is_none());
+    assert!(c.check_verifies(&k), "the proven key must verify");
+    assert!(!c.tweaked_checksum(), "7z stores the bare plaintext CRC32");
+    assert!(c.rar5().is_none());
+    // Another password derives (7zAES has no check to refuse it), and the
+    // proof refuses it.
+    let other = c.derive("someone else's").unwrap();
+    assert!(other.aes != k.aes, "two passwords, one key");
+    assert!(!c.check_verifies(&other), "an unproven key verified");
+    // No proof, no verdict.
+    let bare = EntryCrypt::SevenZ(SevenZCrypt::unproven(props.clone()));
+    assert!(!bare.check_verifies(&bare.derive("wp9-mhe-key").unwrap()));
+    // What the library refuses, this refuses.
+    assert!(
+        SevenZCrypt::proven(props.clone(), "").is_none(),
+        "empty password"
+    );
+    assert!(
+        SevenZCrypt::proven(Vec::new(), "x").is_none(),
+        "no properties"
+    );
+    let dbg = format!("{c:?}");
+    assert!(dbg.contains("proven: true"), "{dbg}");
+    assert!(
+        !dbg.contains(format!("{:?}", &want_key[..4]).trim_matches(['[', ']'])),
+        "the Debug form printed the key: {dbg}"
+    );
+}
+
+/// Sweep 9 Nov 2026 (C, rar.rs:1802): the extra-area walk cast the
+/// declared sizes with `as usize`, which TRUNCATES on a 32-bit target.
+/// A hash record declaring `2^32 + len` read there as a well-formed
+/// `len`-byte record and a digest was lifted out of a header the 64-bit
+/// build rejects - so the two builds disagreed about one archive, and
+/// a crafted size steered which bytes the 32-bit one trusted. Widened,
+/// the oversized record fails the body bound on every target.
+///
+/// On a 64-bit host this held before the fix too; it is the armv7
+/// leg, which runs this crate's tests, that it guards.
+#[test]
+fn v5_extra_record_sizes_past_u32_are_refused_on_every_target() {
+    fn vint_enc(mut v: u64, out: &mut Vec<u8>) {
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(b);
+                break;
+            }
+            out.push(b | 0x80);
+        }
+    }
+    // Hash record body: hash type 0 (BLAKE2sp) and a 32-byte digest.
+    let mut rec_body = Vec::new();
+    vint_enc(0x02, &mut rec_body); // record type: file hash (tn = 1)
+    vint_enc(0, &mut rec_body);
+    rec_body.extend_from_slice(&[0xAB; 32]);
+    let mut extra = Vec::new();
+    // Truncates to exactly the record's real length on a 32-bit target.
+    vint_enc((1u64 << 32) + rec_body.len() as u64, &mut extra);
+    extra.extend_from_slice(&rec_body);
+    let mut hdr = Vec::new();
+    vint_enc(2, &mut hdr); // type 2 = file
+    vint_enc(0x03, &mut hdr); // flags: extra + data
+    vint_enc(extra.len() as u64, &mut hdr); // extra size
+    vint_enc(4, &mut hdr); // data size
+    let mut body = Vec::new();
+    vint_enc(0, &mut body); // file flags
+    vint_enc(100, &mut body); // unpacked
+    vint_enc(0, &mut body); // attrs
+    vint_enc(0, &mut body); // comp info: store
+    vint_enc(0, &mut body); // host
+    vint_enc(4, &mut body); // name len
+    body.extend_from_slice(b"x.mk");
+    hdr.extend_from_slice(&body);
+    hdr.extend_from_slice(&extra);
+    let mut sized = Vec::new();
+    vint_enc(hdr.len() as u64, &mut sized);
+    let mut blk = Vec::new();
+    let mut crc = crc32fast::Hasher::new();
+    crc.update(&sized);
+    crc.update(&hdr);
+    blk.extend_from_slice(&crc.finalize().to_le_bytes());
+    blk.extend_from_slice(&sized);
+    blk.extend_from_slice(&hdr);
+    blk.extend_from_slice(b"data");
+    match parse_block_v5(&blk, 0) {
+        BlockResult::File { entry, .. } => assert!(
+            entry.hash.is_none(),
+            "an oversized record must not yield a digest: {:?}",
+            entry.hash
+        ),
+        _ => panic!("expected a file block"),
+    }
 }

@@ -405,6 +405,25 @@ pub struct Job {
     /// must requeue this job (deferred, back of the queue) instead of
     /// filing it in history as Failed.
     pub demote: bool,
+    /// TODO 358 item 3: the record generation (`Daemon::record_generation`)
+    /// on which the dispatch-stall watchdog has already RESET this job's
+    /// dispatch, `None` while it never has.
+    ///
+    /// THE WHOLE ONCE-ONLY RULE IS THIS FIELD. The reset winds the stalled
+    /// run down and puts the row back in the queue where it stood, so the
+    /// next pass starts a fresh fleet from the journal; if that pass
+    /// stalls too, the watchdog must NOT reset it again, because the
+    /// engine's own deadlock watchdog is what books the remainder missing
+    /// and a second reset would restart its clock forever. The suspended
+    /// re-queue keeps `retries` and `move_seq`, so the generation reads
+    /// the same on the second pass and the reset is spent.
+    ///
+    /// A generation rather than a bool so a user's RETRY (which bumps
+    /// `retries`) gets a reset of its own: that is a new attempt, not the
+    /// same stalled one. Deliberately NOT persisted: a daemon restart is
+    /// itself a fresh dispatch, so a reset spent before it buys nothing
+    /// the restart did not already give.
+    pub dispatch_reset_gen: Option<(u32, u64)>,
     /// Archive password for encrypted RAR sets: the SAB API `password`
     /// parameter, a `{{password}}` suffix on the submitted name, or the
     /// NZB's `<meta type="password">`. Never exposed through the API -
@@ -531,6 +550,23 @@ pub struct Job {
     /// Stored as the bare NAME, not a sentence: the dashboard has to
     /// compose the message in the user's own language.
     pub unpack_blocked_by: String,
+    /// Item 15 (TODO 358, decision D4): what a COMPLETED job did NOT
+    /// deliver, by name - archive sets outside the main payload that
+    /// stayed packed (a sample, a subtitle pack, a second archive that
+    /// failed alone), plus the sidecar [`Self::unpack_blocked_by`]
+    /// names. Empty for a clean unpack.
+    ///
+    /// NOT a Partial state, deliberately: the job is Completed to every
+    /// client, because the main payload WAS delivered. A main payload
+    /// that is missing never reaches this list - the engine fails the
+    /// job instead (G2, `rarfix::vouch`), so an *arr re-grabs rather
+    /// than importing nothing and stopping. Weaver's "one usable file"
+    /// rule is the one this must not copy.
+    ///
+    /// Written by finalize on every completion, read only off a
+    /// Completed record: a retry that then failed keeps a stale list,
+    /// which the history row does not publish.
+    pub not_delivered: Vec<String>,
     /// §282 item 14: the job this one REPLACED, when an alternate
     /// candidate was switched to. The nzo_id, so history can link the
     /// two rows; empty on every job that replaced nothing, which is
@@ -1421,6 +1457,11 @@ pub(super) async fn finalize_completed_gen(
     // record's nzo_id never changes, so one read outside every fence is
     // enough and it costs no place in the snapshot tuple below.
     let nzo = job.lock_ok().nzo_id.clone();
+    // Item 15: what the engine's unpack tail left packed outside the
+    // main payload. Taken HERE, ahead of every early return, so the
+    // owner-keyed cell never outlives the round that wrote it - a
+    // failed, tombstoned or superseded round simply drops it.
+    let not_delivered = d.hub.not_delivered.lock_ok().remove(&nzo);
     let snapshot = {
         let j = job.lock_ok();
         if !Daemon::same_generation(&j, gen0) {
@@ -1598,6 +1639,7 @@ pub(super) async fn finalize_completed_gen(
             ident,
             identified,
             cleaned,
+            refused,
         } = tokio::task::spawn_blocking(move || {
             job_finalize::finalize_payload(
                 d3, nzo3, out2, repl2, pw2, nzb2, site2, name2, crc2, exts, cat2, tv2,
@@ -1658,17 +1700,45 @@ pub(super) async fn finalize_completed_gen(
                 // A bomb verdict is this disk's, not the post's.
                 j.fail_code = Some(FailKind::Local);
             }
-            // In "never ask" mode the locked outcome is not presented
-            // as a failure: the still-packed note (blocked_by above)
-            // says what happened, password_required keeps the 🔑
-            // available for whenever the user does have the password,
-            // and no text or sound nags for one.
-            if needs_pw
-                && j.fail_message.is_empty()
-                && d.password_prompt.lock_ok().as_str() != "never"
-            {
-                j.fail_message = "password required to unpack".into();
-                j.fail_code = Some(FailKind::Local);
+            // TODO 358, decided 9 Nov 2026:
+            // an encrypted set with no working password is FAILED, with
+            // a "password required" reason, as SABnzbd reports it - so
+            // an *arr blocks this release and grabs another instead of
+            // importing a folder of packed volumes. It used to file
+            // Completed with the flag. Everything the flag drives is
+            // kept: the 🔑 on the row, the dashboard prompt, and
+            // `set_password`, whose unlock files the record Completed
+            // again once the archive opens (`api/queue.rs`). Nothing is
+            // lost to the state either: `auto_retry_eligible` already
+            // refused any record carrying `password_required`, and
+            // `Local` is neither transient nor a dead-post report.
+            // NZBGet reads `FAILURE/UNPACK` with UnpackStatus PASSWORD
+            // off the same sentence (`nzbget_status`).
+            //
+            // "never ask" mode changes what the DASHBOARD says, not what
+            // an API client reads: the page stays silent for this row
+            // (its `job.failed` arm), and the still-packed note
+            // (blocked_by above) names the archive. The reason is
+            // written in every mode, because a Failed row with an empty
+            // reason tells an *arr nothing.
+            if needs_pw {
+                if j.fail_message.is_empty() {
+                    j.fail_message = crate::diag::PASSWORD_REQUIRED.into();
+                }
+                if j.fail_code.is_none() {
+                    j.fail_code = Some(FailKind::Local);
+                }
+                j.state = JobState::Failed;
+            }
+            // Item 15: the engine's list, then the sidecar zip the
+            // finished-directory read found, so one list names every
+            // member this completion left packed. Not the LOCKED
+            // archive "never ask" mode puts in `blocked_by`: that one
+            // is the main payload waiting for its password, and this
+            // list is only ever members outside it.
+            j.not_delivered = not_delivered.unwrap_or_default();
+            if !needs_pw && !blocked_by.is_empty() && !j.not_delivered.contains(&blocked_by) {
+                j.not_delivered.push(blocked_by.clone());
             }
             j.unpack_blocked_by = blocked_by;
             // C: the relocation now happens on the mover worker, off
@@ -1691,6 +1761,20 @@ pub(super) async fn finalize_completed_gen(
             // beneath itself.
             j.move_pending =
                 !needs_pw && !j.write_through && d.move_destination_configured(&j.category);
+            // TODO 358 item 13 (D2): a refused payload FAILS, which is
+            // what a SAB/NZBGet client reads to give up on this post and
+            // grab another. Written over whatever the download said,
+            // because the download said Completed - that is the only
+            // way into this pass. `Local` keeps it out of the automatic
+            // retry (the same post would be refused again) and out of
+            // the dead-post report (the post is whole; it is the
+            // CONTENT that is refused). Nothing goes to the mover.
+            if let Some(why) = refused {
+                j.state = JobState::Failed;
+                j.fail_message = why;
+                j.fail_code = Some(FailKind::Local);
+                j.move_pending = false;
+            }
             // Recorded even when it changed no filename: an IMDb id with
             // no better name is still the thing that lets the history
             // row link to what it actually is.
@@ -1771,7 +1855,8 @@ pub(super) async fn finalize_completed_gen(
         // read. Blocking (a folder walk, whole-file reads and an
         // enqueue), so it goes to the pool rather than onto this tail's
         // worker; a panic in it must not cost the job its history row.
-        if d.refeed_nzb.load(Ordering::Relaxed) {
+        // A payload refused above (TODO 358 item 13) is a failure too.
+        if d.refeed_nzb.load(Ordering::Relaxed) && job.lock_ok().state == JobState::Completed {
             let (d5, j5) = (d.clone(), job.clone());
             if let Err(e) =
                 tokio::task::spawn_blocking(move || crate::refeed::refeed_completed(&d5, &j5, gen0))
@@ -3170,7 +3255,11 @@ pub struct Enqueued {
 /// 22 Oct sweep F4). Set at construction, they are on the row before it
 /// is published, filed, announced or offered to a worker, whichever of
 /// those happens.
-#[derive(Debug, Clone, Default)]
+///
+/// Debug is written by hand so `header_password` prints as `<set>` and
+/// never in clear, the same mask `fetch::DnzbHeaders` gives it where it
+/// comes from.
+#[derive(Clone, Default)]
 pub struct AddExtras {
     /// NZBGet PPParameters, as `Job::pp_params` stores them.
     pub pp_params: Vec<(String, String)>,
@@ -3182,6 +3271,13 @@ pub struct AddExtras {
     pub failure_host: String,
     pub failure_https: bool,
     pub failure_depth: u8,
+    /// The fetch's `X-DNZB-Password`, filled by
+    /// `Daemon::enqueue_fetched_with` (and `hunt_hold`, which builds its
+    /// extras by hand). Empty for every other add. Not a field on the
+    /// row: it is one more SOURCE for `Job::password`, settled by
+    /// `Daemon::resolve_add_identity` at the rung the NZB's own
+    /// `<meta type="password">` holds.
+    pub header_password: String,
     /// Build the row per-job PAUSED whatever its priority. `-2` already
     /// means that, but it also means "priority Normal", so a caller that
     /// has to restore a paused row at High (Undo) cannot say both through
@@ -3189,4 +3285,36 @@ pub struct AddExtras {
     /// the row published unpaused across the add's synchronous save, and
     /// the runner could start it in there (27 Oct 2026 sweep F2).
     pub paused: bool,
+    /// `Job::sab_pp` and `Job::script_override` to restore, for a caller
+    /// putting back a row that already had them (Undo). They outrank the
+    /// pre-queue hook's answer, because they ARE an earlier answer -
+    /// the hook's, or the request's that the hook let stand - and an
+    /// empty override would otherwise turn an explicit `script=None`
+    /// into the category's script (6 Nov 2026 sweep F3). None / empty
+    /// for every fresh add, which leaves the hook's answer as it was.
+    pub sab_pp: Option<i64>,
+    pub script_override: String,
+}
+
+impl std::fmt::Debug for AddExtras {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddExtras")
+            .field("pp_params", &self.pp_params)
+            .field("failure_link", &self.failure_link)
+            .field("failure_host", &self.failure_host)
+            .field("failure_https", &self.failure_https)
+            .field("failure_depth", &self.failure_depth)
+            .field(
+                "header_password",
+                &if self.header_password.is_empty() {
+                    ""
+                } else {
+                    "<set>"
+                },
+            )
+            .field("paused", &self.paused)
+            .field("sab_pp", &self.sab_pp)
+            .field("script_override", &self.script_override)
+            .finish()
+    }
 }

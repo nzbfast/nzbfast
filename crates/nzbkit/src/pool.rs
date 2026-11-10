@@ -1385,6 +1385,12 @@ struct Shared {
     /// [`Shared::workers_dialling`] is why both exist.
     parked: Vec<AtomicUsize>,
     parked_total: AtomicUsize,
+    /// Per server, the earliest instant the next worker may dial
+    /// (`admit::dial_pace`). The connect stagger is a property of the
+    /// SERVER - no two dials on one host closer than `ramp_delay` - and
+    /// it used to be a property of the worker's slot number, slept after
+    /// admission (8 Nov 2026, `research/LINECAP-PROBE-DOUBLING-2026-11-08.md`).
+    dial_next: Vec<std::sync::Mutex<tokio::time::Instant>>,
     /// How many workers this run has EVER had. `workers_live == 0` is
     /// ambiguous on its own - it is equally "the fleet is exhausted" and
     /// "the fleet has not been born yet" - and a guard that cannot tell
@@ -1973,6 +1979,9 @@ impl Shared {
             workers_live: AtomicUsize::new(0),
             parked: (0..n_servers).map(|_| AtomicUsize::new(0)).collect(),
             parked_total: AtomicUsize::new(0),
+            dial_next: (0..n_servers)
+                .map(|_| std::sync::Mutex::new(tokio::time::Instant::now()))
+                .collect(),
             workers_born: AtomicUsize::new(0),
             stream_until: AtomicU64::new(0),
             promote_gen: tokio::sync::watch::Sender::new(0),
@@ -2393,6 +2402,16 @@ pub async fn fetch_all_multi_ctl(
     }
     let servers = &servers[..];
     let (shared, unservable) = Shared::new(reqs, servers);
+    // `finished` fires from the completion that lands `pending` on zero,
+    // and a run BORN at zero - no articles, or every one outside every
+    // server's retention - has no such completion. It drained anyway, so
+    // it says so now: the drain marker the graph reads, and the join
+    // deadline that bounds a straggling worker, both hang off this send,
+    // and nothing can raise `pending` again without a cancelled stash,
+    // which a run with nothing in flight cannot have.
+    if shared.pending.load(Ordering::Acquire) == 0 {
+        shared.finish_if_drained();
+    }
     if let Some(c) = ctl {
         c.attach(&shared);
     }
@@ -2437,10 +2456,9 @@ pub async fn fetch_all_multi_ctl(
         let ctx = ctx_for(servers, si);
         let connects = counters[si].1.clone();
         let reconnects = counters[si].2.clone();
-        let ramp = cfg.ramp_delay * slot;
         workers.push(tokio::spawn(async move {
             worker(
-                &server, &cfg, ctx, shared, out, connects, reconnects, life, ramp, slot,
+                &server, &cfg, ctx, shared, out, connects, reconnects, life, slot,
             )
             .await;
         }));
@@ -2702,10 +2720,9 @@ pub fn fetch_all_sharded(
                         let out = out.clone();
                         // `ramp_step` is the per-server worker ordinal, so it
                         // doubles as the live-target slot.
-                        let ramp = cfg.ramp_delay * ramp_step;
                         tasks.push(tokio::spawn(async move {
                             worker(
-                                &server, &cfg, ctx, shared, out, connects, reconnects, life, ramp,
+                                &server, &cfg, ctx, shared, out, connects, reconnects, life,
                                 ramp_step,
                             )
                             .await;
@@ -2782,3 +2799,6 @@ mod fault_rigs;
 
 #[cfg(test)]
 mod tail_rigs;
+
+#[cfg(test)]
+mod relogin_rigs;

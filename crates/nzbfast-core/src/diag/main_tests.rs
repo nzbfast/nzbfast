@@ -2072,6 +2072,22 @@ fn a_successful_unlock_clears_the_bomb_reason_too() {
     )));
     assert!(super::unlock_answers("password required to unpack"));
     assert!(super::unlock_answers(super::UNLOCK_LAYER_LEFT));
+    // The non-RAR arm's named refusal over a layer it exposed and could
+    // not take (`unlockpw::unlock_all`). A later unlock that delivers
+    // the payload has answered it as surely as the layer sentence above,
+    // and before this the row kept "...is still packed" on a Completed
+    // job forever (pre-release sweep, 9 Nov 2026).
+    assert!(super::unlock_answers(&super::unlock_left_packed(
+        "inner.tar"
+    )));
+    // And the sentence a user reads carries no run of spaces: it was
+    // written as a string continuation without the `\`, which kept the
+    // next line's indentation inside the sentence.
+    assert!(
+        !super::unlock_left_packed("inner.tar").contains("  "),
+        "{:?}",
+        super::unlock_left_packed("inner.tar")
+    );
     // And a verdict the unlock did NOT answer keeps its say.
     assert!(!super::unlock_answers(
         "download incomplete: 1 file(s) with missing segments"

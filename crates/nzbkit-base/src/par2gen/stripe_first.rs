@@ -211,6 +211,7 @@ fn band_stripes(bytes: usize, n_slices: usize, w: usize, stripes: usize) -> usiz
 /// priced at most once and only when the cheap gates have passed.
 pub(super) fn admissible(
     batches: usize,
+    volumes: usize,
     fused: bool,
     bs: usize,
     n_slices: usize,
@@ -226,6 +227,15 @@ pub(super) fn admissible(
         Some("the knob is off (NZBFAST_CREATE_STRIPE_FIRST=0)")
     } else if fused {
         Some("the scan is fused into the fold")
+    } else if volumes > super::volwrite::MAX_VOLUME_WRITERS {
+        // EVERY VOLUME IS HELD OPEN FOR THE WHOLE RUN here - each chunk is
+        // one positional write into every row's packet - so a layout of
+        // thousands of volumes (`-l` or `--volume-blocks` over a set of
+        // small files) was that many descriptors at once, past the 256 a
+        // macOS GUI app is given (parfast sweep finding A28, 9 Nov 2026).
+        // The batched path bounds its writers at the same constant, and the
+        // shapes this arm was measured on carry a handful of volumes.
+        Some("more volumes than may be held open at once - the batched writer bounds them")
     // NO HEADROOM TERM HERE, and that is measured rather than an oversight.
     // `mapped_payload_fits_memory` takes one since 16 Sep 2026 (its own
     // docstring), but this call is not the fold's map-or-copy decision - it
@@ -394,8 +404,10 @@ pub(super) struct Args<'a> {
     pub first: usize,
     pub rows: usize,
     pub layout: &'a [(usize, usize)],
+    /// Every volume's FINAL name, one per `layout` entry
+    /// (`super::volume_names`).
+    pub names: &'a [String],
     pub dir: &'a Path,
-    pub base: &'a str,
     pub set_id: &'a [u8; 16],
     /// The critical block every volume starts with (the placeholder the
     /// caller backfills, or the real one).
@@ -420,17 +432,24 @@ pub(super) fn try_run(
     first: usize,
     rows: usize,
     layout: &[(usize, usize)],
+    names: &[String],
     per_batch: usize,
     fused: bool,
     cidx: Option<&CriticalIndex>,
     dir: &Path,
-    base: &str,
     set_id: &[u8; 16],
     ready_critical: Option<&Vec<u8>>,
     critical_shape: &[u8],
 ) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2GenError> {
-    let Some(corpus) = admissible(batches(layout, per_batch), fused, bs, n_slices, first, rows)
-    else {
+    let Some(corpus) = admissible(
+        batches(layout, per_batch),
+        layout.len(),
+        fused,
+        bs,
+        n_slices,
+        first,
+        rows,
+    ) else {
         return Ok(None);
     };
     run(&Args {
@@ -443,8 +462,8 @@ pub(super) fn try_run(
         first,
         rows,
         layout,
+        names,
         dir,
-        base,
         set_id,
         head: ready_critical.map_or(critical_shape, |v| v.as_slice()),
         complete: ready_critical.is_some(),
@@ -612,7 +631,7 @@ fn lay_out_volumes(a: &Args) -> Result<Volumes, Par2GenError> {
     // Per row: (volume, offset of the packet header in that file).
     let mut place: Vec<(usize, u64)> = vec![(0, 0); a.rows];
     for (vi, &(vfirst, count)) in a.layout.iter().enumerate() {
-        let name = format!("{}.vol{vfirst:03}+{count:02}.par2", a.base);
+        let name = a.names[vi].clone();
         let path = a.dir.join(&name);
         // Opened and noted in ONE call - see `CreateTrail::create`. A
         // no-clobber trail answers `AlreadyExists` here, and unwinds
@@ -694,6 +713,34 @@ fn lay_out_volumes(a: &Args) -> Result<Volumes, Par2GenError> {
         patches,
         place,
     })
+}
+
+/// Releases `run`'s transform workers when the DRIVER unwinds: past the
+/// end gate first if a chunk is posted, then the stop flag and the start
+/// gate, which is the path `release` takes. Without it a panic on the
+/// driver left every worker on a barrier and `std::thread::scope` joined
+/// them forever (parfast sweep, 9 Nov 2026). Inert on a normal exit and
+/// once `release` has run - the workers are gone, and a second wait on
+/// the start gate would be the hang this exists to prevent.
+struct FreeOnUnwind<'g> {
+    posted: &'g std::cell::Cell<bool>,
+    released: &'g std::cell::Cell<bool>,
+    stop: &'g std::sync::atomic::AtomicBool,
+    start_gate: &'g std::sync::Barrier,
+    end_gate: &'g std::sync::Barrier,
+}
+
+impl Drop for FreeOnUnwind<'_> {
+    fn drop(&mut self) {
+        if !std::thread::panicking() || self.released.get() {
+            return;
+        }
+        if self.posted.get() {
+            self.end_gate.wait();
+        }
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        self.start_gate.wait();
+    }
 }
 
 /// `Ok(Some(volumes))` with every volume written and sealed;
@@ -795,7 +842,10 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
     // pair costs more than the overlap hides (M3 Ultra, 8 GiB / 256 KiB
     // / 8,192 rows at a 256 MiB budget: 5.5 s against 4.5 in series,
     // and 4.2 with the pair at the full chunk).
-    let bufs = if overlap_enabled() && (2 * natural * stripe_bytes) as u64 <= a.accum {
+    // In u64 BEFORE the multiply: in `usize` the pair's size wraps on a
+    // 32-bit target for a wide row count (parfast sweep, 9 Nov 2026), and a
+    // wrapped size reads as "fits".
+    let bufs = if overlap_enabled() && 2 * natural as u64 * stripe_bytes as u64 <= a.accum {
         2
     } else {
         1
@@ -848,6 +898,12 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
     let start_gate = std::sync::Barrier::new(threads + 1);
     let end_gate = std::sync::Barrier::new(threads + 1);
     let mut verdict: Option<Result<(), Par2GenError>> = None;
+    let panicked: std::sync::Mutex<Option<Box<dyn std::any::Any + Send>>> =
+        std::sync::Mutex::new(None);
+    // Whether a chunk is posted (the workers owe the end gate) and whether
+    // `release` has run, for `FreeOnUnwind`.
+    let posted = std::cell::Cell::new(false);
+    let released = std::cell::Cell::new(false);
     std::thread::scope(|sc| {
         for _ in 0..threads {
             let ntt = &ntt;
@@ -855,7 +911,7 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
             let table = maps.as_ref();
             let band = &band;
             let (next, end, chunk_start, stop) = (&next, &end, &chunk_start, &stop);
-            let buf_base = &buf_base;
+            let (buf_base, panicked) = (&buf_base, &panicked);
             let (start_gate, end_gate) = (&start_gate, &end_gate);
             sc.spawn(move || {
                 let mut scratch = ntt.new_scratch(w);
@@ -868,57 +924,85 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
                     let c0 = chunk_start.load(std::sync::atomic::Ordering::Acquire);
                     let c1 = end.load(std::sync::atomic::Ordering::Acquire);
                     let base = buf_base.load(std::sync::atomic::Ordering::Acquire);
-                    loop {
-                        let c = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if c >= c1 {
-                            break;
+                    // A PANIC in the transform must still reach the end
+                    // gate. Uncaught, the worker left the barrier one party
+                    // short and the driver waited on it forever, so a bug
+                    // that should have crashed the create hung it instead
+                    // (parfast sweep, 9 Nov 2026). Caught once per CHUNK,
+                    // not per stripe: the happy path pays nothing for it.
+                    // The driver reads it after the end gate and re-raises
+                    // it once every worker has been released.
+                    let walked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if ntt_range::stripe_worker_panic_pinned(a.dir) {
+                            panic!("stripe-first worker panic, raised by the test door");
                         }
-                        let len = w.min(words - c * w);
-                        // SAFETY: the transform's src_of contract, 2*len
-                        // readable bytes from the pointer. Mapped: every
-                        // table entry is readable for `bs` bytes and
-                        // c*w*2 + 2*len <= bs. Bands: slot `id` holds
-                        // `slot` bytes starting at stripe c0, and
-                        // (c - c0)*w*2 + 2*len <= slot because c < c1 <=
-                        // c0 + per_chunk.
-                        let src_of = |id: crate::par2ntt::SrcId| unsafe {
-                            match table {
-                                Some(t) => t.table[id as usize].add(c * w * 2),
-                                None => {
-                                    band.0.add(id as usize * slot + (c - c0) * w * 2) as *const u8
-                                }
+                        loop {
+                            let c = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if c >= c1 {
+                                break;
                             }
-                        };
-                        ntt.transform(&src_of, len, &mut scratch, &mut out);
-                        for j in 0..a.rows {
-                            let e = out_first + j;
-                            // SAFETY: row j's span of the posted buffer
-                            // is `stride` words and (c - c0) * w + len
-                            // <= stride; stripe c is this worker's alone.
-                            let dst = unsafe {
-                                std::slice::from_raw_parts_mut(
-                                    rows.0.add(base + j * stride + (c - c0) * w),
-                                    len,
-                                )
+                            let len = w.min(words - c * w);
+                            // SAFETY: the transform's src_of contract, 2*len
+                            // readable bytes from the pointer. Mapped: every
+                            // table entry is readable for `bs` bytes and
+                            // c*w*2 + 2*len <= bs. Bands: slot `id` holds
+                            // `slot` bytes starting at stripe c0, and
+                            // (c - c0)*w*2 + 2*len <= slot because c < c1 <=
+                            // c0 + per_chunk.
+                            let src_of = |id: crate::par2ntt::SrcId| unsafe {
+                                match table {
+                                    Some(t) => t.table[id as usize].add(c * w * 2),
+                                    None => band.0.add(id as usize * slot + (c - c0) * w * 2)
+                                        as *const u8,
+                                }
                             };
-                            dst.copy_from_slice(&out[e * len..(e + 1) * len]);
+                            ntt.transform(&src_of, len, &mut scratch, &mut out);
+                            for j in 0..a.rows {
+                                let e = out_first + j;
+                                // SAFETY: row j's span of the posted buffer
+                                // is `stride` words and (c - c0) * w + len
+                                // <= stride; stripe c is this worker's alone.
+                                let dst = unsafe {
+                                    std::slice::from_raw_parts_mut(
+                                        rows.0.add(base + j * stride + (c - c0) * w),
+                                        len,
+                                    )
+                                };
+                                dst.copy_from_slice(&out[e * len..(e + 1) * len]);
+                            }
+                            // One stripe of the output walked. Stepped HERE,
+                            // by the worker that walked it, and not once per
+                            // chunk by the driver after the end gate: a
+                            // create that fits one chunk otherwise reports
+                            // 0 and then 100 with nothing between, which is
+                            // what a 4 GiB `parfast c` measured on 20 Sep
+                            // 2026 (GH #88). `step` is a relaxed fetch_add
+                            // and reaches the sink at most 256 times a phase,
+                            // so per stripe costs nothing the transform can
+                            // see.
+                            a.control.step(CreatePhase::Fold, 1);
                         }
-                        // One stripe of the output walked. Stepped HERE,
-                        // by the worker that walked it, and not once per
-                        // chunk by the driver after the end gate: a
-                        // create that fits one chunk otherwise reports
-                        // 0 and then 100 with nothing between, which is
-                        // what a 4 GiB `parfast c` measured on 20 Sep
-                        // 2026 (GH #88). `step` is a relaxed fetch_add
-                        // and reaches the sink at most 256 times a phase,
-                        // so per stripe costs nothing the transform can
-                        // see.
-                        a.control.step(CreatePhase::Fold, 1);
+                    }));
+                    if let Err(p) = walked {
+                        panicked
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get_or_insert(p);
                     }
                     end_gate.wait();
                 }
             });
         }
+        // And the DRIVER's own unwind (a flush writer's or band reader's
+        // re-raised panic, the probe fold) frees the workers on its way out
+        // rather than leaving them on a barrier the scope then joins.
+        let _unwind = FreeOnUnwind {
+            posted: &posted,
+            released: &released,
+            stop: &stop,
+            start_gate: &start_gate,
+            end_gate: &end_gate,
+        };
         let mut c0 = 0usize;
         // This arm has no window loop to count bytes in - the payload
         // is mapped and every chunk sweeps ALL of it - so its fold
@@ -927,6 +1011,7 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
         a.control.begin(CreatePhase::Fold, stripes as u64);
         let release = |stop: &std::sync::atomic::AtomicBool| {
             stop.store(true, std::sync::atomic::Ordering::Release);
+            released.set(true);
             start_gate.wait();
         };
         // A chunk transformed and probe-checked, its flush still owed:
@@ -1001,6 +1086,7 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
             next.store(c0, std::sync::atomic::Ordering::Release);
             buf_base.store(base, std::sync::atomic::Ordering::Release);
             start_gate.wait();
+            posted.set(true);
             if let Some((f0, fw, fb)) = owed.take() {
                 // SAFETY: the workers write the buffer at `base` only,
                 // and fb != base (two buffers, alternating).
@@ -1011,6 +1097,7 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
                     a.dir, flushed, stride, fw, at, lanes, &files, &names, &place, &mut seals,
                 ) {
                     end_gate.wait();
+                    posted.set(false);
                     verdict = Some(Err(e));
                     release(&stop);
                     return;
@@ -1021,6 +1108,17 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
                     .step(CreatePhase::Write, a.rows as u64 * fw as u64 * 2);
             }
             end_gate.wait();
+            posted.set(false);
+            // A worker that panicked walked part of the chunk at most, so
+            // nothing in the buffer is trusted: stop here, free them all,
+            // and re-raise below once the scope has joined.
+            if panicked.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                verdict = Some(Err(Par2GenError::Other(
+                    "a stripe-first transform worker panicked".into(),
+                )));
+                release(&stop);
+                return;
+            }
             // The workers are parked at the start gate; the buffer they
             // just filled is ours until it is posted again.
             // SAFETY: no worker touches `staging` between the gates.
@@ -1080,6 +1178,9 @@ pub(super) fn run(a: &Args) -> Result<Option<Vec<(String, CriticalPatch)>>, Par2
         release(&stop);
         verdict = Some(Ok(()));
     });
+    if let Some(p) = panicked.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        std::panic::resume_unwind(p);
+    }
     match verdict {
         Some(Ok(())) => {}
         // The probe mismatch is signalled with an empty message; a real

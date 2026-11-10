@@ -504,8 +504,12 @@ pub(crate) fn parse_feed_date(s: &str) -> Option<i64> {
 /// `m` has to mean one or the other and minutes is the one an age filter
 /// wants, so the other spelling is refused rather than guessed at. An
 /// unparseable term is `None`, which [`term_matches_at`] treats exactly
-/// as it treats an unknown date - the term asserts nothing, so a typo
-/// cannot silently reject a whole feed.
+/// as it treats an unknown date: the term matches nothing. So a typo in
+/// a `Reject:` rejects nothing, and a typo in a `Require:` passes
+/// nothing - the feed grabs nothing until the rule is fixed, and the
+/// dry-run preview names the rule ("did not satisfy ..."). That is the
+/// direction on purpose: skipping a broken `Require:` instead would
+/// grab every item the rule was written to hold back.
 pub(crate) fn parse_age_secs(s: &str) -> Option<i64> {
     let s = s.trim().to_ascii_lowercase();
     let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
@@ -565,7 +569,7 @@ fn term_matches_at(term: &str, item: &FeedItem, now: i64) -> bool {
                 .and_then(|r| r.trim_start().strip_prefix(op))
         };
         if let Some(rest) = after("size") {
-            if let Some(n) = crate::sizes::parse_size(rest.trim()) {
+            if let Some(n) = crate::sizes::parse_byte_size(rest.trim()) {
                 return if gt { item.size > n } else { item.size < n };
             }
             return false;
@@ -869,6 +873,12 @@ fn parse_rss_items(xml: &str) -> Vec<FeedItem> {
         let size = enclosure
             .and_then(|e| attr(e, "length"))
             .and_then(|v| v.parse().ok())
+            // `length="0"` is what a feed writes when it does not know
+            // (RSS requires the attribute, not a value), and taking it
+            // as the size made every `size>` Require refuse the item
+            // while the real figure sat in the newznab attr below. The
+            // search parser (`newznab::parse_results`) already skips it.
+            .filter(|s: &u64| *s > 0)
             // newznab: <newznab:attr name="size" value="123"/>
             .or_else(|| newznab_attr(item, "size")?.parse().ok())
             .unwrap_or(0);
@@ -944,6 +954,8 @@ fn parse_atom_entries(xml: &str) -> Vec<FeedItem> {
         let size = download
             .and_then(|l| attr(l, "length"))
             .and_then(|v| v.parse().ok())
+            // An unknown length, as in the RSS half.
+            .filter(|s: &u64| *s > 0)
             .or_else(|| newznab_attr(entry, "size")?.parse().ok())
             .unwrap_or(0);
         let guid = tag_text(entry, "id")
@@ -1172,6 +1184,12 @@ mod tests {
         assert!(rules_accept(&r, &item("A", 5_000_000_000)));
         assert!(!rules_accept(&r, &item("A", 100_000_000)));
         assert!(!rules_accept(&r, &item("A", 50_000_000_000)));
+        // A lowercase `mb` is megaBYTES in a size rule: a release is
+        // printed as `100 MB` and typed back in lowercase. The shared
+        // parser reads `b` as bits for the line speed, which made this
+        // rule pass only items under 12.5 MB.
+        let r = rules(&["Require: size<100mb"]);
+        assert!(rules_accept(&r, &item("A", 50_000_000)));
         // No rules → accept everything.
         assert!(rules_accept(&[], &item("anything", 0)));
         // Substring term (no wildcard).
@@ -1609,11 +1627,27 @@ mod tests {
         assert!(!judge("Require: age>2h"), "cannot satisfy an unknown age");
         assert!(!judge("Require: age<2h"), "nor the other direction");
         assert!(judge("Reject: age>30d"), "and cannot be rejected on one");
-        // A malformed unit is the same non-answer, on a DATED item, so
-        // a typo cannot silently reject the feed either.
+        // A malformed unit is the same non-answer, on a DATED item: a
+        // typo'd Reject rejects nothing, and a typo'd Require passes
+        // nothing rather than waving the whole feed through.
         let dated = dated_item("Show.S01E01", NOW - 400 * 86_400);
         assert!(!rules_judge_at(&["Require: age>2y".to_string()], &dated, NOW).accept);
         assert!(rules_judge_at(&["Reject: age>2y".to_string()], &dated, NOW).accept);
+    }
+
+    /// An enclosure `length="0"` is "unknown", not "empty": the newznab
+    /// size attr beside it is the size, in both grammars. NEGATIVE
+    /// CONTROL, run: without the `> 0` filters both items read 0.
+    #[test]
+    fn a_zero_enclosure_length_falls_back_to_the_newznab_size() {
+        let rss = r#"<rss><channel><item><title>A</title>
+            <enclosure url="http://x/a.nzb" length="0" type="application/x-nzb"/>
+            <newznab:attr name="size" value="5000000000"/></item></channel></rss>"#;
+        assert_eq!(parse_feed(rss)[0].size, 5_000_000_000);
+        let atom = r#"<feed><entry><title>B</title>
+            <link rel="enclosure" href="http://x/b.nzb" length="0"/>
+            <newznab:attr name="size" value="7000000000"/></entry></feed>"#;
+        assert_eq!(parse_feed(atom)[0].size, 7_000_000_000);
     }
 
     /// The date has to come off the wire, not just out of a constructor:

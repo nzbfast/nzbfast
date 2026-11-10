@@ -117,12 +117,6 @@ fn write_atomic_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     done
 }
 
-/// Read `path` as JSON. `None` means "no data on disk" - a missing file
-/// (fresh start, or a deliberate delete-to-reset, which must stay
-/// effective). A file that EXISTS but won't parse is never reported as
-/// that: its bytes are preserved at `<path>.corrupt`, and the `.bak` of
-/// the last good parse is loaded - and written back to `path` so the
-/// daemon self-heals rather than logging forever.
 /// True when `path` (or its `.bak`) is on disk but NEITHER yields usable
 /// JSON. Distinct from "absent" and from "parsed fine but empty": this is
 /// the state where a store that MAY have held data silently loaded as
@@ -144,6 +138,20 @@ pub fn json_store_unreadable(path: &Path) -> bool {
     existed && !readable(path) && !readable(&bak)
 }
 
+/// Read `path` as JSON. `None` means "no data on disk" - a missing file
+/// (fresh start, or a deliberate delete-to-reset, which must stay
+/// effective). A file that EXISTS but won't parse is never reported as
+/// that: its bytes are preserved at `<path>.corrupt`, and the `.bak` of
+/// the last good parse is loaded - and written back to `path` so the
+/// daemon self-heals rather than logging forever. With no good `.bak`
+/// the answer is `None`, but only after the bytes are safe at
+/// `.corrupt`, so the primary is then genuinely absent.
+///
+/// One `None` is NOT "no data": a file that exists but cannot be READ
+/// (a permission flip, an I/O error) with no readable `.bak` either. The
+/// file is left alone there, and a caller about to rewrite the store must
+/// tell the two apart before saving over it - `update_settings` does, by
+/// asking whether the file is still on disk.
 pub fn load_json_with_backup(path: &Path) -> Option<Value> {
     let bak = sibling(path, ".bak");
     let bytes = match std::fs::read(path) {
@@ -179,10 +187,23 @@ pub fn load_json_with_backup(path: &Path) -> Option<Value> {
                 None => None,
             };
         }
-        Err(_) => {
-            return std::fs::read(&bak)
+        Err(e) => {
+            let recovered = std::fs::read(&bak)
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok());
+            // Said either way: a store that cannot be read is the one
+            // state a caller can mistake for empty.
+            warn!(
+                target: "persist",
+                "{} could not be read ({e}) - {}",
+                path.display(),
+                if recovered.is_some() {
+                    format!("serving {} instead", bak.display())
+                } else {
+                    format!("and {} is no better", bak.display())
+                }
+            );
+            return recovered;
         }
     };
     match serde_json::from_slice::<Value>(&bytes) {

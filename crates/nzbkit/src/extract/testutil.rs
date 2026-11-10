@@ -499,6 +499,105 @@ pub(super) fn rar4_compressed_volume_set(name: &str, data: &[u8], per_vol: usize
     .unwrap()
 }
 
+/// A COMPRESSED RAR 5 multivolume set holding SEVERAL members - what
+/// `rar a -v` makes from more than one file. The members follow one
+/// another through the volumes, so a member boundary falls mid-volume
+/// and the volume after it opens on the NEXT member's continuation.
+/// `solid` shares one encoder window across the members (`rar a -s`);
+/// `level` is the search effort, as in
+/// [`compressed_volume_set_at_effort`].
+#[cfg(feature = "rar")]
+pub(super) fn compressed_multi_member_volume_set(
+    entries: &[(&str, &[u8])],
+    per_vol: usize,
+    solid: bool,
+    level: Option<u8>,
+) -> Vec<Vec<u8>> {
+    use rars::rar50::{CompressedEntry, Rar50VolumeWriter, WriterOptions};
+    let entries: Vec<CompressedEntry> = entries
+        .iter()
+        .map(|&(name, data)| CompressedEntry {
+            name: name.as_bytes(),
+            data,
+            mtime: None,
+            attributes: 0,
+            host_os: 0,
+        })
+        .collect();
+    let mut options = WriterOptions::default();
+    options.features.solid = solid;
+    if let Some(level) = level {
+        options = options.with_compression_level(level);
+    }
+    Rar50VolumeWriter::new(options)
+        .compressed_entries(&entries)
+        .max_payload_per_volume(per_vol)
+        .finish()
+        .unwrap()
+}
+
+/// [`compressed_multi_member_volume_set`], every member AES-encrypted
+/// under `password` with the headers in the clear (`rar a -p -v`).
+#[cfg(feature = "rar")]
+pub(super) fn encrypted_multi_member_volume_set(
+    entries: &[(&str, &[u8])],
+    per_vol: usize,
+    password: &str,
+) -> Vec<Vec<u8>> {
+    use rars::rar50::{EncryptedCompressedEntry, Rar50VolumeWriter, WriterOptions};
+    let entries: Vec<EncryptedCompressedEntry> = entries
+        .iter()
+        .map(|&(name, data)| EncryptedCompressedEntry {
+            name: name.as_bytes(),
+            data,
+            mtime: None,
+            attributes: 0,
+            host_os: 0,
+            password: password.as_bytes(),
+        })
+        .collect();
+    let mut features = rars::FeatureSet::store_only();
+    features.file_encryption = true;
+    Rar50VolumeWriter::new(WriterOptions::new(rars::ArchiveVersion::Rar50, features))
+        .encrypted_compressed_entries(&entries)
+        .max_payload_per_volume(per_vol)
+        .finish()
+        .unwrap()
+}
+
+/// The RAR 4 twin of [`compressed_multi_member_volume_set`]: several
+/// compressed members through one split set, capped packed bytes per
+/// volume, solid or not.
+#[cfg(feature = "rar")]
+pub(super) fn rar4_compressed_multi_member_volume_set(
+    entries: &[(&str, &[u8])],
+    per_vol: usize,
+    solid: bool,
+) -> Vec<Vec<u8>> {
+    use rars::rar15_40::{FileEntry, WriterOptions, write_compressed_volume_set};
+    use rars::{ArchiveVersion, FeatureSet};
+    let entries: Vec<FileEntry> = entries
+        .iter()
+        .map(|&(name, data)| FileEntry {
+            name: name.as_bytes(),
+            data,
+            file_time: 0,
+            file_attr: 0x20,
+            host_os: 3,
+            password: None,
+            file_comment: None,
+        })
+        .collect();
+    let mut features = FeatureSet::store_only();
+    features.solid = solid;
+    write_compressed_volume_set(
+        &entries,
+        WriterOptions::new(ArchiveVersion::Rar29, features),
+        per_vol,
+    )
+    .unwrap()
+}
+
 /// An ENCRYPTED, compressed RAR 4 multivolume set. `hp` encrypts the headers
 /// too (`-hp`; needs the Rar30 target - Rar29 refuses header encryption),
 /// otherwise the data alone (`-p`).

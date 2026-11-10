@@ -222,6 +222,11 @@ impl StreamCreate {
             base,
             spec_exponent_end(first_exponent, Some(max_recovery)),
         )?;
+        // The recovery-count cap the file create enforces through
+        // `shape::resolve` (TODO 358 sweep F5). Without it a stream of
+        // small slices passed the exponent check and the budget alike
+        // and wrote a set the two-pass route and `parfast c` refuse.
+        check_recovery_count(max_recovery as u64)?;
         let admission = CreateAdmission::acquire();
         if held_bytes(block_size, max_recovery, window_bytes) > admission.accum {
             return Err(Par2GenError::Other(format!(
@@ -329,12 +334,14 @@ impl StreamCreate {
         plan: CreatePlan,
         comment: Option<&str>,
     ) -> Result<Vec<String>, Par2GenError> {
-        let trail = CreateTrail::new(plan.no_clobber);
+        // The file create's trail, staging included, and settled the same
+        // way: any failure removes what this run wrote, and the index is
+        // renamed into place only once the volumes are down
+        // (`control::CreateTrail`).
+        let trail = CreateTrail::new(plan.no_clobber).staging(&format!("{}.par2", self.base));
+        let _unwind = trail.unlink_on_unwind();
         let r = self.finish_body(recovery_blocks, plan, comment, &trail);
-        if matches!(r, Err(Par2GenError::Cancelled)) {
-            trail.unlink_all(&self.dir);
-        }
-        r
+        trail.settle(&self.dir, r)
     }
 
     fn finish_body(
@@ -390,11 +397,6 @@ impl StreamCreate {
         )];
         let (set_id, critical) = critical_packets(&scanned, self.bs as u64, comment);
         let index = format!("{}.par2", self.base);
-        write_member(trail, &self.dir, &index, &critical)?;
-        let mut names = vec![index];
-        if recovery_blocks == 0 {
-            return Ok(names);
-        }
         // The file create's own layout rule over its own volume cap, so
         // the two write the same volumes: `fits` admitted every row in
         // one batch, which is the case where the cap is the budget's.
@@ -403,6 +405,22 @@ impl StreamCreate {
             .max_blocks_per_volume
             .map_or(per_batch, |l| per_batch.min(l.max(1)));
         let layout = volume_layout(recovery_blocks, per_vol, plan.volumes, plan.first_exponent);
+        // The final names, and the file create's probe of every one this
+        // run would replace, before the index is written
+        // (`create_body` says why).
+        let volumes = layout_names(
+            &self.base,
+            &layout,
+            plan.first_exponent,
+            recovery_blocks,
+            plan.naming,
+        );
+        trail.probe_replaceable(&self.dir, std::iter::once(&index).chain(&volumes))?;
+        write_member(trail, &self.dir, &index, &critical)?;
+        let mut names = vec![index];
+        if recovery_blocks == 0 {
+            return Ok(names);
+        }
         let cidx =
             matches!(plan.critical, CriticalLayout::Interleaved).then(|| critical_index(&critical));
         self.control
@@ -411,7 +429,7 @@ impl StreamCreate {
             control: &self.control,
             trail,
             dir: &self.dir,
-            base: &self.base,
+            names: &volumes,
             layout: &layout,
             set_id: &set_id,
             first: plan.first_exponent,
@@ -421,6 +439,14 @@ impl StreamCreate {
             cidx: cidx.as_ref(),
         })?;
         self.control.finish(CreatePhase::Write);
+        // THE LAST POLL, the file create's own (`create_body`). Every volume
+        // of the stream's one batch is spawned before the first of them
+        // finishes, so a cancel raised while they are written reaches no
+        // per-volume poll, and without this the stream committed a finished
+        // set over the previous one behind a cancel the caller had already
+        // pressed. Nothing is committed yet here, so this is still the
+        // honest place to stop.
+        self.control.check()?;
         names.extend(written.into_iter().map(|(name, _)| name));
         Ok(names)
     }

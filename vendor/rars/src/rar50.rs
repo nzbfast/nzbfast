@@ -2644,7 +2644,7 @@ fn parse_block_header_bytes(
         .checked_add(4)
         .ok_or(Error::InvalidHeader("RAR 5 header offset overflows usize"))?;
     let (header_size, header_size_len) = read_vint_at(input, after_crc, archive_len)?;
-    let header_body_len = usize_from_u64(header_size, "RAR 5 header size overflows usize")?;
+    let header_body_len = header_body_len(header_size)?;
     let header_total = 4usize
         .checked_add(header_size_len)
         .and_then(|size| size.checked_add(header_body_len))
@@ -2691,7 +2691,7 @@ fn parse_encrypted_block_header_bytes(
         .map_err(map_rar50_crypto_error)?;
     let header_crc = read_u32(&first_plain, 0)?;
     let (header_size, header_size_len) = read_vint_at(&first_plain, 4, first_plain.len())?;
-    let header_body_len = usize_from_u64(header_size, "RAR 5 header size overflows usize")?;
+    let header_body_len = header_body_len(header_size)?;
     let header_total = 4usize
         .checked_add(header_size_len)
         .and_then(|size| size.checked_add(header_body_len))
@@ -2740,7 +2740,7 @@ fn read_block_header_at(
     let prefix = read_exact_at(file, sfx_offset + offset, prefix_len)?;
     let header_crc = read_u32(&prefix, 0)?;
     let (header_size, header_size_len) = read_vint_at(&prefix, 4, prefix.len())?;
-    let header_body_len = usize_from_u64(header_size, "RAR 5 header size overflows usize")?;
+    let header_body_len = header_body_len(header_size)?;
     let header_total = 4usize
         .checked_add(header_size_len)
         .and_then(|size| size.checked_add(header_body_len))
@@ -2782,7 +2782,7 @@ fn read_encrypted_block_header_at(
         .map_err(map_rar50_crypto_error)?;
     let header_crc = read_u32(&first_plain, 0)?;
     let (header_size, header_size_len) = read_vint_at(&first_plain, 4, first_plain.len())?;
-    let header_body_len = usize_from_u64(header_size, "RAR 5 header size overflows usize")?;
+    let header_body_len = header_body_len(header_size)?;
     let header_total = 4usize
         .checked_add(header_size_len)
         .and_then(|size| size.checked_add(header_body_len))
@@ -2849,7 +2849,7 @@ fn read_block_header_from_source(
     }
     let header_crc = read_u32(&prefix, 0)?;
     let (header_size, header_size_len) = read_vint_at(&prefix, 4, prefix.len())?;
-    let header_body_len = usize_from_u64(header_size, "RAR 5 header size overflows usize")?;
+    let header_body_len = header_body_len(header_size)?;
     let header_total = 4usize
         .checked_add(header_size_len)
         .and_then(|size| size.checked_add(header_body_len))
@@ -2891,7 +2891,7 @@ fn read_encrypted_block_header_from_source(
         .map_err(map_rar50_crypto_error)?;
     let header_crc = read_u32(&first_plain, 0)?;
     let (header_size, header_size_len) = read_vint_at(&first_plain, 4, first_plain.len())?;
-    let header_body_len = usize_from_u64(header_size, "RAR 5 header size overflows usize")?;
+    let header_body_len = header_body_len(header_size)?;
     let header_total = 4usize
         .checked_add(header_size_len)
         .and_then(|size| size.checked_add(header_body_len))
@@ -3153,6 +3153,28 @@ fn read_vint_at(input: &[u8], offset: usize, end: usize) -> Result<(u64, usize)>
         shift += 7;
     }
     Err(Error::InvalidHeader("RAR 5 vint is too long"))
+}
+
+/// The largest RAR 5 block header body this reader accepts. The format
+/// limits the header-size field to a three-byte vint, so no conforming
+/// header body exceeds 2^21 - 1 bytes (the writer's `block_header_image`
+/// refuses to produce one). The six header readers above used to check the
+/// field only against the bytes remaining, and on a stream source whose
+/// length is still open (nzbfast TODO 118.2 (b): `expected_len` is
+/// unbounded) that bound is no bound at all, so `ArchiveSource::read_range`
+/// zero-filled an attacker-chosen length before the CRC could reject it -
+/// an allocation failure aborts the process. The memory and file paths were
+/// bounded by the input's length, which is still far larger than any header.
+/// (nzbfast-local change, 9 Nov 2026; see vendor/rars/VENDORING.md.)
+pub(crate) const RAR5_MAX_HEADER_BODY: u64 = (1 << 21) - 1;
+
+fn header_body_len(header_size: u64) -> Result<usize> {
+    if header_size > RAR5_MAX_HEADER_BODY {
+        return Err(Error::InvalidHeader(
+            "RAR 5 header size exceeds the format's three-byte limit",
+        ));
+    }
+    usize_from_u64(header_size, "RAR 5 header size overflows usize")
 }
 
 fn usize_from_u64(value: u64, message: &'static str) -> Result<usize> {
@@ -3505,6 +3527,69 @@ mod tests {
         let other_count = cache.get_or_derive(password, salt_a, 5).unwrap();
         assert_ne!(other_count, first);
         assert_eq!(cache.entries.len(), 3);
+    }
+
+    /// A8 of the 9 Nov 2026 sweep: on a stream whose length is
+    /// still open, a block header's size field was checked against nothing
+    /// before `read_range` zero-filled a buffer of that size. The source
+    /// below reports no total and records the largest read it is asked
+    /// for; a 1 GiB header size must be refused from the size field alone.
+    #[test]
+    fn oversized_header_size_on_open_stream_is_refused_before_reading() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        #[derive(Debug)]
+        struct OpenEnded {
+            bytes: Vec<u8>,
+            largest_read: AtomicUsize,
+        }
+        impl crate::source::BlockingRangeSource for OpenEnded {
+            fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.largest_read.fetch_max(buf.len(), Ordering::Relaxed);
+                let start = (offset as usize).min(self.bytes.len());
+                let n = buf.len().min(self.bytes.len() - start);
+                buf[..n].copy_from_slice(&self.bytes[start..start + n]);
+                Ok(n)
+            }
+            fn known_len(&self) -> u64 {
+                self.bytes.len() as u64
+            }
+            fn total_len(&self) -> Option<u64> {
+                None
+            }
+        }
+        let mut bytes = RAR50_SIGNATURE.to_vec();
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // CRC, never reached
+        bytes.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x04]); // 1 << 30
+        bytes.extend_from_slice(&[0; 32]);
+        let source = std::sync::Arc::new(OpenEnded {
+            bytes,
+            largest_read: AtomicUsize::new(0),
+        });
+        // nzbfast: the largest size this HOST can address, not `u64::MAX`.
+        // On a 32-bit target `u64::MAX` is refused up front by the
+        // archive-size check ("overflows host address size"), which is
+        // correct and is not the refusal this test is about - nightly's
+        // armv7-cross went red on exactly that (10 Nov 2026). `usize::MAX`
+        // is still an end nothing will reach, on every pointer width.
+        let result = Archive::parse_stream(
+            source.clone(),
+            usize::MAX as u64,
+            crate::ArchiveReadOptions::default(),
+        );
+        assert_eq!(
+            result.err(),
+            Some(Error::AtArchiveOffset {
+                offset: 8,
+                source: Box::new(Error::InvalidHeader(
+                    "RAR 5 header size exceeds the format's three-byte limit"
+                )),
+            })
+        );
+        assert!(source.largest_read.load(Ordering::Relaxed) <= 14);
+        // The memory path refuses the same field by the same rule rather
+        // than by running out of input.
+        assert!(header_body_len(RAR5_MAX_HEADER_BODY).is_ok());
+        assert!(header_body_len(RAR5_MAX_HEADER_BODY + 1).is_err());
     }
 
     #[test]

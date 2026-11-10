@@ -34,8 +34,18 @@ REPO="$(cd ../../.. && pwd)"
 # research/MAC-DEPLOYMENT-TARGET-2026-09-15.md.
 export MACOSX_DEPLOYMENT_TARGET=14.0
 
-# Version tracks nzbfast's, per SPEC-PARFAST-PUBLICATION D3.
-VERSION=$(grep '^version' "$REPO/crates/nzbfast/Cargo.toml" | head -1 | cut -d'"' -f2)
+# The version is the parfast CLI's x.y.z (which tracks nzbfast's, per
+# SPEC-PARFAST-PUBLICATION D3), read from crates/parfast/Cargo.toml - the
+# SAME file apps/parfast/packaging/build-parfast-gui-bundles.sh names its
+# assets from. This read nzbfast's Cargo.toml until 9 Nov 2026, so the app's
+# own Info.plist and the zip it shipped in had two sources that agree only
+# while the two crates are bumped together (sweep, section B). The
+# pre-release part is dropped: CFBundleShortVersionString and
+# CFBundleVersion are period-separated integers, and the bundle script's
+# GUI_STAGE belongs on the asset NAME, not in the plist.
+VERSION=$(grep -m1 '^version' "$REPO/crates/parfast/Cargo.toml" | cut -d'"' -f2)
+VERSION=${VERSION%%-*}
+[ -n "$VERSION" ] || { echo "cannot read the parfast version" >&2; exit 1; }
 ARCH="${ARCH:-universal}"
 echo "== parfast.app v$VERSION ($ARCH)"
 
@@ -145,6 +155,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
        have two queues writing the same recovery files. -->
   <key>LSMultipleInstancesProhibited</key><true/>
   <key>NSHumanReadableCopyright</key><string>parfast</string>
+  <!-- "When finished: Sleep / Shut down" (AppModel's PowerAction) is an
+       Apple Event to System Events. An app built against a current SDK with
+       no usage string here is refused that event by TCC with no prompt
+       (errAEEventNotPermitted), so the action the user confirmed never ran
+       and nothing said so. -->
+  <key>NSAppleEventsUsageDescription</key><string>parfast asks System Events to put this Mac to sleep or shut it down when the queue finishes, and only when you have chosen that.</string>
 
   <key>UTExportedTypeDeclarations</key>
   <array>

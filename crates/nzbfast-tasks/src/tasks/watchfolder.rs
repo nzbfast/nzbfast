@@ -421,9 +421,11 @@ async fn watch_pass(
     ) {
         // Best-effort like save_queue: a failed write costs one
         // re-dedupe against the queue/history shas after a restart,
-        // never a wrong download.
+        // never a wrong download. Atomic like save_queue too: a plain
+        // `fs::write` truncates in place, so a crash mid-write left a
+        // torn file that loaded as an empty set.
         if let Ok(b) = serde_json::to_vec(seen) {
-            let _ = std::fs::write(path, b);
+            let _ = crate::persist::write_atomic(path, &b);
         }
     }
     // The pass is all stats and whole-file reads - and the

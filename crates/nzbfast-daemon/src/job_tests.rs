@@ -1186,3 +1186,25 @@ fn set_priority_logs_a_change_by_id_and_stays_quiet_for_a_no_op() {
         "the line is about a number: it names the row by id and not by release"
     );
 }
+
+/// TODO 358 sweep: `AddExtras` carries the fetch's X-DNZB-Password, and
+/// `fetch::DnzbHeaders` (where it comes from) masks that in its Debug. A
+/// derived Debug here would print it in clear the first time anything
+/// formats the extras with `{:?}`, undoing the mask one hop later.
+#[test]
+fn add_extras_debug_never_prints_the_header_password() {
+    let x = AddExtras {
+        header_password: "hunter2-dnzb".into(),
+        failure_link: "https://indexer.example/fail".into(),
+        ..AddExtras::default()
+    };
+    let s = format!("{x:?}");
+    assert!(!s.contains("hunter2-dnzb"), "{s}");
+    assert!(s.contains("<set>"), "says a password is present: {s}");
+    assert!(
+        s.contains("indexer.example/fail"),
+        "the rest still prints: {s}"
+    );
+    let empty = format!("{:?}", AddExtras::default());
+    assert!(!empty.contains("<set>"), "{empty}");
+}

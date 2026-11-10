@@ -44,6 +44,7 @@ fn synth_set(n: usize) -> Arc<Par2Set> {
         recovery_set_id: [1u8; 16],
         block_size: 640 << 10,
         files,
+        undescribed: Vec::new(),
         nonrecovery: Vec::new(),
         recovery_blocks_seen: 0,
     })

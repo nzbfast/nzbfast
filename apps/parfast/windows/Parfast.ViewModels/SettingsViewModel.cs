@@ -175,31 +175,50 @@ public sealed class SettingsViewModel : Observable
     public int ThreadCount
     {
         get => _settings.Performance.Threads ?? 0;
-        set => Update(_settings with
-        {
-            Performance = _settings.Performance with { Threads = value <= 0 ? null : value },
-        });
+        set => EchoIfNormalised(
+            Update(_settings with
+            {
+                Performance = _settings.Performance with { Threads = value <= 0 ? null : value },
+            }),
+            ThreadCount == value);
     }
 
+    /// <remarks>
+    /// A write of the value it already has is a no-op, and that is load-bearing:
+    /// turning "Auto" OFF picks a thread count, so a re-assertion of "off" would
+    /// replace the count the user chose with the processor count. The Settings
+    /// page's performance handler assigns every checkbox in its group on any
+    /// click, which is how a click on Fast solver used to wipe a custom count.
+    /// </remarks>
     public bool AutomaticThreads
     {
         get => _settings.Performance.Threads is null;
-        set => Update(_settings with
+        set
         {
-            Performance = _settings.Performance with
+            if (value == AutomaticThreads)
             {
-                Threads = value ? null : Environment.ProcessorCount,
-            },
-        });
+                return;
+            }
+
+            Update(_settings with
+            {
+                Performance = _settings.Performance with
+                {
+                    Threads = value ? null : Environment.ProcessorCount,
+                },
+            });
+        }
     }
 
     public int MemoryMb
     {
         get => _settings.Performance.MemoryMb ?? 0;
-        set => Update(_settings with
-        {
-            Performance = _settings.Performance with { MemoryMb = value <= 0 ? null : value },
-        });
+        set => EchoIfNormalised(
+            Update(_settings with
+            {
+                Performance = _settings.Performance with { MemoryMb = value <= 0 ? null : value },
+            }),
+            MemoryMb == value);
     }
 
     public bool FastSolver
@@ -293,6 +312,11 @@ public sealed class SettingsViewModel : Observable
         get => _shell.CanWrite ? _shell.IsContextMenuRegistered : _settings.Integration.ShellMenu;
         set
         {
+            if (value == ContextMenu)
+            {
+                return;
+            }
+
             _shell.SetContextMenu(value);
             Update(_settings with
             {
@@ -338,10 +362,20 @@ public sealed class SettingsViewModel : Observable
             var index = Array.FindLastIndex(LogLevelValues, v => v <= LogLevel);
             return index < 0 ? 0 : index;
         }
-        set => LogLevel = LogLevelValues[Math.Clamp(value, 0, LogLevelValues.Length - 1)];
+        set
+        {
+            var level = LogLevelValues[Math.Clamp(value, 0, LogLevelValues.Length - 1)];
+            EchoIfNormalised(
+                Update(_settings with { Advanced = _settings.Advanced with { LogLevel = level } }),
+                LogLevelIndex == value);
+        }
     }
 
-    /// <summary>Rereads from the core, for instance after another window changed something.</summary>
+    /// <summary>
+    /// Rereads from the core. The shell calls it once the queue store is open,
+    /// because THAT is what loads the saved settings: the snapshot this class
+    /// takes in its constructor is the core's defaults.
+    /// </summary>
     public void Reload()
     {
         _loading = true;
@@ -355,23 +389,94 @@ public sealed class SettingsViewModel : Observable
         // A fresh session's settings ARE the defaults, by contract, so resetting
         // is writing an untouched record and reading back what the core makes of
         // it. No default is written here, which is the whole point of the core
-        // owning them.
-        _core.SetSettings(new ParfastSettings());
+        // owning them. The queue's own fields are carried, as on every write:
+        // resetting the Settings page must not disarm a "shut down when finished"
+        // the user set on the Queue page.
+        _core.SetSettings(WithQueueFieldsFromCore(new ParfastSettings()));
         Reload();
     }
 
     private void SetAssoc(string extension, bool on, Func<ParfastSettings, ParfastSettings> also)
     {
+        // Compared against the REGISTRY (the getter's truth), for the same reason
+        // as AutomaticThreads: the page assigns every association box on a click
+        // on any one of them.
+        if (_shell.CanWrite && on == _shell.IsAssociated(extension))
+        {
+            return;
+        }
+
         _shell.SetAssociation(extension, on);
         Update(also(_settings));
     }
 
-    private void Update(ParfastSettings next)
+    /// <summary>
+    /// <paramref name="next"/> with the fields this page does not own taken from
+    /// what the core holds NOW.
+    /// </summary>
+    /// <remarks>
+    /// THE CORE'S SETTER IS A PLAIN REPLACE (parfast_session::Session::set_settings),
+    /// and concurrency and the post-queue action live in the same record but are
+    /// set from the QUEUE page through their own calls. This class used to send
+    /// the record it read at startup, so the first toggle on this page put both
+    /// back to their startup values: a "shut down when finished" set on the Queue
+    /// page was silently disarmed, or one the user had cleared came back (sweep
+    /// 2026-11-09 A30). Read immediately before the write, so the window is one
+    /// call wide rather than the whole session; closing it entirely is the core's
+    /// to do with a per-field setter.
+    /// </remarks>
+    private ParfastSettings WithQueueFieldsFromCore(ParfastSettings next)
+    {
+        var live = _core.GetSettings();
+        return next with
+        {
+            Concurrency = live.Concurrency,
+            PostQueueAction = live.PostQueueAction,
+            LogTailLines = live.LogTailLines,
+        };
+    }
+
+    /// <summary>
+    /// Raises the page-wide notification for a setter whose input was NORMALISED
+    /// to the value already held (a thread count of -5 that means Auto when Auto
+    /// is already set), so the box the user typed into is rewritten to what the
+    /// setting actually is instead of keeping the typed text.
+    /// </summary>
+    /// <remarks>
+    /// Only for the normalising setters, and only when <see cref="Update"/> raised
+    /// nothing itself. A plain re-assertion of the held value must stay silent:
+    /// the page's batch handlers depend on that (see <see cref="Update"/>).
+    /// </remarks>
+    private void EchoIfNormalised(bool raised, bool readsBack)
+    {
+        if (!raised && !readsBack && !_loading)
+        {
+            Raise(string.Empty);
+        }
+    }
+
+    /// <returns>True when it wrote and raised; false when there was nothing to do.</returns>
+    private bool Update(ParfastSettings next)
     {
         if (_loading)
         {
-            return;
+            return false;
         }
+
+        // NOTHING TO WRITE, NOTHING TO RAISE. Every setter funnels here, and the
+        // Settings page's batch handlers assign each control in a group in turn;
+        // the empty-name Raise below makes the page rewrite every control from
+        // this object. Without this early return the first assignment's Raise
+        // reset the controls the later assignments then read, so only the FIRST
+        // control of each handler could ever change (sweep 2026-11-09 A32). With
+        // it, the unchanged controls are no-ops and the one the user touched is
+        // applied wherever it sits in the handler.
+        if (next == _settings)
+        {
+            return false;
+        }
+
+        next = WithQueueFieldsFromCore(next);
 
         // What the CORE holds, not what was asked for: a write it refused used
         // to stay in `_settings`, so every later edit re-sent the bad value and
@@ -383,5 +488,6 @@ public sealed class SettingsViewModel : Observable
         // hand-maintained list of thirty names that goes stale the first time
         // somebody adds a setting.
         Raise(string.Empty);
+        return true;
     }
 }

@@ -425,12 +425,25 @@ pub mod mac {
             for dir in SYSTEM_READ {
                 p.push_str(&format!("  (subpath \"{dir}\")\n"));
             }
-            // The tool's own directory: a sibling-to-nzbfast binary, or
-            // a package prefix that is not on the list above.
-            if let Some(parent) = program.parent().and_then(Path::to_str)
-                && !parent.is_empty()
-            {
-                p.push_str(&format!("  (subpath \"{}\")\n", sbpl_escape(parent)));
+            // The tool's own executable, when it is not on the list
+            // above: a sibling-to-nzbfast binary, or one the user
+            // installed somewhere of their own.
+            //
+            // The FILE, not its directory, matching the Linux arm's bind.
+            // This granted `program.parent()` until Nov 2026, so a tool
+            // at `~/par2` handed the confined child the whole home
+            // directory, config and provider password included - the one
+            // read a strict profile exists to refuse. Measured on macOS
+            // 27 with the profile this writes: real par2 1.2.0 and unrar
+            // 7.23 copied into a private directory run under a literal
+            // grant of the binary alone, and a script there reading a
+            // sibling file is refused where the parent grant let it read.
+            // Every dylib those tools load is under SYSTEM_READ.
+            if !program.as_os_str().is_empty() {
+                p.push_str(&format!(
+                    "  (literal \"{}\")\n",
+                    sbpl_escape(program.to_str()?)
+                ));
             }
             for dir in &policy.readable {
                 p.push_str(&format!("  (subpath \"{}\")\n", sbpl_escape(dir.to_str()?)));
@@ -509,6 +522,24 @@ pub mod linux {
                 a.push(dir.into());
                 a.push(dir.into());
             }
+            // A PRIVATE /tmp for the strict arm, which binds nothing
+            // writable outside the job. It costs nothing (the tmpfs is
+            // the child's alone and goes with it) and it removes the one
+            // failure this policy could plausibly cause: a tool that
+            // insists on a scratch file somewhere other than its working
+            // directory. The macOS profile has no equivalent and is
+            // measured rather than assumed - real unrar and real par2
+            // both run under it with no temp of any kind. The script arm
+            // needs none: `--ro-bind / /` plus the writable set already
+            // carries the system temp directory.
+            //
+            // BEFORE the readable binds, not after them. A later parent
+            // mount hides every earlier bind beneath it, so a tmpfs laid
+            // after them hid a repair donor under /tmp (`/tmp/donor`
+            // beside a `/tmp/job`) that the policy granted explicitly -
+            // only the writable binds below were ever rebound over it.
+            a.push("--tmpfs".into());
+            a.push("/tmp".into());
             for dir in &policy.readable {
                 a.push("--ro-bind-try".into());
                 a.push(dir.into());
@@ -522,18 +553,6 @@ pub mod linux {
         a.push("--dev".into());
         a.push("/dev".into());
         if !policy.read_all {
-            // A PRIVATE /tmp for the strict arm, which binds nothing
-            // writable outside the job. It costs nothing (the tmpfs is
-            // the child's alone and goes with it) and it removes the one
-            // failure this policy could plausibly cause: a tool that
-            // insists on a scratch file somewhere other than its working
-            // directory. The macOS profile has no equivalent and is
-            // measured rather than assumed - real unrar and real par2
-            // both run under it with no temp of any kind. The script arm
-            // needs none: `--ro-bind / /` plus the writable set already
-            // carries the system temp directory.
-            a.push("--tmpfs".into());
-            a.push("/tmp".into());
             // The tool's OWN executable, when nothing above or below
             // shows it. Without this a strict child can only run a tool
             // that lives under `SYSTEM_READ`, and a par2 or unrar the
@@ -545,11 +564,12 @@ pub mod linux {
             // (an AppArmor userns rule; see `bwrap_refused`), so every
             // spawn there fell down the ladder and nothing was confined.
             //
-            // The FILE, not its directory, and that is deliberately
-            // narrower than the macOS profile's `program.parent()`: a
-            // tool at `~/par2` would otherwise hand the child the whole
-            // home directory, provider password included. After the
-            // tmpfs, so a tool under /tmp is not hidden by it.
+            // The FILE, not its directory, as the macOS profile now
+            // grants too: a tool at `~/par2` would otherwise hand the
+            // child the whole home directory, provider password included. After the
+            // tmpfs, so a tool under /tmp is not hidden by it, and
+            // `shown` can trust a readable bind because the tmpfs now
+            // lands before those too.
             if !shown(program, policy) {
                 a.push("--ro-bind-try".into());
                 a.push(program.into());
@@ -567,7 +587,8 @@ pub mod linux {
 
     /// Whether a bind [`bwrap_args`] already lays down shows `program`
     /// to a strict child. /tmp is the one system path that does NOT,
-    /// being a fresh tmpfs.
+    /// being a fresh tmpfs; a `readable` or `writable` dir under it
+    /// does, because both are bound after that tmpfs.
     fn shown(program: &Path, policy: &Policy) -> bool {
         SYSTEM_READ.iter().any(|d| program.starts_with(d))
             || policy.readable.iter().any(|d| program.starts_with(d))

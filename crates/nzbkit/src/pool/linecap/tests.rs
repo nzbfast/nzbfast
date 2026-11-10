@@ -390,6 +390,7 @@ fn seeded_fleet_tiered(
                     block_account: false,
                     bind_ip: None,
                     socks5: None,
+                    http_proxy: None,
                     enabled: true,
                     warm_pool: false,
                     idle_release_secs: None,
@@ -1677,20 +1678,21 @@ fn the_supply_arm_reads_a_mixed_speed_fleet_as_its_mean_carry() {
     );
 }
 
-/// A server whose ACCOUNT is smaller than its share keeps its
-/// account, and the shortfall is not handed to anybody else.
+/// A server whose ACCOUNT is smaller than its share keeps its account,
+/// and since 8 Nov 2026 the shortfall goes to the other primaries.
 ///
-/// Recorded because it is the one way this rule can deliver fewer
-/// sockets than the fleet it decided on, and nothing said so: the
-/// walk is `share.min(ceiling)` per server with no second pass. A
-/// fleet of 35 across five providers is 7 each, but a provider
-/// granting 3 contributes 3, so the fleet on the wire is 31. That
-/// is the conservative direction - it can only ever under-dial an
-/// account, never over-dial one - and redistributing would mean
-/// deciding which provider deserves the surplus, which is the
-/// steering gates' question and not this rule's.
+/// Until then this pinned the opposite (27 Aug 2026): the walk was
+/// `share.min(ceiling)` per server with no second pass, so a fleet of 35
+/// across five providers was 7 each, a provider granting 3 contributed
+/// 3, and the fleet on the wire was 31. That was recorded as the
+/// conservative direction, with redistribution left as "which provider
+/// deserves the surplus". [`water_fill`] answers it without steering:
+/// the surplus is split evenly over the primaries that have room, so
+/// the wire carries the 35 the rule decided. It cost GitHub #103's
+/// reporter 30 of frugal's 100 at a fleet of 150
+/// (`research/LINECAP-WATERFILL-SPLIT-2026-11-08.md`).
 #[test]
-fn a_small_account_caps_its_own_share_and_is_not_redistributed() {
+fn a_small_accounts_shortfall_goes_to_the_other_primaries() {
     let line = mbit(1_000);
     let big = server_share(LINE_CAP_MAX_FLEET, 5);
     let (sh, targets) = seeded_fleet_n(&[big, big, big, big, 3], LINE_CAP_DEFAULT_FLEET, line);
@@ -1702,13 +1704,13 @@ fn a_small_account_caps_its_own_share_and_is_not_redistributed() {
     let got: Vec<usize> = targets.iter().map(|t| t.get()).collect();
     assert_eq!(
         got,
-        vec![7, 7, 7, 7, 3],
-        "the small account kept its own size"
+        vec![8, 8, 8, 8, 3],
+        "the small account kept its own size and the rest took its slice"
     );
     assert_eq!(
         got.iter().sum::<usize>(),
-        31,
-        "so the fleet on the wire is under the 35 the rule decided"
+        35,
+        "so the fleet on the wire is the 35 the rule decided"
     );
 }
 
@@ -1921,6 +1923,7 @@ fn anchor_cfgs(measured: &[bool], anchor_bps: u64) -> Vec<(ServerConfig, PoolCon
                     block_account: false,
                     bind_ip: None,
                     socks5: None,
+                    http_proxy: None,
                     enabled: true,
                     warm_pool: false,
                     idle_release_secs: None,
@@ -2139,15 +2142,15 @@ fn probe_run_to(
 /// 12 Oct 2026, the regime the probe exists for: a 10 GbE line whose
 /// sockets each carry ~170 Mbit, so the SOCKETS are the limit. The
 /// curve stalls here (it plans 150 Mbit a socket and reads the fleet's
-/// own rate as the line); the probe reaches the first ceiling within
-/// two dwells and stops there.
+/// own rate as the line); the probe reaches the ceiling it is handed on
+/// the seed's own 1 s dwell (8 Nov 2026) and stops there.
 #[test]
 fn the_probe_climbs_a_fast_line_whose_sockets_are_the_limit() {
     let seen = probe_run(LINE_CAP_DEFAULT_FLEET, 12, LINE_CAP_MAX_FLEET, |d| {
         mbit(170) * d as u64
     });
-    assert_eq!(seen[2], 35, "{seen:?}");
-    assert_eq!(seen[4], LINE_CAP_MAX_FLEET, "{seen:?}");
+    assert_eq!(seen[0], LINE_CAP_DEFAULT_FLEET, "{seen:?}");
+    assert_eq!(seen[1], LINE_CAP_MAX_FLEET, "{seen:?}");
     assert_eq!(*seen.last().unwrap(), LINE_CAP_MAX_FLEET, "{seen:?}");
 }
 
@@ -2159,14 +2162,14 @@ fn the_probe_stops_at_the_first_rung_that_does_not_pay() {
     let seen = probe_run(LINE_CAP_DEFAULT_FLEET, 30, LINE_CAP_MAX_FLEET, |_| {
         mbit(3_000)
     });
-    assert_eq!(*seen.last().unwrap(), 35, "{seen:?}");
+    assert_eq!(*seen.last().unwrap(), 50, "{seen:?}");
 }
 
 /// Sockets that each add a little but well under half the average
 /// carry: a line that is nearly full. That is not paying.
 #[test]
 fn a_rung_that_buys_under_half_its_share_does_not_pay() {
-    // 25 -> 35 sockets is +40%; +15% of rate is under half of that.
+    // 25 -> 50 sockets is +100%; +15% of rate is under half of that.
     let seen = probe_run(
         LINE_CAP_DEFAULT_FLEET,
         30,
@@ -2176,7 +2179,7 @@ fn a_rung_that_buys_under_half_its_share_does_not_pay() {
             _ => mbit(4_600),
         },
     );
-    assert_eq!(*seen.last().unwrap(), 35, "{seen:?}");
+    assert_eq!(*seen.last().unwrap(), 50, "{seen:?}");
 }
 
 /// §208's protected regime: a 99 Mbit line (and a 1 GbE one) can never
@@ -2207,15 +2210,15 @@ fn a_cold_probe_climbs_a_slow_per_socket_fleet_on_a_fast_line() {
         "the anchored gate moved: {warm:?}"
     );
     let cold = probe_run_cold(LINE_CAP_DEFAULT_FLEET, 12, LINE_CAP_MAX_FLEET, rate);
-    assert_eq!(cold[2], 35, "{cold:?}");
+    assert_eq!(cold[2], LINE_CAP_MAX_FLEET, "{cold:?}");
     assert_eq!(*cold.last().unwrap(), LINE_CAP_MAX_FLEET, "{cold:?}");
 }
 
 /// The cold gate still keeps §208's regime out: a 99 Mbit line, and
-/// anything under 400 Mbit, never opens it.
+/// anything under 200 Mbit (400 until 8 Nov 2026), never opens it.
 #[test]
 fn a_cold_probe_never_fires_on_a_slow_line() {
-    for line in [mbit(99), mbit(250), mbit(390)] {
+    for line in [mbit(99), mbit(150), mbit(195)] {
         let seen = probe_run_cold(LINE_CAP_DEFAULT_FLEET, 60, LINE_CAP_MAX_FLEET, |_| line);
         assert!(
             seen.iter().all(|&f| f == LINE_CAP_DEFAULT_FLEET),
@@ -2314,32 +2317,50 @@ fn a_probe_rung_is_judged_once_its_sockets_are_up() {
 /// not wait for ever.
 #[test]
 fn a_rung_a_provider_holds_short_is_judged_at_the_max_dwell() {
-    // 40 sockets granted: the 25 -> 35 rung comes up in full and pays,
-    // the 35 -> 50 rung gets five more and never fills.
+    // 40 sockets granted: the 25 -> 50 rung gets fifteen more and never
+    // fills.
     let (seen, raises) = probe_ramp_run(40, mbit(33), 300, 40, 100, false);
     assert!(raises.len() >= 2, "{seen:?} {raises:?}");
-    let to_50 = raises[1];
-    let judged_after = raises.get(2).map(|r| r - to_50);
+    let to_50 = raises[0];
+    let judged_after = raises.get(1).map(|r| r - to_50);
     match judged_after {
-        // 40 > 35 sockets carrying their share pays, so it raises again,
+        // 40 > 25 sockets carrying their share pays, so it raises again,
         // but only once the max dwell has passed.
         Some(gap) => assert!(gap >= LINE_CAP_PROBE_MAX_DWELL_MS, "{raises:?}"),
         None => panic!("the short rung was never judged: {seen:?} {raises:?}"),
     }
 }
 
+/// 8 Nov 2026: the class the 400 Mbit gate left open. Sockets carrying
+/// ~13 Mbit each read ~325 Mbit on 25 of them, under the old gate, and
+/// the fleet stayed at 25 for the whole job; they ARE the limit, so the
+/// first rung pays and the probe walks on to the grant.
+#[test]
+fn a_cold_probe_climbs_a_fleet_carrying_13_mbit_a_socket() {
+    let seen = probe_run_to(
+        LINE_CAP_DEFAULT_FLEET,
+        20,
+        LINE_CAP_MAX_FLEET,
+        LINE_CAP_SUPPLY_MAX_FLEET,
+        false,
+        |d| mbit(13) * d as u64,
+    );
+    assert!(seen.contains(&LINE_CAP_MAX_FLEET), "{seen:?}");
+    assert_eq!(*seen.last().unwrap(), LINE_CAP_SUPPLY_MAX_FLEET, "{seen:?}");
+}
+
 /// The price `LINE_CAP_PROBE_COLD_MIN_BPS` names, on a FLAT reading: a
-/// cold run on a full line between 400 Mbit and 2 Gbit gets the first
+/// cold run on a full line between 200 Mbit and 2 Gbit gets the first
 /// rung and no more, because a line the seed already fills cannot pay.
 /// Pinned at exactly one rung, so a pay rule that stopped refusing a
 /// full line fails here. (A real run's ramping baseline can buy one
 /// rung more, up to the first ceiling; the constant's doc measures it.)
 #[test]
 fn a_cold_probe_on_a_full_line_costs_one_rung() {
-    for line in [mbit(400), mbit(940), mbit(1_990)] {
+    for line in [mbit(200), mbit(320), mbit(400), mbit(940), mbit(1_990)] {
         let seen = probe_run_cold(LINE_CAP_DEFAULT_FLEET, 60, LINE_CAP_MAX_FLEET, |_| line);
-        assert_eq!(*seen.last().unwrap(), 35, "{line}: {seen:?}");
-        assert!(seen.iter().all(|&f| f <= 35), "{line}: {seen:?}");
+        assert_eq!(*seen.last().unwrap(), 50, "{line}: {seen:?}");
+        assert!(seen.iter().all(|&f| f <= 50), "{line}: {seen:?}");
     }
 }
 
@@ -2363,7 +2384,7 @@ fn the_probe_waits_for_a_dwell_and_ignores_no_reading() {
     let (f, p) = probe_step(
         p,
         25,
-        LINE_CAP_PROBE_SETTLE_MS - 1,
+        LINE_CAP_PROBE_FIRST_SETTLE_MS - 1,
         mbit(5_000),
         25,
         25,
@@ -2387,7 +2408,7 @@ fn the_probe_waits_for_a_dwell_and_ignores_no_reading() {
     let (f, _) = probe_step(
         p,
         25,
-        LINE_CAP_PROBE_SETTLE_MS,
+        LINE_CAP_PROBE_FIRST_SETTLE_MS,
         mbit(5_000),
         25,
         25,
@@ -2395,7 +2416,7 @@ fn the_probe_waits_for_a_dwell_and_ignores_no_reading() {
         50,
         true,
     );
-    assert_eq!(f, 35);
+    assert_eq!(f, 50);
 }
 
 /// A fleet the curve raised under the probe gets a fresh dwell rather
@@ -2408,7 +2429,7 @@ fn a_curve_raise_restarts_the_probes_dwell() {
     let (f, _) = probe_step(p, 30, 2_100, mbit(5_000), 30, 30, 50, 50, true);
     assert_eq!(f, 30, "30's dwell began at 1.9 s");
     let (f, _) = probe_step(p, 30, 3_900, mbit(5_000), 30, 30, 50, 50, true);
-    assert_eq!(f, 45);
+    assert_eq!(f, 50, "30 doubles to 60, held to the ceiling");
 }
 
 /// Slots that never came up add no dialling sockets, and a rung that
@@ -2433,7 +2454,7 @@ fn a_rung_whose_slots_never_dialled_does_not_pay() {
         p = n;
         fleet = f;
     }
-    assert_eq!(fleet, 35);
+    assert_eq!(fleet, 50);
     assert!(p.done);
 }
 
@@ -2451,8 +2472,10 @@ fn the_probe_respects_the_ceiling_it_is_handed() {
 
 /// 12 Oct 2026, Option B: once a rung has PAID, the probe may walk to
 /// `proven` (the second ceiling) - the first, unproven step may not.
-/// A fast line whose sockets are the limit goes 25 -> 35 -> 50 -> 70
-/// -> 100, the account's grant, and no further.
+/// A line whose sockets are the limit, on a seed under the 2 Gbit gate
+/// (a COLD run, 60 Mbit a socket), goes 25 -> 50 -> 100 (2x rungs since
+/// 8 Nov 2026), the account's grant, and no further. A seed over the
+/// gate skips the first rung altogether; the next test pins that.
 #[test]
 fn a_probe_that_paid_walks_past_the_first_ceiling() {
     let seen = probe_run_to(
@@ -2460,32 +2483,88 @@ fn a_probe_that_paid_walks_past_the_first_ceiling() {
         20,
         LINE_CAP_MAX_FLEET,
         LINE_CAP_SUPPLY_MAX_FLEET,
-        true,
-        |d| mbit(120) * d as u64,
+        false,
+        |d| mbit(60) * d as u64,
     );
     assert_eq!(*seen.last().unwrap(), LINE_CAP_SUPPLY_MAX_FLEET, "{seen:?}");
     assert!(
         seen.iter().all(|&f| f <= LINE_CAP_SUPPLY_MAX_FLEET),
         "{seen:?}"
     );
-    assert!(seen.contains(&70), "{seen:?}");
+    assert!(seen.contains(&50), "{seen:?}");
+    assert!(!seen.contains(&70), "1.4x rungs are gone: {seen:?}");
+}
+
+/// 8 Nov 2026: the same line at 120 Mbit a socket. The seed alone moves
+/// 3 Gbit, past the gate, so the first judgement goes straight to the
+/// grant without dwelling at the first ceiling.
+#[test]
+fn a_fast_seed_jumps_to_the_grant_in_one_step() {
+    let seen = probe_run_to(
+        LINE_CAP_DEFAULT_FLEET,
+        20,
+        LINE_CAP_MAX_FLEET,
+        LINE_CAP_SUPPLY_MAX_FLEET,
+        false,
+        |d| mbit(120) * d as u64,
+    );
+    assert_eq!(*seen.last().unwrap(), LINE_CAP_SUPPLY_MAX_FLEET, "{seen:?}");
+    assert!(!seen.contains(&LINE_CAP_MAX_FLEET), "{seen:?}");
 }
 
 /// The first step has no rung behind it, so it is bounded by `ceiling`
-/// however generous `proven` is.
+/// however generous `proven` is - unless the seed ALONE already moves
+/// [`LINE_CAP_PROBE_MIN_BPS`] (8 Nov 2026), which is the provenance the
+/// second ceiling asks for, so it goes straight to `proven`.
 #[test]
-fn the_first_probe_step_never_uses_the_proven_ceiling() {
+fn the_first_probe_step_uses_the_proven_ceiling_only_on_a_fast_seed() {
     let (f, _) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 25, 30, 100, true);
     assert_eq!(f, 25);
-    let (_, p) = probe_step(Probe::default(), 25, 0, mbit(5_000), 25, 25, 30, 100, true);
-    let (f, p) = probe_step(p, 25, 2_000, mbit(5_000), 25, 25, 30, 100, true);
+    // A cold seed under the 2 Gbit gate: the unproven step stops at `ceiling`.
+    let (_, p) = probe_step(Probe::default(), 25, 0, mbit(1_000), 25, 25, 30, 100, false);
+    let (f, p) = probe_step(p, 25, 2_000, mbit(1_000), 25, 25, 30, 100, false);
     assert_eq!(f, 30, "the unproven step stops at `ceiling`");
     assert!(!p.paid);
+    // The same seed moving 5 Gbit jumps to `proven`, cold or anchored.
+    for anchored in [false, true] {
+        let (_, p) = probe_step(
+            Probe::default(),
+            25,
+            0,
+            mbit(5_000),
+            25,
+            25,
+            30,
+            100,
+            anchored,
+        );
+        let (f, p) = probe_step(p, 25, 1_000, mbit(5_000), 25, 25, 30, 100, anchored);
+        assert_eq!(f, 100, "anchored {anchored}: a fast seed jumps to `proven`");
+        assert!(p.paid);
+    }
+    // Exactly at the gate counts; a hair under does not.
+    let (_, p) = probe_step(Probe::default(), 25, 0, 1, 25, 25, 30, 100, false);
+    let (f, _) = probe_step(
+        p,
+        25,
+        1_000,
+        LINE_CAP_PROBE_MIN_BPS - 1,
+        25,
+        25,
+        30,
+        100,
+        false,
+    );
+    assert_eq!(f, 30);
 }
 
-/// A line 50 sockets nearly fill (8 Gbit at 150 Mbit a socket): the
-/// rung to 70 buys a sixth of its share, so the probe stops THERE - one
-/// rung past the knee, never at the grant.
+/// A line 50 sockets nearly fill (8 Gbit at 150 Mbit a socket). Under
+/// the 1.4x rungs the probe stopped at 70, one rung past the knee; under
+/// 2x rungs that rung was the grant; and since the fast-seed jump (8 Nov
+/// 2026) a seed moving this much goes to the grant on its first
+/// judgement. The loopback A/Bs (`research/LINECAP-PROBE-DOUBLING-2026-11-08.md`,
+/// `research/LINECAP-FAST-JUMP-2026-11-08.md`) measured the S shape, full
+/// at 50, running faster at 100 than the old arm at 50.
 #[test]
 fn a_proven_probe_still_stops_where_the_line_is_full() {
     let line = mbit(8_000);
@@ -2497,7 +2576,12 @@ fn a_proven_probe_still_stops_where_the_line_is_full() {
         true,
         |d| (mbit(150) * d as u64).min(line),
     );
-    assert_eq!(*seen.last().unwrap(), 70, "{seen:?}");
+    assert_eq!(*seen.last().unwrap(), LINE_CAP_SUPPLY_MAX_FLEET, "{seen:?}");
+    // The seed moves 3.75 Gbit, so since 8 Nov it reaches the grant in
+    // one jump and the pay test it fails there only latches the probe.
+    // What protects a line that gets WORSE past the knee is the
+    // step-back check, which `regret_step`'s own tests pin.
+    assert!(!seen.contains(&LINE_CAP_MAX_FLEET), "{seen:?}");
 }
 
 /// Option B's spawn change must not move the I/O shard layout: an
@@ -2650,4 +2734,282 @@ fn the_step_back_baseline_is_the_best_since_the_raise() {
         seen.push(cap);
     }
     assert_eq!(seen, vec![55, 55, 55, 55, 50], "{seen:?}");
+}
+
+/// 8 Nov 2026: a slot the governor wakes mid-run dials at once, still
+/// paced against its own server's other dials, and never waits out the
+/// `ramp_delay x slot` its high slot number used to charge it. The loopback
+/// A/B in `research/LINECAP-PROBE-DOUBLING-2026-11-08.md` measured the old
+/// wait as 0.75-2.85 s after every raise, with a probe rung waiting on it.
+#[tokio::test(start_paused = true)]
+async fn a_woken_slot_dials_at_once_but_never_closer_than_the_gap() {
+    let (sh, _) = seeded_fleet(20);
+    let gap = std::time::Duration::from_millis(150);
+    let ms = |d: std::time::Duration| d.as_millis() as u64;
+    // A fleet admitted together keeps the old stagger, in admission order.
+    let start: Vec<u64> = (0..5)
+        .map(|_| ms(super::super::dial_pace(&sh, 0, gap)))
+        .collect();
+    assert_eq!(start, [0, 150, 300, 450, 600]);
+    // The other server is paced on its own.
+    assert_eq!(ms(super::super::dial_pace(&sh, 1, gap)), 0);
+    // Ten seconds on, a raise wakes slots 5-9: the first dials at once,
+    // where `ramp_delay x 5` used to hold it 750 ms.
+    tokio::time::advance(std::time::Duration::from_secs(10)).await;
+    let raised: Vec<u64> = (0..5)
+        .map(|_| ms(super::super::dial_pace(&sh, 0, gap)))
+        .collect();
+    assert_eq!(raised, [0, 150, 300, 450, 600]);
+}
+
+/// 8 Nov 2026: the probe's proven ceiling is the PRIMARY servers' whole
+/// grant, never [`LINE_CAP_SUPPLY_MAX_FLEET`], and a fill tier's
+/// connections are not in it.
+#[test]
+fn the_probe_ceiling_is_the_primaries_grant() {
+    let fleet = |rows: &[(u32, usize)]| -> Vec<(ServerConfig, PoolConfig)> {
+        rows.iter()
+            .enumerate()
+            .map(|(i, &(level, n))| {
+                let s: ServerConfig = serde_json::from_value(serde_json::json!({
+                    "host": format!("s{i}.example"), "port": 119,
+                    "connections": n, "level": level
+                }))
+                .unwrap();
+                let c = PoolConfig {
+                    connections: n,
+                    line_cap_uncapped: n,
+                    ..PoolConfig::shipped()
+                };
+                (s, c)
+            })
+            .collect()
+    };
+    // GH #103's shape: two primaries (100 + 50) and two fill servers.
+    let gh103 = fleet(&[(0, 100), (0, 50), (1, 50), (1, 90)]);
+    assert_eq!(seed_primary_grant(&gh103), 150);
+    assert_eq!(probe_ceiling(seed_primary_grant(&gh103)), 150);
+    // Five primaries of 100: past the old 100 backstop.
+    let five = fleet(&[(0, 100); 5]);
+    assert_eq!(probe_ceiling(seed_primary_grant(&five)), 500);
+    // Small accounts never pull it under the first ceiling, and no claim
+    // holds it there.
+    assert_eq!(
+        probe_ceiling(seed_primary_grant(&fleet(&[(0, 10), (0, 10)]))),
+        LINE_CAP_MAX_FLEET
+    );
+    assert_eq!(probe_ceiling(0), LINE_CAP_MAX_FLEET);
+    // Relative tiering: a fleet of level-1 and level-2 servers has its
+    // level-1 servers as the primaries.
+    assert_eq!(
+        seed_primary_grant(&fleet(&[(1, 60), (2, 40), (1, 70)])),
+        130
+    );
+}
+
+/// 8 Nov 2026: with a primaries' grant of 500, a fast seed jumps only to
+/// [`LINE_CAP_SUPPLY_MAX_FLEET`], and every rung past it must pay. A line
+/// 100 sockets already fill (12 Gbit at 120 Mbit a socket) stops there;
+/// one whose sockets stay the limit walks 100 -> 200 -> 400 -> 500.
+#[test]
+fn past_100_the_probe_climbs_only_on_rungs_that_pay() {
+    let full = probe_run_to(
+        LINE_CAP_DEFAULT_FLEET,
+        30,
+        LINE_CAP_MAX_FLEET,
+        500,
+        false,
+        |d| (mbit(120) * d as u64).min(mbit(12_000)),
+    );
+    assert_eq!(full[1], LINE_CAP_SUPPLY_MAX_FLEET, "{full:?}");
+    assert!(full.iter().all(|&f| f <= 200), "{full:?}");
+    let open = probe_run_to(
+        LINE_CAP_DEFAULT_FLEET,
+        30,
+        LINE_CAP_MAX_FLEET,
+        500,
+        false,
+        |d| mbit(120) * d as u64,
+    );
+    assert!(open.contains(&200) && open.contains(&400), "{open:?}");
+    assert_eq!(*open.last().unwrap(), 500, "{open:?}");
+}
+
+/// 8 Nov 2026: [`water_fill`] is the equal split while every ceiling
+/// holds its share, and passes what a small account cannot take to the
+/// rest - GH #103's fleet at 150 (primaries' pool 140 after the two
+/// fill floors) gives newsdemon its knee of 33 and frugal its 100.
+#[test]
+fn water_fill_passes_a_small_accounts_slice_on() {
+    assert_eq!(water_fill(140, &[100, 100]), vec![70, 70]);
+    assert_eq!(water_fill(100, &[20, 20, 20, 20, 20]), vec![20; 5]);
+    assert_eq!(water_fill(140, &[100, 33]), vec![100, 33]);
+    assert_eq!(water_fill(140, &[100, 50]), vec![90, 50]);
+    assert_eq!(water_fill(90, &[45, 45]), vec![45, 45]);
+    // More than every ceiling together: nobody past its own.
+    assert_eq!(water_fill(300, &[100, 50]), vec![100, 50]);
+    assert_eq!(water_fill(0, &[10, 10]), vec![0, 0]);
+    // Smallest first, whatever the order they arrive in.
+    assert_eq!(water_fill(150, &[10, 100, 100]), vec![10, 70, 70]);
+}
+
+/// 9 Nov 2026: [`recall_check`] waits for the fleet to be up and dwelt,
+/// then keeps a recalled fleet on a line moving the cold gate and sends
+/// it back below it.
+#[test]
+fn a_recalled_fleet_is_judged_once_it_is_up() {
+    let fast = mbit(5_000);
+    let slow = LINE_CAP_PROBE_COLD_MIN_BPS - 1;
+    // Not dwelt, not up, or no reading: no answer yet.
+    assert_eq!(recall_check(0, 500, fast, 100, 100), None);
+    assert_eq!(recall_check(0, 2_000, fast, 100, 60), None);
+    assert_eq!(recall_check(0, 2_000, 0, 100, 100), None);
+    // Up and dwelt.
+    assert_eq!(recall_check(0, 1_000, fast, 100, 100), Some(true));
+    assert_eq!(recall_check(0, 1_000, slow, 100, 100), Some(false));
+    assert_eq!(
+        recall_check(0, 1_000, LINE_CAP_PROBE_COLD_MIN_BPS, 100, 100),
+        Some(true),
+        "exactly at the gate keeps it"
+    );
+    // A slow line is told from a fleet still connecting: 60 of 100 up
+    // carrying 100 Mbit project to 167 Mbit, under the gate, so it falls
+    // back without waiting; the same 60 carrying 1 Gbit wait for the rest.
+    assert_eq!(recall_check(0, 1_000, mbit(100), 100, 60), Some(false));
+    assert_eq!(recall_check(0, 1_000, mbit(1_000), 100, 60), None);
+    // An account that never grants the last sockets is judged anyway.
+    assert_eq!(
+        recall_check(0, LINE_CAP_PROBE_MAX_DWELL_MS, slow, 100, 60),
+        Some(false)
+    );
+}
+
+/// Two servers of 100 sockets on a measured 10 Gbit anchor, seeded at a
+/// RECALLED fleet of `recall` (the curve alone would seed `from`) and
+/// started under `hold`, with `dialling` sockets admitted.
+fn recalled_fleet(
+    recall: usize,
+    from: usize,
+    hold: usize,
+) -> (Arc<Shared>, Vec<Arc<ConnTarget>>, Arc<LiveStats>) {
+    let targets: Vec<_> = (0..2)
+        .map(|_| ConnTarget::new(server_share(recall, 2)))
+        .collect();
+    let mut servers = anchor_cfgs(&[true, true], mbit(10_000));
+    for (i, (sc, pc)) in servers.iter_mut().enumerate() {
+        sc.connections = 100;
+        pc.connections = 100;
+        pc.live_target = Some(targets[i].clone());
+        pc.line_cap_fleet = recall;
+        pc.line_cap_uncapped = 100;
+        pc.line_cap_auto = true;
+        pc.line_anchor_measured = true;
+        pc.line_cap_recall_from = from;
+        pc.line_cap_hold = hold;
+    }
+    let live = LiveStats::for_servers(&servers);
+    for (_, pc) in servers.iter_mut() {
+        pc.live = Some(live.clone());
+    }
+    let sh = Shared::new(vec![ArticleReq::fresh("<a@x>")], &servers).0;
+    sh.workers_live.store(200, Ordering::Release);
+    sh.parked_total.store(200 - recall, Ordering::Release);
+    (sh, targets, live)
+}
+
+/// The case the check exists for: last night's 100 sockets handed to a
+/// run on a line now moving 100 Mbit (a laptop moved, an anchor that has
+/// not learned down yet). Once the fleet has dwelt, it goes back to the
+/// seed the curve would have given it, and that is the verdict banked
+/// for the next job.
+#[test]
+fn a_recalled_fleet_on_a_slow_line_falls_back_to_the_seed() {
+    let (sh, targets, live) = recalled_fleet(100, 50, 0);
+    // Judged at the dwell cap (the fixture holds no sessions), so a
+    // second past it. Later ticks are the supply arm's own business.
+    feed_and_tick(&sh, 12, mbit(100), false);
+    assert!(
+        targets.iter().all(|t| t.get() == server_share(50, 2)),
+        "{:?}",
+        targets.iter().map(|t| t.get()).collect::<Vec<_>>()
+    );
+    assert_eq!(live.line_cap_settled.load(Ordering::Relaxed), 50);
+}
+
+/// The same recalled fleet on a line that still earns it stays put: the
+/// probe's first judgement reads a fast seed already at its bound and
+/// stops, which banks the same fleet again.
+#[test]
+fn a_recalled_fleet_on_a_fast_line_starts_and_stays_there() {
+    let (sh, targets, live) = recalled_fleet(100, 50, 0);
+    feed_and_tick(&sh, 14, mbit(5_000), false);
+    assert!(
+        targets.iter().all(|t| t.get() == server_share(100, 2)),
+        "{:?}",
+        targets.iter().map(|t| t.get()).collect::<Vec<_>>()
+    );
+    assert_eq!(live.line_cap_settled.load(Ordering::Relaxed), 100);
+    assert_eq!(live.line_cap_hold.load(Ordering::Relaxed), 0);
+}
+
+/// A step-back the last job made is held from the start: a fast seed
+/// that would jump to 100 stops at the hold, and the gauge carries the
+/// hold forward so the daemon keeps it until it expires.
+#[test]
+fn a_remembered_step_back_holds_the_climb() {
+    let (sh, targets, live) = recalled_fleet(25, 0, 50);
+    assert_eq!(live.line_cap_hold.load(Ordering::Relaxed), 50);
+    sh.parked_total.store(200 - 25, Ordering::Release);
+    let now = feed_and_tick(&sh, 6, mbit(5_000), false);
+    sh.parked_total.store(200 - 50, Ordering::Release);
+    feed_and_tick_from(&sh, now, 14, mbit(5_000), false);
+    let got: Vec<_> = targets.iter().map(|t| t.get()).collect();
+    assert!(
+        got.iter().all(|&t| t == server_share(50, 2)),
+        "the hold is the ceiling: {got:?}"
+    );
+    assert_eq!(live.line_cap_settled.load(Ordering::Relaxed), 50);
+}
+
+/// A hold under the seed is no reason to shrink it: it bounds a climb.
+#[test]
+fn a_hold_under_the_seed_never_shrinks_it() {
+    let (sh, targets, _live) = recalled_fleet(50, 0, 25);
+    feed_and_tick(&sh, 14, mbit(5_000), false);
+    assert!(targets.iter().all(|t| t.get() == server_share(50, 2)));
+}
+
+/// A job that ends before its probe stops still banks the fleet it was
+/// raised to (`line_cap_finish`) - and a run never raised banks nothing.
+#[test]
+fn a_short_job_banks_the_fleet_it_ran_dry_at() {
+    let (sh, _targets, live) = recalled_fleet(25, 0, 0);
+    sh.parked_total.store(200 - 25, Ordering::Release);
+    let now = feed_and_tick(&sh, 4, mbit(5_000), false);
+    assert_eq!(
+        live.line_cap_settled.load(Ordering::Relaxed),
+        0,
+        "still climbing"
+    );
+    feed_and_tick_from(&sh, now, 2, mbit(5_000), true);
+    sh.line_cap_finish();
+    let running = live.line_cap_fleet.load(Ordering::Relaxed);
+    assert!(running > 25, "the fixture must have raised: {running}");
+    assert_eq!(live.line_cap_settled.load(Ordering::Relaxed), running);
+    // Seeded at the anchor curve's own 50, as the fleet build seeds it.
+    let (sh, _targets, live) = recalled_fleet(50, 0, 0);
+    feed_and_tick(&sh, 4, mbit(100), true);
+    sh.line_cap_finish();
+    assert_eq!(live.line_cap_settled.load(Ordering::Relaxed), 0);
+}
+
+/// The slow-line fallback answers inside a queue-dry tail too: a small
+/// job on a recalled fleet can run dry in its first seconds, and waiting
+/// for a non-tail reading left the stale fleet running AND banked.
+#[test]
+fn a_recalled_fleet_falls_back_even_once_the_queue_is_dry() {
+    let (sh, targets, live) = recalled_fleet(100, 50, 0);
+    feed_and_tick(&sh, 12, mbit(100), true);
+    assert!(targets.iter().all(|t| t.get() == server_share(50, 2)));
+    assert_eq!(live.line_cap_settled.load(Ordering::Relaxed), 50);
 }

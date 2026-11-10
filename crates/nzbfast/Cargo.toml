@@ -1,6 +1,6 @@
 [package]
 name = "nzbfast"
-version = "1.9.0"
+version = "1.10.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -257,6 +257,12 @@ windows-sys = { version = "0.61", features = [
     "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_System_Threading",
+    # crashdump.rs (F7): SetUnhandledExceptionFilter + MiniDumpWriteDump.
+    # windows-sys gates MiniDumpWriteDump on Kernel and Memory as well as
+    # Storage_FileSystem, for the types in its signature.
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_Memory",
 ] }
 
 # Kernel TLS, Linux only and off by default - see nzbkit's `ktls`
@@ -400,7 +406,7 @@ postfast = { path = "../postfast" }
 # Seed-harvest migration tests open the daemon's closed index directly to
 # model a pre-manifest database. This is the same version/features nzbkit's
 # index tests already compile, so it adds no production dependency.
-rusqlite = { version = "0.40.1", features = ["hooks"] }
+rusqlite = { version = "0.41.0", features = ["hooks"] }
 # TLS daemon tests (§129 2a): rcgen mints the test certificate (end-entity,
 # basicConstraints CA:FALSE by construction - the CaUsedAsEndEntity trap a
 # hand-run `openssl req -x509` falls into), and rustls is the verifying

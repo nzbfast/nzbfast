@@ -505,3 +505,173 @@ fn an_interrupt_during_a_create_leaves_no_recovery_set() {
         "the set the second run wrote does not verify: {out}{err}"
     );
 }
+
+/// Every file of the set in `dir`, hidden ones included, with its bytes:
+/// what a re-create is allowed to have left exactly as it was.
+fn set_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("set.") || n.starts_with('.'))
+        .map(|n| {
+            let b = std::fs::read(dir.join(&n)).unwrap();
+            (n, b)
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// Run `parfast` and send SIGINT the moment `ready` says so of the
+/// directory - polled, so the signal lands on a FACT about the disk (a
+/// file this run has written) rather than on a guess at timing. Panics,
+/// with the run's output, if the run ends first: the window was missed
+/// and nothing was tested.
+fn interrupt_when(
+    dir: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    ready: impl Fn(&Path) -> bool,
+) -> Interrupted {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_parfast"))
+        .args(args)
+        .current_dir(dir)
+        .env("NZBFAST_NO_ENRICH", "1")
+        .envs(env.iter().copied())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("parfast spawns");
+    let mut errpipe = child.stderr.take().unwrap();
+    let errt = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = errpipe.read_to_end(&mut bytes);
+        bytes
+    });
+    let mut outpipe = child.stdout.take().unwrap();
+    let outt = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = outpipe.read_to_end(&mut bytes);
+        bytes
+    });
+    let deadline = Instant::now() + MARKER_DEADLINE;
+    loop {
+        if ready(dir) {
+            break;
+        }
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            let out = outt.join().unwrap();
+            let err = errt.join().unwrap();
+            panic!(
+                "the run finished (status {status}) before the directory was ready - the window \
+                 this test needs was missed, so nothing here was tested:\n{}{}",
+                String::from_utf8_lossy(&out),
+                String::from_utf8_lossy(&err)
+            );
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the directory was never ready in {MARKER_DEADLINE:?}");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let kill = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(kill.success(), "kill -INT failed");
+    let status = reap(&mut child, "the interrupt");
+    let out = outt.join().expect("the stdout reader thread");
+    let err = errt.join().expect("the stderr reader thread");
+    Interrupted {
+        code: status.code(),
+        stdout: String::from_utf8_lossy(&out).into_owned(),
+        stderr: String::from_utf8_lossy(&err).into_owned(),
+    }
+}
+
+/// THE MEASURED LOSS (the 9 Nov 2026 parfast sweep handoff, E4): a
+/// re-create over a good set, interrupted once it is writing volumes,
+/// destroyed most of the previous set's recovery volumes. Now every file
+/// of the previous set comes through byte-identical, `v` passes, and a
+/// later damage is still repairable from it.
+///
+/// Both shapes, because they protect the old set by different means:
+///
+/// - DIFFERENT options (`-r5`, then `-r50`): the reproduced scenario. The
+///   new set's names no longer coincide with the old one's at all, because
+///   the engine writes the reference's names itself rather than its own
+///   `vol000+01` spelling (which WAS the old set's names) followed by a
+///   rename - so nothing of the old set is even opened.
+/// - The SAME options: every name of the new set IS a name of the old one,
+///   so the run writes every file under a staging name, and the staging is
+///   what keeps the old set.
+///
+/// The signal lands once a volume of the new run is on disk, polled, and
+/// `NZBFAST_PAR2GEN_ACCUM` splits the fold into several passes so that is
+/// early in the run with most of it still to go; `-t1` stretches it.
+#[test]
+fn an_interrupt_during_a_re_create_keeps_every_file_of_the_previous_set() {
+    for (tag, first, again) in [("resliced", "-r5", "-r50"), ("same", "-r30", "-r30")] {
+        let dir = scratch(&format!("cancel-recreate-{tag}"));
+        let member = dir.join("payload.bin");
+        write_payload(&member, 32, 23);
+        let good = digest(&member);
+        let (code, out, err) = parfast(&dir, &["c", first, "set.par2", "payload.bin"]);
+        assert_eq!(code, 0, "{tag}: the first create failed: {out}{err}");
+        let before = set_files(&dir);
+        assert!(before.len() > 3, "{tag}: {before:?}");
+        let old: BTreeSet<String> = before.iter().map(|(n, _)| n.clone()).collect();
+
+        let run = interrupt_when(
+            &dir,
+            &["c", "-t1", again, "set.par2", "payload.bin"],
+            &[("NZBFAST_PAR2GEN_ACCUM", "2097152")],
+            |d| {
+                names(d).iter().any(|n| {
+                    // A volume of THIS run: staged beside an old name, or
+                    // written fresh under a new one.
+                    (n.starts_with(".set.vol") && n.ends_with(".tmp"))
+                        || (n.starts_with("set.vol") && !old.contains(n))
+                })
+            },
+        );
+        assert_eq!(
+            run.code,
+            Some(130),
+            "{tag}: stdout:\n{}\nstderr:\n{}",
+            run.stdout,
+            run.stderr
+        );
+        assert!(!run.stdout.contains("Done"), "{tag}: {}", run.stdout);
+        let after = set_files(&dir);
+        assert_eq!(
+            after.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+            before.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+            "{tag}: the interrupted re-create changed the set's file list (a volume lost, or \
+             a file of its own left behind)"
+        );
+        for ((n, a), (_, b)) in after.iter().zip(&before) {
+            assert!(
+                a == b,
+                "{tag}: {n} is not byte-identical to the previous set's"
+            );
+        }
+        let (code, out, err) = parfast(&dir, &["v", "set.par2"]);
+        assert_eq!(
+            code, 0,
+            "{tag}: the previous set no longer verifies: {out}{err}"
+        );
+        // 256 KiB of damage: inside what even the `-r5` set can repair.
+        destroy(&member, 1 << 20, (1 << 20) + (256 << 10));
+        let (code, out, err) = parfast(&dir, &["r", "set.par2"]);
+        assert_eq!(
+            code, 0,
+            "{tag}: the previous set no longer repairs: {out}{err}"
+        );
+        assert_eq!(digest(&member), good, "{tag}: the repair is not byte-exact");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

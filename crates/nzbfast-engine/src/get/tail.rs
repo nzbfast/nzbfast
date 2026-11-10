@@ -176,6 +176,7 @@ fn demoted_volume_ladder(
     all_good: &mut bool,
     reextract_failed: &mut Option<String>,
     locked_no_password: &mut bool,
+    not_delivered: &mut Vec<String>,
 ) {
     // The unrar ladder below reasons about RAR VOLUMES, so a top-level 7z
     // chase that demoted is filtered out of it entirely: that demote
@@ -232,7 +233,13 @@ fn demoted_volume_ladder(
         match try_unrar_outcome(out_dir, password) {
             Ok(outcome) => {
                 remove_spent_volumes(&outcome.spent);
-                settle_leftovers(&outcome, par2_covered, reextract_failed, locked_no_password);
+                settle_leftovers(
+                    &outcome,
+                    par2_covered,
+                    reextract_failed,
+                    locked_no_password,
+                    not_delivered,
+                );
                 *all_good &= reextract_failed.is_none();
             }
             // TODO 211's last rung - see the twin below.
@@ -257,7 +264,13 @@ fn demoted_volume_ladder(
         match try_unrar_outcome(out_dir, password) {
             Ok(outcome) => {
                 remove_spent_volumes(&outcome.spent);
-                settle_leftovers(&outcome, par2_covered, reextract_failed, locked_no_password);
+                settle_leftovers(
+                    &outcome,
+                    par2_covered,
+                    reextract_failed,
+                    locked_no_password,
+                    not_delivered,
+                );
                 *all_good &= reextract_failed.is_none();
             }
             // TODO 211: what looks like a volume set here may be a byte
@@ -290,15 +303,34 @@ fn demoted_volume_ladder(
 /// the level, and a vouched encrypted set that was never offered a
 /// password routes to the existing locked shape. Anything the set does
 /// not name keeps the decoy tolerance - see [`crate::rarfix::vouch`].
+///
+/// G2 (TODO 358): a leftover that outweighs everything that unpacked is
+/// the main payload whatever the PAR2 set says, and fails the level the
+/// same way - see [`crate::rarfix::vouch`]. What is still tolerated is
+/// pushed onto `not_delivered` by name (item 15): a Completed job then
+/// says which of its members outside the main payload it left packed.
 fn settle_leftovers(
     outcome: &crate::rarfix::UnpackOutcome,
     par2_covered: Option<&std::collections::HashSet<String>>,
     reextract_failed: &mut Option<String>,
     locked_no_password: &mut bool,
+    not_delivered: &mut Vec<String>,
 ) {
-    use crate::rarfix::vouch::{VouchVerdict, failure_sentence, judge};
-    match judge(&outcome.packed, par2_covered) {
-        VouchVerdict::Tolerated => {}
+    use crate::rarfix::vouch::{VouchVerdict, failure_sentence, judge, main_payload_sentence};
+    match judge(&outcome.packed, par2_covered, outcome.largest_produced) {
+        VouchVerdict::Tolerated(names) => {
+            if !names.is_empty() {
+                warn!(
+                    target: "extract",
+                    "not delivered (outside the main payload, left packed): {}",
+                    names.join(", ")
+                );
+            }
+            not_delivered.extend(names);
+        }
+        VouchVerdict::MainPayload { names, reason } => {
+            *reextract_failed = Some(unpack_failure(reason, &main_payload_sentence(&names)));
+        }
         VouchVerdict::Locked(names) => {
             warn!(
                 target: "extract",
@@ -529,6 +561,9 @@ pub(super) fn unpack_tail(
     // password prompt, where the identical named set finishes Completed and
     // offers the unlock.
     let mut locked_no_password = false;
+    // Item 15 (D4): what the ladders below left packed OUTSIDE the main
+    // payload, by name - see [`settle_leftovers`].
+    let mut not_delivered: Vec<String> = Vec::new();
     //
     // Declared ahead of the resumed-run arm since TODO 164: that arm
     // reaches the same leftover judgement as the fresh-run arms, and a
@@ -549,16 +584,13 @@ pub(super) fn unpack_tail(
         match reextract_dir_outcome(out_dir, password)? {
             // TODO 164: the same leftover judgement the fresh-run arms
             // below make, on the same set.
-            Ok(packed) => {
-                let outcome = crate::rarfix::UnpackOutcome {
-                    spent: Vec::new(),
-                    packed,
-                };
+            Ok(outcome) => {
                 settle_leftovers(
                     &outcome,
                     par2_covered,
                     &mut reextract_failed,
                     &mut locked_no_password,
+                    &mut not_delivered,
                 );
                 all_good &= reextract_failed.is_none();
             }
@@ -584,6 +616,7 @@ pub(super) fn unpack_tail(
         &mut all_good,
         &mut reextract_failed,
         &mut locked_no_password,
+        &mut not_delivered,
     );
     // The downloaded volume set is done with. Everything below works on
     // what extraction PRODUCED, which this mode has no business eating.
@@ -737,6 +770,20 @@ pub(super) fn unpack_tail(
             }
         }
     }
+    // Item 15: published for the daemon's finalize, owner-keyed so a
+    // concurrent tail can never read another job's list. Written on
+    // EVERY run, the empty answer included, so a retry that delivered
+    // everything cannot inherit the last attempt's names. Only a run
+    // that is still good has anything to say: a failed one reports
+    // through `reextract_failed`, and its leftovers are the retry's.
+    if let Some(h) = hub.as_ref() {
+        let mut g = h.not_delivered.lock_ok();
+        if all_good && !not_delivered.is_empty() {
+            g.insert(stream_owner.to_string(), not_delivered);
+        } else {
+            g.remove(stream_owner);
+        }
+    }
     Ok(UnpackVerdict {
         all_good,
         reextract_failed,
@@ -859,8 +906,24 @@ fn drop_orphaned_slot_files(
     // article was lost, still carries the name. The sweep deleted the
     // file parity had just recreated and `finish_job` reported Completed
     // over it.
-    let owned: std::collections::HashSet<std::path::PathBuf> =
-        extractor.slot_paths().into_iter().collect();
+    //
+    // BOTH IDENTITY TESTS FOLD CASE (read-only sweep, 9 Nov 2026). They
+    // compared path strings exactly, and the existence test below asks the
+    // FILESYSTEM - which on the default macOS and Windows volumes is
+    // case-insensitive. So a slot posted as `sample.mkv` whose yEnc header
+    // wrote it as `Sample.mkv` (`FileSlot::write_name`) was not "owned" by
+    // string, `p.exists()` answered yes for the same file, and the sweep
+    // removed the slot's own delivered payload; an extraction output that
+    // differed from a stale posted name only by case went the same way.
+    // Folding both sides can only make the sweep skip more, which is the
+    // stated limit's safe direction: on a case-SENSITIVE volume two names
+    // differing only by case are now both left alone, and an orphan it
+    // misses is the state before this pass existed.
+    let owned: std::collections::HashSet<String> = extractor
+        .slot_paths()
+        .into_iter()
+        .map(|p| p.to_string_lossy().to_lowercase())
+        .collect();
     let recoverable = crate::smart::cleanup_recoverable();
     let staging = crate::smart::trash_staging_dir(out_dir);
     for s in slots {
@@ -868,11 +931,17 @@ fn drop_orphaned_slot_files(
             continue;
         }
         let name = nzbkit::disk::sanitize_out_name(&s.hint);
-        if name.is_empty() || ex_report.extracted.iter().any(|(n, _)| n == &name) {
+        let folded = name.to_lowercase();
+        if name.is_empty()
+            || ex_report
+                .extracted
+                .iter()
+                .any(|(n, _)| n.to_lowercase() == folded)
+        {
             continue;
         }
         let p = out_dir.join(&name);
-        if owned.contains(&p) || !p.exists() {
+        if owned.contains(&p.to_string_lossy().to_lowercase()) || !p.exists() {
             continue;
         }
         match crate::smart::remove_swept_file(&p, recoverable, staging.as_deref()) {
@@ -958,8 +1027,38 @@ fn sfx_pass(
                     .into(),
             );
         }
+        // The posted self-extractor is the CONTAINER, and its contents
+        // are delivered: it is spent exactly as a RAR set's volumes are
+        // once they unpack (`remove_spent_volumes` above), and as the
+        // in-stream SFX route already leaves it (M4-101: the chased file
+        // is gone from the output tree). Left behind, it was an `.exe`
+        // in a media release, so a media-named SFX post
+        // (`Movie.2024.1080p-GRP.exe`) unpacked correctly and was then
+        // FAILED by the executable refusal (TODO 358 item 13) over its
+        // own wrapper (pre-release sweep, 9 Nov 2026). Only these paths:
+        // each is a slot the DOWNLOAD wrote and this arm just unpacked,
+        // so a separate executable inside the payload is untouched here
+        // and still answers to the refusal.
+        remove_spent_sfx(&sfx);
     }
     None
+}
+
+/// Delete the self-extractors [`sfx_pass`] has just unpacked. A failed
+/// delete is a warning and nothing more: the payload is out, and the
+/// worst a surviving stub costs is the refusal it would have avoided.
+fn remove_spent_sfx(sfx: &[std::path::PathBuf]) {
+    for p in sfx {
+        match std::fs::remove_file(p) {
+            Ok(()) => info!(target: "extract", "removed the spent self-extractor {}", p.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => warn!(
+                target: "extract",
+                "could not remove the spent self-extractor {}: {e}",
+                p.display()
+            ),
+        }
+    }
 }
 
 /// The end-of-extraction report: finish() the extractor, apply the
@@ -1262,7 +1361,7 @@ pub(super) fn finish_job(
         // have healed, so the download really is done - but "done" and
         // "everything arrived" are different claims and only one of them
         // is true.
-        let kept = drop_spared_metadata(out_dir, &census.incomplete_spared);
+        let kept = drop_spared_metadata(out_dir, &census.incomplete_spared, slots, extractor);
         if !kept.is_empty() {
             // The delete IS the safety of the spare (see the fn doc):
             // a holed .nfo looks exactly like a real .nfo, and going
@@ -1339,6 +1438,21 @@ pub(super) fn finish_job(
         // this machine's, not the post's, which is what the string
         // classifier's catch-all also answers. Stated, so it no longer
         // depends on the catch-all staying where it is.
+        //
+        // THAT IS THE COMMON CASE, NOT THE ONLY ONE (read-only sweep,
+        // 9 Nov 2026), and the sentence above and the message below are
+        // only true of it. This channel also carries a refusal from
+        // settle that no recovery set certified anything behind:
+        // `conflicting_unvouched`'s "the post contradicts itself" (no set
+        // covers the file at all), and a bomb verdict out of the RAR
+        // recovery-record rung (which runs only because PAR2 FAILED). Those
+        // still take `Local`, still skip the quarantine below, and still
+        // say "the verified files". `Local` is right for the bomb verdict,
+        // which is about the disk; for the contradiction it is not. Moving the
+        // contradiction to its own channel is a product call - `Local`
+        // arms no retry and files no indexer report, and quarantining the
+        // contradicted file changes what a failed job leaves in place -
+        // so it is recorded, not changed, here.
         anyhow::bail!(classified(
             FailKind::Local,
             format!("{why} - the verified files are still in the output directory")
@@ -2034,9 +2148,23 @@ pub(super) async fn finish_run(
             .map(|n| nzbkit::disk::sanitize_out_name(n).to_lowercase())
             .collect();
         let before = census.incomplete_spared.len();
-        census
-            .incomplete_spared
-            .retain(|n| !rebuilt.contains(&nzbkit::disk::sanitize_out_name(n).to_lowercase()));
+        // By the slot's ON-DISK name as well as by its hint (read-only
+        // sweep, 9 Nov 2026): `drop_spared_metadata` now removes a spared
+        // slot's live path too, because the writer names a file by its
+        // yEnc `name=` and not by the subject, and that is the very file a
+        // disk-side set rebuilds under its FileDesc name. Pruning by hint
+        // alone would hand the deleter a file parity had just restored.
+        let on_disk = |hint: &str| -> bool {
+            slots.iter().enumerate().any(|(i, s)| {
+                s.hint == hint
+                    && extractor.slot_path(i).is_some_and(|p| {
+                        rebuilt.contains(&nzbkit::disk::out_name_of(out_dir, &p).to_lowercase())
+                    })
+            })
+        };
+        census.incomplete_spared.retain(|n| {
+            !rebuilt.contains(&nzbkit::disk::sanitize_out_name(n).to_lowercase()) && !on_disk(n)
+        });
         let kept = before - census.incomplete_spared.len();
         if kept > 0 {
             info!(
@@ -2253,7 +2381,10 @@ mod tests {
     #[test]
     fn an_empty_spared_list_is_a_no_op() {
         // Never-created directory: an empty list must return before any IO.
-        drop_spared_metadata(Path::new("/nonexistent/nzbfast-test"), &[]);
+        let d = tdir("spared-empty");
+        let ex = nzbkit::extract::Extractor::new(&d, 0, true);
+        drop_spared_metadata(Path::new("/nonexistent/nzbfast-test"), &[], &[], &ex);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// The spared partial is removed; a spared name that was never
@@ -2262,8 +2393,13 @@ mod tests {
     fn spared_partials_are_removed_and_notfound_is_success() {
         let d = tdir("spared");
         std::fs::write(d.join("a.nfo"), b"partial").unwrap();
-        let kept =
-            drop_spared_metadata(&d, &["a.nfo".to_string(), "never-written.nfo".to_string()]);
+        let ex = nzbkit::extract::Extractor::new(&d, 0, true);
+        let kept = drop_spared_metadata(
+            &d,
+            &["a.nfo".to_string(), "never-written.nfo".to_string()],
+            &[],
+            &ex,
+        );
         assert!(
             !d.join("a.nfo").exists(),
             "the holed partial must be deleted"
@@ -2283,10 +2419,79 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let d = tdir("spared-ro");
         std::fs::write(d.join("a.nfo"), b"partial").unwrap();
+        let ex = nzbkit::extract::Extractor::new(&d, 0, true);
         std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let kept = drop_spared_metadata(&d, &["a.nfo".to_string()]);
+        let kept = drop_spared_metadata(&d, &["a.nfo".to_string()], &[], &ex);
         std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(kept, vec!["a.nfo".to_string()]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Read-only sweep, 9 Nov 2026: the spared partial is removed where the
+    /// WRITER put it. The census spares by subject hint, the writer names
+    /// the file by its yEnc `name=` (GH #63), and when the two differ the
+    /// hint-name delete found nothing, counted NotFound as gone, and the
+    /// job completed with the holed file still sitting there under the
+    /// yEnc name.
+    #[test]
+    fn a_spared_partial_written_under_its_yenc_name_is_removed() {
+        let d = tdir("spared-yenc");
+        let ex = Arc::new(nzbkit::extract::Extractor::new(&d, 1, true));
+        ex.anchor();
+        // Half of a 20,000-byte file: the hole the census spared it for.
+        ex.write(0, "movie-grp.nfo", 20_000, 0, &[b'n'; 10_000])
+            .unwrap();
+        let written = ex.slot_path(0).expect("the slot owns its file");
+        assert!(written.exists());
+        let mut s = census_slot(false, 1);
+        Arc::get_mut(&mut s).unwrap().hint = "Movie.nfo".to_string();
+        let kept = drop_spared_metadata(&d, &["Movie.nfo".to_string()], &[s], &ex);
+        assert!(kept.is_empty(), "{kept:?}");
+        assert!(
+            !written.exists(),
+            "the holed partial under its yEnc name must be removed, not left looking real"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Read-only sweep, 9 Nov 2026: the orphan sweep's identity tests fold
+    /// case. On a case-insensitive volume (the macOS and Windows default)
+    /// `out_dir.join(hint)` EXISTS whenever a file differing only by case
+    /// does, so an exact string compare let the sweep remove a slot's own
+    /// payload written under its yEnc spelling, and an extraction output
+    /// whose name matched a stale posted name but for case. On a
+    /// case-sensitive volume the joins below simply do not exist and the
+    /// test passes either way - the defect is a property of the volume.
+    #[test]
+    fn the_orphan_sweep_never_removes_a_file_that_differs_only_by_case() {
+        let d = tdir("orphan-case");
+        let ex = Arc::new(nzbkit::extract::Extractor::new(&d, 2, true));
+        ex.anchor();
+        // Slot 0 owns its payload under the yEnc spelling.
+        feed_volume(&ex, 0, "Sample.mkv", &[1u8; 5_000]);
+        // An extraction output that a stale posted name matches but for
+        // case, owned by no slot.
+        std::fs::write(d.join("Movie.mkv"), b"extracted").unwrap();
+        let mut a = census_slot(false, 0);
+        Arc::get_mut(&mut a).unwrap().hint = "sample.mkv".to_string();
+        let mut b = census_slot(false, 0);
+        Arc::get_mut(&mut b).unwrap().hint = "movie.mkv".to_string();
+        let report = nzbkit::extract::ExtractReport {
+            extracted: vec![("Movie.mkv".to_string(), 9)],
+            fallbacks: Vec::new(),
+            extracted_bytes: 9,
+            decrypted: Vec::new(),
+            resume_outputs: Vec::new(),
+        };
+        drop_orphaned_slot_files(&ex, &[a, b], &report, &d);
+        assert!(
+            d.join("Sample.mkv").exists(),
+            "a slot's own payload must survive a hint that differs only by case"
+        );
+        assert!(
+            d.join("Movie.mkv").exists(),
+            "an extraction output must survive a posted name that differs only by case"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -2299,7 +2504,8 @@ mod tests {
         let out = parent.join("out");
         std::fs::create_dir_all(&out).unwrap();
         std::fs::write(parent.join("evil.nfo"), b"keep me").unwrap();
-        drop_spared_metadata(&out, &["../evil.nfo".to_string()]);
+        let ex = nzbkit::extract::Extractor::new(&out, 0, true);
+        drop_spared_metadata(&out, &["../evil.nfo".to_string()], &[], &ex);
         assert!(
             parent.join("evil.nfo").exists(),
             "sanitize_out_name must keep the delete inside the output dir"

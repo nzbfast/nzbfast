@@ -675,6 +675,9 @@ impl Daemon {
                 // be offered at all, which is the same question the
                 // strip row answers - not the spool path itself.
                 "retry": nzb.is_some(),
+                // F15: a timed-out Trash call may still move the files,
+                // so the toast must not say they are still on disk.
+                "pending": crate::smart::kept_reason_may_still_finish(why),
             }),
         );
         true
@@ -750,6 +753,29 @@ impl Daemon {
         self.hub.activity.lock_ok().remove(id);
         self.hub.unpack.lock_ok().remove(id);
         self.hub.tail_cancel.lock_ok().remove(id);
+    }
+
+    /// Does a DIFFERENT record now hold this id in the queue?
+    ///
+    /// The one way that happens inside a process is an add that chose
+    /// its own id while the old record had not parked yet - a cancel's
+    /// Undo (`spend_cancel_undo`) re-adds under the ORIGINAL id so an
+    /// *arr's handle stays valid, and a cancelled DOWNLOADING job does
+    /// not park until its pipeline has wound down, which is seconds and
+    /// can be minutes. Every write park makes by id alone - the queue
+    /// retain, the custody maps, the spare drop - then lands on the
+    /// restored row instead of the record being parked: the row vanished
+    /// from the queue (or kept running with no row at all), and its
+    /// freshly written spool copy, which `enqueue_as` names by that same
+    /// id, was unlinked by the old record's deferred delete (9 Nov 2026
+    /// sweep A3). By pointer, the idiom `park_file_terminal`'s history
+    /// test already uses: a record in this process is one `Arc` for its
+    /// whole life, and a retry moves that same `Arc`.
+    fn id_taken_by_another(&self, job: &Arc<Mutex<Job>>, id: &str) -> bool {
+        self.queue
+            .lock_ok()
+            .iter()
+            .any(|j| !Arc::ptr_eq(j, job) && j.lock_ok().nzo_id == id)
     }
 
     /// Spend a delete that was deferred until the download drained,
@@ -830,8 +856,22 @@ impl Daemon {
             // out once its files are actually gone.
             self.reserved.lock_ok().remove(&out_dir);
         }
+        // ...and not when a live queue row names the same file. The spool
+        // copy is named by the id (`enqueue_as`), so an Undo that re-added
+        // this id before the old record parked wrote ITS copy to exactly
+        // this path whenever the request-time mask was refused or never
+        // ran (the non-active arm drops the copy outright, and the Undo
+        // then writes a new one under the old name). Dropping it here took
+        // the restored row's NZB away from under it (9 Nov 2026 sweep A3).
+        let named_elsewhere = gone_nzb.as_ref().is_some_and(|nzb| {
+            self.queue
+                .lock_ok()
+                .iter()
+                .any(|j| !Arc::ptr_eq(j, job) && j.lock_ok().nzb_path == *nzb)
+        });
         if let Some(nzb) = gone_nzb
             && kept_nzb.as_ref() != Some(&nzb)
+            && !named_elsewhere
         {
             // `drop_spool` and not a raw unlink (sweep 9, finding 3):
             // a refusal here is the last thing standing between a
@@ -1031,9 +1071,16 @@ impl Daemon {
         // with the row - BELOW the re-read, not above it, or the guard
         // cannot guard the one thing the comment above says it exists
         // for (sweep 4, M4c).
-        self.hub.activity.lock_ok().remove(&id);
-        self.hub.unpack.lock_ok().remove(&id);
-        self.hub.tail_cancel.lock_ok().remove(&id);
+        //
+        // And not when a different record holds the id now: those
+        // entries are the restored row's from the moment it starts, and
+        // removing them is the M4c damage reached by the Undo road
+        // (`id_taken_by_another`).
+        if !self.id_taken_by_another(&job, &id) {
+            self.hub.activity.lock_ok().remove(&id);
+            self.hub.unpack.lock_ok().remove(&id);
+            self.hub.tail_cancel.lock_ok().remove(&id);
+        }
         let tombstone = job.lock_ok().tombstone;
         // Watchdog demotion: back into the queue (deferred, at the end)
         // instead of history - the abort was ours, not a failure. The
@@ -1138,7 +1185,7 @@ impl Daemon {
         // `Wrote` means a row is on disk to bury, and `Refused` is the
         // §158.7 window reopening rather than the demote it used to be
         // indistinguishable from.
-        let prewrite = self.park_prewrite(&job, dropping, || prewrite_cost(&job));
+        let (prewrite, prewrite_seq) = self.park_prewrite(&job, dropping, || prewrite_cost(&job));
         let filed_early = prewrite == HistWrite::Wrote;
         // From the retain below until an arm files the record into
         // `self.history`, the job is in NEITHER store in memory - and
@@ -1181,7 +1228,35 @@ impl Daemon {
         // stamped its own `move_seq`, so the tuple no longer matches by
         // construction. `retries` is the half a retry moves and park
         // never does.
+        //
+        // AND THE ROW THE PREWRITE LEFT goes with the stand-down. A retry
+        // buries the history rows of the round it moved out of with its
+        // own bounded tombstone, but only the ones already on disk when
+        // that tombstone lands - and this prewrite can append AFTER it:
+        // the retry needs `HIST_IO` for one line and this park may have
+        // serialized first and reached the lock second. The row then
+        // replays live behind the record's queue copy. Usually the next
+        // load's move-sequence reconciliation resolves the pair in the
+        // queue's favour; but a retry that slipped in between park's
+        // stamp and the serialization put ITS stamp on the line, the two
+        // copies tie, and a tie keeps the §158 answer - history - which
+        // undoes the retry at the next start. And if the retried row is
+        // deleted before then, nothing answers the stale row at all and a
+        // job the user removed comes back parked (9 Nov 2026 sweep). So
+        // the line is buried here, bounded by the `move_seq` it carries:
+        // the retry stamped at or above that, so no later generation is
+        // reachable from it. Outside `add_lock`, like every durable write
+        // on this path.
         if gen0.is_some_and(|(r0, _)| job.lock_ok().retries != r0) {
+            drop(publish);
+            if filed_early && !self.history_tombstone_upto(&id, prewrite_seq) {
+                warn!(
+                    target: "queue",
+                    "{id}: a retry took this job back while it was being parked, and the \
+                     history row the park had already written could not be buried - the \
+                     next start reconciles the two"
+                );
+            }
             return;
         }
         // A REFUSED prewrite leaves the queue row as the record's only
@@ -1195,7 +1270,15 @@ impl Daemon {
         // is durable and `_inflight` keeps it there - and `Absent` is a
         // tombstone bound for no store.
         let carried = prewrite == HistWrite::Refused;
-        let leave = || self.queue.lock_ok().retain(|j| j.lock_ok().nzo_id != id);
+        // By POINTER, not by id. The two agree for every record that
+        // reaches here except one: a cancelled run whose Undo re-added
+        // the same id before this park, where the id retain took the
+        // RESTORED row out of the queue and left the user's undo with
+        // nothing to show for it (9 Nov 2026 sweep A3;
+        // `id_taken_by_another`). The demote arm above keeps its id
+        // retain - it pushes this same `Arc` straight back, and a
+        // tombstone never takes it.
+        let leave = || self.queue.lock_ok().retain(|j| !Arc::ptr_eq(j, &job));
         if carried {
             self.hist_carry_across(&job, &id, true, leave);
         } else {
@@ -1513,7 +1596,14 @@ impl Daemon {
         // §4b's junk queue arriving by a new road. An armed auto-retry
         // is neither - the job is coming back through the queue in
         // minutes and its spares must be waiting when it does.
-        if (!verdict.failed || verdict.tombstone) && !verdict.armed_auto_retry {
+        // Not for a tombstone whose id a restored row holds now: the
+        // spares held against that id are the restored row's (an Undo
+        // puts a batch's spares back beside their original), and the
+        // user's cancel has just been taken back (`id_taken_by_another`).
+        if (!verdict.failed || verdict.tombstone)
+            && !verdict.armed_auto_retry
+            && !(verdict.tombstone && self.id_taken_by_another(job, id))
+        {
             self.drop_spares_for(id);
             // The user-added half of the same sentence, for the one shape
             // that is provably junk: a copy of the SAME POST that a Force
@@ -2756,6 +2846,136 @@ mod park_custody_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// 9 Nov 2026 sweep A3: an Undo of a cancelled download that has not
+    /// parked yet survives the old record's park.
+    ///
+    /// The cancel takes the row out of the queue at once, but a
+    /// DOWNLOADING record parks only once its pipeline has wound down -
+    /// and the Undo re-adds under the ORIGINAL id inside that window. The
+    /// old park's queue retain was by id, so it removed the restored row,
+    /// and its tombstone drop unlinked the restored row's spool copy,
+    /// which `enqueue_as` names by that same id. The mask is left
+    /// unapplied here on purpose: the request-time rename is refused on a
+    /// read-only spool and never runs on the non-active arm, and both
+    /// leave the old record naming the path the Undo writes to.
+    #[test]
+    fn an_undo_that_lands_before_the_cancelled_run_parks_survives_the_park() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-undo-park-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let d = test_daemon(&dir);
+
+        let e = d
+            .enqueue(NZB, "Undo.Race", "", -100, None, None, "test", true)
+            .expect("add");
+        let old = find_job(d.queue.lock_ok().iter(), &e.nzo_id).expect("queued");
+        old.lock_ok().state = JobState::Downloading;
+        let gen0 = Daemon::record_generation(&old.lock_ok());
+
+        // The request half of a files-KEPT cancel on a running job: the
+        // undo copy first, then tombstone and out of the queue.
+        let row = d.retain_for_undo(&old.lock_ok()).expect("retained");
+        old.lock_ok().tombstone = true;
+        d.queue.lock_ok().retain(|j| !Arc::ptr_eq(j, &old));
+        let (token, _) = d.file_cancel_undo(vec![row], 1).expect("undoable");
+
+        // The old run is still in its tail, writing into its folder: its
+        // activity token is registered and the folder holds its partials.
+        let old_dir = old.lock_ok().out_dir.clone();
+        std::fs::create_dir_all(&old_dir).expect("old dir");
+        std::fs::write(old_dir.join("part.rar"), b"partial").expect("partial");
+        d.hub
+            .activity
+            .lock_ok()
+            .insert(e.nzo_id.clone(), "extracting");
+
+        // The Undo, while the old pipeline is still winding down.
+        let out = d.spend_cancel_undo(d.take_cancel_undo(&token).expect("token"));
+        assert_eq!(out.restored, vec![e.nzo_id.clone()], "{:?}", out.failed);
+        let restored = find_job(d.queue.lock_ok().iter(), &e.nzo_id).expect("restored");
+        assert!(!Arc::ptr_eq(&restored, &old));
+        assert_ne!(
+            restored.lock_ok().out_dir,
+            old_dir,
+            "the restored row was pointed into the folder the old tail still writes"
+        );
+        let restored_nzb = restored.lock_ok().nzb_path.clone();
+        assert_eq!(
+            restored_nzb,
+            old.lock_ok().nzb_path,
+            "the rig needs both records naming one spool path"
+        );
+
+        // ...and now the cancelled run's abort reaches park.
+        old.lock_ok().state = JobState::Failed;
+        d.park_gen(old.clone(), Some(gen0));
+
+        let still = find_job(d.queue.lock_ok().iter(), &e.nzo_id);
+        assert!(
+            still.as_ref().is_some_and(|j| Arc::ptr_eq(j, &restored)),
+            "the old record's park took the restored row out of the queue"
+        );
+        assert!(
+            restored_nzb.exists(),
+            "the old record's park unlinked the restored row's NZB: {}",
+            restored_nzb.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 9 Nov 2026 sweep (the phantom-row question on `park_gen`): a park
+    /// that stands down for a retry takes the history row its prewrite
+    /// left with it.
+    ///
+    /// The retry's own bounded tombstone buries what is on disk when it
+    /// lands, and the prewrite can append after it - the two contend for
+    /// one lock and nothing orders them. The seam holds park just past
+    /// its prewrite; the retry staged there is the end state of that
+    /// interleaving (generation bumped, its tombstone already behind the
+    /// row), and the row must not replay afterwards.
+    #[test]
+    fn a_park_that_stands_down_for_a_retry_buries_its_own_prewrite() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-park-bury-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let d = test_daemon(&dir);
+        let id = "nzo-park-bury-1";
+        let job = crate::testutil::jv(
+            id,
+            "Bury.Release",
+            serde_json::json!({ "out_dir": dir.join("Bury.Release").to_string_lossy() }),
+        );
+        job.lock_ok().state = JobState::Failed;
+        d.queue.lock_ok().push_back(job.clone());
+        let gen0 = Daemon::record_generation(&job.lock_ok());
+
+        let open = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        *PARK_PREWRITE_BARRIER.lock_ok() = Some((id.to_string(), open.clone(), release.clone()));
+        let tail = {
+            let (d, job) = (d.clone(), job.clone());
+            std::thread::spawn(move || d.park_gen(job, Some(gen0)))
+        };
+        open.wait();
+        *PARK_PREWRITE_BARRIER.lock_ok() = None;
+        {
+            let mut g = job.lock_ok();
+            g.retries += 1;
+            moveseq::stamp_move_locked(&mut g);
+        }
+        release.wait();
+        tail.join().expect("park tail");
+
+        let (rows, _) = d.history_replay();
+        assert!(
+            !rows.iter().any(|j| j.nzo_id == id),
+            "the stood-down park left its prewritten history row live behind the retry"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// GH #92: `failed_delete_files`. Driven through
@@ -2826,7 +3046,19 @@ mod failed_payload_tests {
             d.history.lock_ok().iter().any(|j| Arc::ptr_eq(j, &job)),
             "the failure itself must stay in history"
         );
-        assert!(!d.reserved.lock_ok().contains(&out), "reservation leaked");
+        // Bounded like the folder, because the worker gives the
+        // reservation back AFTER `remove_job_files` returns
+        // (`remove_files_in_custody`): reading it the instant the folder
+        // vanished raced that line, and lost under a loaded nextest
+        // sweep (9 Nov 2026, line 2829, twice in a row).
+        let released = (0..200).any(|_| {
+            let held = d.reserved.lock_ok().contains(&out);
+            if held {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            !held
+        });
+        assert!(released, "reservation leaked");
     }
 
     /// Off is the default, and off keeps everything.

@@ -136,6 +136,22 @@ impl<R: Read + Seek> Seek for Aes256Sha256Decoder<R> {
     }
 }
 
+/// nzbfast: the AES-256 key and CBC IV that a 7zAES coder's `properties`
+/// and `password` derive, exactly as the decoder derives them (same
+/// property parse, same work-factor cap, same one-entry key cache).
+///
+/// Public so a caller that places a stored (Copy) member's ciphertext
+/// itself, and decrypts it span by span as it arrives, keys its cipher
+/// with the one derivation this crate already has instead of a second
+/// copy of it. `PasswordRequired` for an empty password, like the
+/// decoder.
+pub fn aes256_sha256_key_iv(
+    properties: &[u8],
+    password: &Password,
+) -> Result<([u8; 32], [u8; 16]), crate::Error> {
+    get_aes_key(properties, password.as_slice())
+}
+
 fn get_aes_key(properties: &[u8], password: &[u8]) -> Result<([u8; 32], [u8; 16]), crate::Error> {
     let properties = match properties.len() {
         0 => {

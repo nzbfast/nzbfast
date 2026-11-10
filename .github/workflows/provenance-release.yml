@@ -32,8 +32,8 @@ name: provenance-release
 # provenance bundle) and `<file>.spdx.json` (an SPDX SBOM of the crates
 # compiled into it, from packaging/make-sbom.py, also attested). What it
 # does NOT build: the Android .apk, whose release keystore lives on one
-# machine by design, and the release's own metadata (SHA256SUMS.txt,
-# latest.json and its signature). So the true public claim is still
+# machine by design, and latest.json with its signature, whose key does
+# too. So the true public claim is still
 # "every file that has an .intoto.jsonl beside it was built here from the
 # tagged source", never "nzbfast's downloads are attested".
 #
@@ -43,8 +43,9 @@ name: provenance-release
 # side by side, and nobody could match SHA256SUMS.txt to a CI run. The
 # release Mac no longer builds them: the publish-release skill step 4
 # creates the release as a DRAFT, dispatches this workflow against it,
-# downloads what it attached, scans it, and folds it into SHA256SUMS.txt
-# and latest.json before publishing. Uploads here never --clobber, so a
+# downloads what it attached, scans it, and folds it into latest.json,
+# then dispatches the `sums` job below once the draft is complete and
+# publishes. Uploads here never --clobber, so a
 # release that already carries a locally built file under one of these
 # names makes this workflow fail loudly rather than publish a second
 # build of it.
@@ -56,8 +57,9 @@ name: provenance-release
 #    and dispatches with all build inputs on; every build job attaches to
 #    the draft, which is invisible to the public until it is published.
 #    That ordering is the point: the Mac has to fold these files into
-#    SHA256SUMS.txt and the signed latest.json BEFORE the release goes
-#    out, and a draft is the only state in which both exist at once.
+#    the signed latest.json, and the `sums` job has to read them all,
+#    BEFORE the release goes out, and a draft is the only state in which
+#    both can happen.
 #    (A draft does not create its tag - the skill pushes the tag first,
 #    and the checkout below refuses without one.)
 #
@@ -147,6 +149,10 @@ on:
         description: "Build, attest and attach the armv7 Linux, FreeBSD and Windows ARM64 betas (uncheck when they are already attached)"
         type: boolean
         default: true
+      sums:
+        description: "Write and attest SHA256SUMS over everything on the draft. LAST, alone, with every other input false, once the APK is on the draft (publish-release step 4)"
+        type: boolean
+        default: false
       image:
         description: "Also build, push and attest the container image (moves :latest - only at release time, never for an old tag)"
         type: boolean
@@ -1768,6 +1774,108 @@ jobs:
             files+=("$f" "$f.intoto.jsonl" "$f.spdx.json")
           done
           gh release upload "$TAG" "${files[@]}" --repo "$REPO"
+
+  # The release's checksum file, written HERE and not on the release Mac.
+  # Issue 107's reviewer put it well: a chain of custody that goes public
+  # build, private machine, public release is a weird one even when the
+  # hashes match. So this reads the draft itself, proves each attested
+  # file still verifies, sums what it downloaded with the same script the
+  # Mac uses, and attests the result. Dispatch only, against a draft,
+  # after the Mac has attached the APK: a sum of an unfinished draft is
+  # the one thing this must not publish, so a published release is
+  # refused, and a second run fails on the no-clobber upload rather than
+  # replacing a file somebody may already have checked. After a rebuild,
+  # delete SHA256SUMS* from the draft and dispatch again.
+  sums:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.sums }}
+    permissions:
+      id-token: write       # Sigstore keyless signing (OIDC identity token)
+      attestations: write   # write the attestation to the GH attestations API
+      contents: write       # attach artifacts to the release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Require a tag
+        run: |
+          if [ -z "${TAG:-}" ]; then
+            echo "no tag to attest: inputs.tag and release.tag_name are both empty" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      - name: Verify the checkout and the attested source are both the tag
+        run: |
+          set -euo pipefail
+          want=$(git rev-parse "refs/tags/$TAG^{commit}")
+          have=$(git rev-parse HEAD)
+          if [ "$want" != "$have" ]; then
+            echo "checkout is $have but tag $TAG is $want" >&2
+            exit 1
+          fi
+          if [ "$want" != "$GITHUB_SHA" ]; then
+            echo "this run's ref is $GITHUB_SHA but tag $TAG is $want." >&2
+            echo "Re-dispatch at the tag:" >&2
+            echo "  gh workflow run provenance-release.yml --ref $TAG -f tag=$TAG" >&2
+            exit 1
+          fi
+
+      - name: Refuse anything but a draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          draft=$(gh release view "$TAG" --repo "$REPO" --json isDraft -q .isDraft)
+          if [ "$draft" != "true" ]; then
+            echo "release $TAG is not a draft: its checksum file is not rewritten" >&2
+            exit 1
+          fi
+
+      - name: Download the draft and verify every attested file
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$TAG" --repo "$REPO" -D dist -p 'nzbfast*'
+          n=0
+          for b in dist/*.intoto.jsonl; do
+            f=${b%.intoto.jsonl}
+            gh attestation verify "$f" --bundle "$b" --repo "$REPO"
+            n=$((n + 1))
+          done
+          if [ "$n" -eq 0 ]; then
+            echo "no attested file on the draft: nothing here to vouch for" >&2
+            exit 1
+          fi
+          echo "verified $n attested file(s)"
+
+      - name: Write the checksum files
+        run: sh packaging/make-sha256sums.sh dist
+
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/SHA256SUMS.txt
+
+      - name: Stage the attestation bundle beside the file
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: python3 packaging/stage-attestation.py "$BUNDLE" dist/SHA256SUMS.txt
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" dist/SHA256SUMS dist/SHA256SUMS.txt \
+            dist/SHA256SUMS.txt.intoto.jsonl --repo "$REPO"
 
   # Container image: assemble, push and attest IN THIS RUN, so the attested
   # digest is one this workflow actually produced. What the provenance claim

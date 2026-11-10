@@ -240,6 +240,12 @@ pub(crate) fn extract_nested(
 /// this job's failure. It is NOT cleared by a later level succeeding -
 /// nothing below can make the disk bigger, and the outcome the caller
 /// judges is `ok`, which a refusal has already fixed at `Failed`.
+///
+/// A second class has a reason too since 9 Nov 2026: a named-RAR level
+/// whose main payload stayed packed beside a group that did unpack
+/// names that set here (`judge_named_rar_leftovers`), where the tail's
+/// generic wording would only say that "an archive" could not be
+/// unpacked.
 pub fn extract_nested_why(
     dir: &std::path::Path,
     password: Option<&str>,
@@ -1084,10 +1090,10 @@ fn unpack_named_rar(
     let mark = crate::unpackprog::mark();
     // The spent volumes this arm does not read: `try_unrar` never swept
     // them either, and the nested pass owns its own before/after diff.
-    let mut attempt = |dir: &std::path::Path| {
+    let attempt = |dir: &std::path::Path, why: &mut Option<String>| {
         mark.rewind();
-        match try_unrar_spent_why(dir, password) {
-            Ok(_) => Some(NestOutcome::Produced),
+        match crate::rarfix::try_unrar_outcome(dir, password) {
+            Ok(outcome) => Some(judge_named_rar_leftovers(&outcome, why)),
             Err(Some(w)) => {
                 *why = Some(w);
                 Some(NestOutcome::Failed)
@@ -1095,23 +1101,83 @@ fn unpack_named_rar(
             Err(None) => None,
         }
     };
-    if let Some(o) = attempt(dir) {
+    if let Some(o) = attempt(dir, why) {
         return o;
     }
     if try_rev_reconstruct(dir)
-        && let Some(o) = attempt(dir)
+        && let Some(o) = attempt(dir, why)
     {
         return o;
     }
     warn!(target: "extract", "extraction failed - trying recovery-record self-repair…");
     mark.rewind();
-    match try_rar_rr_repair_why(dir, password) {
-        Ok(()) => NestOutcome::Produced,
+    match crate::rarfix::try_rar_rr_repair_hinted_outcome(dir, password, None, None) {
+        Ok(outcome) => judge_named_rar_leftovers(&outcome, why),
         Err(Some(w)) => {
             *why = Some(w);
             NestOutcome::Failed
         }
         Err(None) => NestOutcome::Failed,
+    }
+}
+
+/// What a SUCCESSFUL ladder run means for this level, judged on the
+/// groups it left packed (bug sweep 9 Nov 2026, A13).
+///
+/// The ladder answers `Ok` as soon as ANY stem group produced - the
+/// decoy tolerance, see [`crate::rarfix::vouch`] - and carries the groups
+/// that failed out in [`crate::rarfix::UnpackOutcome::packed`]. This arm
+/// used to read every `Ok` as `Produced`, so `sample.rar` unpacking made
+/// the level a success while `movie.part01..50.rar` beside it was still
+/// packed, on every path that reaches here: the nested pass's inner
+/// layers and the whole of the offline `nzbfast extract <dir>`. The tail
+/// judges the TOP level with [`crate::rarfix::vouch::judge`]; this is the
+/// same rule for everywhere else.
+///
+/// There is no PAR2 set in scope here, so nothing is vouched and only
+/// the size rule (G2) can fail a level: a leftover that outweighs the
+/// largest group that unpacked is the main payload. A smaller leftover
+/// keeps the decoy tolerance it always had and is only logged, by the
+/// ladder's own leftovers warning.
+///
+/// `Locked` - an encrypted main payload never offered a password - is
+/// `Failed` here and not the tail's completed-but-locked shape, because
+/// that is what this level already answers for the same set on its own:
+/// a lone encrypted set with no password fails every rung of this arm.
+///
+/// Nothing is deleted on any arm. `Failed` keeps what DID unpack on disk
+/// beside the volumes that did not, exactly as the ladder left them; it
+/// only stops the level being reported as fully unpacked.
+fn judge_named_rar_leftovers(
+    outcome: &crate::rarfix::UnpackOutcome,
+    why: &mut Option<String>,
+) -> NestOutcome {
+    use crate::rarfix::vouch::{VouchVerdict, judge, main_payload_sentence};
+    match judge(&outcome.packed, None, outcome.largest_produced) {
+        VouchVerdict::Tolerated(_) => NestOutcome::Produced,
+        VouchVerdict::MainPayload { names, reason } => {
+            // The group's own refusal (a bomb verdict) outranks the
+            // sentence: it is about the disk, the sentence blames the
+            // archive. Written at most once, like every other `why`.
+            why.get_or_insert_with(|| reason.unwrap_or_else(|| main_payload_sentence(&names)));
+            NestOutcome::Failed
+        }
+        VouchVerdict::Locked(names) => {
+            warn!(
+                target: "extract",
+                "encrypted archive set(s) still packed and no password was given: {}",
+                names.join(", ")
+            );
+            NestOutcome::Failed
+        }
+        // Unreachable with no set in scope (nothing is vouched), and
+        // answered the same way if that ever changes.
+        VouchVerdict::Failed { names, reason } => {
+            why.get_or_insert_with(|| {
+                reason.unwrap_or_else(|| crate::rarfix::vouch::failure_sentence(&names))
+            });
+            NestOutcome::Failed
+        }
     }
 }
 
@@ -2700,6 +2766,12 @@ mod lift_name_cap_tests;
 #[cfg(test)]
 #[path = "unpack/named_payload_tests.rs"]
 mod named_payload_tests;
+
+/// Bug sweep 9 Nov 2026, A13: a successful ladder run that left a group
+/// packed is judged, not read as `Produced`.
+#[cfg(test)]
+#[path = "unpack/partial_set_tests.rs"]
+mod partial_set_tests;
 
 #[cfg(test)]
 mod obfuscated_rar_extension_tests {

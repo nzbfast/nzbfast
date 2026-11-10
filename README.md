@@ -223,7 +223,9 @@ gh attestation verify nzbfast-x86_64-unknown-linux-gnu.tar.gz --repo nzbfast/nzb
 A successful verify prints the source repo, commit SHA, and workflow
 run. Attestations are also browsable under this repository's
 **Attestations** tab, and every release ships `SHA256SUMS.txt` for a
-plain checksum check (`shasum -a 256 -c SHA256SUMS.txt`).
+plain checksum check (`shasum -a 256 -c SHA256SUMS.txt`). From the release
+after 1.9.0 that file is written on a GitHub runner, covers the updater
+payloads too, and has an attestation of its own.
 
 Newer releases also attach the attestation beside each tarball, so the
 proof is a file you can download and keep rather than a lookup (older

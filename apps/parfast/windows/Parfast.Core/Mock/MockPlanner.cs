@@ -109,7 +109,8 @@ public static class MockPlanner
                          + "recovery block.");
         }
 
-        var indexSize = IndexSize(sources, blockSize);
+        var storedNames = StoredNames(spec, sources);
+        var indexSize = IndexSize(sources, storedNames, blockSize);
         var files = new List<PlannedFile>(8) { new()
         {
             Name = PathUtil.FileName(spec.Output),
@@ -138,7 +139,7 @@ public static class MockPlanner
         for (var i = 0; i < layout.Count; i++)
         {
             var blocks = layout[i];
-            var size = VolumeSize(sources, blockSize, blocks);
+            var size = VolumeSize(sources, storedNames, blockSize, blocks);
             files.Add(new PlannedFile
             {
                 Name = names[i],
@@ -855,8 +856,9 @@ public static class MockPlanner
     /// a mock cannot know it, and it is the only part of the set's bytes this does not
     /// derive.
     /// </remarks>
-    private static long IndexSize(IReadOnlyList<PlannedSource> sources, long blockSize) =>
-        CriticalBlockBytes(sources, blockSize);
+    private static long IndexSize(
+        IReadOnlyList<PlannedSource> sources, IReadOnlyList<string> names, long blockSize) =>
+        CriticalBlockBytes(sources, names, blockSize);
 
     /// <summary>
     /// One recovery volume's size on disk
@@ -873,10 +875,11 @@ public static class MockPlanner
     /// block, sixteen slices in the volume: 16,789,904 bytes, which is
     /// 16 x (68 + 1,048,576) + 5 x 2,304 + 80 exactly.
     /// </remarks>
-    private static long VolumeSize(IReadOnlyList<PlannedSource> sources, long blockSize, int blocks)
+    private static long VolumeSize(
+        IReadOnlyList<PlannedSource> sources, IReadOnlyList<string> names, long blockSize, int blocks)
     {
         var creator = CreatorPacketBytes;
-        var cycle = CriticalBlockBytes(sources, blockSize) - creator;
+        var cycle = CriticalBlockBytes(sources, names, blockSize) - creator;
         var copies = 0;
         for (var n = blocks; n > 0; n >>= 1)
         {
@@ -890,14 +893,97 @@ public static class MockPlanner
     /// The whole critical block: every packet the index carries, which is also what a
     /// volume repeats.
     /// </summary>
-    private static long CriticalBlockBytes(IReadOnlyList<PlannedSource> sources, long blockSize)
+    private static long CriticalBlockBytes(
+        IReadOnlyList<PlannedSource> sources, IReadOnlyList<string> names, long blockSize)
     {
         const int header = 64;
         var main = header + 12 + (16L * sources.Count);
-        var perMember = sources.Sum(s =>
-            (long)header + 56 + RoundUpTo(Encoding.UTF8.GetByteCount(PathUtil.FileName(s.Path)), 4)
-            + header + 16 + (20 * CeilDiv(s.Size, blockSize)));
+        var perMember = sources.Select((s, i) =>
+            (long)header + 56 + RoundUpTo(Encoding.UTF8.GetByteCount(names[i]), 4)
+            + header + 16 + (20 * CeilDiv(s.Size, blockSize))).Sum();
         return main + perMember + CreatorPacketBytes;
+    }
+
+    /// <summary>
+    /// The name the create STORES for each source, whose length is in every file
+    /// description packet and so in every file's size.
+    /// </summary>
+    /// <remarks>
+    /// The engine's rule (<c>parfast_session::planner::par2_members</c>,
+    /// <c>basename_base</c> and <c>stored_name</c>, sweep 2026-11-09 A6): a member is
+    /// named by its path below the explicit base in Relative mode; in Basename mode by
+    /// its path below the folder the set is written to when every source is under it,
+    /// else below the one folder they share (its bare name) or the nearest folder
+    /// several share; and by its bare name when nothing strips. This class used the
+    /// bare name always, which held until A6 and then put every size off by the
+    /// padded difference for sources in a subfolder of the output's - caught by
+    /// PlannerParityTests on its first run against the real engine (9 Nov 2026).
+    /// </remarks>
+    internal static IReadOnlyList<string> StoredNames(CreateSpec spec, IReadOnlyList<PlannedSource> sources)
+    {
+        var outDir = PathUtil.Split(PathUtil.DirectoryName(spec.Output));
+        string[]? strip;
+        if (spec.PathMode == PathMode.Relative)
+        {
+            strip = string.IsNullOrEmpty(spec.BasePath) ? outDir : PathUtil.Split(spec.BasePath);
+        }
+        else
+        {
+            strip = BasenameBase(outDir, sources) ?? outDir;
+        }
+
+        return sources.Select(s =>
+        {
+            var parts = PathUtil.Split(s.Path);
+            return StartsWith(parts, strip) && parts.Length > strip.Length
+                ? string.Join('/', parts[strip.Length..])
+                : PathUtil.FileName(s.Path);
+        }).ToList();
+    }
+
+    /// <summary>
+    /// The base Basename mode hands the create, or null for none (every source is
+    /// under the output folder, or they share no folder at all).
+    /// </summary>
+    private static string[]? BasenameBase(string[] outDir, IReadOnlyList<PlannedSource> sources)
+    {
+        var parents = sources.Select(s => PathUtil.Split(PathUtil.DirectoryName(s.Path))).ToList();
+        if (parents.Count == 0 || sources.All(s => StartsWith(PathUtil.Split(s.Path), outDir)))
+        {
+            return null;
+        }
+
+        var common = parents[0];
+        foreach (var p in parents.Skip(1))
+        {
+            var n = 0;
+            while (n < common.Length && n < p.Length && common[n] == p[n])
+            {
+                n++;
+            }
+
+            common = common[..n];
+        }
+
+        return common.Length == 0 ? null : common;
+    }
+
+    private static bool StartsWith(string[] path, string[] prefix)
+    {
+        if (prefix.Length > path.Length)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < prefix.Length; i++)
+        {
+            if (!string.Equals(path[i], prefix[i], StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>

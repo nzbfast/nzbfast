@@ -963,15 +963,24 @@ pub(super) fn scan_parallel_positional(
         let mut left = length;
         let mut skipped = false;
         while left > 0 {
-            // Cancel only, and NO `CreatePhase::Verify` step: the block
-            // lanes above already count every byte of this member once,
-            // and the whole-file chain is a second pass over the same
-            // bytes. The CHAIN counter below is a different question
-            // (how far along is THIS lane) and is stepped per MiB, as
-            // `scan_mapped` explains. Per MiB, on the one lane that is
-            // this member's serial cost - without it a cancelled create
-            // would still hash the whole file out.
-            control.check()?;
+            // NO `CreatePhase::Verify` step: the block lanes above
+            // already count every byte of this member once, and the
+            // whole-file chain is a second pass over the same bytes. The
+            // CHAIN counter below is a different question (how far along
+            // is THIS lane) and is stepped per MiB, as `scan_mapped`
+            // explains. Per MiB, on the one lane that is this member's
+            // serial cost - without it a cancelled create would still
+            // hash the whole file out.
+            //
+            // A PARK site as well as a cancel one since 9 Nov 2026: this
+            // was `check()`, so a paused create kept this lane reading and
+            // hashing the whole member while every block lane beside it
+            // was parked (parfast sweep, "pause does not stop every
+            // lane"). The lane is sequential and its own - it holds no
+            // claimed unit another thread could take and no lock - which
+            // is `PauseGate`'s rule for a park, and `gate` costs the same
+            // one relaxed load `check` did.
+            control.gate()?;
             // A digest record validated (`crate::digest_cache`): the chain's
             // answer is known, and once the head is done this lane reads for
             // nothing else.
@@ -1094,11 +1103,16 @@ pub(super) fn scan_mapped(
                 let mut bi = first;
                 while bi < last {
                     // The grain, as in `hash_block_range`: one relaxed
-                    // load per pass of up to `lanes` blocks. Cancel
-                    // only here - this arm returns no Result, and a
-                    // half-hashed member is thrown away by the caller's
-                    // own unwind, which reads the cancel a line later.
-                    if control.cancelled() {
+                    // load per pass of up to `lanes` blocks. This arm
+                    // returns no Result, so a cancel just stops here and
+                    // the half-hashed member is thrown away by the
+                    // caller's own unwind, which reads the cancel a line
+                    // later. It PARKS too since 9 Nov 2026, as
+                    // `hash_block_range`'s lanes always did: a lane owns
+                    // a static range of this member's blocks and nothing
+                    // else (parfast sweep, "pause does not stop every
+                    // lane").
+                    if control.gate().is_err() {
                         return;
                     }
                     // Full blocks straight off the mapping, up to `lanes` per
@@ -1136,7 +1150,9 @@ pub(super) fn scan_mapped(
         // measured no-op for it (`CreateControl::chain_step`).
         let mut chained = 0u64;
         for chunk in data.chunks(1 << 20) {
-            if control.cancelled() {
+            // Parks as well as cancels - see `scan_parallel_positional`'s
+            // sequential lane, which is the same lane over a reader.
+            if control.gate().is_err() {
                 break;
             }
             // A validated digest record answers for the chain.
@@ -1595,6 +1611,49 @@ where
     Ok(out)
 }
 
+/// Every member's LENGTH and MTIME, for the non-fused routes' change
+/// detection in `create_body`: one stat per member, `None` for a member
+/// that is not a regular file or could not be stat'd.
+///
+/// # Why only these two, and not the fused arm's whole identity
+///
+/// The fused arm pins a handle and compares device, inode and ctime
+/// through it (`disk::Identity`). This check has no handle - it stats the
+/// PATH at each end of the create - and over a path those three fail
+/// healthy creates: a FUSE mount renumbers inodes (rclone after its
+/// directory cache expires, sshfs without `use_ino`), and ctime moves on a
+/// Finder tag, a last-used-date xattr or a backup tool clearing the Windows
+/// archive bit. A false refusal here is not cheap either - it removes the
+/// whole set. Length and mtime are what an edit moves; a writer that puts
+/// the mtime back is the one case left to the fused arm's stamps.
+pub(super) fn member_stamps(members: &[Member]) -> Vec<Option<(u64, std::time::SystemTime)>> {
+    members.iter().map(|m| member_stamp(&m.path)).collect()
+}
+
+fn member_stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let md = std::fs::metadata(path).ok()?;
+    if !md.is_file() {
+        return None;
+    }
+    Some((md.len(), md.modified().ok()?))
+}
+
+/// The first member whose length or mtime moved since [`member_stamps`].
+/// A member that cannot be stat'd NOW is UNKNOWN, not changed: a file held
+/// briefly by a scanner must not fail a finished create, and a member that
+/// is really gone or replaced is the fold's and the scan's own read errors
+/// to report.
+pub(super) fn first_changed<'a>(
+    members: &'a [Member],
+    stamps: &[Option<(u64, std::time::SystemTime)>],
+) -> Option<&'a Member> {
+    members
+        .iter()
+        .zip(stamps)
+        .find(|(m, s)| s.is_some_and(|s| member_stamp(&m.path).is_some_and(|now| now != s)))
+        .map(|(m, _)| m)
+}
+
 /// The recovery fold starts from the head scan's file-id order while the full
 /// scan runs beside it. Compare identities by their ORIGINAL member index
 /// rather than comparing only the final sorted Main packet: two same-length
@@ -1878,6 +1937,89 @@ mod chain_counter_tests {
             scan_at_length(&m, small as u64, BS as u64, 1, &control, None).expect("serial scan");
         assert_eq!(scanned.length, small as u64);
         assert_eq!(control.chain_done(), small as u64);
+    }
+
+    /// A PAUSE holds every lane of a scan, the whole-file chain included,
+    /// and a resume finishes it whole (parfast sweep, 9 Nov 2026: the
+    /// chain lanes were cancel-only, and the mapped arm's block lanes too,
+    /// so a paused create kept reading and hashing its members).
+    ///
+    /// The chain counter is the instrument, because a parked chain has
+    /// stepped NOTHING: each chain lane takes its gate before its first
+    /// chunk. On the positional arm the call would block anyway (its block
+    /// lanes always parked), so the counter is the only thing that can
+    /// tell a parked chain from one hashing the member out.
+    fn assert_paused_until_resumed(
+        tag: &str,
+        scan: impl FnOnce(&CreateControl, &std::path::Path) + Send,
+    ) {
+        let t = Tmp::new(tag);
+        let path = fixture(&t, "p.bin");
+        let gate = crate::par2repair::PauseGate::new();
+        let control = CreateControl::new(None, Some(gate.clone()));
+        gate.set_paused(true);
+        // Observed while paused, and asserted only AFTER the resume: a
+        // failing assertion inside the scope would leave the scan parked
+        // and the scope joining it forever, turning a red into a hang.
+        let (chained, finished) = std::thread::scope(|sc| {
+            let h = sc.spawn(|| scan(&control, &path));
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let seen = (control.chain_done(), h.is_finished());
+            gate.set_paused(false);
+            h.join().expect("scan thread");
+            seen
+        });
+        assert_eq!(
+            chained, 0,
+            "{tag}: the chain lane hashed while the create was paused"
+        );
+        assert!(!finished, "{tag}: a paused scan ran to completion");
+        assert_eq!(
+            control.chain_done(),
+            LEN as u64,
+            "{tag}: resumed, but not whole"
+        );
+    }
+
+    #[test]
+    fn a_pause_holds_the_mapped_arms_chain_and_block_lanes() {
+        let t = Tmp::new("pause-map-probe");
+        let probe = fixture(&t, "m.bin");
+        if !matches!(
+            crate::par2gen::MappedMember::open(&probe, LEN as u64),
+            Ok(Some(_))
+        ) {
+            // A box that cannot map is the serial arm's business.
+            return;
+        }
+        assert_paused_until_resumed("pause-mapped", |control, path| {
+            let map = crate::par2gen::MappedMember::open(path, LEN as u64)
+                .unwrap()
+                .unwrap();
+            let (whole, _, blocks) =
+                scan_mapped(&map, BS, LEN.div_ceil(BS), 4, control, &inert_digest(path));
+            assert!(whole.is_some());
+            assert_eq!(blocks.len(), LEN.div_ceil(BS));
+        });
+    }
+
+    #[test]
+    fn a_pause_holds_the_positional_arms_chain() {
+        assert_paused_until_resumed("pause-positional", |control, path| {
+            let f = std::fs::File::open(path).unwrap();
+            let (whole, _, _) = scan_parallel_positional(
+                &f,
+                path,
+                LEN as u64,
+                BS as u64,
+                LEN.div_ceil(BS),
+                4,
+                control,
+                &inert_digest(path),
+            )
+            .expect("positional scan");
+            assert!(whole.is_some());
+        });
     }
 }
 

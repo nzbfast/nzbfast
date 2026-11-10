@@ -1040,6 +1040,9 @@ pub(super) const AUTOMATION: &[Setting] = &[
     rw("cleanup_exts", |c| {
         json!(c.d.cleanup_exts.lock_ok().clone())
     }),
+    // TODO 358 item 13: executable extensions that fail a media-shaped
+    // job. Empty = the check is off.
+    rw("refuse_exts", |c| json!(c.d.refuse_exts.lock_ok().clone())),
     // SAB/NZBGet-parity passwords file. Only the PATH and a count reach
     // the UI - the contents are credentials, edited in the file itself
     // (the has_password/notify-token contract).

@@ -402,8 +402,17 @@ pub fn open_sevenz(
     if let Some(reason) = nzbkit::nameprobe::sevenz_disk_declared_bomb(&mut src) {
         anyhow::bail!("{reason}");
     }
+    let file_len = std::io::Seek::seek(&mut src, std::io::SeekFrom::End(0))?;
     std::io::Seek::seek(&mut src, std::io::SeekFrom::Start(0))?;
     let mut reader = ArchiveReader::new(src, pw).map_err(|e| anyhow::anyhow!("opening 7z: {e}"))?;
+    // The same content rule over the PARSED header, before any entry is
+    // decoded: the raw gate above reads ciphertext on a header-encrypted
+    // set and has to stand aside, so for `-mhe` this is the only content
+    // verdict there is (TODO 358 sweep, lane 3 item 1).
+    if let Some(reason) = nzbkit::nameprobe::sevenz_archive_content_bomb(reader.archive(), file_len)
+    {
+        anyhow::bail!("{reason}");
+    }
     // LZMA2 streams 7-Zip wrote with its default multithreading are a
     // sequence of independently decodable blocks (a dictionary reset every
     // block), and sevenz-rust2 decodes them in parallel when asked - its
@@ -411,14 +420,20 @@ pub fn open_sevenz(
     // against 7-Zip's 1.13 on an M1 Ultra. Each worker holds its own
     // dictionary, so the count is capped; Copy and AES folders ignore it
     // (research/RAR-PERF-AUDIT-2026-09-02.md, round 11).
+    // CORRECTED 9 Nov 2026 (bug sweep, extraction lane): "its default is
+    // ONE thread" is not what the VENDORED reader does. `ArchiveReader::new`
+    // in vendor/sevenz-rust2/src/reader.rs ends by setting one thread per
+    // core (`available_parallelism()`), and has since it was vendored
+    // (46d8c9dfbd). So the call below is not what turns the parallel
+    // decode on; it is what CAPS it - at eight, and at the memory bound
+    // that follows - where the library would size it to the box with no
+    // regard to the budget.
     // Each worker holds a block of output plus its dictionary and the
     // reader buffers finished blocks out of order: eight workers peaked
     // at 2.7 GB on a 1 GiB LZMA2 member with a 32 MiB dictionary, so the
     // count is also bounded by the process budget's decoder allowance at
     // a conservative ~320 MiB per worker.
-    let allowance = nzbkit::mem::process_budget()
-        .rar_execution_policy()
-        .working_memory_limit;
+    let allowance = nzbkit::mem::process_budget().decoder_allowance();
     let by_memory = (allowance / (320 << 20)).clamp(1, 8) as usize;
     let threads = nzbkit::mem::cpu_workers().clamp(1, 8).min(by_memory) as u32;
     reader.set_thread_count(threads);
@@ -800,6 +815,41 @@ mod sevenz_extract_tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The content half of the gate behind an ENCRYPTED header (TODO 358
+    /// sweep, lane 3 item 1): the raw-bytes gate sees only ciphertext, so
+    /// once the password opens the header the parsed declarations are
+    /// judged by the same rule before a byte is decoded. The fixture's
+    /// LZMA2 block declares 128 MiB of dictionary out of ~1 KB of pack;
+    /// without the parsed-header gate it decodes (and succeeds).
+    #[test]
+    fn an_encrypted_header_content_bomb_is_refused_by_name() {
+        let dir = tmp("mhe-content-bomb");
+        let container = dir.join("bomb.7z");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../nzbkit-base/tests/fixtures/sevenz/mhe-content-dict.7z"
+            ),
+            &container,
+        )
+        .unwrap();
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let err = super::extract_one_sevenz(
+            &out,
+            &dir,
+            std::slice::from_ref(&container),
+            Some("mhe-bomb-key"),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("content declares decoder memory"),
+            "must die at the gate, not in the decoder: {err}"
+        );
+        assert!(!out.join("a.bin").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// One container, header-encrypted, cut into numbered parts the way
     /// the field posts it (`.7z.001`, `.7z.002`, ...), with the cut
     /// falling inside the payload AND inside the end header. The key is
@@ -995,6 +1045,62 @@ mod sevenz_extract_tests {
                     }
                     assert_eq!(a[..ka], b[..ka], "step {step}");
                 }
+            }
+        }
+    }
+
+    /// TODO 358 item 9's fallback route over REAL 7-Zip output: the
+    /// committed `-mhe` split sets in `crates/nzbkit-base/tests/fixtures/
+    /// sevenz/` (`mhe-store` is `-mx=0`, Copy under AES, one folder per
+    /// file; `mhe-lzma2` is `-mx=5`, one solid LZMA2 folder under AES -
+    /// the commands and the payload generators are in nzbkit's
+    /// `extract/sevenz_mhe_tests.rs`). These are the parts a one-pass
+    /// demote materializes; with the password both shapes land every
+    /// byte, and a wrong or missing password leaves nothing but the parts.
+    #[test]
+    fn real_7zip_mhe_split_sets_unpack_stored_and_compressed() {
+        let fx = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../nzbkit-base/tests/fixtures/sevenz"
+        );
+        let a: Vec<u8> = (0..50_001u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let b: Vec<u8> = (0..1_234u32)
+            .map(|i| i.wrapping_mul(31).wrapping_add(7) as u8)
+            .collect();
+        for stem in ["mhe-store", "mhe-lzma2"] {
+            for pw in [Some("wp9-mhe-key"), Some("wp9-wrong"), None] {
+                let dir = tmp(&format!("wp9-{stem}-{}", pw.unwrap_or("none")));
+                let mut parts = Vec::new();
+                for i in 1..=3 {
+                    let name = format!("{stem}.7z.{i:03}");
+                    let p = dir.join(&name);
+                    std::fs::copy(format!("{fx}/{name}"), &p).unwrap();
+                    parts.push(p);
+                }
+                let jobs = super::collect_sevenz_archives(&dir).unwrap();
+                assert_eq!(jobs, vec![parts.clone()], "{stem}: one ordered job");
+                let ok = super::extract_sevenz(&dir, &jobs, pw);
+                let prefix = format!("{stem}.7z.");
+                if pw == Some("wp9-mhe-key") {
+                    assert!(ok, "{stem}: the password must open it");
+                    assert_eq!(std::fs::read(dir.join("a.bin")).unwrap(), a, "{stem}");
+                    assert_eq!(std::fs::read(dir.join("b.nfo")).unwrap(), b, "{stem}");
+                    assert_eq!(
+                        leftovers_beside(&dir, &prefix),
+                        vec!["a.bin".to_string(), "b.nfo".to_string()],
+                        "{stem}"
+                    );
+                } else {
+                    assert!(!ok, "{stem}: {pw:?} must not open it");
+                    assert!(
+                        leftovers_beside(&dir, &prefix).is_empty(),
+                        "{stem}/{pw:?}: {:?}",
+                        leftovers_beside(&dir, &prefix)
+                    );
+                }
+                std::fs::remove_dir_all(&dir).unwrap();
             }
         }
     }

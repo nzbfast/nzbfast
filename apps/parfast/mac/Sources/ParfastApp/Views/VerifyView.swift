@@ -67,7 +67,21 @@ struct VerifyView: View {
     private var content: some View {
         VStack(spacing: T.spacingL) {
             headerCard
-            if let survey = model.survey {
+            if model.endedWithoutVerdict, let job = model.snapshot {
+                // A job that ENDED with no survey - a .par2 that could not be
+                // read, a verify cancelled before it parsed anything, one the
+                // app quit under. This drew the "working" spinner below for
+                // ever, under a pill that said it was waiting to start (sweep,
+                // section B). Say what happened instead.
+                Card {
+                    Label(job.error?.message ?? pillText,
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(job.state == .failed ? T.statusBad : T.statusWarn)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else if let survey = model.survey {
                 mapCard(survey)
                 fileCard(survey)
             } else {
@@ -340,45 +354,14 @@ struct VerifyView: View {
 
     // MARK: - The pill
 
-    private var pillText: String {
-        guard let snapshot = model.snapshot else { return S.verifyPillQueued }
-        if snapshot.state == .paused { return S.verifyPillPaused }
-        if snapshot.state == .cancelled { return S.verifyPillCancelled }
-        if snapshot.state == .queued { return S.verifyPillQueued }
-        let percent = Fmt.progressPercent(snapshot.progress)
-        if snapshot.state == .running {
-            return snapshot.kind == .repairSet
-                ? S.verifyPillRepairing(percent: percent)
-                : S.verifyPillVerifying(percent: percent)
-        }
-        if snapshot.kind == .repairSet {
-            if snapshot.state == .failed {
-                return S.verifyPillRepairFailed(reason: snapshot.error?.message ?? "")
-            }
-            return S.verifyPillRepaired
-        }
-        guard let survey = model.survey else { return S.verifyPillQueued }
-        switch survey.verdict {
-        case .complete: return S.verifyPillComplete
-        case .repaired: return S.verifyPillRepaired
-        case .repairable:
-            return S.verifyPillRepairable(needed: Fmt.count(survey.recovery_needed),
-                                          available: Fmt.count(survey.recovery_available))
-        case .unrepairable:
-            return S.verifyPillUnrepairable(
-                short: Fmt.count(max(0, survey.recovery_needed - survey.recovery_available)))
-        case .failed:
-            return S.verifyPillRepairFailed(reason: snapshot.error?.message ?? "")
-        case .verifying:
-            return S.verifyPillVerifying(percent: percent)
-        }
-    }
+    private var pillText: String { model.pillText }
 
     private var pillTone: StatusPill.Tone {
         guard let snapshot = model.snapshot else { return .neutral }
         if snapshot.state == .running || snapshot.state == .queued { return .working }
         if snapshot.state == .failed { return .bad }
-        if snapshot.state == .cancelled || snapshot.state == .paused { return .neutral }
+        if snapshot.state == .cancelled || snapshot.state == .paused
+            || snapshot.state == .interrupted { return .neutral }
         switch model.survey?.verdict {
         case .complete, .repaired: return .good
         case .repairable: return .warn
@@ -408,6 +391,54 @@ struct VerifyView: View {
         case .extra: return T.textTertiary
         case .hashing: return T.blockHashing
         case .pending: return T.textTertiary
+        }
+    }
+}
+
+extension VerifyModel {
+    /// The header pill's words. On the model rather than the view so a test
+    /// can read it.
+    var pillText: String {
+        guard let snapshot else { return S.verifyPillQueued }
+        if snapshot.state == .paused { return S.verifyPillPaused }
+        if snapshot.state == .cancelled { return S.verifyPillCancelled }
+        if snapshot.state == .queued { return S.verifyPillQueued }
+        if snapshot.state == .interrupted { return S.queueStateInterrupted }
+        // A VERIFY that failed has no survey to read a verdict from, and fell
+        // through to the "no survey yet" answer below - "Waiting to start", in
+        // red, beside a spinner that never stopped (sweep, section B).
+        if snapshot.state == .failed && snapshot.kind == .verify {
+            let reason = snapshot.error?.message ?? ""
+            return reason.isEmpty
+                ? S.queueStateFailed
+                : S.notifyFailed(job: S.jobKindVerify, reason: reason)
+        }
+        let percent = Fmt.progressPercent(snapshot.progress)
+        if snapshot.state == .running {
+            return snapshot.kind == .repairSet
+                ? S.verifyPillRepairing(percent: percent)
+                : S.verifyPillVerifying(percent: percent)
+        }
+        if snapshot.kind == .repairSet {
+            if snapshot.state == .failed {
+                return S.verifyPillRepairFailed(reason: snapshot.error?.message ?? "")
+            }
+            return S.verifyPillRepaired
+        }
+        guard let survey = survey else { return S.verifyPillQueued }
+        switch survey.verdict {
+        case .complete: return S.verifyPillComplete
+        case .repaired: return S.verifyPillRepaired
+        case .repairable:
+            return S.verifyPillRepairable(needed: Fmt.count(survey.recovery_needed),
+                                          available: Fmt.count(survey.recovery_available))
+        case .unrepairable:
+            return S.verifyPillUnrepairable(
+                short: Fmt.count(max(0, survey.recovery_needed - survey.recovery_available)))
+        case .failed:
+            return S.verifyPillRepairFailed(reason: snapshot.error?.message ?? "")
+        case .verifying:
+            return S.verifyPillVerifying(percent: percent)
         }
     }
 }

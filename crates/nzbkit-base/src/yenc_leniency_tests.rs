@@ -551,6 +551,7 @@ async fn shape6_terminator_in_its_own_network_read() {
         block_account: false,
         bind_ip: None,
         socks5: None,
+        http_proxy: None,
         enabled: true,
         warm_pool: false,
         idle_release_secs: None,

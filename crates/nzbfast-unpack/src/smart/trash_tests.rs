@@ -459,3 +459,47 @@ fn the_recoverable_default_follows_the_platform_that_has_to_honour_it() {
         );
     }
 }
+
+/// F15: a Trash call that TIMED OUT is not worded as a refusal.
+///
+/// The bounded call is abandoned, not cancelled, so Finder or the volume
+/// can still finish the move after we stop waiting - and the kept-files
+/// notice used to tell that user "its files could not be removed", then
+/// they were gone. Pins both halves: the reason says the move may still
+/// finish (and is a `TimedOut`), and `kept_reason_may_still_finish` -
+/// what the queue payload's `pending` and the `job.delete_kept` event
+/// read - answers yes for it and no for every real refusal, including
+/// the latched "not responding" one, where no call was made at all.
+#[test]
+fn a_timed_out_trash_call_says_the_move_may_still_finish() {
+    for why in ["timed out", "AppleEvent timed out (-1712)"] {
+        let e = super::refusal(why);
+        assert_eq!(e.kind(), std::io::ErrorKind::TimedOut, "{why}");
+        let text = e.to_string();
+        assert!(
+            super::kept_reason_may_still_finish(&text),
+            "{why}: the notice cannot tell this timeout from a refusal: {text}"
+        );
+        assert!(
+            text.contains("may already be in the Trash") && !text.contains("would not take it"),
+            "{why}: a timeout must not read as the files staying put: {text}"
+        );
+        // The same predicate over the string as callers store it, with
+        // the path or job name in front.
+        assert!(super::kept_reason_may_still_finish(&format!(
+            "/Volumes/nas/Some.Release: {text}"
+        )));
+    }
+    for why in [
+        "the Trash is not responding",
+        "Handler can't handle objects of this class (-10010)",
+        "no system trash on this platform",
+    ] {
+        let text = super::refusal(why).to_string();
+        assert!(
+            !super::kept_reason_may_still_finish(&text),
+            "{why}: a real refusal must keep its 'files are still there' sentence: {text}"
+        );
+        assert!(text.contains("would not take it"), "{why}: {text}");
+    }
+}

@@ -74,6 +74,13 @@ pub fn encrypted_archive(dir: &Path) -> Option<PathBuf> {
     if let Some(rar) = encrypted_rar(dir) {
         return Some(rar);
     }
+    encrypted_non_rar(dir)
+}
+
+/// [`encrypted_archive`] past its RAR arm: the first locked 7z set or
+/// zip, by the same evidence. Its own function so [`locked_left`] can
+/// judge the RAR volumes against a snapshot and ask this half as is.
+fn encrypted_non_rar(dir: &Path) -> Option<PathBuf> {
     let mut sevenz = crate::rarfix::collect_sevenz_archives(dir).unwrap_or_default();
     // Stable across a directory read that hands its entries back in any
     // order: the NAME a job reports is the one the UI shows.
@@ -174,6 +181,33 @@ impl LockedNonRar {
             })
             .collect();
         Self { sevenz, zips }
+    }
+
+    /// The containers an unlock in `dir` has EXPOSED that are still to
+    /// open: every locked set [`Self::find`] reports, plus each set -
+    /// locked or not - none of whose parts was on disk before the unlock
+    /// began (`before`) and which is not delivered yet. Spending the
+    /// password on a plain container extracts it like any other; the
+    /// password is simply not asked for.
+    fn exposed(dir: &Path, before: &std::collections::HashSet<PathBuf>) -> Self {
+        let new =
+            |parts: &[PathBuf]| !parts.is_empty() && parts.iter().all(|p| !before.contains(p));
+        let mut out = Self::find(dir);
+        for parts in crate::rarfix::collect_sevenz_archives(dir).unwrap_or_default() {
+            if new(&parts) && !sevenz_already_unlocked(dir, &parts) && !out.sevenz.contains(&parts)
+            {
+                out.sevenz.push(parts);
+            }
+        }
+        for f in nzbkit::zip::scan(dir) {
+            if new(&f.parts)
+                && !crate::diag::zip_already_delivered(dir, &f)
+                && !out.zips.iter().any(|z| z.parts == f.parts)
+            {
+                out.zips.push(f);
+            }
+        }
+        out
     }
 
     /// Spend `password` on EVERY container found: 7-Zip sets, then zips.
@@ -348,14 +382,139 @@ fn record_sevenz_unlocked(dir: &Path, parts: &[PathBuf]) {
 /// the inner one is tried), and with none left the job parks locked with
 /// its archives spared.
 pub fn unlock(dir: &Path, password: &str) -> std::result::Result<(), Option<String>> {
+    let locked_before = locked_rar_volumes(dir);
     let mut answer = unlock_all(dir, password);
-    if answer.is_ok() && encrypted_archive(dir).is_some() {
+    if answer.is_ok() && locked_left(dir, &locked_before).is_some() {
         answer = Err(None);
     }
     if answer.is_ok() {
         retire_sevenz_marker(dir);
     }
     answer
+}
+
+/// Every password-protected RAR volume directly in `dir`, with the
+/// length and mtime it had when this was asked: the predicate
+/// [`encrypted_rar`] stops at the first match of, applied to them all.
+fn locked_rar_volumes(dir: &Path) -> Vec<(PathBuf, String)> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.path())
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .filter(|p| {
+            (crate::archname::looks_like_named_rar(p)
+                || (nzbkit::extract::archive_sniff_eligible(p) && crate::archname::rar_magic(p)))
+                && nzbkit::rar::needs_password(p)
+        })
+        .filter_map(|p| sevenz_part_stamp(&p).map(|s| (p, s)))
+        .collect()
+}
+
+/// The set a RAR volume belongs to, as the re-extract ladder groups
+/// them (`release_stem` of the lowercased name).
+fn rar_set_of(p: &Path) -> String {
+    let name = p
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+    nzbkit::extract::release_stem(&name).to_string()
+}
+
+/// What an unlock that answered `Ok` has LEFT locked, judged against the
+/// locked RAR volumes that were on disk before it ran (`before`, from
+/// [`locked_rar_volumes`]).
+///
+/// It used to ask [`encrypted_archive`] of the whole directory, which
+/// counts every encrypted RAR volume still there - including a volume of
+/// the very set this unlock just extracted, whose delete failed (an AV
+/// scanner holding it on Windows, EACCES on a NAS share) or that the
+/// spent-proof declined to remove. A RIGHT password then read as wrong:
+/// the candidate walks went on to the next line, the winner was never
+/// recorded, the job parked locked with its payload on disk, and a typed
+/// password was told it "did not unlock the archive". Each later
+/// candidate also re-ran the extraction over that survivor, which on a
+/// RAR4 set (no password check) can overwrite the delivered output
+/// (pre-release sweep, 9 Nov 2026).
+///
+/// So a locked volume still here counts as SPENT only on evidence: it
+/// was locked before, it is byte-for-byte the file it was (length and
+/// mtime), and another volume of its own set that was locked before is
+/// gone - which only the extraction of that set removes. Everything
+/// else is still a lock: a set nothing was removed from (a second set
+/// this password did not open keeps every volume), and any locked volume
+/// that was not there before (a layer this unlock exposed).
+///
+/// THE STATED LIMIT: a SINGLE-volume set whose one volume survives has
+/// no sibling to be evidence for it, and still reads as locked, as it
+/// did before. Telling it apart from an untouched set needs the archive
+/// opened again, which is the very extraction this exists to avoid.
+fn locked_left(dir: &Path, before: &[(PathBuf, String)]) -> Option<PathBuf> {
+    let spent_sets: std::collections::HashSet<String> = before
+        .iter()
+        .filter(|(p, _)| !p.exists())
+        .map(|(p, _)| rar_set_of(p))
+        .collect();
+    let survivor = |p: &Path, stamp: &str| {
+        before.iter().any(|(b, s)| b == p && s == stamp) && spent_sets.contains(&rar_set_of(p))
+    };
+    if let Some((p, _)) = locked_rar_volumes(dir)
+        .into_iter()
+        .find(|(p, s)| !survivor(p, s))
+    {
+        return Some(p);
+    }
+    encrypted_non_rar(dir)
+}
+
+/// Every file directly in `dir` the nested pass could try to extract, by
+/// the same test `dir_has_nested_extractable` uses - so the unlock can
+/// tell the archives it EXPOSED from the ones it was handed.
+fn archive_files(dir: &Path) -> std::collections::HashSet<PathBuf> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.path())
+        .filter(|p| {
+            crate::archname::looks_like_named_rar(p) || crate::unpack::is_extractable_archive(p)
+        })
+        .collect()
+}
+
+/// The name of an archive the unlock exposed and did not deliver, if any.
+/// A 7z set it opened is stamped and a zip it extracted is checked
+/// member by member ([`LockedNonRar::exposed`] is the same test), so what
+/// is left is the shape the walk does not take: named RAR volumes, a tar,
+/// or a 7z or zip it failed on or never reached.
+fn undelivered_exposed(dir: &Path, before: &std::collections::HashSet<PathBuf>) -> Option<String> {
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
+    let pending = LockedNonRar::exposed(dir, before);
+    if let Some(parts) = pending.sevenz.first() {
+        return parts.first().and_then(|p| name(p));
+    }
+    if let Some(f) = pending.zips.first() {
+        return Some(f.name.clone());
+    }
+    let opened: std::collections::HashSet<PathBuf> = crate::rarfix::collect_sevenz_archives(dir)
+        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .chain(nzbkit::zip::scan(dir).into_iter().flat_map(|f| f.parts))
+        .collect();
+    let mut left: Vec<PathBuf> = archive_files(dir)
+        .into_iter()
+        .filter(|p| !before.contains(p) && !opened.contains(p))
+        .collect();
+    left.sort();
+    left.first().and_then(|p| name(p))
 }
 
 /// How many layers of locked 7z or zip one password is spent through.
@@ -413,6 +572,7 @@ fn unlock_all(dir: &Path, password: &str) -> std::result::Result<(), Option<Stri
     // job unlocked (Codex 22 Oct sweep F5). Collected first so a
     // container the RAR extraction itself publishes is the nested pass's
     // business, not a second spend of this password.
+    let before = archive_files(dir);
     let others = LockedNonRar::find(dir);
     if encrypted_rar(dir).is_none()
         && let Some(unlocked) = others.spend(dir, password)
@@ -421,15 +581,33 @@ fn unlock_all(dir: &Path, password: &str) -> std::result::Result<(), Option<Stri
             return Err(None);
         }
         // Each layer the spend exposed gets the same password, the way
-        // a release locked twice under one password expects. A layer it
-        // does not open stops the walk; `unlock` then reports the lock
-        // that is left.
+        // a release locked twice under one password expects - and so
+        // does an UNLOCKED layer it exposed. The walk used to follow
+        // locked layers only, so an encrypted 7z holding a plain zip
+        // opened its outer layer, found nothing locked, and answered
+        // Ok over a payload still packed: the API cleared the prompt,
+        // and the tail's ordinary cleanup could delete the zip and the
+        // 7z both (6 Nov 2026 sweep F2). A layer it does not open stops
+        // the walk; `unlock` then reports the lock that is left.
         for _ in 0..NESTED_UNLOCK_DEPTH {
             if encrypted_rar(dir).is_some()
-                || LockedNonRar::find(dir).spend(dir, password) != Some(true)
+                || LockedNonRar::exposed(dir, &before).spend(dir, password) != Some(true)
             {
                 break;
             }
+        }
+        // Done means DELIVERED, not merely "nothing locked is left". A
+        // new archive still undelivered here is one this walk could not
+        // take - a plain RAR, a tar, a layer past the depth bound, or
+        // one that failed to extract - and calling that unlocked hands
+        // the only copy of the payload to a cleanup. A named refusal
+        // instead parks the job with its archives spared and says why.
+        // A new LOCKED one is not this arm's to name: `unlock` reports
+        // it as the lock that is left.
+        if encrypted_archive(dir).is_none()
+            && let Some(left) = undelivered_exposed(dir, &before)
+        {
+            return Err(Some(crate::diag::unlock_left_packed(&left)));
         }
         return Ok(());
     }
@@ -1001,6 +1179,130 @@ mod tests {
         let path = dir.join("release.7z");
         std::fs::write(&path, mhe_bytes("n2-single-key", &data)).unwrap();
         assert_eq!(encrypted_archive(&dir), Some(path));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pre-release sweep, 9 Nov 2026: a volume of the set this unlock
+    /// just EXTRACTED that failed to delete (an AV lock, EACCES on a NAS)
+    /// is spent, not locked. `unlock` judged "still locked" by asking
+    /// [`encrypted_archive`] of the whole folder, which finds it, so a
+    /// right password read as wrong - and the walks went on spending the
+    /// rest of the file against the delivered set.
+    ///
+    /// The extraction cannot be made to fail a delete portably, so this
+    /// stages the state it leaves: three locked volumes of one set before,
+    /// two removed by the set's own sweep, one left exactly as it was.
+    #[test]
+    fn a_spent_volume_that_survived_its_delete_is_not_a_lock() {
+        let dir = tmp("spent-survivor");
+        let vol = nzbkit::rar::fixtures::rar4_encrypted_headers(4096);
+        for n in 1..=3 {
+            std::fs::write(dir.join(format!("movie.part{n}.rar")), &vol).unwrap();
+        }
+        let before = locked_rar_volumes(&dir);
+        assert_eq!(before.len(), 3, "the fixture is three locked volumes");
+        std::fs::remove_file(dir.join("movie.part2.rar")).unwrap();
+        std::fs::remove_file(dir.join("movie.part3.rar")).unwrap();
+        // What the old check said about this folder.
+        assert!(encrypted_archive(&dir).is_some());
+        assert_eq!(
+            locked_left(&dir, &before),
+            None,
+            "the survivor belongs to a set this unlock spent"
+        );
+
+        // The same unlock with a second set beside the first, which the
+        // password did NOT open: it keeps every volume, and is still a
+        // lock whatever happened to the first.
+        for n in 1..=2 {
+            std::fs::write(dir.join(format!("other.part{n}.rar")), &vol).unwrap();
+        }
+        let mut with_other = before.clone();
+        with_other.extend(
+            locked_rar_volumes(&dir)
+                .into_iter()
+                .filter(|(p, _)| p.starts_with(dir.join("other"))),
+        );
+        assert_eq!(
+            locked_left(&dir, &with_other),
+            Some(dir.join("other.part1.rar")),
+            "an untouched set is still locked"
+        );
+
+        // A locked volume that was not there before is a layer the
+        // unlock EXPOSED, even under a spent set's own stem.
+        for n in 1..=2 {
+            std::fs::remove_file(dir.join(format!("other.part{n}.rar"))).unwrap();
+        }
+        std::fs::write(dir.join("movie.part9.rar"), &vol).unwrap();
+        assert_eq!(
+            locked_left(&dir, &before),
+            Some(dir.join("movie.part9.rar")),
+            "a new locked volume is never read as spent"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ...and through `unlock` itself, on a real two-volume encrypted
+    /// set: the right password is an unlock, and the set is delivered.
+    #[test]
+    fn a_two_volume_encrypted_set_unlocks() {
+        use nzbkit::rar::fixtures;
+        let dir = tmp("two-vol");
+        let film: Vec<u8> = (0..80_000u32).map(|i| (i * 11 + 5) as u8).collect();
+        let f = fixtures::encrypt_file("rightpw", &film, 9);
+        let half = f.cipher.len() / 2;
+        std::fs::write(
+            dir.join("movie.part1.rar"),
+            fixtures::rar5_volume_enc_headers(
+                &[("movie.mkv", &f, 0..half, false, true)],
+                Some(0),
+                "rightpw",
+                9,
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("movie.part2.rar"),
+            fixtures::rar5_volume_enc_headers(
+                &[("movie.mkv", &f, half..f.cipher.len(), true, false)],
+                Some(1),
+                "rightpw",
+                9,
+            ),
+        )
+        .unwrap();
+        assert_eq!(unlock(&dir, "rightpw"), Ok(()));
+        assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), film);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The non-RAR walk's named refusal, when the password opened a
+    /// container and exposed a layer the walk does not take (here a plain
+    /// RAR).
+    /// It reaches a user verbatim, and it was a string continuation
+    /// without the backslash, so the next line's indentation sat in the
+    /// middle of the sentence; and `diag::unlock_answers` must recognise
+    /// it, or a later unlock that delivers leaves it on a Completed row.
+    #[test]
+    fn the_left_packed_refusal_reads_cleanly_and_a_later_unlock_answers_it() {
+        let dir = tmp("left-packed");
+        std::fs::write(
+            dir.join("outer.zip"),
+            locked_zip(
+                "zippy",
+                "inner.rar",
+                &nzbkit::rar::fixtures::rar5_volume(&[("x.mkv", 3, b"abc", false, false)]),
+            ),
+        )
+        .unwrap();
+        let answer = unlock(&dir, "zippy");
+        let Err(Some(why)) = answer else {
+            panic!("expected the named refusal, got {answer:?}");
+        };
+        assert!(!why.contains("  "), "a run of spaces in {why:?}");
+        assert!(why.contains("inner.rar"), "{why:?}");
+        assert!(crate::diag::unlock_answers(&why), "{why:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

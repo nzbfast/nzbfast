@@ -1152,6 +1152,10 @@ impl Archive {
         }
         let num_bind_pairs = total_out_streams - 1;
         let mut bind_pairs = Vec::with_capacity(num_bind_pairs);
+        // nzbfast: each stream may be bound at most once. Both totals are bounded by
+        // `limit` above, so these maps cost at most the header's own size.
+        let mut in_bound = vec![false; total_in_streams];
+        let mut out_bound = vec![false; total_out_streams];
         for _ in 0..num_bind_pairs {
             let bp = BindPair {
                 in_index: read_variable_u64(header)?,
@@ -1162,6 +1166,18 @@ impl Archive {
             // out-of-range index.
             if bp.in_index >= total_in_streams as u64 || bp.out_index >= total_out_streams as u64 {
                 return Err(Error::other("bind pair references an out-of-range stream"));
+            }
+            // nzbfast: a coder's output feeds exactly one input. Several bind pairs naming
+            // one `out_index` let the decode-stack walk (`get_in_stream2`) build that
+            // coder's whole subtree once per binding, and a chain of BCJ2 coders (four
+            // inputs each) fanning into one another multiplied it 4x per level - an
+            // exponential walk out of a header of a few hundred bytes, which the depth
+            // guard there does not bound. No writer emits a shared binding; refuse it.
+            // (9 Nov 2026 sweep; see README-nzbfast.md item 7.)
+            if std::mem::replace(&mut in_bound[bp.in_index as usize], true)
+                || std::mem::replace(&mut out_bound[bp.out_index as usize], true)
+            {
+                return Err(Error::other("bind pair binds a stream twice"));
             }
             bind_pairs.push(bp);
         }
@@ -1195,6 +1211,28 @@ impl Archive {
 
         Ok(block)
     }
+}
+
+/// nzbfast: the end (exclusive) of a block's run of entries in `files`: from `start`, the
+/// index just past the `sub_streams`-th file that carries a stream. Stream-less files
+/// inside that run belong to the block too (`calculate_stream_map` maps them to it) and
+/// are emitted with an empty reader; they do not count toward `sub_streams`. `None` when
+/// the files run out first. With no stream-less file inside the run this is exactly
+/// `start + sub_streams`, the span upstream used.
+fn block_file_span(files: &[ArchiveEntry], start: usize, sub_streams: usize) -> Option<usize> {
+    if sub_streams == 0 {
+        return Some(start);
+    }
+    let mut seen = 0usize;
+    for (index, file) in files.iter().enumerate().skip(start) {
+        if file.has_stream {
+            seen += 1;
+            if seen == sub_streams {
+                return Some(index + 1);
+            }
+        }
+    }
+    None
 }
 
 /// Validates an attacker-controlled count/size decoded from the header against an upper
@@ -1658,6 +1696,9 @@ impl<R: Read + Seek> ArchiveReader<R> {
         // Each coder is visited at most once in an acyclic graph, so a traversal deeper
         // than the coder count means the bind pairs form a cycle. Bail out instead of
         // recursing until the stack overflows (an uncatchable abort).
+        // nzbfast: "at most once" holds only because `read_block` refuses a coder output
+        // bound to more than one input; this guard bounds DEPTH, not the number of visits,
+        // and without that refusal a shared binding is walked once per binding.
         if depth > block.coders.len() {
             return Err(Error::other("cyclic coder bind-pair graph"));
         }
@@ -1940,10 +1981,10 @@ impl<'a, R: Read + Seek> BlockDecoder<'a, R> {
             return &[];
         };
         let file_count = self.archive.blocks[self.block_index].num_unpack_sub_streams;
-        self.archive
-            .files
-            .get(start..start.saturating_add(file_count))
-            .unwrap_or(&[])
+        // nzbfast: the span ends at the block's LAST stream-carrying file, not
+        // `file_count` entries on - see `block_file_span`.
+        let end = block_file_span(&self.archive.files, start, file_count).unwrap_or(start);
+        self.archive.files.get(start..end).unwrap_or(&[])
     }
 
     /// Returns the number of entries contained in this block.
@@ -1992,7 +2033,16 @@ impl<'a, R: Read + Seek> BlockDecoder<'a, R> {
                 "block declares more sub-streams than the archive has files",
             ));
         }
-        for file_index in start..(file_count + start) {
+        // nzbfast: walk to the block's last STREAM file, not `file_count` entries.
+        // `calculate_stream_map` gives a stream-less file that sits between two of a
+        // block's stream files to that block without counting it as a sub-stream, so
+        // a span of `file_count` entries stopped one stream file short per such entry
+        // and the block's last file(s) were silently never extracted (9 Nov 2026
+        // sweep; README-nzbfast.md item 8).
+        let end = block_file_span(&archive.files, start, file_count).ok_or_else(|| {
+            Error::other("block declares more sub-streams than the archive has files")
+        })?;
+        for file_index in start..end {
             let file = &archive.files[file_index];
             if file.has_stream && file.size > 0 {
                 let mut decoder: Box<dyn Read> =

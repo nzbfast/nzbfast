@@ -99,3 +99,43 @@ fn live_samplers_are_registered_under_their_labels() {
     );
     drop(second);
 }
+
+/// Read-only sweep, 9 Nov 2026: a job that returns EARLY - a pause, a
+/// user stop, a full disk out of `drain_network`, any `?` in the tail -
+/// never reaches `print_mem_summary`, which was the only place the token
+/// moved. Dropping the guard must stop the task too, or it ticks on into
+/// an unread record until the next job's spawn moves the token for it.
+/// The task's loop condition is `keeps_sampling`, asked here directly.
+#[test]
+fn dropping_a_sampler_without_a_summary_stops_it() {
+    // FIRST, so it drops LAST: see MEM_SAMPLER_TEST_LOCK in workers.rs.
+    let _serial = serialize_mem_sampler_tests();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let _g = rt.enter();
+    let early = spawn_mem_sampler("nzo_early", std::path::Path::new("early.nzb"));
+    let run = early.run;
+    let alive = Arc::downgrade(&early.alive);
+    assert!(
+        keeps_sampling(run, &alive),
+        "a live guard keeps its sampler"
+    );
+    early.handle.abort();
+    drop(early);
+    assert!(
+        !keeps_sampling(run, &alive),
+        "the guard's drop is the one point an early return reaches"
+    );
+    // And never a LATER job's: each guard owns its own token, so an old
+    // guard dropping leaves a newer sampler running.
+    let old = spawn_mem_sampler("nzo_old", std::path::Path::new("old.nzb"));
+    let new = spawn_mem_sampler("nzo_new", std::path::Path::new("new.nzb"));
+    let new_alive = Arc::downgrade(&new.alive);
+    old.handle.abort();
+    drop(old);
+    assert!(keeps_sampling(new.run, &new_alive));
+    stop_mem_sampler(new.run);
+    new.handle.abort();
+}

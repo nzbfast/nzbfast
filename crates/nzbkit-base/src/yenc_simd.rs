@@ -17,7 +17,12 @@
 //!   terminator is stripped before `decode` is called);
 //! - a lone `=` at the very end of a payload line is ignored by the oracle
 //!   but consumes the following CR in rapidyenc. Valid yEnc never ends a
-//!   line with a bare `=`;
+//!   line with a bare `=`. Closed since 9 Nov 2026 for the line just
+//!   before a `=y` control line (the `=yend` trailer above all), where
+//!   rapidyenc's own stop marks the line break and the extra byte is
+//!   taken back for free (`lone_escape_before_control`, B14); the shape
+//!   is open only in the MIDDLE of a body, where finding it would cost a
+//!   scan of every article;
 //! - MIXED line endings inside one body (some CRLF, some bare LF): rapidyenc
 //!   only treats `\r\n` as a line break, so after a bare LF it neither stops
 //!   at a `=y…` control line nor unstuffs a leading dot, while the oracle
@@ -700,6 +705,7 @@ fn decode_framed(
             }
         } else {
             // ---- payload mode: one rapidyenc pass over the rest ----
+            let chunk_start = pos;
             let chunk = &body[pos..];
             data.reserve(chunk.len());
             // SAFETY: data.len() <= capacity always holds for a Vec, so the
@@ -735,6 +741,17 @@ fn decode_framed(
 
             match endseq {
                 END_CONTROL => {
+                    // B14: the payload line just before this control line
+                    // may have ended in a lone `=`, which rapidyenc read as
+                    // escaping the CR and so wrote one byte the oracle does
+                    // not. Taken back here, in O(1), before anything reads
+                    // the length - see `lone_escape_before_control`.
+                    if written > 0
+                        && lone_escape_before_control(body, chunk_start, pos)
+                        && data.last() == Some(&ESCAPED_CR)
+                    {
+                        data.pop();
+                    }
                     // src points just past the 'y' of "\r\n=y". Reconstruct
                     // the control line ("=y" + remainder) and parse it in
                     // line mode.
@@ -1023,6 +1040,55 @@ fn decode_framed(
             verified_article_crc: verified_article_crc.filter(|_| placed.vouched),
         },
     ))
+}
+
+/// What rapidyenc writes for a CR it took to be escaped: `\r - 42 - 64`.
+const ESCAPED_CR: u8 = b'\r'.wrapping_sub(42).wrapping_sub(64);
+
+/// Whether the payload line that ends just before the control line
+/// rapidyenc stopped at closes on a LONE `=` (B14).
+///
+/// `after_y` is where rapidyenc left `src`: just past the `y` of the
+/// `\r\n=y` (or dot-stuffed `\r\n.=y`) it stopped at. `floor` is where
+/// this payload pass began, so the look-back never reaches a header line.
+///
+/// Valid yEnc never ends a line on a bare `=`, but a poster that does
+/// ends it on the line before `=yend` most of all - the data is complete
+/// and the escape has nothing left to apply to. The scalar oracle drops
+/// such an `=` (`yenc::decode_line`), and so does Weaver 0.14.6, which
+/// then lets size and CRC decide. rapidyenc instead reads it as escaping
+/// the CR, writes `ESCAPED_CR` for it, and still stops at the trailer,
+/// so the article came out one byte long: a `size=` trailer refused an
+/// article whose payload was whole, and a bare `=yend` accepted a
+/// corrupt one. This is the one place the extra byte can be taken back
+/// for free, because rapidyenc has just told us where the line break is;
+/// the same shape in the MIDDLE of a body has no such marker, would cost
+/// a scan of every article to find, and stays a documented deviation
+/// (see the module header).
+///
+/// "Lone" means an ODD run of `=` before the CR: `==` is one complete
+/// escape pair (the byte `=` - 106) and leaves nothing dangling, on both
+/// decoders. The run cannot be miscounted by what precedes it: the byte
+/// before a maximal run is not `=`, so whether or not it was itself
+/// escaped it is consumed before the run starts.
+fn lone_escape_before_control(body: &[u8], floor: usize, after_y: usize) -> bool {
+    // `=y` sits at after_y-2..after_y. One stuffed dot may lead it.
+    let Some(mut line_start) = after_y.checked_sub(2) else {
+        return false;
+    };
+    if line_start > floor && body[line_start - 1] == b'.' {
+        line_start -= 1;
+    }
+    // The CRLF that ended the previous payload line.
+    if line_start < floor + 2 || &body[line_start - 2..line_start] != b"\r\n" {
+        return false;
+    }
+    let run = body[floor..line_start - 2]
+        .iter()
+        .rev()
+        .take_while(|&&b| b == b'=')
+        .count();
+    run % 2 == 1
 }
 
 #[inline]
@@ -1701,6 +1767,87 @@ mod tests {
             "only one kernel was reachable ({covered:?}) - on x86 that means \
              the pin shim is not working, not that the CPU is limited"
         );
+    }
+
+    /// B14: a payload line ending in a lone `=` right before the trailer.
+    ///
+    /// The escape has nothing left to apply to, so the article is whole:
+    /// both decoders drop the `=` and let `size=`/`pcrc32=` decide, as
+    /// Weaver 0.14.6 does. Before `lone_escape_before_control`, rapidyenc
+    /// read the `=` as escaping the CR and wrote one extra byte, so this
+    /// exact article was REFUSED (LengthMismatch) on the production path
+    /// while the oracle accepted it, and with a bare `=yend` it was
+    /// ACCEPTED one byte long. Every reachable kernel, every payload
+    /// length that puts the `=` on a different side of a vector boundary,
+    /// the dot-stuffed trailer, and the `=` alone on its own line.
+    ///
+    /// The even-run arm (`==`, a complete escape pair) proves the fix does
+    /// not take a byte that was really there: it decodes one byte MORE
+    /// than the poster declared and both decoders must refuse it alike.
+    #[test]
+    fn lone_escape_before_the_trailer_decodes_on_every_kernel() {
+        // Put `ins` between the last payload byte and the `\r\n=yend`.
+        fn splice(art: &[u8], ins: &[u8], stuff_trailer: bool) -> Vec<u8> {
+            let at = art
+                .windows(7)
+                .rposition(|w| w == b"\r\n=yend")
+                .expect("an encoded article ends in a trailer");
+            let mut v = art[..at].to_vec();
+            v.extend_from_slice(ins);
+            v.extend_from_slice(b"\r\n");
+            if stuff_trailer {
+                v.push(b'.');
+            }
+            v.extend_from_slice(&art[at + 2..]);
+            v
+        }
+        let detected = detected_decode_kernel();
+        let lens: Vec<usize> = (1..=300).chain([4096, 70_000]).collect();
+        for &k in &pinnable_decode_kernels() {
+            assert_eq!(pin_decode_kernel(k), Some(k), "pin {}", kernel::name(k));
+            for &len in &lens {
+                let data = test_data(len);
+                let art = yenc::encode("b14.bin", len as u64, None, 1, &data);
+                for stuff in [false, true] {
+                    for ins in [&b"="[..], b"\r\n=", b"==="] {
+                        let a = splice(&art, ins, stuff);
+                        let ctx = format!(
+                            "kernel {} len {len} ins {:?} stuffed {stuff}",
+                            kernel::name(k),
+                            String::from_utf8_lossy(ins)
+                        );
+                        let lone = matches!(ins, b"=" | b"\r\n=");
+                        let simd = decode(&a);
+                        assert_eq!(yenc::decode(&a), simd, "{ctx}: diverged from the oracle");
+                        if lone {
+                            assert_eq!(simd.expect(&ctx).data, data, "{ctx}: payload");
+                        } else {
+                            // `===` is one pair plus a lone `=`: one byte
+                            // the poster never declared, refused alike.
+                            assert!(simd.is_err(), "{ctx}: a surplus byte was accepted");
+                        }
+                    }
+                    let even = splice(&art, b"==", stuff);
+                    assert_eq!(yenc::decode(&even), decode(&even), "even run, len {len}");
+                    assert!(decode(&even).is_err(), "even run is a real byte, len {len}");
+                }
+                // A bare `=yend` gates nothing, which is where the extra
+                // byte used to be ACCEPTED: the payload itself must match.
+                if len <= 300 {
+                    let mut bare = yenc::encode("b14.bin", len as u64, None, 1, &data);
+                    let at = bare.windows(7).rposition(|w| w == b"\r\n=yend").unwrap();
+                    bare.truncate(at);
+                    bare.extend_from_slice(b"=\r\n=yend\r\n");
+                    assert_eq!(
+                        decode(&bare).expect("bare").data,
+                        data,
+                        "bare =yend, len {len}"
+                    );
+                    assert_eq!(yenc::decode(&bare), decode(&bare), "bare =yend, len {len}");
+                }
+            }
+        }
+        pin_decode_kernel(detected);
     }
 
     /// The CRC half of the same gap: every CRC kernel this CPU can run,

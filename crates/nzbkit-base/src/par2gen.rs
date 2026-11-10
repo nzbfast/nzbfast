@@ -170,7 +170,14 @@ pub enum Par2GenError {
     /// against nothing. A set this run was EXTENDING (`-f` onto an
     /// existing one) keeps every file it already had - the trail a cancel
     /// unlinks is a record of what this run CREATED, not a glob over
-    /// the directory (`control::CreateTrail`).
+    /// the directory (`control::CreateTrail`) - and since 9 Nov 2026 that
+    /// includes its INDEX, which a run writes under a staging name and
+    /// renames into place only once its own set is whole. A set this run
+    /// was REPLACING (an overwriting re-create) keeps every file too, index
+    /// and volumes alike: a file that was already under one of the run's
+    /// names is written under a staging name and replaced only at the
+    /// commit. Every other failure removes this run's files the same way;
+    /// only the variant says the user asked for it.
     #[error("the recovery set was cancelled; every file it wrote has been removed")]
     Cancelled,
 }
@@ -779,6 +786,112 @@ pub struct CreatePlan {
     /// the planned set is the same set either way, and the difference
     /// is only whether writing it is allowed to destroy anything.
     pub no_clobber: bool,
+    /// How the volume files are NAMED. See [`VolumeNaming`]: the engine's
+    /// own fixed widths for everything nzbfast posts, par2cmdline's for
+    /// the drop-in CLI.
+    pub naming: VolumeNaming,
+}
+
+/// The spelling of a recovery volume's file name.
+///
+/// # Why the engine names the CLI's volumes (9 Nov 2026)
+///
+/// Until 9 Nov 2026 the engine always wrote `vol{first:03}+{count:02}`
+/// and `parfast::create` RENAMED each volume to par2cmdline's widths once
+/// the create had returned. That second step is what made a failed or
+/// cancelled re-create destroy the set it was replacing: a re-create's
+/// engine names are routinely the PREVIOUS set's final names (a 100-block
+/// set's `vol000+01` ... `vol031+32` are exactly what a 600-block
+/// re-create's engine writes before renaming to `vol000+001`), so its
+/// opens landed on the old set's files and the failure cleanup then
+/// removed them - six of seven volumes of a 3 GiB set, measured. With the
+/// final name known here, every file of the set is opened under the name
+/// it will keep, the only collisions are real ones, and the trail can
+/// stage exactly those and commit them in one place
+/// (`control::CreateTrail`). The rule moved here whole; the CLI's
+/// `final_volume_names` now answers through [`volume_names`], so there is
+/// still one copy of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeNaming {
+    /// `<base>.vol{first:03}+{count:02}.par2` - the widths nzbfast has
+    /// always posted, whatever the exponent space.
+    Engine,
+    /// par2cmdline's: the first field as wide as the exponent ONE PAST the
+    /// last one written (`first_exponent + recovery`), the count field as
+    /// wide as the largest count. `std_naming` selects the spec's own
+    /// `vol<first>-<last>` form, both fields at the first field's width.
+    /// Measured against par2cmdline on 3 Sep 2026; the widths and the
+    /// examples are on `parfast::create::final_volume_names`.
+    Reference { std_naming: bool },
+}
+
+/// Decimal width of `n`, floored at 1.
+fn decimal_width(n: u64) -> usize {
+    n.checked_ilog10().unwrap_or(0) as usize + 1
+}
+
+/// The file names of a set's recovery volumes, one per `(first exponent,
+/// count)` pair of `layout`, under `naming`.
+///
+/// `first_exponent` and `recovery` are the WHOLE set's (the exponent the
+/// first recovery slice carries and how many there are), not the layout
+/// slice's: par2cmdline's first-field width is a property of the exponent
+/// space and its count-field width of the whole layout, so a batch's
+/// volumes must be named from the whole set or two batches of one set
+/// would disagree about their widths. `layout` must therefore be the
+/// set's whole layout too.
+///
+/// THE ONE COPY of the naming rule: the creator names its files through
+/// this, [`plan_files`] previews them through it, and the drop-in CLI's
+/// `final_volume_names` answers through it.
+pub fn volume_names(
+    base: &str,
+    layout: &[(u64, u64)],
+    first_exponent: u64,
+    recovery: u64,
+    naming: VolumeNaming,
+) -> Vec<String> {
+    match naming {
+        VolumeNaming::Engine => layout
+            .iter()
+            .map(|&(first, count)| format!("{base}.vol{first:03}+{count:02}.par2"))
+            .collect(),
+        VolumeNaming::Reference { std_naming } => {
+            let fw = decimal_width(first_exponent.saturating_add(recovery));
+            let cw = layout
+                .iter()
+                .map(|&(_, c)| decimal_width(c))
+                .max()
+                .unwrap_or(1);
+            layout
+                .iter()
+                .map(|&(first, count)| {
+                    if std_naming {
+                        // The last exponent, not one past it: a volume
+                        // carrying `count` slices from `first` ends at
+                        // `first + count - 1`.
+                        let last = first.saturating_add(count.saturating_sub(1));
+                        format!("{base}.vol{first:0fw$}-{last:0fw$}.par2")
+                    } else {
+                        format!("{base}.vol{first:0fw$}+{count:0cw$}.par2")
+                    }
+                })
+                .collect()
+        }
+    }
+}
+
+/// [`volume_names`] over the creator's own `usize` layout - the form every
+/// write path holds.
+fn layout_names(
+    base: &str,
+    layout: &[(usize, usize)],
+    first_exponent: usize,
+    recovery: usize,
+    naming: VolumeNaming,
+) -> Vec<String> {
+    let pairs: Vec<(u64, u64)> = layout.iter().map(|&(f, c)| (f as u64, c as u64)).collect();
+    volume_names(base, &pairs, first_exponent as u64, recovery as u64, naming)
 }
 
 impl CreatePlan {
@@ -791,6 +904,7 @@ impl CreatePlan {
         first_exponent: 0,
         max_blocks_per_volume: None,
         no_clobber: false,
+        naming: VolumeNaming::Engine,
     };
 
     /// This plan with a different volume split.
@@ -824,6 +938,11 @@ impl CreatePlan {
     pub const fn with_no_clobber(self, no_clobber: bool) -> CreatePlan {
         CreatePlan { no_clobber, ..self }
     }
+
+    /// This plan naming its volumes another way. See [`VolumeNaming`].
+    pub const fn with_naming(self, naming: VolumeNaming) -> CreatePlan {
+        CreatePlan { naming, ..self }
+    }
 }
 
 /// How many volumes the `Variable` plan produces for `n_recovery`
@@ -843,12 +962,12 @@ pub fn variable_volume_count(n_recovery: usize) -> usize {
 /// One file a create would write, as [`plan_files`] answers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlannedFile {
-    /// The name on disk, in the ENGINE's own `vol{first:03}+{count:02}`
-    /// spelling. par2cmdline's widths - and the spec's own
-    /// `vol<first>-<last>` form - are a RENAME afterwards, so a caller
-    /// that shows the names a user will see maps this list through
-    /// `parfast::create::final_volume_names`, which is the one rule
-    /// `parfast::create::rename_volumes` applies to the files.
+    /// The name on disk, in the plan's [`VolumeNaming`] - the very name the
+    /// create writes, since 9 Nov 2026, through the same [`volume_names`].
+    /// It was the engine's fixed width whatever the plan, and a caller
+    /// showing the CLI's names had to map it through
+    /// `parfast::create::final_volume_names`, which that rename applied to
+    /// the files afterwards; the rename is gone (see [`VolumeNaming`]).
     pub name: String,
     /// The exponent of this volume's first recovery slice. Zero, and
     /// meaningless, for the index file.
@@ -950,7 +1069,9 @@ pub fn plan_files_with_comment(
     let per_vol = plan
         .max_blocks_per_volume
         .map_or(per_batch, |l| per_batch.min(l.max(1)));
-    for (first, count) in volume_layout(n_recovery, per_vol, plan.volumes, plan.first_exponent) {
+    let layout = volume_layout(n_recovery, per_vol, plan.volumes, plan.first_exponent);
+    let names = layout_names(base, &layout, plan.first_exponent, n_recovery, plan.naming);
+    for ((first, count), name) in layout.into_iter().zip(names) {
         let recovery_bytes = count as u64 * (68 + block_size);
         let critical_bytes = match plan.critical {
             CriticalLayout::Head => critical.len() as u64,
@@ -963,7 +1084,7 @@ pub fn plan_files_with_comment(
             }
         };
         out.push(PlannedFile {
-            name: format!("{base}.vol{first:03}+{count:02}.par2"),
+            name,
             first_exponent: first,
             blocks: count,
             bytes: recovery_bytes + critical_bytes,
@@ -1248,7 +1369,8 @@ pub fn create_into_exact_with_comment(
 /// direction where stopping halfway cannot leave the payload alone -
 /// it is WRITING the set - so the cancel path removes the index and
 /// every volume this run wrote, and a set being extended keeps all of
-/// its own.
+/// its own, its previous index included (the index is staged and
+/// renamed into place last - `control::CreateTrail`).
 ///
 /// Every existing door delegates here with an inert control, and an
 /// inert control is one `Option` branch per already-chunked loop; the
@@ -1352,10 +1474,16 @@ pub fn spec_exponent_end(
     first_exponent: usize,
     exact_recovery: Option<usize>,
 ) -> Option<(usize, usize)> {
-    first_exponent
-        .checked_add(exact_recovery.unwrap_or(0))
-        .filter(|&n| n > 65535)
-        .map(|last| (first_exponent, last))
+    // An OVERFLOWING sum is past 65535 too, and is reported as
+    // `usize::MAX`. It used to be `checked_add(..).filter(..)`, which read
+    // the overflow's `None` as "in range", so `parfast c -f<huge>` (the
+    // CLI clamps `-f` to `usize::MAX`) passed the one check that exists to
+    // refuse it (sweep A14).
+    match first_exponent.checked_add(exact_recovery.unwrap_or(0)) {
+        Some(n) if n <= 65535 => None,
+        Some(last) => Some((first_exponent, last)),
+        None => Some((first_exponent, usize::MAX)),
+    }
 }
 
 /// `Err` when a set of `n_recovery` recovery slices is more than the
@@ -1440,10 +1568,15 @@ fn write_member(
 /// wrote its volumes and then took a cancel in the NEXT batch must have
 /// its own removed too, which is the multi-pass case
 /// `a_cancel_in_a_later_pass_removes_the_earlier_passes_volumes` pins.
-/// Only [`Par2GenError::Cancelled`] triggers it: a create that failed
-/// for any other reason (a member that changed under it, a full disk)
-/// leaves what it left, exactly as it always has, because that is a
-/// diagnosis and not a user's decision.
+/// Until 9 Nov 2026 only [`Par2GenError::Cancelled`] triggered it, and a
+/// create that failed for any other reason (a member that changed under
+/// it, a full disk) left what it left "because that is a diagnosis and
+/// not a user's decision". What it left was a placeholder index under
+/// the final name that verifies every intact member as damaged, so ANY
+/// failure now unlinks, and the index is written under a staging name
+/// and renamed into place only here, once the set is whole - which is
+/// what keeps a previous index alive through a failed or cancelled
+/// re-create. Both are `control::CreateTrail`'s, through `settle`.
 #[expect(clippy::too_many_arguments)]
 fn create_into_inner(
     dir: &Path,
@@ -1457,8 +1590,12 @@ fn create_into_inner(
 ) -> Result<Vec<String>, Par2GenError> {
     let control = control.or_env_arm().with_active_digest_cache();
     // The plan's no-clobber decision reaches every file of the set
-    // through the trail, which is the one door they are all created by.
-    let trail = CreateTrail::new(plan.no_clobber);
+    // through the trail, which is the one door they are all created by,
+    // and the index is staged so the previous one outlives a failure.
+    let trail = CreateTrail::new(plan.no_clobber).staging(&format!("{base}.par2"));
+    // A panic re-raised out of the body (a stripe-first worker, a volume
+    // writer) never reaches `settle`; this takes the run's files with it.
+    let _unwind = trail.unlink_on_unwind();
     let r = create_body(
         dir,
         members,
@@ -1470,10 +1607,7 @@ fn create_into_inner(
         &control,
         &trail,
     );
-    if matches!(r, Err(Par2GenError::Cancelled)) {
-        trail.unlink_all(dir);
-    }
-    r
+    trail.settle(dir, r)
 }
 
 /// [`create_into_inner`]'s body: everything between the input refusals
@@ -1592,15 +1726,6 @@ fn create_body(
     let (set_id, critical_shape) = critical_packets(&placeholder, block_size, comment);
     let index = format!("{base}.par2");
     let mut out: Vec<(String, CriticalPatch)> = vec![(index.clone(), CriticalPatch::Head)];
-    // As above, and this is the site the no-clobber door most often
-    // answers on: the index is the FIRST file of the set to be created,
-    // so two creates started together on one base meet here and exactly
-    // one of them gets past it.
-    write_member(trail, dir, &index, &critical_shape)?;
-    // Only the interleave needs the packet boundaries, and on a
-    // file-heavy set walking them is tens of thousands of headers.
-    let cidx = matches!(plan.critical, CriticalLayout::Interleaved)
-        .then(|| critical_index(&critical_shape));
 
     // The memory cap and `-l`'s size ceiling are the same KIND of bound
     // - "no volume larger than this" - so they meet as a min and the
@@ -1611,6 +1736,26 @@ fn create_body(
         .max_blocks_per_volume
         .map_or(per_batch, |l| per_batch.min(l.max(1)));
     let layout = volume_layout(n_recovery, per_vol, plan.volumes, plan.first_exponent);
+    // Every volume's FINAL name, decided once for the whole set, so each
+    // write path opens the name the file keeps (`VolumeNaming`).
+    let names = layout_names(base, &layout, plan.first_exponent, n_recovery, plan.naming);
+    // BEFORE A BYTE IS WRITTEN: every file this run would replace must be
+    // one it can replace. An overwriting re-create stages each file that
+    // already exists and renames it into place at the commit, so without
+    // this a read-only old volume, or one held open on Windows, would be
+    // found only at the commit - after the whole set was written.
+    trail.probe_replaceable(dir, std::iter::once(&index).chain(&names))?;
+    // As above, and this is the site the no-clobber door most often
+    // answers on: the index is the FIRST file of the set to be created,
+    // so two creates started together on one base meet here and exactly
+    // one of them gets past it. An OVERWRITING create writes this
+    // placeholder under a staging name instead (`CreateTrail::staging`),
+    // so a previous index is still whole until the set is committed.
+    write_member(trail, dir, &index, &critical_shape)?;
+    // Only the interleave needs the packet boundaries, and on a
+    // file-heavy set walking them is tens of thousands of headers.
+    let cidx = matches!(plan.critical, CriticalLayout::Interleaved)
+        .then(|| critical_index(&critical_shape));
     let mut fused_scan = create_route(
         members,
         &lengths,
@@ -1625,6 +1770,22 @@ fn create_body(
         control,
         timing,
     )?;
+    // THE NON-FUSED ROUTES' CHANGE DETECTION. The fused arm pins every
+    // member's identity and change stamps and refuses a member that moved
+    // (`FusedScan::finish_all`); the other routes read each member TWICE,
+    // once for the fold and once for the hashes, and compared only the
+    // head scan's length and 16 KiB digest. A same-length write past the
+    // head between those two reads gave a set whose hashes describe the new
+    // bytes and whose recovery slices describe the old: it verifies, and it
+    // cannot repair (parfast sweep, 9 Nov 2026). Each member's length and
+    // mtime, taken here before either read and compared after both, close
+    // it for one stat per member at each end - and only those two, for the
+    // reasons `scan::member_stamps` gives.
+    let stamps = if fused_scan.is_none() {
+        scan::member_stamps(members)
+    } else {
+        Vec::new()
+    };
     let mut fused_res: Option<Result<Vec<Scanned>, Par2GenError>> = None;
     let mut scan_res: Result<Vec<Scanned>, Par2GenError> = Ok(Vec::new());
     // The two phases that span the WHOLE create, sized once here.
@@ -1716,11 +1877,11 @@ fn create_body(
                 plan.first_exponent,
                 n_recovery,
                 &layout,
+                &names,
                 per_batch,
                 fused_scan.is_some(),
                 cidx.as_ref(),
                 dir,
-                base,
                 &set_id,
                 ready_critical.as_ref(),
                 &critical_shape,
@@ -1827,7 +1988,7 @@ fn create_body(
                     control,
                     trail,
                     dir,
-                    base,
+                    names: &names[vi..vj],
                     layout: &layout[vi..vj],
                     set_id: &set_id,
                     first,
@@ -1879,6 +2040,12 @@ fn create_body(
                 .into(),
         ));
     }
+    if let Some(m) = scan::first_changed(members, &stamps) {
+        return Err(Par2GenError::Other(format!(
+            "{} changed while the PAR2 set was being built",
+            m.path.display()
+        )));
+    }
     // THE LAST POLL, and the one that makes the promise uniform. Every
     // volume of a one-batch create is spawned before the first of them
     // finishes, so a cancel raised while they are being written can
@@ -1889,7 +2056,7 @@ fn create_body(
     // block until the backfill below lands, so up to this line the set
     // on disk is not a set.
     control.check()?;
-    volwrite::backfill_critical(dir, &out, &critical, cidx.as_ref())?;
+    volwrite::backfill_critical(trail, dir, &out, &critical, cidx.as_ref())?;
     commit_digests(&mut scanned);
     Ok(out.into_iter().map(|(name, _)| name).collect())
 }

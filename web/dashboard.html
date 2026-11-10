@@ -3009,6 +3009,8 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
       <input class="txt" id="sv_bindip" data-i18n-placeholder="set.srv.bindip.ph" placeholder="e.g. 192.168.1.50"></div>
     <div class="row" data-adv="1"><label data-i18n="set.srv.socks">Through a SOCKS5 proxy<span class="hint" data-i18n="set.srv.socks.hint">send this server's traffic through a SOCKS5 proxy, as host:port. The proxy looks up the server's name for you, so the lookup does not leak past it. Blank connects directly. Each server has its own, so one provider can go through a proxy while the others do not</span></label>
       <input class="txt" id="sv_socks" data-i18n-placeholder="set.srv.socks.ph" placeholder="e.g. 127.0.0.1:1080"></div>
+    <div class="row" data-adv="1"><label data-i18n="set.srv.httpproxy">Through an HTTP proxy<span class="hint" data-i18n="set.srv.httpproxy.hint">for a web proxy that offers CONNECT and no SOCKS5, as host:port. The proxy looks up the server's name for you, and an encrypted connection to the server stays encrypted inside it. Use this box or the SOCKS5 one above, not both. The proxy sign-in below goes to whichever proxy is set</span></label>
+      <input class="txt" id="sv_httpproxy" data-i18n-placeholder="set.srv.httpproxy.ph" placeholder="e.g. 127.0.0.1:8080"></div>
     <div class="row" data-adv="1"><label data-i18n="set.srv.socksauth">Proxy sign-in<span class="hint" data-i18n="set.srv.socksauth.hint">only if your proxy asks for a user name and password. Leave both blank for an open proxy. Like the server password above, a stored proxy password is never shown: leave it blank to keep it, or clear the user name to remove both</span></label>
       <span><input class="txt sm" id="sv_socksuser" data-i18n-placeholder="set.srv.socksauth.user" placeholder="user" autocomplete="off">
       <input class="txt sm" type="password" id="sv_sockspass" data-i18n-placeholder="set.srv.socksauth.pass" placeholder="password" autocomplete="new-password">
@@ -3235,6 +3237,8 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
     <input type="checkbox" id="s_failed_delete_files" onchange="setCfg('failed_delete_files',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.watchdir.cleanup">Cleanup after download<span class="hint" data-i18n="set.watchdir.cleanup.hint">file extensions or name patterns deleted from a job's folder once it completes successfully, e.g. sfv, srr, url, *sample*, Subs/*; empty = off. Recovery files have their own switch above</span></label>
     <input class="txt" id="s_cleanup_exts" placeholder="sfv, srr, url" onchange="setCfg('cleanup_exts',this.value)"></div>
+  <div class="row"><label data-i18n="set.watchdir.refuse">Refuse programs in media downloads<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.refuse.hint">a film, episode, album or book never comes with a program, so when a download named or filed as one of those holds a file with one of these extensions, it is marked failed and the file is removed. Sonarr, Radarr and the like then look for another copy. Software downloads are never checked. Empty = off</span></label>
+    <input class="txt" id="s_refuse_exts" placeholder="exe, bat, cmd, scr, msi" onchange="setCfg('refuse_exts',this.value)"></div>
   <div class="row"><label data-i18n="set.watchdir.pwprompt">When an archive needs a password<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.pwprompt.hint">"ask right away" prompts the moment a running download turns out to be password-protected, so you can type it while it keeps downloading; "ask when finished" waits until the download completes and offers the 🔑 unlock; "never ask" completes the download quietly with the archive left packed in its folder for you to extract by hand. Set password on the download itself works in every mode</span></label>
     <select class="sel" id="s_password_prompt" style="max-width:280px" onchange="setCfg('password_prompt',this.value)">
       <option value="now" data-i18n="set.watchdir.pwprompt.now">ask right away, mid-download</option>
@@ -5885,7 +5889,19 @@ function syncLimitPresets(ls, line){
     if(o.textContent!==lbl) o.textContent=lbl;
   }
 }
-function esc(s){ const d=document.createElement('span'); d.textContent=s==null?'':s; return d.innerHTML; }
+// Escapes the quotes too, the way wall.html's esc does. innerHTML leaves
+// " and ' intact, and esc() lands in double-quoted attributes (title=,
+// src=, class=) as well as text, so a value carrying a " closed the
+// attribute. &quot; and &#39; render as the characters in text context.
+function esc(s){ const d=document.createElement('span'); d.textContent=s==null?'':s; return d.innerHTML.replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+// A string safe to drop into a double-quoted on*= handler as a JS
+// argument: ${jsArg(x)}, never '${escA(x)}'. HTML escaping inside a JS
+// string is no defence - the HTML parser decodes &#39; back to ' before
+// the handler is compiled, so a ' in a file name or nzo id closed the JS
+// string (stored XSS through the preview button). JSON.stringify makes
+// the JS literal; escA makes it survive the attribute, and the parser
+// hands the handler exactly the literal. Same rule as wall.html's jsArg.
+function jsArg(v){ return escA(JSON.stringify(v==null?'':String(v))); }
 // Change-aware innerHTML: skip the write (and the layout/paint it forces)
 // when the markup is identical to what is already shown.
 function setHtml(id, html){
@@ -7019,7 +7035,7 @@ function busyChipHtml(shown,rest){
     // a pill that has never been clickable is not one people try.
     const tip=(hint?hint+' ':'')+t('chip.clickfor','· click for what to do about it');
     return `<button type="button" class="pill bchip ${cls}" aria-haspopup="menu"`+
-      ` title="${escA(tip)}" onclick="busyMenu(event,${JSON.stringify(tok).replace(/"/g,'&quot;')})">${esc(lbl)}</button>`;
+      ` title="${escA(tip)}" onclick="busyMenu(event,${jsArg(tok)})">${esc(lbl)}</button>`;
   }).join('');
   if(rest.length)
     html+=`<button type="button" class="pill bchip" aria-haspopup="menu"`+
@@ -7910,7 +7926,7 @@ function altOfferBlock(s){
   const head=`<div class="bad" style="font-size:12px;margin-top:7px">${t('drawer.alt.title','This download cannot finish:')} ${esc(altReason(o))}`
     +(o.detail&&o.detail!==altReason(o)?`<div class="dim" style="margin-top:4px">${esc(o.detail)}</div>`:'');
   if(!sp.length) return head+altHuntBlock(s,o)+`</div>`;
-  return head+sp.map(a=>`<div style="margin-top:6px"><button class="ghost mini" onclick="altSwitch('${escA(s.nzo_id)}','${escA(a.nzo_id)}')">${
+  return head+sp.map(a=>`<div style="margin-top:6px"><button class="ghost mini" onclick="altSwitch(${jsArg(s.nzo_id)},${jsArg(a.nzo_id)})">${
       t('drawer.alt.switch','Switch to this copy')}</button> <span class="mono" style="font-size:11.5px">${esc(a.name)}</span></div>`).join('')
     +`<div class="dim" style="margin-top:4px">${
       t('drawer.alt.hint','Switching ends this download - it moves to history with the reason above - and starts the copy you picked instead. Nothing happens until you click.')}</div></div>`;
@@ -7948,13 +7964,13 @@ function altHuntBlock(s,o,done){
   if(!o.search) return h+`<div class="dim" style="margin-top:4px">${
     t('drawer.alt.arr','Sonarr or Radarr sent this download and looks for a replacement itself, so nzbfast does not search for one as well. Pick a different release from its own search if you want to choose by hand.')}</div>`;
   const st=ALTHUNT[s.nzo_id]||{};
-  h+=`<div style="margin-top:6px"><button class="ghost mini" ${st.busy?'disabled':''} onclick="altHunt('${escA(s.nzo_id)}')">${
+  h+=`<div style="margin-top:6px"><button class="ghost mini" ${st.busy?'disabled':''} onclick="altHunt(${jsArg(s.nzo_id)})">${
     st.busy?t('drawer.alt.searching','Looking...'):t('drawer.alt.search','Look for another copy')}</button></div>`;
   if(st.err) return h+`<div class="dim" style="margin-top:4px">${esc(st.err)}</div>`;
   if(!st.rows) return h;
   if(!st.rows.length) return h+`<div class="dim" style="margin-top:4px">${
     t('drawer.alt.nores','Your indexers offered no other copy of this release.')}</div>`;
-  return h+st.rows.map(c=>`<div style="margin-top:6px"><button class="ghost mini" onclick="altPick('${escA(s.nzo_id)}','${escA(c.key)}')">${
+  return h+st.rows.map(c=>`<div style="margin-top:6px"><button class="ghost mini" onclick="altPick(${jsArg(s.nzo_id)},${jsArg(c.key)})">${
       t('drawer.alt.pick','Use this copy')}</button> <span class="mono" style="font-size:11.5px">${esc(c.name)}</span> <span class="dim" style="font-size:11.5px">${
       esc(fmtSize(c.size||0))}${c.source?' · '+esc(c.source):''}</span></div>`).join('')
     +`<div class="dim" style="margin-top:4px">${done
@@ -7981,7 +7997,7 @@ function histAltBlock(s){
   if(!o) return '';
   const sp=o.spares||[];
   if(!sp.length) return altHuntBlock(s,o,true);
-  return sp.map(a=>`<div style="margin-top:2px"><button class="ghost mini" onclick="altSwitch('${escA(s.nzo_id)}','${escA(a.nzo_id)}')">${
+  return sp.map(a=>`<div style="margin-top:2px"><button class="ghost mini" onclick="altSwitch(${jsArg(s.nzo_id)},${jsArg(a.nzo_id)})">${
       t('drawer.alt.switch','Switch to this copy')}</button> <span class="mono" style="font-size:11.5px">${esc(a.name)}</span></div>`).join('')
     +`<div class="dim" style="margin-top:4px">${
       t('drawer.alt.hint.done','Starting the copy being held for this one costs no new search and no new bytes: its NZB is already here. This download has already failed and its record stays in history exactly as it is, with a note saying what replaced it. Nothing happens until you click.')}</div>`;
@@ -8131,13 +8147,13 @@ function forcedTip(){
 }
 function forceChip(s){
   if(!isForced(s)) return '';
-  return ` <button type="button" class="qbadge force" title="${escA(forcedTip())}" onclick="event.stopPropagation();unforceJobs(['${escA(s.nzo_id)}'])">⏫ ${esc(t('queue.forced','forced'))}</button>`;
+  return ` <button type="button" class="qbadge force" title="${escA(forcedTip())}" onclick="event.stopPropagation();unforceJobs([${jsArg(s.nzo_id)}])">⏫ ${esc(t('queue.forced','forced'))}</button>`;
 }
 // The row's one-click control: replaces the ⏫ button on a forced queued
 // row (which has nothing left to do there) and rides beside stop on the
 // downloading one.
 function unforceBtn(s){
-  return `<button class="ghost mini" title="${escA(forcedTip())}" aria-label="${escA(t('queue.unforce','stop forcing'))}" data-snd="down" onclick="event.stopPropagation();unforceJobs(['${escA(s.nzo_id)}'])">⏬</button>`;
+  return `<button class="ghost mini" title="${escA(forcedTip())}" aria-label="${escA(t('queue.unforce','stop forcing'))}" data-snd="down" onclick="event.stopPropagation();unforceJobs([${jsArg(s.nzo_id)}])">⏬</button>`;
 }
 // The drawer's version: the sentence, and the words on the buttons - plus
 // the way back to the hold for a copy that was a held duplicate.
@@ -8145,8 +8161,8 @@ function forceBlock(s){
   if(!isForced(s)) return '';
   const id=escA(s.nzo_id);
   return `<div style="font-size:12px;margin-top:7px">${esc(forcedTip())}<br>`
-    +`<button class="ghost mini" onclick="event.stopPropagation();unforceJobs(['${id}'])">⏬ ${esc(t('queue.unforce','stop forcing'))}</button>`
-    +(s.held_for?` <button class="ghost mini" title="${escA(t('queue.rehold.title','Put this copy back on hold as a duplicate, the way it was before you pressed download anyway. It stays in the queue, stopped.'))}" onclick="event.stopPropagation();reholdJob('${id}')">⏸ ${esc(t('queue.rehold','put back on hold'))}</button>`:'')
+    +`<button class="ghost mini" onclick="event.stopPropagation();unforceJobs([${jsArg(id)}])">⏬ ${esc(t('queue.unforce','stop forcing'))}</button>`
+    +(s.held_for?` <button class="ghost mini" title="${escA(t('queue.rehold.title','Put this copy back on hold as a duplicate, the way it was before you pressed download anyway. It stays in the queue, stopped.'))}" onclick="event.stopPropagation();reholdJob(${jsArg(id)})">⏸ ${esc(t('queue.rehold','put back on hold'))}</button>`:'')
     +`</div>`;
 }
 // Back to Normal - the job stays in the queue, and is neither restarted
@@ -8227,9 +8243,9 @@ function insBlock(s){
   // that can never succeed is the defect the whole api contract exists
   // to stop.
   const btn = on
-    ? `<button class="ghost mini" title="${escA(t('drawer.ins.off.title','Stop fetching this in the background. Anything already on disk stays, and the download picks up from it whenever you start it.'))}" onclick="insureJob(this,'${escA(s.nzo_id)}',0)">${t('drawer.ins.off','Stop saving this one')}</button>`
+    ? `<button class="ghost mini" title="${escA(t('drawer.ins.off.title','Stop fetching this in the background. Anything already on disk stays, and the download picks up from it whenever you start it.'))}" onclick="insureJob(this,${jsArg(s.nzo_id)},0)">${t('drawer.ins.off','Stop saving this one')}</button>`
     : cap&&waiting
-    ? `<button class="ghost mini" title="${escA(t('drawer.ins.on.title','Fetch this download\'s files in the background now, while the post is still whole, and unpack them only when you start it.'))}" onclick="insureJob(this,'${escA(s.nzo_id)}',1)">${t('drawer.ins.on','Save this one early')}</button>`
+    ? `<button class="ghost mini" title="${escA(t('drawer.ins.on.title','Fetch this download\'s files in the background now, while the post is still whole, and unpack them only when you start it.'))}" onclick="insureJob(this,${jsArg(s.nzo_id)},1)">${t('drawer.ins.on','Save this one early')}</button>`
     : '';
   const off = on&&!cap
     ? `<br><span class="warn">${t('drawer.ins.capoff','Saving downloads early is switched off: this one is marked for it but nothing will be fetched until a disk budget is set in Settings, under Downloading.')}</span>`
@@ -8495,7 +8511,7 @@ function renderHistory(slots){
   if(!hsFocused)
   setHtml('histFilter', HIST_BUCKETS.filter(([k])=>k==='all'||k===cur||count(k)>0)
     .map(([k])=>`<button class="ghost${k===cur?' on':''}" aria-pressed="${k===cur}"`
-      +` onclick="setHistFilter('${k}')">${labels[k]} <span class="dim">${count(k)}</span></button>`).join('')
+      +` onclick="setHistFilter(${jsArg(k)})">${labels[k]} <span class="dim">${count(k)}</span></button>`).join('')
     +`<input id="histSearch" class="mini" type="search" value="${escA(histSearch)}"`
     +` placeholder="${escA(t('hist.search','search history…'))}"`
     +` aria-label="${escA(t('hist.search','search history…'))}"`
@@ -8574,22 +8590,22 @@ function renderHistory(slots){
                    :t('hist.retry.title','Retry: the journal resumes from what already downloaded'));
       const retryable=failed&&!rotted;
       const actSig=(s.password_required?'k':'')+((leadSearch||rotted)?'f':'')+(retryable?'r':'');
-      const ctl=(s.password_required?`<button class="ghost mini" title="${escA(t('hist.unlock.title','Archive is password-protected: enter the password to unpack the verified volumes'))}" onclick="event.stopPropagation();unlockJob('${s.nzo_id}')">🔑 ${t('hist.unlock','unlock')}</button>`:'')+
-        ((leadSearch||rotted)?`<button class="ghost mini" title="${escA(t('hist.find.title','Search the wall and your indexers for another release of this title'))}" onclick="event.stopPropagation();findAnother('${escA(s.nzo_id)}')">🔎 ${t('hist.find','find another')}</button>`:'')+
+      const ctl=(s.password_required?`<button class="ghost mini" title="${escA(t('hist.unlock.title','Archive is password-protected: enter the password to unpack the verified volumes'))}" onclick="event.stopPropagation();unlockJob(${jsArg(s.nzo_id)})">🔑 ${t('hist.unlock','unlock')}</button>`:'')+
+        ((leadSearch||rotted)?`<button class="ghost mini" title="${escA(t('hist.find.title','Search the wall and your indexers for another release of this title'))}" onclick="event.stopPropagation();findAnother(${jsArg(s.nzo_id)})">🔎 ${t('hist.find','find another')}</button>`:'')+
         // U8: when the daemon's one useful move is a settings row or
         // the output folder, put that control ON the row - the same
         // verbs the drawer's histFixBtn offers, so the row and drawer
         // stay one action system. The dimmed Retry beside it keeps its
         // "fix the cause first" title; now the fix is one click left.
         ((act==='servers'||act==='retention')?`<button class="ghost mini" title="${escA(t('hist.act.servers.title','Open the server list - this failure was decided by your own server setup'))}" onclick="event.stopPropagation();goSetting('servers')">⚙ ${t('hist.act.servers','Server settings')}</button>`:'')+
-        (act==='path'?`<button class="ghost mini" title="${escA(t('hist.act.folder.title','Open this job’s output folder, where the evidence is'))}" onclick="event.stopPropagation();openItem('${s.nzo_id}','folder')">📂 ${t('hist.act.folder','Show the folder')}</button>`:'')+
-        (retryable?`<button class="ghost mini${retryDim?' dimbtn':''}" title="${escA(retryTip)}" onclick="event.stopPropagation();retryJob('${s.nzo_id}')">↻ ${t('hist.retry','retry')}</button>`:'')+
-        `<button class="ghost mini" title="${escA(t('hist.del.title','Remove this entry from history. The download itself stays in its own folder.'))}" aria-label="${escA(t('hist.del.title','Remove this entry from history. The download itself stays in its own folder.'))}" data-snd="remove" onclick="event.stopPropagation();delHist('${s.nzo_id}')">✕</button>`+
+        (act==='path'?`<button class="ghost mini" title="${escA(t('hist.act.folder.title','Open this job’s output folder, where the evidence is'))}" onclick="event.stopPropagation();openItem(${jsArg(s.nzo_id)},'folder')">📂 ${t('hist.act.folder','Show the folder')}</button>`:'')+
+        (retryable?`<button class="ghost mini${retryDim?' dimbtn':''}" title="${escA(retryTip)}" onclick="event.stopPropagation();retryJob(${jsArg(s.nzo_id)})">↻ ${t('hist.retry','retry')}</button>`:'')+
+        `<button class="ghost mini" title="${escA(t('hist.del.title','Remove this entry from history. The download itself stays in its own folder.'))}" aria-label="${escA(t('hist.del.title','Remove this entry from history. The download itself stays in its own folder.'))}" data-snd="remove" onclick="event.stopPropagation();delHist(${jsArg(s.nzo_id)})">✕</button>`+
         // The same menu the right-click opens - as a visible button,
         // because touch has no right-click and four of these actions
         // (play, show in folder, change category, delete files) had no
         // other route at all.
-        `<button class="ghost mini" aria-haspopup="menu" title="${escA(t('hist.more.title','More: play, show in folder, change category, create report, remove with files'))}" aria-label="${escA(t('hist.more.title','More: play, show in folder, change category, create report, remove with files'))}" onclick="event.stopPropagation();histMenu(event,'${s.nzo_id}',${retryable})">⋯</button>`;
+        `<button class="ghost mini" aria-haspopup="menu" title="${escA(t('hist.more.title','More: play, show in folder, change category, create report, remove with files'))}" aria-label="${escA(t('hist.more.title','More: play, show in folder, change category, create report, remove with files'))}" onclick="event.stopPropagation();histMenu(event,${jsArg(s.nzo_id)},${retryable})">⋯</button>`;
       if(actSamples[actSig]===undefined) actSamples[actSig]=ctl;
       // The sub-line under the size: when it finished, then how long it
       // took and how fast. The when carries its full stamp on hover -
@@ -8689,7 +8705,7 @@ function renderHistory(slots){
       // the control's own activation.
       return `<tr class="item ${cls}" data-id="${escA(s.nzo_id)}" onclick="toggleHistRow(this)" tabindex="0"
         onkeydown="if((event.key==='Enter'||event.key===' ')&&event.target===this){event.preventDefault();toggleHistRow(this);}"
-        ondblclick="openItem('${s.nzo_id}','file')" oncontextmenu="return histMenu(event,'${s.nzo_id}',${retryable})">
+        ondblclick="openItem(${jsArg(s.nzo_id)},'file')" oncontextmenu="return histMenu(event,${jsArg(s.nzo_id)},${retryable})">
         <td class="selcol" onclick="selCellClick(event,'h',this)" ondblclick="event.stopPropagation()"><input type="checkbox" class="rowsel" data-sel="${escA(s.nzo_id)}"${hSel.has(s.nzo_id)?' checked':''} onclick="selClick(event,'h',this)" aria-label="${escA(t('sel.row','Select {name}',{name:s.name}))}"></td>
         <td class="hname"><span class="nm"><span class="caret">▶</span><span class="sdot" role="img" title="${escA(dotLabel)}" aria-label="${escA(dotLabel)}"></span><span class="nmtxt" data-full="${escA(s.name)}">${esc(s.name)}${identName(s)}${mediaBadge(s.media)}${shapeBadge(s.archive_shape)}${catBadge(s.category)}${originGlyph(s.origin)}${needsPw?` <span class="warn">· ${t('hist.needpw','needs a password')}</span>`:''}${split?` <span class="warn">· ${t('hist.split','part of it did not move')}</span>`:''}${moveFail?` <span class="warn">· ${t('hist.movefail','not moved to its destination')}</span>`:''}${movingNow?` <span class="dim">· ${t('hist.moving','moving to its destination…')}</span>`:''}</span></span></td>
         <td class="hsize"><span class="nowrap">${s.bytes!=null?fmtSize(s.bytes):esc(s.size||'')}</span>${st}</td>
@@ -9201,7 +9217,7 @@ function pvBlock(id,j){
   const full=previewMode==='full';
   // The token is fetched here, as the button is drawn - see pvToken.
   const btn=(rx,ai)=>full
-    ? (pvToken(id),`<button class="ghost mini" onclick="event.stopPropagation();pvOpen('${escA(id)}','${escA(name)}',${rx?1:0},${(ai===undefined?-1:ai)})">▶ ${esc(t('probe.testhere','Test it here'))}</button>`)
+    ? (pvToken(id),`<button class="ghost mini" onclick="event.stopPropagation();pvOpen(${jsArg(id)},${jsArg(name)},${rx?1:0},${(ai===undefined?-1:ai)})">▶ ${esc(t('probe.testhere','Test it here'))}</button>`)
     : '';
   const play=btn(false);
   const off=`<div class="dim">${esc(t('probe.playeroff','The player is off for this daemon; turn it on in Settings. Your own player opens the file either way.'))}</div>`;
@@ -9471,7 +9487,7 @@ function histSpaceHtml(s){
   const state=esc(t('hist.space.state','the unpack needs about {need} GB free; the disk has {free} GB right now',{need:needGB.toFixed(1),free:freeGB.toFixed(1)}));
   if(freeGB>=needGB)
     return `${state} · <span class="ok">${esc(t('hist.space.ok','enough space now - nothing is re-downloaded, Retry re-runs just the unpack'))}</span> `+
-      `<button class="mini" onclick="event.stopPropagation();retryJob('${escA(s.nzo_id)}')">↻ ${esc(t('hist.retry','retry'))}</button>`;
+      `<button class="mini" onclick="event.stopPropagation();retryJob(${jsArg(s.nzo_id)})">↻ ${esc(t('hist.retry','retry'))}</button>`;
   // TODO 101: the other way out of a disk that will not fit. Offered
   // only in low_disk mode, which is the mode that asks per download -
   // off never eats and always needs no answer. The copy has to be blunt
@@ -9479,7 +9495,7 @@ function histSpaceHtml(s){
   // halfway means fetching the download again.
   const eat=eatVolMode==='low_disk'
     ? ` · <button class="mini" title="${escA(t('hist.space.eat.title','Unpack without freeing anything first: each archive part is deleted the moment the unpacker has finished reading it. The parts are not recoverable, and if the unpack stops halfway the download is fetched again.'))}" `+
-      `onclick="event.stopPropagation();eatUnpack('${escA(s.nzo_id)}')">${esc(t('hist.space.eat','extract in place'))}</button>`
+      `onclick="event.stopPropagation();eatUnpack(${jsArg(s.nzo_id)})">${esc(t('hist.space.eat','extract in place'))}</button>`
     : '';
   return `${state} · <span class="warn">${esc(t('hist.space.wait','free about {short} GB more, then hit Retry',{short:(needGB-freeGB).toFixed(1)}))}</span>${eat}`;
 }
@@ -9532,19 +9548,19 @@ function histFixBtn(s){
   const b=(label,fn,tip)=>`<button class="mini" title="${escA(tip)}" onclick="event.stopPropagation();${fn}">${esc(label)}</button>`;
   switch(s.fail_action){
     case 'search': return b('🔎 '+t('hist.act.find','Find another release'),
-      `findAnother('${escA(s.nzo_id)}')`,
+      `findAnother(${jsArg(s.nzo_id)})`,
       t('hist.find.title','Search the wall and your indexers for another release of this title'));
     case 'servers': case 'retention': return b('⚙ '+t('hist.act.servers','Server settings'),
       `goSetting('servers')`,
       t('hist.act.servers.title','Open the server list - this failure was decided by your own server setup'));
     case 'path': return b('📂 '+t('hist.act.folder','Show the folder'),
-      `openItem('${escA(s.nzo_id)}','folder')`,
+      `openItem(${jsArg(s.nzo_id)},'folder')`,
       t('hist.act.folder.title','Open this job’s output folder, where the evidence is'));
     case 'password': return b('🔑 '+t('hist.unlock','unlock'),
-      `unlockJob('${escA(s.nzo_id)}')`,
+      `unlockJob(${jsArg(s.nzo_id)})`,
       t('hist.unlock.title','Archive is password-protected: enter the password to unpack the verified volumes'));
     case 'retry': return b('↻ '+t('hist.act.retrynow','Retry now'),
-      `retryJob('${escA(s.nzo_id)}')`,
+      `retryJob(${jsArg(s.nzo_id)})`,
       t('hist.retry.title','Retry: the journal resumes from what already downloaded'));
     default: return '';
   }
@@ -9599,7 +9615,7 @@ async function toggleHistRow(tr){
     // download the user expected in one folder was quietly in another.
     // The rule that decided it says everything in three words.
     +(s.smart_rule?` <span class="dim">${esc(t('hist.cat.byrule','set by rule {name}',{name:s.smart_rule}))}</span>`:'')
-    +` <button class="ghost mini" onclick="event.stopPropagation();changeCat('${s.nzo_id}')">${esc(t('hist.cat.change','change…'))}</button>`]);
+    +` <button class="ghost mini" onclick="event.stopPropagation();changeCat(${jsArg(s.nzo_id)})">${esc(t('hist.cat.change','change…'))}</button>`]);
   // §129 2d: the identity duplicate detection derived - the answer to
   // "why was this held / failed as a duplicate", inspectable instead
   // of inferred. Shown only when there is one.
@@ -9646,7 +9662,7 @@ async function toggleHistRow(tr){
       : t('hist.autoretry.propagation','Pieces were missing. Posts often finish landing on the servers within the hour, so nzbfast tries again in {m} min - the journal means only the gaps are fetched.',{m});
     rows.push([t('hist.autoretry.head','Automatic retry'),
       esc(why)
-      +` <button class="mini" onclick="event.stopPropagation();retryJob('${escA(s.nzo_id)}')">↻ ${esc(t('hist.act.retrynow','Retry now'))}</button>`]);
+      +` <button class="mini" onclick="event.stopPropagation();retryJob(${jsArg(s.nzo_id)})">↻ ${esc(t('hist.act.retrynow','Retry now'))}</button>`]);
   }
   // What to DO about it, per failure kind - the Reason above is the
   // engine's diagnostic; this is the user's next move. disk_full has
@@ -9741,7 +9757,7 @@ async function toggleHistRow(tr){
   if(s.password_required&&!failed)
     rows.push([t('hist.pw.head','Password'),
       esc(t('hist.pw.body','This archive is waiting for its password. Nothing is missing and nothing re-downloads: the password only unlocks the unpack.'))
-      +` <button class="mini" onclick="event.stopPropagation();unlockJob('${escA(s.nzo_id)}')">🔑 ${esc(t('hist.unlock','unlock'))}</button>`]);
+      +` <button class="mini" onclick="event.stopPropagation();unlockJob(${jsArg(s.nzo_id)})">🔑 ${esc(t('hist.unlock','unlock'))}</button>`]);
   // UX §16: what verification actually found, and - the case that had no
   // words at all - that it never ran. `bad_blocks` is null for a post
   // that carried no PAR2 and for a resume that mapped no block, and both
@@ -9790,8 +9806,8 @@ async function toggleHistRow(tr){
   // alone. Both are buttons here now, beside the path they act on.
   rows.push([t('col.location','Location'),
     esc(s.storage||s.path||'')
-    +` <button class="ghost mini" title="${escA(t('hist.showfolder.title',"Open this download's folder on the machine running nzbfast"))}" onclick="event.stopPropagation();openItem('${escA(s.nzo_id)}','folder')">📂 ${esc(t('menu.showfolder','Show in folder'))}</button>`
-    +`<div style="margin-top:6px"><button class="ghost mini danger" title="${escA(t('hist.delfiles.title','Remove this entry AND delete the downloaded files from disk. Asks first.'))}" data-snd="remove" onclick="event.stopPropagation();delHistFiles('${escA(s.nzo_id)}')">🗑 ${esc(t('menu.removefiles','Remove and delete files…'))}</button></div>`]);
+    +` <button class="ghost mini" title="${escA(t('hist.showfolder.title',"Open this download's folder on the machine running nzbfast"))}" onclick="event.stopPropagation();openItem(${jsArg(s.nzo_id)},'folder')">📂 ${esc(t('menu.showfolder','Show in folder'))}</button>`
+    +`<div style="margin-top:6px"><button class="ghost mini danger" title="${escA(t('hist.delfiles.title','Remove this entry AND delete the downloaded files from disk. Asks first.'))}" data-snd="remove" onclick="event.stopPropagation();delHistFiles(${jsArg(s.nzo_id)})">🗑 ${esc(t('menu.removefiles','Remove and delete files…'))}</button></div>`]);
   // UX §18: ...and the OTHER location, when the move stopped part way.
   // Immediately under Location on purpose - that row is the half-truth
   // this one corrects, and a user about to delete "the download folder"
@@ -9821,7 +9837,7 @@ async function toggleHistRow(tr){
       +(nextTry&&tries>1
         ?`<br><span class="dim">${esc(t('hist.movefail.tries','Tried {n} times; next try in {m} min.',{n:tries,m:Math.max(1,Math.ceil((s.auto_retry_at*1000-Date.now())/60000))}))}</span>`
         :'')
-      +`<div style="margin-top:6px"><button class="ghost mini" onclick="event.stopPropagation();retryMove('${escA(s.nzo_id)}')">↻ ${esc(t('hist.movefail.retry','Try the move now'))}</button></div>`]);
+      +`<div style="margin-top:6px"><button class="ghost mini" onclick="event.stopPropagation();retryMove(${jsArg(s.nzo_id)})">↻ ${esc(t('hist.movefail.retry','Try the move now'))}</button></div>`]);
   }
 
   // Truth-audit I: a de-obfuscation rename left history saying "a4f9c2e1"
@@ -9848,14 +9864,14 @@ async function toggleHistRow(tr){
   // control here, or the click folds the row shut. A record whose spool
   // was cleared answers 404 and dlNzb says so in a toast.
   rows.push([t('drawer.nzbfile','NZB file'),
-    `<button class="ghost mini" title="${escA(t('drawer.getnzb.title',"Save this job's .nzb file - nzbfast keeps its own copy even after the original is gone"))}" onclick="event.stopPropagation();dlNzb('${s.nzo_id}')">⬇ ${t('drawer.getnzb','Download .nzb')}</button>`]);
+    `<button class="ghost mini" title="${escA(t('drawer.getnzb.title',"Save this job's .nzb file - nzbfast keeps its own copy even after the original is gone"))}" onclick="event.stopPropagation();dlNzb(${jsArg(s.nzo_id)})">⬇ ${t('drawer.getnzb','Download .nzb')}</button>`]);
   // The report, beside the .nzb - the two "take this away with you"
   // actions of the drawer, and the only two that produce something to
   // paste or attach. It is still in the ⋯ menu; this is the copy that
   // makes anyone reach for it, and the drawer is where a user who is
   // trying to work out what went wrong already is.
   rows.push([t('rep.title','Download report'),
-    `<button class="ghost mini" style="margin-inline-start:0" onclick="event.stopPropagation();jobReport('${escA(s.nzo_id)}')">🧾 ${esc(t('menu.report','Create report'))}</button>`
+    `<button class="ghost mini" style="margin-inline-start:0" onclick="event.stopPropagation();jobReport(${jsArg(s.nzo_id)})">🧾 ${esc(t('menu.report','Create report'))}</button>`
     +`<div class="dim" style="margin-top:4px">${esc(t('rep.what','Everything about this one download as text you can paste into a support thread: what it is, which servers it used, what the NZB contained, and this job\'s own log lines. Your usernames, passwords and API keys are not in it, and your home folder is written as ~.'))}</div>`]);
   // What the container itself says it holds. Only for a job that
   // finished with files on disk - a failed one has nothing to read.
@@ -9867,7 +9883,7 @@ async function toggleHistRow(tr){
   // the row keeps its handoff button and drops the panel above it.
   if(!failed) rows.push([t('probe.head','Inside the file'),
     mediaWarnBlock(s.media)+(previewMode==='off'?'':probeHtml(s.nzo_id))
-    +`<div style="margin-top:6px"><button class="ghost mini" title="${escA(t('hist.play.title','Open the largest video file in the default player on the machine running nzbfast'))}" onclick="event.stopPropagation();openItem('${escA(s.nzo_id)}','file')">▶ ${esc(t('menu.play2','Play'))}</button></div>`]);
+    +`<div style="margin-top:6px"><button class="ghost mini" title="${escA(t('hist.play.title','Open the largest video file in the default player on the machine running nzbfast'))}" onclick="event.stopPropagation();openItem(${jsArg(s.nzo_id)},'file')">▶ ${esc(t('menu.play2','Play'))}</button></div>`]);
   // What an identity oracle said this release is. Only present when one
   // answered, and always attributed - "srrdb says" and "the video file
   // says" are different degrees of confidence.
@@ -10185,7 +10201,7 @@ function pipeline(s,mbps,queued,done,failed){
           stat=` · <span class="dim" title="${escA(t('prov.stat.fill.title','a level-{n} fill server: it is only asked for articles every lower-level server has already missed, so it stays idle while they answer everything - even when they are slow. Set it to level 0 to download from it at the same time as your other servers.',{n:lvl}))}">${t('prov.stat.fill','fill, level {n}',{n:lvl})}</span>`;
           const w=lastQ&&lastQ.whyslow, lim=w&&w.layer==='provider'&&w.detail?String(w.detail):'';
           if(lim&&lim!==sv.host) detail=`<div class="srvwhy dim">${esc(t('prov.fill.starved','{p} is the limit right now and this server is not helping: at level {n} it only takes what the lower levels miss, and {p} is missing nothing. To download from both at once, give this server level 0.',{p:lim.replace(/^(news|reader)\./,''),n:lvl}))}
-    <a href="#settings/servers" onclick="landOnServer('${escA(sv.host)}');return false">${
+    <a href="#settings/servers" onclick="landOnServer(${jsArg(sv.host)});return false">${
       t('prov.refused.open','Open this server’s settings')}</a></div>`;
         }
         else                     stat=` · <span class="dim" title="${escA(t('prov.stat.standby.title','a backup backbone the pool has not had to call on for this download'))}">${t('prov.stat.standby','standby')}</span>`;
@@ -10281,7 +10297,7 @@ function refusalDetailHtml(host, line, permanent, sourceIps){
     : t('prov.refused.fix.cap','Your plan will not give this many connections at once. Lower the connection count.');
   return `<div class="srvwhy ${permanent?'bad':'warn'}">${esc(line||'')}
     <span class="dim">${esc(fix)}</span>
-    <a href="#settings/servers" onclick="landOnServer('${escA(host)}');return false">${
+    <a href="#settings/servers" onclick="landOnServer(${jsArg(host)});return false">${
       t('prov.refused.open','Open this server’s settings')}</a></div>`;
 }
 // Put one server's settings row on screen, highlighted. Matched by host
@@ -10595,7 +10611,7 @@ function actSub(s){
   // otherwise open the line with a bare "·".
   const why=whyTxt?`${txt?'<span class="dim"> · </span>':''}<button type="button" class="whychip" title="${
     escA(t('diag.open','Why is this slow? Open the evidence behind this verdict.'))
-  }" onclick="event.stopPropagation();openWhySlow('${escA(s.nzo_id)}')"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-help"/></svg>${whyTxt}</button>`:'';
+  }" onclick="event.stopPropagation();openWhySlow(${jsArg(s.nzo_id)})"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-help"/></svg>${whyTxt}</button>`:'';
   // The tooltip carries the WHOLE line, whyslow clause included - the
   // visible line ellipsizes to the column, and a tooltip that repeats
   // only the two-word phase answers nothing the truncation asked.
@@ -10887,11 +10903,11 @@ function whyslowBlock(s){
     w.layer==='fleet'&&!w.fleet_refused?`<div style="margin-top:6px"><button type="button" class="ghost" onclick="landOnRow('s_line_cap_fleet')">${
       esc(t('diag.fleet.setting','Change the connection budget'))}</button> <span class="dim">${
       esc(t('diag.fleet.setting.note','the new number applies from the next download; a per-server "Use exactly this many" in the server editor lifts it for that server alone'))}</span></div>`:''}
-    ${w.layer==='solecap'&&w.sole_host?`<div style="margin-top:6px"><button type="button" class="ghost" onclick="landOnServer('${escA(w.sole_host)}')">${
+    ${w.layer==='solecap'&&w.sole_host?`<div style="margin-top:6px"><button type="button" class="ghost" onclick="landOnServer(${jsArg(w.sole_host)})">${
       esc(t('prov.refused.open','Open this server’s settings'))}</button> <span class="dim">${
       esc(t('diag.solecap.note','This provider will not give more connections at once, and it is the only one of yours that still has this post - so switching to another provider will not finish it. A second connection slot on that account, or fewer of its connections spent elsewhere, is what would.'))}</span></div>`:''}
     ${w.layer==='knee'&&w.knee_host?`<div style="margin-top:6px"><button type="button" class="ghost" onclick="landOnRow('ladderCard')">${
-      esc(t('diag.knee.remeasure','Measure this provider again'))}</button> <button type="button" class="ghost" onclick="landOnServer('${escA(w.knee_host)}')">${
+      esc(t('diag.knee.remeasure','Measure this provider again'))}</button> <button type="button" class="ghost" onclick="landOnServer(${jsArg(w.knee_host)})">${
       esc(t('prov.refused.open','Open this server’s settings'))}</button> <span class="dim">${
       esc(t('diag.knee.note','Connection tuning measured this provider once and has capped downloads at what it found ever since. Measure it again, or set "Use exactly this many" in the server editor to use your own number instead.'))}</span></div>`:''}
   </div>`;
@@ -11080,10 +11096,10 @@ function renderQueue(){
     // the downloading row next to stop, and on a queued one in place of the
     // up-arrow that would only write the priority it already has.
     const ctl = dl
-      ? (isForced(s)?unforceBtn(s):'')+`<button class="ghost mini" title="${escA(stopTitle)}" data-snd="remove" onclick="stopJob('${s.nzo_id}')">✕ ${t('queue.stop','stop')}</button>`
+      ? (isForced(s)?unforceBtn(s):'')+`<button class="ghost mini" title="${escA(stopTitle)}" data-snd="remove" onclick="stopJob(${jsArg(s.nzo_id)})">✕ ${t('queue.stop','stop')}</button>`
       : tail
-      ? `<button class="ghost mini" title="${escA(t('queue.remove.finishing.title','Remove this job. It has already downloaded - this stops the work it is finishing and drops it from the queue.'))}" aria-label="${escA(t('queue.remove.title','Remove from the queue'))}" data-snd="remove" onclick="qOp('delete','${s.nzo_id}')">✕</button>`
-      : `<button class="ghost mini" title="${escA(pz?t('queue.resume.title','Resume this item'):t('queue.pause.title','Pause this item'))}" aria-label="${escA(pz?t('queue.resume.title','Resume this item'):t('queue.pause.title','Pause this item'))}" data-snd="${pz?'on':'off'}" onclick="qOp('${pz?'resume':'pause'}','${s.nzo_id}')">${pz?'▶':'⏸'}</button>`+
+      ? `<button class="ghost mini" title="${escA(t('queue.remove.finishing.title','Remove this job. It has already downloaded - this stops the work it is finishing and drops it from the queue.'))}" aria-label="${escA(t('queue.remove.title','Remove from the queue'))}" data-snd="remove" onclick="qOp('delete',${jsArg(s.nzo_id)})">✕</button>`
+      : `<button class="ghost mini" title="${escA(pz?t('queue.resume.title','Resume this item'):t('queue.pause.title','Pause this item'))}" aria-label="${escA(pz?t('queue.resume.title','Resume this item'):t('queue.pause.title','Pause this item'))}" data-snd="${pz?'on':'off'}" onclick="qOp(${jsArg(pz?'resume':'pause')},${jsArg(s.nzo_id)})">${pz?'▶':'⏸'}</button>`+
         // A held duplicate gets the same button with its NAME on it.
         // "⏫" is the whole escape hatch from a hold, and a user looking
         // at a row that says "held (duplicate)" and will not start has
@@ -11093,13 +11109,13 @@ function renderQueue(){
         (isForced(s)
           ? unforceBtn(s)
           : dupHeld(s)
-          ? `<button class="ghost mini" title="${escA(t('queue.dup.force.title','Download this copy anyway: it releases the duplicate hold and starts this job next.'))}" data-snd="top" onclick="forceJob('${s.nzo_id}')">⏫ ${esc(t('queue.dup.force','download anyway'))}</button>`
-          : `<button class="ghost mini" title="${escA(t('queue.force.title','Download this next (force: starts even while paused)'))}" aria-label="${escA(t('queue.force.title','Download this next (force: starts even while paused)'))}" data-snd="top" onclick="forceJob('${s.nzo_id}')">⏫</button>`)+
+          ? `<button class="ghost mini" title="${escA(t('queue.dup.force.title','Download this copy anyway: it releases the duplicate hold and starts this job next.'))}" data-snd="top" onclick="forceJob(${jsArg(s.nzo_id)})">⏫ ${esc(t('queue.dup.force','download anyway'))}</button>`
+          : `<button class="ghost mini" title="${escA(t('queue.force.title','Download this next (force: starts even while paused)'))}" aria-label="${escA(t('queue.force.title','Download this next (force: starts even while paused)'))}" data-snd="top" onclick="forceJob(${jsArg(s.nzo_id)})">⏫</button>`)+
         // Buttoned reorder beside the drag: drag does not exist on touch,
         // and the only hint for it lives in a hover tooltip.
-        `<button class="ghost mini" title="${escA(t('queue.up.title','Move up the queue'))}" aria-label="${escA(t('queue.up.title','Move up the queue'))}" data-snd="up" onclick="qMove('${s.nzo_id}',-1)">↑</button>`+
-        `<button class="ghost mini" title="${escA(t('queue.down.title','Move down the queue'))}" aria-label="${escA(t('queue.down.title','Move down the queue'))}" data-snd="down" onclick="qMove('${s.nzo_id}',1)">↓</button>`+
-        `<button class="ghost mini" title="${escA(t('queue.remove.title','Remove from the queue'))}" aria-label="${escA(t('queue.remove.title','Remove from the queue'))}" data-snd="remove" onclick="qOp('delete','${s.nzo_id}')">✕</button>`;
+        `<button class="ghost mini" title="${escA(t('queue.up.title','Move up the queue'))}" aria-label="${escA(t('queue.up.title','Move up the queue'))}" data-snd="up" onclick="qMove(${jsArg(s.nzo_id)},-1)">↑</button>`+
+        `<button class="ghost mini" title="${escA(t('queue.down.title','Move down the queue'))}" aria-label="${escA(t('queue.down.title','Move down the queue'))}" data-snd="down" onclick="qMove(${jsArg(s.nzo_id)},1)">↓</button>`+
+        `<button class="ghost mini" title="${escA(t('queue.remove.title','Remove from the queue'))}" aria-label="${escA(t('queue.remove.title','Remove from the queue'))}" data-snd="remove" onclick="qOp('delete',${jsArg(s.nzo_id)})">✕</button>`;
     // §129 3e: the live storage pause, if one is holding. Read off the
     // whole-queue payload rather than the slot, because the pause is the
     // queue's and only names the job it happened to.
@@ -11109,7 +11125,7 @@ function renderQueue(){
     // It is the button it looks like now - same unlockJob the drawer and
     // the history row call, stopPropagation so it does not just fold the
     // row open instead.
-    const defer=(s.password_needed?` <button class="ghost mini warn" title="${escA(t('queue.pwneeded.title2','This archive is password-protected. Enter the password here - the download keeps running, and with the password it unpacks in one pass.'))}" onclick="event.stopPropagation();unlockJob('${escA(s.nzo_id)}')">🔑 ${t('queue.pwneeded','needs a password')}</button>`:'')+
+    const defer=(s.password_needed?` <button class="ghost mini warn" title="${escA(t('queue.pwneeded.title2','This archive is password-protected. Enter the password here - the download keeps running, and with the password it unpacks in one pass.'))}" onclick="event.stopPropagation();unlockJob(${jsArg(s.nzo_id)})">🔑 ${t('queue.pwneeded','needs a password')}</button>`:'')+
       // The watchdog tried this job, got nowhere, and moved it to the
       // back of the queue - and until 26 Aug 2026 the row said so in a
       // dim `title=` tooltip that nothing invites you to hover and that
@@ -11136,7 +11152,7 @@ function renderQueue(){
       // true from a bench hours earlier, wearing the badge while it ran.
       (s.deferred&&!dl?` <span class="dim">· </span><button type="button" class="whychip" title="${
         escA(t('queue.benched.title','This job was tried and moved to the back of the queue. Open the row for the reason.'))
-      }" onclick="event.stopPropagation();openDefer('${escA(s.nzo_id)}')"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-help"/></svg>${
+      }" onclick="event.stopPropagation();openDefer(${jsArg(s.nzo_id)})"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-help"/></svg>${
         s.defer_at>0
           ? t('queue.benched','tried {t} ago',{t:fmtEta(Math.max(1,Math.round(Date.now()/1000-s.defer_at)))})
           : t('queue.benched.plain','tried, set aside')
@@ -11701,7 +11717,7 @@ function originGlyph(o){
 // report is worth most, and the state history could never offer.
 function reportBlock(s){
   return `<div style="font-size:12px;margin-top:9px;padding-top:7px;border-top:1px dashed var(--line)">
-    <button class="ghost mini" style="margin-inline-start:0" onclick="event.stopPropagation();jobReport('${escA(s.nzo_id)}')">🧾 ${esc(t('menu.report','Create report'))}</button>
+    <button class="ghost mini" style="margin-inline-start:0" onclick="event.stopPropagation();jobReport(${jsArg(s.nzo_id)})">🧾 ${esc(t('menu.report','Create report'))}</button>
     <div class="dim" style="margin-top:4px">${esc(t('rep.what','Everything about this one download as text you can paste into a support thread: what it is, which servers it used, what the NZB contained, and this job\'s own log lines. Your usernames, passwords and API keys are not in it, and your home folder is written as ~.'))}</div></div>`;
 }
 // ---------------------------------------------------------------------
@@ -11802,7 +11818,7 @@ function jfRow(id,f,live,bare){
     <span class="dim mono nowrap">${fmtSize(got)} / ${fmtSize(b)}</span>
     <span class="jfst dim">${esc(jfState(st))}</span>`+
     (can?`<button class="ghost mini jfpr" title="${escA(t('drawer.files.promote','Download this file next'))}"
-      onclick="event.stopPropagation();promoteFile('${escA(id)}','${escA(f.nzf_id||f.id||'')}',this)">&#9195;</button>`:'')+
+      onclick="event.stopPropagation();promoteFile(${jsArg(id)},${jsArg(f.nzf_id||f.id||'')},this)">&#9195;</button>`:'')+
   `</div>`;
 }
 function jfBody(id,live,tail){
@@ -11831,11 +11847,11 @@ function jfBody(id,live,tail){
   const clip=!JF_FOLD.all.has(id)&&pay.length>JF_CAP;
   let h=(clip?pay.slice(0,JF_CAP):pay).map(f=>jfRow(id,f,live,bare)).join('');
   if(pay.length>JF_CAP)
-    h+=`<button class="ghost mini jfmore" onclick="event.stopPropagation();jfFold('all','${escA(id)}')">${
+    h+=`<button class="ghost mini jfmore" onclick="event.stopPropagation();jfFold('all',${jsArg(id)})">${
       clip?esc(t('drawer.files.more','show all ({n})',{n:pay.length})):esc(t('drawer.files.less','show fewer'))}</button>`;
   if(rec.length){
     const open=JF_FOLD.rec.has(id);
-    h+=`<button class="ghost mini jfmore" onclick="event.stopPropagation();jfFold('rec','${escA(id)}')">${
+    h+=`<button class="ghost mini jfmore" onclick="event.stopPropagation();jfFold('rec',${jsArg(id)})">${
       open?'&#9662;':'&#9656;'} ${esc(t('drawer.files.rec','repair files ({n})',{n:rec.length}))}</button>`;
     if(open) h+=rec.map(f=>jfRow(id,f,live,bare)).join('');
   }
@@ -11992,7 +12008,7 @@ function drawerHtml(s){
   const prios=[[2,'Force',t('prio.force','Force')],[1,'High',t('prio.high','High')],[0,'Normal',t('prio.normal','Normal')],[-1,'Low',t('prio.low','Low')]];
   return `<div class="dgrid">
       <span class="dim">${t('drawer.size','size')}</span><span class="mono">${fmtMB(s.mb)}</span>
-      <span class="dim">${t('drawer.priority','priority')}</span><span><select class="ctl" onchange="setPrio('${s.nzo_id}',this.value)">${
+      <span class="dim">${t('drawer.priority','priority')}</span><span><select class="ctl" onchange="setPrio(${jsArg(s.nzo_id)},this.value)">${
         // A duplicate-held row's priority (-3) is not in the list, and
         // an unmatched <select> silently rendered its first option -
         // "Force" - as if selected. Show the truth as a disabled entry;
@@ -12091,7 +12107,7 @@ async function dlNzb(id){
   }catch(e){ toast(t('drawer.getnzb.gone','The stored copy of this NZB is gone: nzbfast keeps the .nzb only while its job is in the queue or in History, and clears the rest about an hour after they are removed.'),true); }
 }
 function nzbBlock(s){
-  return `<button class="ghost mini" title="${escA(t('drawer.getnzb.title',"Save this job's .nzb file - nzbfast keeps its own copy even after the original is gone"))}" onclick="dlNzb('${s.nzo_id}')">⬇ ${t('drawer.getnzb','Download .nzb')}</button>`;
+  return `<button class="ghost mini" title="${escA(t('drawer.getnzb.title',"Save this job's .nzb file - nzbfast keeps its own copy even after the original is gone"))}" onclick="dlNzb(${jsArg(s.nzo_id)})">⬇ ${t('drawer.getnzb','Download .nzb')}</button>`;
 }
 // GH #86: the per-row half of "let a cancel delete the files". It lives
 // in the drawer rather than on the row, for the reason History's own
@@ -12106,10 +12122,10 @@ function nzbBlock(s){
 // racing them; qFilesToast says so instead of claiming the disk space
 // is already back.
 function qDelFilesBlock(s){
-  return `<div style="font-size:12px;margin-top:7px"><button class="ghost mini danger" title="${escA(t('queue.delfiles.title','Remove this download from the queue AND delete what it has already written to disk. Asks first.'))}" data-snd="remove" onclick="event.stopPropagation();qDelFiles('${escA(s.nzo_id)}')">🗑 ${esc(t('menu.removefiles','Remove and delete files…'))}</button></div>`;
+  return `<div style="font-size:12px;margin-top:7px"><button class="ghost mini danger" title="${escA(t('queue.delfiles.title','Remove this download from the queue AND delete what it has already written to disk. Asks first.'))}" data-snd="remove" onclick="event.stopPropagation();qDelFiles(${jsArg(s.nzo_id)})">🗑 ${esc(t('menu.removefiles','Remove and delete files…'))}</button></div>`;
 }
 function pwBlock(s){
-  return `<div style="font-size:12px;margin-top:7px"><button class="ghost mini" title="${escA(t('drawer.pw.title','Attach the archive password now: the download unpacks with it the moment it needs one, instead of parking as password-required'))}" onclick="unlockJob('${s.nzo_id}')">🔑 ${t('drawer.pw.set','Set password…')}</button>`+
+  return `<div style="font-size:12px;margin-top:7px"><button class="ghost mini" title="${escA(t('drawer.pw.title','Attach the archive password now: the download unpacks with it the moment it needs one, instead of parking as password-required'))}" onclick="unlockJob(${jsArg(s.nzo_id)})">🔑 ${t('drawer.pw.set','Set password…')}</button>`+
     (s.has_password?` <span class="dim">${t('drawer.pw.stored','A password is stored for this download.')}</span>`:'')+
   `</div>`;
 }
@@ -13242,6 +13258,14 @@ async function watchUnlock(id){
       toast(t('toast.pwlayer','That password opened the archive, but another locked archive was inside it - enter the password for that one.'), true);
       return;
     }
+    // The password opened it and the payload was then REFUSED (an
+    // executable in a media release, exerefuse): the row is Failed with
+    // the refusal's sentence, and "the password worked" is not the news.
+    if(!s.password_required&&s.status==='Failed'){
+      toast(t('toast.failed','Failed: {name} - {err}',{name:s.name, err:firstClause(s.fail_message)||t('err.unknown','unknown error')}), true);
+      tick();
+      return;
+    }
     if(!s.password_required){
       toast(t('toast.pwunlocked','Unpacked - the password worked.'));
       tick();
@@ -13273,12 +13297,12 @@ function watchFailRow(f){
   switch(kind){
     case 'queued':
       msg=t('queue.wf.queued','<b>{name}</b> is already in the queue, so it was not added a second time. Your file is untouched.',{name});
-      btn=`<button class="ghost mini" onclick="openQueueRow('${escA(f.nzo_id||'')}')">${esc(t('queue.wf.show','show it'))}</button> `+del;
+      btn=`<button class="ghost mini" onclick="openQueueRow(${jsArg(f.nzo_id||'')})">${esc(t('queue.wf.show','show it'))}</button> `+del;
       break;
     case 'done':
       msg=t('queue.wf.done','<b>{name}</b> has already been downloaded, so it was not fetched again. To download it once more, remove its History entry first.',{name});
       btn=f.nzo_id
-        ? `<button class="ghost mini" onclick="delHist('${escA(f.nzo_id)}')">${esc(t('queue.wf.forget','remove the History entry'))}</button> `+del
+        ? `<button class="ghost mini" onclick="delHist(${jsArg(f.nzo_id)})">${esc(t('queue.wf.forget','remove the History entry'))}</button> `+del
         : del;
       break;
     case 'unsaved':
@@ -13333,8 +13357,15 @@ function deleteKeptRow(f){
   // have taken some of the folder before it stopped. The folder is the
   // answer either way, and promising every file is still in it is a
   // promise this cannot keep.
-  const msg=t('hist.kept','<b>{name}</b> was deleted from the list, but its files could not be removed - look in <bdi>{path}</bdi>.',
-    {name:esc(f.name), path:esc(f.path)});
+  // `pending` (F15): the Trash call TIMED OUT, and the move it started can
+  // still finish after the daemon stopped waiting. "Could not be removed"
+  // told a user on a slow volume the files were staying, and then they
+  // were gone - so this one says where they may have gone as well.
+  const msg=f.pending
+    ? t('hist.kept.pending','<b>{name}</b> was deleted from the list, but the Trash did not answer in time. Its files may still be on their way to the Trash - look there and in <bdi>{path}</bdi>.',
+      {name:esc(f.name), path:esc(f.path)})
+    : t('hist.kept','<b>{name}</b> was deleted from the list, but its files could not be removed - look in <bdi>{path}</bdi>.',
+      {name:esc(f.name), path:esc(f.path)});
   // The daemon's sentence, in full and unsliced - it names the reason the
   // Trash gave and the setting that changes it, neither of which the line
   // above says.
@@ -14838,13 +14869,13 @@ function histMenu(e, id, failed){
   m.innerHTML=
     // "Test" for what is plainly Play: one action had two names across
     // the menu, the drawer button and the row's own tooltip.
-    it(`onclick="openItem('${id}','file')"`,`▶&nbsp; ${t('menu.play2','Play')}`)+
-    it(`onclick="openItem('${id}','folder')"`,`📂&nbsp; ${t('menu.showfolder','Show in folder')}`)+
-    it(`onclick="changeCat('${id}')"`,`🗂&nbsp; ${t('menu.changecat','Change category…')}`)+
-    (failed?it(`data-snd="top" onclick="retryJob('${id}')"`,`↻&nbsp; ${t('menu.retry','Retry download')}`):'')+
-    it(`onclick="jobReport('${id}')"`,`🧾&nbsp; ${t('menu.report','Create report')}`)+
-    `<hr>`+it(`data-snd="remove" onclick="delHist('${id}')"`,`✕&nbsp; ${t('menu.remove','Remove from history')}`)+
-    it(`class="danger" data-snd="remove" onclick="delHistFiles('${id}')"`,`🗑&nbsp; ${t('menu.removefiles','Remove and delete files…')}`);
+    it(`onclick="openItem(${jsArg(id)},'file')"`,`▶&nbsp; ${t('menu.play2','Play')}`)+
+    it(`onclick="openItem(${jsArg(id)},'folder')"`,`📂&nbsp; ${t('menu.showfolder','Show in folder')}`)+
+    it(`onclick="changeCat(${jsArg(id)})"`,`🗂&nbsp; ${t('menu.changecat','Change category…')}`)+
+    (failed?it(`data-snd="top" onclick="retryJob(${jsArg(id)})"`,`↻&nbsp; ${t('menu.retry','Retry download')}`):'')+
+    it(`onclick="jobReport(${jsArg(id)})"`,`🧾&nbsp; ${t('menu.report','Create report')}`)+
+    `<hr>`+it(`data-snd="remove" onclick="delHist(${jsArg(id)})"`,`✕&nbsp; ${t('menu.remove','Remove from history')}`)+
+    it(`class="danger" data-snd="remove" onclick="delHistFiles(${jsArg(id)})"`,`🗑&nbsp; ${t('menu.removefiles','Remove and delete files…')}`);
   document.body.appendChild(m);
   m.addEventListener('keydown', menuKey);
   const btn=e.detail===0 ? (e.target.closest&&e.target.closest('button')) : null;
@@ -14911,21 +14942,21 @@ function cardMenu(e, id, anchor){
   let stackIt='';
   if(uiDense() && !denseFull(c)){
     if(layoutPrefs().stack[id]){
-      stackIt=it(`onclick="cardStack('${id}','')"`,`⤴&nbsp; ${t('layout.menu.unstack','Unstack')}`);
+      stackIt=it(`onclick="cardStack(${jsArg(id)},'')"`,`⤴&nbsp; ${t('layout.menu.unstack','Unstack')}`);
     }else{
       let an=null;
       for(let k=i-1;k>=0;k--) if(!denseFull(seq[k])){ an=seq[k]; break; }
-      if(an) stackIt=it(`onclick="cardStack('${id}','${an.id}')"`,
+      if(an) stackIt=it(`onclick="cardStack(${jsArg(id)},${jsArg(an.id)})"`,
         `⤵&nbsp; ${t('layout.menu.stack','Stack under {card}',{card:esc(cardLabel(an))})}`);
     }
   }
   m.innerHTML=
-    it(`${noUp?'disabled ':''}onclick="cardMove('${id}',-1)"`,`↑&nbsp; ${t('layout.menu.up','Move up')}`)+
-    it(`${noDown?'disabled ':''}onclick="cardMove('${id}',1)"`,`↓&nbsp; ${t('layout.menu.down','Move down')}`)+
-    it(`onclick="toggleCardDensity('${id}')"`,`▤&nbsp; ${t('layout.menu.dense','Compact')}`)+
-    (grip?it(`onclick="cardResize('${id}')"`,`↕&nbsp; ${t('layout.menu.resize','Resize')}`):'')+
+    it(`${noUp?'disabled ':''}onclick="cardMove(${jsArg(id)},-1)"`,`↑&nbsp; ${t('layout.menu.up','Move up')}`)+
+    it(`${noDown?'disabled ':''}onclick="cardMove(${jsArg(id)},1)"`,`↓&nbsp; ${t('layout.menu.down','Move down')}`)+
+    it(`onclick="toggleCardDensity(${jsArg(id)})"`,`▤&nbsp; ${t('layout.menu.dense','Compact')}`)+
+    (grip?it(`onclick="cardResize(${jsArg(id)})"`,`↕&nbsp; ${t('layout.menu.resize','Resize')}`):'')+
     stackIt+
-    `<hr>`+it(`onclick="hideCard('${id}',true)"`,`✕&nbsp; ${t('layout.menu.hide','Hide')}`)+
+    `<hr>`+it(`onclick="hideCard(${jsArg(id)},true)"`,`✕&nbsp; ${t('layout.menu.hide','Hide')}`)+
     // The way out to §6c's mode, last and in its own group: the four
     // items above are what someone who right-clicked came for, and
     // leading with a mode switch would push Move up out of the default
@@ -16040,7 +16071,7 @@ function handleLifeEvents(r){
       // folder that is still there, not a moment), but the nudge is a
       // moment, and it used to be recovered by diffing that array
       // against a seen-set. Collected, not toasted here - see `kept`.
-      kept.push(e.name);
+      kept.push({name:e.name, pending:!!e.pending});
     } else if(e.kind==='watchlist.upgraded'){
       // The upgrade deletes a COMPLETED download and drops its history
       // row, and until this existed the only narration was two daemon
@@ -16278,6 +16309,16 @@ function handleLifeEvents(r){
         // minutes, a switch is something already downloading. The
         // password ask above is untouched - an encrypted set is still
         // encrypted whatever replaced the row.
+      } else if(e.locked&&e.fail_message==='password required to unpack'){
+        // TODO 358: an encrypted set with no password now files FAILED
+        // (diag::PASSWORD_REQUIRED), which is what an *arr has to read to
+        // grab another release. On this page it is still the ask it was
+        // as a locked completion - the password notice and no failure
+        // alarm - and in "never ask" mode it is silent, as it always was.
+        if(pwPromptMode!=='never'){
+          notice(t('toast.needpw','Downloaded, but locked: {name} needs a password to unpack.',{name:e.name}), P_ACT, true);
+          maybeNotify(t('notify.needpw','Needs a password to unpack'), e.name);
+        }
       } else if(e.auto_retry_at&&e.auto_retry_at*1000>Date.now()){
         notice(t('toast.willretry','{name} hit missing pieces - retrying automatically in {m} min.',{name:e.name,m:Math.max(1,Math.ceil((e.auto_retry_at*1000-Date.now())/60000))}), P_ENGINE);
       } else {
@@ -16302,8 +16343,16 @@ function handleLifeEvents(r){
     say('added', arrived.length===1?t('say.added','Download added: {name}.',{name:sayShort(arrived[0])})
       :t('say.addedMany','{n} downloads added.',{n:arrived.length}));
   }
-  if(kept.length===1) notice(t('toast.deleteKept','{name} was removed from the list, but its files are still on disk - see History.',{name:kept[0]}), P_ACT, true);
-  else if(kept.length) notice(t('toast.deleteKept.n','{n} deleted downloads still have their files on disk - see History.',{n:kept.length}), P_ACT, true);
+  // F15: a TIMED-OUT Trash call may still move the files, so "still on
+  // disk" is not a claim this can make about it. One pending entry in a
+  // batch is enough to soften the plural sentence for the whole batch.
+  const keptPending=kept.some(k=>k.pending);
+  if(kept.length===1) notice(keptPending
+    ? t('toast.deleteKept.pending','{name} was removed from the list, but the Trash did not answer in time - its files may still be on their way there.',{name:kept[0].name})
+    : t('toast.deleteKept','{name} was removed from the list, but its files are still on disk - see History.',{name:kept[0].name}), P_ACT, true);
+  else if(kept.length) notice(keptPending
+    ? t('toast.deleteKept.pending.n','{n} deleted downloads may still have their files on disk - the Trash did not answer in time for some of them.',{n:kept.length})
+    : t('toast.deleteKept.n','{n} deleted downloads still have their files on disk - see History.',{n:kept.length}), P_ACT, true);
   // Sort is STABLE (ES2019), so within a tier the daemon's own order -
   // which is the order the things actually happened in - survives, and
   // a batch that is all one tier plays exactly as it arrived.
@@ -16452,10 +16501,10 @@ function renderSndEvents(){
   // t() fallback; the i18n loader re-calls this once the catalogue lands.
   document.getElementById('sndEvents').innerHTML=Object.entries(SND).map(([k,v])=>
     `<div class="sndev"><label><input type="checkbox" ${sndPrefs.ev[k]===false?'':'checked'}
-       onchange="sndPrefs.ev['${k}']=this.checked; saveSndPrefs()">${t('snd.ev.'+k, v.label)}</label>
-     <button class="ghost mini" data-noblip onclick="previewSnd('${k}')" title="${escA(t('snd.preview.title','Play this sound'))}" aria-label="${escA(t('snd.preview.title','Play this sound'))}">▶</button>
+       onchange="sndPrefs.ev[${jsArg(k)}]=this.checked; saveSndPrefs()">${t('snd.ev.'+k, v.label)}</label>
+     <button class="ghost mini" data-noblip onclick="previewSnd(${jsArg(k)})" title="${escA(t('snd.preview.title','Play this sound'))}" aria-label="${escA(t('snd.preview.title','Play this sound'))}">▶</button>
      ${v.say?`<label class="mic" title="${escA(t('snd.ev.mic.title','also announce this event by voice (needs Voice announcements on)'))}"><input type="checkbox" ${sndPrefs.sv[k]===false?'':'checked'}
-       onchange="sndPrefs.sv['${k}']=this.checked; saveSndPrefs()">🗣</label>`:''}</div>`).join('');
+       onchange="sndPrefs.sv[${jsArg(k)}]=this.checked; saveSndPrefs()">🗣</label>`:''}</div>`).join('');
 }
 // Audible speed: "ticks" clicks every N MB downloaded (a geiger counter
 // for your line - pace IS the speed), "tone" pips every few seconds with
@@ -17492,7 +17541,7 @@ function buildSetRail(){
   if(!rail) return;
   rail.innerHTML=SETGROUPS.map(g=>{
     const n=setCards().filter(c=>c.dataset.sg===g.k).length;
-    return `<button type="button" data-g="${g.k}" onclick="setGoGroup('${g.k}')">`+
+    return `<button type="button" data-g="${g.k}" onclick="setGoGroup(${jsArg(g.k)})">`+
       `<span>${esc(t(g.i,g.d))}</span><span class="n">${n}</span></button>`;
   }).join('')+'<hr>'+
     `<button type="button" data-g="*" onclick="setGoGroup('*')">`+
@@ -18372,6 +18421,7 @@ async function loadSettings(){
   if(sbx) sbx.textContent = (c.sandbox&&c.sandbox.detail)||'';
   put('s_pre_queue_timeout_secs', c.pre_queue_timeout_secs??30);
   put('s_cleanup_exts', (c.cleanup_exts||[]).join(', '));
+  put('s_refuse_exts', (c.refuse_exts||[]).join(', '));
   put('s_password_prompt', c.password_prompt||'done');
   put('s_unpack_eat_volumes', c.unpack_eat_volumes||'off');
   put('s_preview', c.preview||'metadata-only');
@@ -19693,9 +19743,15 @@ function renderServers(){
       tuneNote=` · <span class="dim" title="${escA(t('set.srv.capset.title','downloads use at most {n} connections per server, from the Connections setting in Settings; this account allows {m}. Raise Connections to use more of its allowance.',{n:asked0,m:s.connections}))}">${t('set.srv.capset','capped at {n} by the Connections setting',{n:asked0})}</span>`;
     }
     const capNote=capChip(kn0&&kn0.capped, s.connections, Math.floor(Date.now()/864e5));
+    // TODO 358 item 14: the kill switch's verdict, read by the daemon
+    // from this machine's interface table when the list was fetched (the
+    // field carries the dial's own English sentence; the chip is the
+    // translated reading of it). Not on a disabled row, which is not
+    // dialled anyway.
+    const kill=(en&&s.bind_ip_down)?` <span class="bad" title="${escA(t('set.srv.killswitch.title','this server is set to go out from {addr}, and nothing on this machine has that address right now, which usually means the VPN is off. Nothing is sent over your normal connection instead. It starts again by itself once the address is back',{addr:s.bind_ip}))}">· ${t('set.srv.killswitch','kill switch: {addr} is not up, this server is paused',{addr:esc(s.bind_ip)})}</span>`:'';
     return `
     <div class="srvrow" id="srvrow${i}"${en?'':' style="opacity:.45"'}>
-      <span>${esc(s.host)}:${s.port}${s.tls?` <span class="dim" title="${escA(t('set.srv.tls.title','Encrypted connection to this server'))}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-lock"/></svg></span>`:''}${en?'':` <span class="warn">· ${t('set.srv.disabled','disabled')}</span>`}${s.level>0?` <span class="dim">· ${t('set.srv.fill','fill level {n}',{n:s.level})}</span>`:''}${s.block_account?` <span class="dim" title="${escA(t('set.srv.paid.chip.title','every byte from this server is billed, so nzbfast never sends it traffic of its own: no automatic connection tests, no benchmark traffic, no header scans'))}">· ${t('set.srv.paid.chip','billed per byte')}</span>`:''}${s.group?` <span class="dim">· ${esc(s.group)}</span>`:''}${block}${comp}
+      <span>${esc(s.host)}:${s.port}${s.tls?` <span class="dim" title="${escA(t('set.srv.tls.title','Encrypted connection to this server'))}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-lock"/></svg></span>`:''}${en?'':` <span class="warn">· ${t('set.srv.disabled','disabled')}</span>`}${kill}${s.level>0?` <span class="dim">· ${t('set.srv.fill','fill level {n}',{n:s.level})}</span>`:''}${s.block_account?` <span class="dim" title="${escA(t('set.srv.paid.chip.title','every byte from this server is billed, so nzbfast never sends it traffic of its own: no automatic connection tests, no benchmark traffic, no header scans'))}">· ${t('set.srv.paid.chip','billed per byte')}</span>`:''}${s.group?` <span class="dim">· ${esc(s.group)}</span>`:''}${block}${comp}
         <span class="hint">${tn('set.srv.connsN',s.connections,'{n} connection','{n} connections')}${tuneNote}${capNote}${s.username?' · '+esc(s.username):''}${s.retention_days>0?' · '+t('set.srv.retention','{n}d retention',{n:s.retention_days}):''}</span><span class="hint" id="srvtest${i}"></span></span>
       <label class="srvon" title="${escA(en?t('set.srv.disable.title','Take this server out of the pool without removing it'):t('set.srv.enable.title','Put this server back in the pool'))}"><input type="checkbox"${en?' checked':''} aria-label="${escA(t('set.srv.enable','Enable'))}" onchange="toggleServer(${i},this.checked?1:0,this)"></label>
       <button class="ghost" title="${escA(t('set.srv.test.title','Connect and authenticate to check this server is reachable'))}" onclick="testServerRow(${i},this)">${t('set.srv.test','Test')}</button>
@@ -19923,9 +19979,13 @@ function editServer(i){
   put('sv_family', s.address_family||'auto');
   put('sv_tlsname', s.tls_hostname||'');
   put('sv_bindip', s.bind_ip||''); put('sv_socks', s.socks5||'');
-  put('sv_socksuser', s.socks5_user||''); put('sv_sockspass','');
+  // TODO 358 item 14: one sign-in pair serves whichever proxy is set,
+  // so it loads from the HTTP proxy's echo when that is the one.
+  put('sv_httpproxy', s.http_proxy||'');
+  const viaHttp=!s.socks5&&!!s.http_proxy;
+  put('sv_socksuser', (viaHttp?s.http_proxy_user:s.socks5_user)||''); put('sv_sockspass','');
   document.getElementById('sv_sockspasshint').textContent=
-    (i>=0&&s.has_socks5_pass)?t('set.srv.pass.keep','stored: leave blank to keep'):'';
+    (i>=0&&(viaHttp?s.has_http_proxy_pass:s.has_socks5_pass))?t('set.srv.pass.keep','stored: leave blank to keep'):'';
   document.getElementById('srvform').style.display='';
   document.getElementById('sv_host').focus();
 }
@@ -20064,7 +20124,13 @@ function srvFormData(){
     socks5_user:g('sv_socksuser'),
     // Not trimmed: a proxy password may legitimately start or end with
     // a space, and blank means "keep the stored one" either way.
-    socks5_pass:document.getElementById('sv_sockspass').value };
+    socks5_pass:document.getElementById('sv_sockspass').value,
+    // TODO 358 item 14. The same sign-in pair rides along under the HTTP
+    // proxy's keys; the daemon stores it only on the proxy whose address
+    // box is filled, and refuses a save that fills both.
+    http_proxy:g('sv_httpproxy'),
+    http_proxy_user:g('sv_socksuser'),
+    http_proxy_pass:document.getElementById('sv_sockspass').value };
 }
 // '' for a blank or non-numeric box (the daemon clears the key), the
 // number otherwise - including 0. NOT named num(): that is the page's
@@ -21171,7 +21237,7 @@ function renderWelcomeLook(){
     box(ids.every(id=>!p.hidden.includes(id)), 'welcomeLookAll(this.checked)',
         t('welcome.look.all','Show everything'))
     +'<span style="flex-basis:100%"></span>'
-    +ids.map(id=>box(!p.hidden.includes(id), `welcomeLookOne('${id}',this.checked)`,
+    +ids.map(id=>box(!p.hidden.includes(id), `welcomeLookOne(${jsArg(id)},this.checked)`,
         cardLabel(document.getElementById(id)))).join('');
 }
 function welcomeLookOne(id,on){ hideCard(id,!on); renderWelcomeLook(); }
@@ -21486,7 +21552,7 @@ function renderRoles(){
   const head=`<p style="margin:0 0 4px"><b>${esc(t('role.title','How do you plan to use nzbfast?'))}</b><br>`
     +`<span class="dim">${esc(t('role.hint','Each answer is a short list of recommendations with the reason for each one. Nothing changes until you press Apply, and every row is an ordinary setting you can change back on its own afterwards.'))}</span></p>`
     +`<div class="rolepick">`+defs.map(d=>
-      `<button class="ghost${d.id===roleSel?' on':''}" aria-pressed="${d.id===roleSel}" onclick="pickRole('${d.id}')">${esc(d.label)}</button>`).join('')
+      `<button class="ghost${d.id===roleSel?' on':''}" aria-pressed="${d.id===roleSel}" onclick="pickRole(${jsArg(d.id)})">${esc(d.label)}</button>`).join('')
     +`</div>`;
   let body='';
   const d=defs.find(x=>x.id===roleSel);
@@ -21507,7 +21573,7 @@ function renderRoles(){
       const cur=roleValueText(r.id, c[r.k]), want=roleValueText(r.id, r.v);
       if(!(r.k in roleTicks)) roleTicks[r.k]=true;
       return `<label class="orow"><input type="checkbox" ${roleTicks[r.k]?'checked':''} `
-        +`onchange="roleTick('${r.k}',this.checked)"><span class="ob">`
+        +`onchange="roleTick(${jsArg(r.k)},this.checked)"><span class="ob">`
         +`<span class="ol">${esc(roleRowLabel(r.id,r.k))}</span>`
         +`<span class="oh">${esc(r.why)}</span>`
         +`<span class="ov">${t('role.change','now <b>{a}</b>, recommended <b>{b}</b>',
@@ -21518,7 +21584,7 @@ function renderRoles(){
     else if(rows.length) body+=`<p class="roledone">${esc(t('role.allset','Every recommendation for this is already how you have it.'))}</p>`;
     if(d.links.length) body+='<div class="rolelinks"><span class="dim">'
       +esc(t('role.where','Where these live:'))+'</span>'
-      +d.links.map(([sk,lbl])=>`<a href="#" onclick="return goSetting('${sk}')">${esc(lbl)}</a>`).join('')
+      +d.links.map(([sk,lbl])=>`<a href="#" onclick="return goSetting(${jsArg(sk)})">${esc(lbl)}</a>`).join('')
       +'</div>';
     body+='</div>';
   }

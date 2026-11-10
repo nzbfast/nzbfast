@@ -21,16 +21,25 @@ final class ChecksumsModel: ObservableObject {
     @Published var outputEdited = false
 
     @Published var file: String = ""
+    /// The LAST checksum job either side started, for the log drawer.
     @Published var jobId: Int64?
     @Published var snapshot: JobSnapshot?
+    /// The last checksum VERIFY, which is all the verify side may show.
+    ///
+    /// Both sides used to share `jobId`, so creating a manifest after
+    /// verifying one put the CREATE's totals, rows and busy state under the
+    /// verified file's name on the verify side (sweep, section B). A create
+    /// has a result of its own and no business in that pill.
+    @Published var verifyJobId: Int64?
+    @Published var verifySnapshot: JobSnapshot?
 
     func applyDefaults(_ settings: CoreSettings) {
         _ = settings
     }
 
     func apply(queue: QueueSnapshot) {
-        guard let id = jobId else { return }
-        snapshot = queue.jobs.first { $0.id == id }
+        if let id = jobId { snapshot = queue.jobs.first { $0.id == id } }
+        if let id = verifyJobId { verifySnapshot = queue.jobs.first { $0.id == id } }
     }
 
     func addSources(_ paths: [String]) {
@@ -71,12 +80,13 @@ final class ChecksumsModel: ObservableObject {
             relative: relative)
     }
 
-    var entries: [ChecksumEntry] { snapshot?.result?.checksum?.entries ?? [] }
+    // The three below are the VERIFY side's, and read `verifySnapshot` only.
+    var entries: [ChecksumEntry] { verifySnapshot?.result?.checksum?.entries ?? [] }
 
-    var result: ChecksumResult? { snapshot?.result?.checksum }
+    var result: ChecksumResult? { verifySnapshot?.result?.checksum }
 
     var isBusy: Bool {
-        guard let s = snapshot else { return false }
+        guard let s = verifySnapshot else { return false }
         return !s.state.isFinished
     }
 }

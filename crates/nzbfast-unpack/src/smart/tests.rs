@@ -2001,6 +2001,72 @@ fn an_unlock_that_exposes_another_lock_is_not_an_unlock() {
     assert!(crate::unlockpw::encrypted_archive(&d).is_none());
 }
 
+/// 6 Nov 2026 sweep F2: an unlock that exposes an UNLOCKED archive must
+/// unpack it too, and must never answer `Ok` over one it could not.
+///
+/// The nested walk followed locked layers only, so a locked outer
+/// container holding a PLAIN inner zip opened its outer layer, found
+/// nothing locked, and answered `Ok` with the media still packed. The API
+/// cleared the prompt on that, and the completed tail ran the ordinary
+/// cleanup, which deletes the inner zip - and with it the only unpacked
+/// route to the payload - when the cleanup list names `zip`.
+#[test]
+fn an_unlock_unpacks_a_plain_archive_it_exposes() {
+    use nzbkit::zip::fixtures::{Encrypt, Spec, zip_of};
+    let payload: Vec<u8> = (0..40_000u32).map(|i| (i * 13 + 1) as u8).collect();
+    let locked = |name: &str, body: &[u8]| {
+        zip_of(&[Spec {
+            encrypt: Some(Encrypt::ZipCrypto { password: "pwA" }),
+            ..Spec::deflated(name, body)
+        }])
+    };
+
+    let d = scratch("plaininner");
+    let inner = zip_of(&[Spec::deflated("movie.mkv", &payload)]);
+    std::fs::write(d.join("outer.zip"), locked("inner.zip", &inner)).unwrap();
+    assert_eq!(crate::unlockpw::unlock(&d, "pwA"), Ok(()));
+    assert_eq!(
+        std::fs::read(d.join("movie.mkv")).ok(),
+        Some(payload.clone()),
+        "the plain inner archive was left packed under an Ok"
+    );
+    assert!(crate::unlockpw::encrypted_archive(&d).is_none());
+
+    // A shape the walk does not take - plain RAR volumes - is a named
+    // refusal, never `Ok`: the job parks with its archives spared, and
+    // the reason says the password worked.
+    let d = scratch("plaininner-rar");
+    let rar = b"Rar!\x1a\x07\x01\x00 not a set this walk unpacks".to_vec();
+    std::fs::write(d.join("outer.zip"), locked("inner.part01.rar", &rar)).unwrap();
+    match crate::unlockpw::unlock(&d, "pwA") {
+        Err(Some(why)) => assert!(
+            why.contains("inner.part01.rar") && why.contains("password opened"),
+            "{why}"
+        ),
+        other => panic!("an exposed archive left packed must be refused by name: {other:?}"),
+    }
+    assert!(
+        d.join("inner.part01.rar").exists(),
+        "the exposed archive is kept"
+    );
+
+    // Control: a plain archive that was ALREADY there before the unlock
+    // is not this unlock's to unpack, and changes nothing.
+    let d = scratch("plaininner-before");
+    std::fs::write(d.join("outer.zip"), locked("movie.mkv", &payload)).unwrap();
+    std::fs::write(
+        d.join("extras.zip"),
+        zip_of(&[Spec::deflated("x.nfo", b"n")]),
+    )
+    .unwrap();
+    assert_eq!(crate::unlockpw::unlock(&d, "pwA"), Ok(()));
+    assert_eq!(std::fs::read(d.join("movie.mkv")).unwrap(), payload);
+    assert!(
+        !d.join("x.nfo").exists(),
+        "a pre-existing plain archive was not this unlock's"
+    );
+}
+
 /// H2 (29 Aug 2026 sweep): a destination INSIDE the source is refused
 /// before anything is created or moved.
 ///

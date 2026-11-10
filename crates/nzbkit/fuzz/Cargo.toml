@@ -35,6 +35,25 @@ url = "2"
 [profile.release]
 debug = 1
 
+# The root's `[patch.crates-io]`, copied, because `[patch]` applies from
+# the WORKSPACE ROOT and the `[workspace]` line above makes this crate
+# its own. Without it the 7z targets fuzzed the crates.io sevenz-rust2
+# and lzma-rust2 while every binary in this repo links the vendored
+# forks - so a fork-only change (an nzbfast hunk in either) was never
+# under a fuzzer here. Found 9 Nov 2026 when TODO 358 item 9 made
+# nzbkit-base call a function only the fork has
+# (`sevenz_rust2::aes256_sha256_key_iv`, vendor/sevenz-rust2/
+# README-nzbfast.md item 6) and this crate stopped compiling.
+# `apps/parfast/Cargo.toml` carries the same two lines for the same
+# reason. This crate's Cargo.lock is gitignored, so a fresh resolve
+# (CI's, any new checkout) takes both - measured. A box carrying an OLD
+# local lock keeps the registry's lzma-rust2 0.20.1 and cargo says
+# "patch ... was not used" as a warning: delete that lock (or `cargo
+# update -p lzma-rust2 --precise 0.20.0`) to fuzz the fork.
+[patch.crates-io]
+sevenz-rust2 = { path = "../../../vendor/sevenz-rust2" }
+lzma-rust2 = { path = "../../../vendor/lzma-rust2" }
+
 [[bin]]
 name = "audio_tags"
 path = "fuzz_targets/audio_tags.rs"

@@ -38,8 +38,13 @@ mod worker;
 use runner::*;
 pub use worker::spawn_download_worker;
 mod stall;
+// TODO 358 item 3: the dispatch-stall reset, driven from stall's tick.
+mod dispatch_stall;
 mod tuner;
 mod watchfolder;
+// The RSS poller's dedupe set, out of `spawn_rss_poller` with its tests.
+mod rss_seen;
+use rss_seen::SeenGuids;
 // The two leaf blocks of `spawn_index_scan`'s pass loop, moved out under
 // the fn ceiling (TODO 106); gated like enrich because every item in it
 // already was.
@@ -64,10 +69,11 @@ pub use tuner::*;
 pub use watchfolder::*;
 
 /// M14g scheduler: JSON list of {days, time, action, value} entries,
-/// evaluated once per minute in the machine's LOCAL timezone. On
-/// startup the whole week is re-evaluated so a restart lands in the
-/// state the schedule implies. Entries live in the daemon (settings
-/// UI can replace them); a UI-saved schedule wins over --schedule.
+/// evaluated every 30 s (each local minute fires once) in the machine's
+/// LOCAL timezone. On startup the whole week is re-evaluated so a
+/// restart lands in the state the schedule implies. Entries live in the
+/// daemon (settings UI can replace them); a UI-saved schedule wins over
+/// --schedule.
 pub fn spawn_scheduler(
     daemon: &Arc<Daemon>,
     settings_path: &std::path::Path,
@@ -123,53 +129,70 @@ pub fn spawn_scheduler(
         // backwards; unix seconds can, because DST does not move them.
         // See `sched::classify_tick`.
         let mut last_utc = localtime::unix_secs();
+        let mut held = false;
         loop {
             // Half-minute tick so every minute boundary is seen promptly.
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             let now = local_minute_of_week();
             let now_utc = localtime::unix_secs();
             let entries = d.schedule.lock_ok().clone();
-            match classify_tick(last, now, last_utc, now_utc) {
-                Tick::Advance => {
-                    while last != now {
-                        last = (last + 1) % WEEK_MINUTES;
-                        for e in entries.iter().filter(|e| e.fires_at(last)) {
-                            info!(target: "schedule", "{:?}", e.action);
-                            apply_action(&d, e.action.clone());
-                        }
+            let (next, tick, effects) = sched_step(&entries, last, now, last_utc, now_utc);
+            for effect in effects {
+                match effect {
+                    SchedEffect::Fire(action) => {
+                        info!(target: "schedule", "{action:?}");
+                        apply_action(&d, action);
                     }
-                }
-                // A suspend or a clock step. Land in the state the
-                // schedule implies for the minutes that were actually
-                // missed, WITHOUT replaying the one-shots in them -
-                // otherwise an overnight sleep leaves the queue paused
-                // through the whole next day (F3).
-                Tick::Reconcile { span } => {
-                    let (paused, limit) = catch_up_state(&entries, now, span);
-                    if let Some(p) = paused {
-                        apply_action(
-                            &d,
-                            if p {
-                                SchedAction::Pause
-                            } else {
-                                SchedAction::Resume
-                            },
+                    // A suspend or a clock step. Land in the state the
+                    // schedule implies for the minutes that were actually
+                    // missed, WITHOUT replaying the one-shots in them -
+                    // otherwise an overnight sleep leaves the queue paused
+                    // through the whole next day (F3).
+                    SchedEffect::Reconcile {
+                        span,
+                        paused,
+                        limit,
+                    } => {
+                        if let Some(p) = paused {
+                            apply_action(
+                                &d,
+                                if p {
+                                    SchedAction::Pause
+                                } else {
+                                    SchedAction::Resume
+                                },
+                            );
+                        }
+                        if let Some(l) = limit {
+                            d.set_speed_ceiling_from(l, "schedule");
+                        }
+                        // One line whether or not anything was owed: a
+                        // scheduler that quietly skipped a night is exactly
+                        // what took a day to find.
+                        info!(
+                            target: "schedule",
+                            "clock jump: {span} minute(s) missed, reconciled to \
+                             paused={paused:?} speedlimit={limit:?}"
                         );
                     }
-                    if let Some(l) = limit {
-                        d.set_speed_ceiling_from(l, "schedule");
-                    }
-                    // One line whether or not anything was owed: a
-                    // scheduler that quietly skipped a night is exactly
-                    // what took a day to find.
-                    info!(
-                        target: "schedule",
-                        "clock jump: {span} minute(s) missed, reconciled to \
-                         paused={paused:?} speedlimit={limit:?}"
-                    );
-                    last = now;
                 }
             }
+            // The two DST steps say so once each, for the same reason.
+            match tick {
+                Tick::Jump { span } => info!(
+                    target: "schedule",
+                    "local clock jumped forward: skipped minutes fire nothing, \
+                     the last {span} minute(s) were walked"
+                ),
+                Tick::Hold if !held => info!(
+                    target: "schedule",
+                    "local clock went back: holding until it passes the minutes \
+                     already walked"
+                ),
+                _ => {}
+            }
+            held = tick == Tick::Hold;
+            last = next;
             last_utc = now_utc;
         }
     });
@@ -293,12 +316,51 @@ pub fn spawn_queue_saver(daemon: &Arc<Daemon>) {
     });
 }
 
+/// How often the trim loop looks. Was 15 s; 5 s since a settled queue
+/// trims on the next look rather than after a minute (TODO 358 hygiene).
+const TRIM_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+/// The idle wait before a trim while something is still queued.
+const TRIM_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Is anything in the queue waiting to start, or starting? A paused job
+/// counts: the user may resume it any second, and then the minute's grace
+/// is the right rule.
+fn queue_waiting(d: &Arc<Daemon>) -> bool {
+    d.queue
+        .lock_ok()
+        .iter()
+        .any(|j| matches!(j.lock_ok().state, JobState::Queued | JobState::Downloading))
+}
+
+/// Should the idle trim fire now? Asked only once the wire is idle and
+/// no post-processing tail is running.
+///
+/// `fresh`: a download has ended since the last trim. Then EITHER the
+/// minute's grace has passed, OR nothing is queued to start - the job
+/// that just finished was the last one, so there is no warm start to
+/// protect and no reason to wait.
+///
+/// The minute alone made the first minute after every job read as a
+/// ~280 MB daemon whose idle is 34-53 MB (WEAVER-PARITY-PHASE0 section
+/// 2.2: 256-282 MB footprint at the 60 s sample on 7 of 8 legs). Trimming
+/// at completion was checked against the cost it could have - the NEXT
+/// job re-faulting the pages - before it shipped, 9 Nov 2026, release
+/// build on the dev Mac at load 13-30, a 4 x 1 GB mockserve set + PAR2,
+/// 20 fresh daemons per arm, arms interleaved: job 2's wall median
+/// 1.743 s right after a trim (footprint 21-39 MB going in) against
+/// 1.735 s untrimmed (~250 MB going in), and first progress 0.485 s
+/// against 0.495 s. No measurable cost, so the trim moved rather than
+/// the wait shortening.
+fn trim_due(fresh: bool, since_end: std::time::Duration, queue_waiting: bool) -> bool {
+    fresh && (since_end >= TRIM_IDLE || !queue_waiting)
+}
+
 /// Post-job memory trim. A finished job frees its pipeline buffers,
 /// but the allocator keeps those pages resident for reuse - which
-/// reads as a leak on the dashboard's RAM line. Once the daemon has
-/// been idle for a full minute after a download, hand the retained
-/// pages back to the OS; the next download simply faults fresh ones
-/// in. One trim per idle period, none at startup.
+/// reads as a leak on the dashboard's RAM line. Once the daemon is idle
+/// after a download, hand the retained pages back to the OS; the next
+/// download simply faults fresh ones in. One trim per idle period, none
+/// at startup. WHEN is `trim_due`'s call.
 pub fn spawn_memory_trim(daemon: &Arc<Daemon>) {
     let d = daemon.clone();
     tokio::spawn(async move {
@@ -310,7 +372,7 @@ pub fn spawn_memory_trim(daemon: &Arc<Daemon>) {
         // first job.
         let mut covered = *d.last_download_end.lock_ok();
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            tokio::time::sleep(TRIM_TICK).await;
             // `download_idle`, not `started_at` alone: the stamp lands
             // when the NETWORK drains, and repair/extract/move run on
             // the post-processing lane after it (a short download with a
@@ -323,7 +385,7 @@ pub fn spawn_memory_trim(daemon: &Arc<Daemon>) {
                 continue;
             }
             let end = *d.last_download_end.lock_ok();
-            if end != covered && end.elapsed() >= std::time::Duration::from_secs(60) {
+            if trim_due(end != covered, end.elapsed(), queue_waiting(&d)) {
                 covered = end;
                 let before = nzbkit::mem::dashboard_rss().unwrap_or(0);
                 // mimalloc (macOS + Linux): force a collection - the
@@ -1006,10 +1068,17 @@ pub fn spawn_rss_poller(
     }
     let mut from_settings = false;
     if let Some(v) = load_settings(settings_path).get("feeds") {
-        match serde_json::from_value(v.clone()) {
-            Ok(l) => {
+        // Per entry: one feed this build cannot read must not cost the
+        // others (and the id migration below would then save the loss).
+        match saved_entries(v) {
+            Ok((l, bad)) => {
+                for e in &bad {
+                    warn!(target: "rss", "ignoring one saved feed {e}");
+                }
                 feed_list = l;
-                from_settings = true;
+                // Not "from settings" for the migration save below when
+                // an entry was dropped: that save would write the loss.
+                from_settings = bad.is_empty();
             }
             Err(e) => warn!(target: "rss", "ignoring saved feeds setting: {e}"),
         }
@@ -1029,21 +1098,25 @@ pub fn spawn_rss_poller(
     // masking round-trip works for the session either way) and persist
     // the first time the dashboard saves, which is the point at which
     // settings.json takes over anyway.
-    if crate::rss::assign_feed_ids(&mut feed_list) && from_settings {
-        save_settings(
-            settings_path,
-            &[(
-                "feeds",
-                serde_json::to_value(&feed_list).unwrap_or(json!([])),
-            )],
-        );
+    // Never `unwrap_or(json!([]))` here: an encode failure would have
+    // saved an EMPTY feed list over the user's feeds to persist an id.
+    if crate::rss::assign_feed_ids(&mut feed_list)
+        && from_settings
+        && let Ok(v) = serde_json::to_value(&feed_list)
+    {
+        save_settings(settings_path, &[("feeds", v)]);
     }
     *daemon.feeds.lock_ok() = feed_list;
     // M35 pull-search indexers ride the same settings file, and the
     // daily usage counters survive a restart via the spool.
     if let Some(v) = load_settings(settings_path).get("indexers") {
-        match serde_json::from_value(v.clone()) {
-            Ok(l) => *daemon.indexers.lock_ok() = l,
+        match saved_entries(v) {
+            Ok((l, bad)) => {
+                for e in bad {
+                    warn!(target: "indexer", "ignoring one saved indexer {e}");
+                }
+                *daemon.indexers.lock_ok() = l;
+            }
             Err(e) => warn!(target: "indexer", "ignoring saved indexers setting: {e}"),
         }
     }
@@ -1055,104 +1128,14 @@ pub fn spawn_rss_poller(
     }
     let d = daemon.clone();
     tokio::spawn(async move {
-        /// The RSS dedupe set: which guids have already been judged.
-        ///
-        /// Insertion-ordered alongside the set, and capped. It used to
-        /// be a bare HashSet that never shrank under any
-        /// configuration, and every single marked item re-serialised
-        /// the WHOLE set and durably wrote it - `write_atomic` is
-        /// write_all + sync_all + a directory fsync - so one poll cost
-        /// O(items x every-guid-ever) of durable I/O. A feed producing
-        /// a few hundred guids a day reaches a multi-MB file within a
-        /// year, and from then on each new item costs a multi-MB
-        /// rewrite plus two fsyncs: real flash wear on a NAS or Pi
-        /// spool. Now it evicts the oldest and writes once per pass,
-        /// the same accumulate-then-write shape the watchlist watcher
-        /// in this file already uses.
-        ///
-        /// Evicting the oldest, never clearing: a cleared set lets old
-        /// items back through the dedupe and re-grabs history, which
-        /// is the one thing this file exists to prevent. The cap is
-        /// far wider than any rolling feed window.
-        /// Keys are `<feed scope>\u{1}<guid>`, not the bare guid.
-        ///
-        /// An RSS `guid` and an Atom `id` are publisher-local arbitrary
-        /// strings, and one global set meant two feeds publishing
-        /// different items under guid `123` suppressed each other -
-        /// including across restarts, so a rule-rejected item in feed A
-        /// permanently hid an accepted item in feed B (review sweep 12 Aug
-        /// F12).
-        ///
-        /// Reads still fall back to the bare guid, because every entry
-        /// written before this change is unscoped and re-evaluating them
-        /// would re-grab whatever is still inside each feed's rolling
-        /// window. Legacy entries therefore keep suppressing (the old
-        /// behaviour, cross-feed collisions and all) and age out of the
-        /// LRU, while every new decision is per feed.
-        struct SeenGuids {
-            set: std::collections::HashSet<String>,
-            order: std::collections::VecDeque<String>,
-            dirty: bool,
-        }
-        impl SeenGuids {
-            const MAX: usize = 20_000;
-            fn key(scope: &str, guid: &str) -> String {
-                format!("{scope}\u{1}{guid}")
-            }
-            fn contains(&self, scope: &str, guid: &str) -> bool {
-                self.set.contains(&Self::key(scope, guid)) || self.set.contains(guid)
-            }
-            fn insert(&mut self, scope: &str, guid: &str) {
-                let guid = &Self::key(scope, guid);
-                if !self.set.insert(guid.to_string()) {
-                    return;
-                }
-                self.order.push_back(guid.to_string());
-                while self.order.len() > Self::MAX {
-                    if let Some(old) = self.order.pop_front() {
-                        self.set.remove(&old);
-                    }
-                }
-                self.dirty = true;
-            }
-            /// The on-disk form: a JSON array, byte-compatible with
-            /// what the bare HashSet wrote, so an existing
-            /// rss-seen.json loads unchanged - it just gains an order.
-            /// Clears the mark only once there are bytes to write: an
-            /// encode failure keeps `dirty` set so the next pass tries
-            /// again instead of silently forgetting the set until some
-            /// later insert happens to re-mark it.
-            fn take_dirty(&mut self) -> Option<Vec<u8>> {
-                if !self.dirty {
-                    return None;
-                }
-                match serde_json::to_vec(&self.order) {
-                    Ok(b) => {
-                        self.dirty = false;
-                        Some(b)
-                    }
-                    Err(e) => {
-                        warn!(target: "rss", "rss seen set could not be encoded ({e})");
-                        None
-                    }
-                }
-            }
-            /// The write's failure path: the bytes never landed, so the
-            /// mark goes back up and the next pass retries.
-            fn unpersisted(&mut self) {
-                self.dirty = true;
-            }
-        }
+        // The dedupe set, its cap and why eviction is per feed:
+        // `rss_seen::SeenGuids`.
         let seen_path = d.spool.join("rss-seen.json");
         let loaded: Vec<String> = std::fs::read(&seen_path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
-        let seen = Arc::new(Mutex::new(SeenGuids {
-            set: loaded.iter().cloned().collect(),
-            order: loaded.into(),
-            dirty: false,
-        }));
+        let seen = Arc::new(Mutex::new(SeenGuids::from_loaded(loaded)));
         // When each feed was LAST polled, keyed by feed id and pruned to
         // the live id set on every pass below. Both halves of that are a
         // fix rather than a preference, and both were reachable with a
@@ -1717,21 +1700,17 @@ pub fn spawn_library_recheck(daemon: &Arc<Daemon>, config: &std::path::Path) {
                     .collect()
             };
             for job in jobs {
+                // Offline is a promise that this machine touches no
+                // provider (healauto and the index scans keep it the
+                // same way), and a re-verify is a provider session.
+                if d.offline.load(Ordering::Relaxed) {
+                    break;
+                }
                 let nzb_path = job.lock_ok().nzb_path.clone();
                 if let Ok(crate::Verdict::Impossible { .. }) =
                     crate::check(&config, &nzb_path, 10, 4, 50, true).await
+                    && library_mark_vanished(&d, &job, &nzb_path)
                 {
-                    {
-                        let mut j = job.lock_ok();
-                        j.state = JobState::Failed;
-                        j.fail_message = "content no longer retrievable".into();
-                        // The one sentence `fail_kind` matches EXACTLY
-                        // rather than by opening, so a single appended
-                        // character used to move it to `Local`. TODO 307
-                        // item 1 states it instead.
-                        j.fail_code = Some(FailKind::Gone);
-                        info!(target: "library", "{} vanished - marked Failed", j.nzo_id);
-                    }
                     // Log and carry on, deliberately: this verdict is
                     // the one thing here that re-derives itself. A row
                     // whose Failed flip never reached the store comes
@@ -1745,6 +1724,36 @@ pub fn spawn_library_recheck(daemon: &Arc<Daemon>, config: &std::path::Path) {
             }
         }
     });
+}
+
+/// The re-verify's Failed flip, taken only if the row is still the one
+/// that was sampled. The sampling takes seconds to minutes, and in that
+/// time the row can have been retried, fetched, re-pointed or deleted -
+/// stamping Failed on whatever it has become was a verdict about a
+/// different thing. Offline is re-read too: a session the operator cut
+/// mid-sample says nothing about the post. True = flipped, publish it.
+fn library_mark_vanished(d: &Daemon, job: &Arc<Mutex<Job>>, sampled: &std::path::Path) -> bool {
+    if d.offline.load(Ordering::Relaxed) {
+        return false;
+    }
+    // History before the job, the order the pass that collected it
+    // takes them in.
+    let h = d.history.lock_ok();
+    if !h.iter().any(|r| Arc::ptr_eq(r, job)) {
+        return false;
+    }
+    let mut j = job.lock_ok();
+    if !(j.library && !j.fetched && j.state == JobState::Completed && j.nzb_path == sampled) {
+        return false;
+    }
+    j.state = JobState::Failed;
+    j.fail_message = "content no longer retrievable".into();
+    // The one sentence `fail_kind` matches EXACTLY rather than by
+    // opening, so a single appended character used to move it to
+    // `Local`. TODO 307 item 1 states it instead.
+    j.fail_code = Some(FailKind::Gone);
+    info!(target: "library", "{} vanished - marked Failed", j.nzo_id);
+    true
 }
 
 /// NZBFAST_NO_ENRICH=1 disables the metadata workers entirely - set by

@@ -1883,6 +1883,9 @@ struct Mp4Cursor {
     chunk: u64,
     in_chunk: u32,
     chunk_spc: u32,
+    /// The `stsc` run `chunk` sits in, carried like `stts_run`: see
+    /// [`spc_at`].
+    stsc_run: usize,
     off: u64,
     done: bool,
 }
@@ -1897,18 +1900,44 @@ pub struct Mp4SampleIter {
     pub warnings: Vec<String>,
 }
 
-/// `samples_per_chunk` for a 0-based chunk index.
+/// `samples_per_chunk` for a 0-based chunk index, from scratch. Test-only
+/// since the walk took a run cursor ([`spc_at`]): one-shot lookups are
+/// what the tests assert, and no production path wants a rescan.
+#[cfg(test)]
 fn spc_for(stsc: &[(u32, u32)], chunk0: u64) -> u32 {
+    spc_at(stsc, &mut 0, chunk0)
+}
+
+/// `samples_per_chunk` for a 0-based chunk index, resuming from the run
+/// `run` already reached and leaving it at the one `chunk0` sits in.
+///
+/// The answer is the last entry of the LEADING run of entries whose
+/// `first_chunk` is at or below the chunk - an out-of-order entry ends
+/// the search, exactly as it always has - and because the walk only ever
+/// moves forward a chunk at a time, that run only ever grows, so the
+/// cursor never has to look back. Rescanning from entry 0 for every
+/// chunk, as this did until 9 Nov 2026, was O(chunks x entries): both
+/// tables are attacker-sized up to `MAX_TABLE_ENTRIES`, one entry per
+/// chunk is a legal layout, and the walk (and every seek's re-walk from
+/// the start) went quadratic on it.
+///
+/// `chunk0` must not go backwards between calls on one `run`; a seek
+/// starts a fresh cursor, and so a fresh `run`.
+fn spc_at(stsc: &[(u32, u32)], run: &mut usize, chunk0: u64) -> u32 {
     let c1 = chunk0.saturating_add(1);
-    let mut spc = 0;
-    for &(first, n) in stsc {
-        if u64::from(first) <= c1 {
-            spc = n;
-        } else {
-            break;
-        }
+    while stsc
+        .get(*run + 1)
+        .is_some_and(|&(first, _)| u64::from(first) <= c1)
+        && stsc
+            .get(*run)
+            .is_some_and(|&(first, _)| u64::from(first) <= c1)
+    {
+        *run += 1;
     }
-    spc
+    match stsc.get(*run) {
+        Some(&(first, n)) if u64::from(first) <= c1 => n,
+        _ => 0,
+    }
 }
 
 impl Mp4Cursor {
@@ -1925,10 +1954,12 @@ impl Mp4Cursor {
             ctts_left: t.ctts.first().map_or(0, |(c, _)| *c),
             chunk: 0,
             in_chunk: 0,
-            chunk_spc: spc_for(&t.stsc, 0),
+            chunk_spc: 0,
+            stsc_run: 0,
             off: t.chunk_offsets.first().copied().unwrap_or(0),
             done: false,
         };
+        c.chunk_spc = spc_at(&t.stsc, &mut c.stsc_run, 0);
         // An stsc that puts no samples in the first chunk describes no
         // samples at all; walking it would step a chunk per sample.
         c.done = c.total == 0 || t.chunk_offsets.is_empty() || c.chunk_spc == 0;
@@ -2002,7 +2033,7 @@ impl Mp4Cursor {
         if self.in_chunk >= self.chunk_spc {
             self.chunk += 1;
             self.in_chunk = 0;
-            self.chunk_spc = spc_for(&t.stsc, self.chunk);
+            self.chunk_spc = spc_at(&t.stsc, &mut self.stsc_run, self.chunk);
             match t
                 .chunk_offsets
                 .get(usize::try_from(self.chunk).unwrap_or(usize::MAX))
@@ -2633,6 +2664,76 @@ mod tests {
         assert_eq!(spc_for(&stsc, 7), 2);
         assert_eq!(spc_for(&stsc, 8), 7);
         assert_eq!(spc_for(&stsc, 100), 7);
+    }
+
+    /// The resuming cursor answers exactly what a rescan from entry 0
+    /// would, chunk by chunk, on the shapes a hostile file can write: a
+    /// first entry above chunk 1, out-of-order and repeated entries, a
+    /// zero count, an empty table.
+    #[test]
+    fn the_stsc_run_cursor_agrees_with_a_full_rescan() {
+        fn rescan(stsc: &[(u32, u32)], chunk0: u64) -> u32 {
+            let mut spc = 0;
+            for &(first, n) in stsc {
+                if u64::from(first) > chunk0 + 1 {
+                    break;
+                }
+                spc = n;
+            }
+            spc
+        }
+        let tables: [&[(u32, u32)]; 6] = [
+            &[(1, 4), (5, 2), (9, 7)],
+            &[(3, 4), (5, 2)],
+            &[(1, 4), (9, 7), (5, 2), (12, 1)],
+            &[(1, 4), (1, 6), (2, 0), (2, 3), (4, 5)],
+            &[(0, 9), (2, 1)],
+            &[],
+        ];
+        for stsc in tables {
+            let mut run = 0;
+            for chunk0 in 0..20u64 {
+                assert_eq!(
+                    spc_at(stsc, &mut run, chunk0),
+                    rescan(stsc, chunk0),
+                    "{stsc:?} at chunk {chunk0}"
+                );
+            }
+        }
+    }
+
+    /// One `stsc` entry per chunk is a legal layout, and the walk used
+    /// to rescan the table from its first entry at every chunk: O(chunks
+    /// x entries), both attacker-sized up to `MAX_TABLE_ENTRIES`. At
+    /// 100,000 of each that is five billion comparisons per walk, and
+    /// every seek walks again from the start.
+    ///
+    /// The bound is two orders of magnitude above what the linear walk
+    /// costs on a loaded box; it exists to fail the quadratic one.
+    ///
+    /// NEGATIVE CONTROL, run: make `step` call `spc_for(&t.stsc,
+    /// self.chunk)` again and this takes tens of seconds, then fails.
+    #[test]
+    fn a_one_entry_per_chunk_stsc_walks_in_linear_time() {
+        const N: u32 = 100_000;
+        let mut t = mp4_track(1, b"vide", b"avc1", true);
+        t.stts = vec![(N, 1)];
+        t.stsz = Stsz::Uniform(1);
+        t.stsc = (1..=N).map(|c| (c, 1)).collect();
+        t.chunk_offsets = (0..u64::from(N)).collect();
+        let started = std::time::Instant::now();
+        let mut c = Mp4Cursor::new(&t, 1);
+        let mut walked = 0u64;
+        while !c.done {
+            c.step(&t).unwrap();
+            walked += 1;
+        }
+        assert_eq!(walked, u64::from(N));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the stsc walk took {:?} over {N} chunks",
+            started.elapsed()
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@ The SwiftUI front end over the PAR2 engine, plan
 `research/PLAN-PARFAST-GUI-2026-09-12.md` (TODO 342), chip B.
 
 ```sh
-swift build && swift test     # 67 tests, no app bundle needed
+swift build && swift test     # the mock-build suite, no app bundle needed
 ./make-app.sh                 # universal build/parfast.app
 ARCH=arm64 ./make-app.sh      # this Mac only, for a quick loop
 ./Tools/generate.py --check   # the shared tables are current
