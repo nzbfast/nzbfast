@@ -24,7 +24,7 @@ workspace = true
 # renamed that feature, which is what stalled the weekly dependabot
 # cargo run for a fortnight. Check `cargo tree -p nzbtray --target
 # x86_64-pc-windows-gnu` for aws-lc-sys before taking any bump here.
-ureq = { version = "3", default-features = false, features = ["rustls"] }
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
 # Declared directly for the custom loopback verifier in `loopback_tls` -
 # same version and the same ring-only feature set ureq asks for, so this
 # adds no crate the `tls` feature above did not already pull in.

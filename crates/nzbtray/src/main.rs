@@ -321,7 +321,10 @@ mod app {
                     .map_err(|_| ureq::Error::Tls("invalid dns name"))?
                     .to_owned();
             let mut conn = rustls::ClientConnection::new(loopback_tls(), name)?;
-            let mut sock = ureq::unversioned::transport::TransportAdapter::new(transport.boxed());
+            let mut sock = ureq::unversioned::transport::TransportAdapter::new(
+                transport.boxed(),
+                details.current_time.clone(),
+            );
             sock.set_timeout(details.timeout);
             conn.complete_io(&mut sock)?;
             Ok(Some(Either::B(LoopbackTlsTransport {

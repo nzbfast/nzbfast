@@ -20,7 +20,7 @@ anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.150"
-ureq = "3"
+ureq = "3.5"
 # `notify`'s webhook signing (X-NzbFast-Signature) and `manifest`'s
 # update-payload digests.
 sha2 = "0.11"
