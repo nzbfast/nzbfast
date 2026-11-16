@@ -312,7 +312,7 @@ button.dimbtn:hover,button.dimbtn:focus-visible{opacity:1}
 #histhov .foot{color:var(--dim);margin-top:7px;font-size:11.5px}
 #ctxmenu{position:fixed;background:var(--surface);border:1px solid var(--line);border-radius:10px;
   padding:5px;z-index:99;min-width:220px;box-shadow:0 10px 34px rgba(0,0,0,.5);
-  max-height:calc(100vh - 16px);overflow-y:auto}
+  max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);overflow-y:auto}
 /* The height cap is not decoration. Every menu here was ~7 rows until
    the busy strip's "+N" chip started inlining every folded subsystem's
    actions under its own heading - eight of them is 24 rows and seven
@@ -14894,8 +14894,14 @@ function histMenu(e, id, failed){
 function placeMenu(m, e, anchor){
   const r=anchor && anchor.getBoundingClientRect();
   const x=r?r.left:e.clientX, y=r?r.bottom+4:e.clientY;
-  m.style.left=Math.max(8,Math.min(x, innerWidth-m.offsetWidth-8))+'px';
-  m.style.top=Math.max(8,Math.min(y, innerHeight-m.offsetHeight-8))+'px';
+  // `innerWidth` can include the scrollbar area and does not consistently
+  // match the CSS containing block in embedded browsers. Clamp against the
+  // actual layout viewport, after limiting the menu itself to that width.
+  const vw=document.documentElement.clientWidth || innerWidth;
+  const vh=document.documentElement.clientHeight || innerHeight;
+  m.style.maxWidth=Math.max(0,vw-16)+'px';
+  m.style.left=Math.max(8,Math.min(x, vw-m.offsetWidth-8))+'px';
+  m.style.top=Math.max(8,Math.min(y, vh-m.offsetHeight-8))+'px';
 }
 
 // Right-click menu on a card's heading (§6). Testers kept reporting that
