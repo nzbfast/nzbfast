@@ -111,7 +111,7 @@ jobs:
         run: |
           python3 packaging/make-sbom.py --asset "dist/parfast-$VER-macos-universal.tar.gz" \
             --target aarch64-apple-darwin --target x86_64-apple-darwin -p parfast
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: parfast-cli-mac
           path: dist/*
@@ -214,7 +214,7 @@ jobs:
           done
           python3 packaging/make-sbom.py --asset "dist/parfast-$VER-windows-x64.zip" \
             --target x86_64-pc-windows-gnu -p parfast
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: parfast-cli-unix-windows
           path: dist/*
@@ -353,7 +353,7 @@ jobs:
             python3 packaging/make-sbom.py --asset "dist/parfast-gui-$VER-macos-universal.$a" \
               --target aarch64-apple-darwin --target x86_64-apple-darwin -p parfast-ffi --workspace apps/parfast
           done
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: parfast-app-mac
           path: dist/*
@@ -465,7 +465,7 @@ jobs:
             "$PY" packaging/make-sbom.py --asset "dist/parfast-gui-$VER-$a" \
               --target x86_64-pc-windows-msvc -p parfast-ffi --workspace apps/parfast
           done
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: parfast-app-windows
           path: dist/*
