@@ -27,6 +27,17 @@ use rars::{ArchiveReadOptions, ArchiveReader};
 /// target hunts panics and OOB in the parse and decode paths, and 8 MiB of
 /// output exercises those just as well as 64 MiB, while keeping `-timeout=10`
 /// meaningful as a genuine hang detector instead of a bomb detector.
+/// 2 MiB since 25 Nov 2026, because 8 MiB never bound the slowest seed:
+/// `rar15_40/ppmd/farmanager170.rar` is a genuine 329-member PPMd archive
+/// that decodes to 3.2 MiB in ~0.25 s uninstrumented, and took 10-14 s on
+/// CI runners - straddling `-timeout=10`, so the job went red or green by
+/// runner speed. Dropping the seed would not do: a same-size mutant of it
+/// lives in the cached corpus and times out too. Measured locally with
+/// cargo-fuzz's flags (aarch64 macOS, median of 7), 8 -> 2 -> 1 MiB:
+/// 3191 -> 1498 -> 1487 ms on that seed, and over the fixture tree
+/// 6379 -> 6382 -> 6373 edges (ft 16,138 -> 16,066 -> 15,937). 2 MiB buys
+/// essentially all of the time and 1 MiB starts to cost edges.
+///
 /// The budget is PER ARCHIVE, not per entry. It used to live inside the
 /// sink, and `open` builds a fresh sink for every member - so an archive
 /// of 400 members each decoding 8 MiB passed the cap 400 times over and
@@ -37,7 +48,7 @@ struct CapSink(Rc<Cell<usize>>);
 impl Write for CapSink {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.set(self.0.get().saturating_add(buf.len()));
-        if self.0.get() > 8 * 1024 * 1024 {
+        if self.0.get() > 2 * 1024 * 1024 {
             return Err(std::io::Error::other("output cap"));
         }
         Ok(buf.len())
