@@ -8,9 +8,10 @@
 # team has a QNAP. packaging/tests/qnap-install.sh drives this file
 # directly against fake volume trees.
 #
-# Runs as root, from qinstall's pkg_post_install. Every input is an
-# environment variable qinstall.sh has already resolved, which is also
-# how the test harness fakes a NAS.
+# Runs as root, from pkg_post_install in package_routines. Every input is
+# a variable qinstall.sh has already resolved and that hook passes in the
+# environment (qinstall does not export them itself - a new input has to
+# be added there too), which is also how the test harness fakes a NAS.
 set -e
 
 PORT="@@PORT@@"

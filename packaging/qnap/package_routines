@@ -90,7 +90,13 @@ port_is_listening(){
 # service script, so this is the last thing to run before QTS starts it.
 ######################################################################
 pkg_post_install(){
-    /bin/sh "$SYS_QPKG_DIR/nzbfast-setup.sh" || \
+    # qinstall.sh sets these but never exports them, and the script is a
+    # child process: anything not handed over here does not reach it.
+    SYS_QPKG_DIR="$SYS_QPKG_DIR" \
+    SYS_QPKG_INSTALL_PATH="$SYS_QPKG_INSTALL_PATH" \
+    SYS_DOWNLOAD_PATH="$SYS_DOWNLOAD_PATH" \
+    SYS_PUBLIC_PATH="$SYS_PUBLIC_PATH" \
+        /bin/sh "$SYS_QPKG_DIR/nzbfast-setup.sh" || \
         err_log "[nzbfast] Setup failed after unpacking - see the App Center log above."
 }
 
