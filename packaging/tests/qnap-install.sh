@@ -298,6 +298,63 @@ case "$(routines_case x86_64 "$T/net-listen" "$T/installed")" in
     *) bad "an upgrade was refused because it was already running" ;;
 esac
 
+# --- the hook that runs the setup script --------------------------------
+
+# qinstall.sh SETS the SYS_* variables but never EXPORTS them, and the
+# setup script is a child process, so the hook has to hand each one over.
+# Every run_setup case above passes them in the environment itself, which
+# is how a hook that handed over nothing shipped: setup died on its first
+# line on every NAS (issue #134). So run the real hook, with the variables
+# as plain unexported shell variables. `unset` first, because assigning to
+# a name this shell inherited as exported would leave it exported.
+#
+# Each share path is checked on its own, outside the install volume, so a
+# hook that drops just that one cannot pass on the volume-relative
+# fallback.
+#   hook_case <root> <download-path> <public-path>
+hook_case() {
+    (
+        unset SYS_QPKG_DIR SYS_QPKG_INSTALL_PATH SYS_DOWNLOAD_PATH SYS_PUBLIC_PATH
+        err_log() { echo "ERR: $1"; exit 1; }
+        SYS_QPKG_DIR="$1/volume/.qpkg/nzbfast"
+        SYS_QPKG_INSTALL_PATH="$1/volume/.qpkg"
+        SYS_DOWNLOAD_PATH="$2"
+        SYS_PUBLIC_PATH="$3"
+        cp "$SETUP" "$SYS_QPKG_DIR/nzbfast-setup.sh"
+        QNAP_TEST_UNAME=x86_64
+        export QNAP_TEST_UNAME
+        . "$ROUTINES"
+        pkg_post_install
+    ) >"$1/hook.log" 2>&1
+}
+#   hook_check <name> <root> <expected data folder> <download> <public>
+hook_check() {
+    if hook_case "$2" "$4" "$5"; then
+        check "$1" "$3" "$(envval "$2" NZBFAST_DATA)"
+    else
+        bad "$1: $(cat "$2/hook.log")"
+    fi
+}
+r="$T/hook-vol"; make_nas "$r" Download
+hook_check "the hook passes the install volume" "$r" \
+    "$r/volume/Download/nzbfast" "" ""
+r="$T/hook-dl"; make_nas "$r"; mkdir -p "$r/other/My Downloads"
+hook_check "the hook passes the download share" "$r" \
+    "'$r/other/My Downloads/nzbfast'" "$r/other/My Downloads" ""
+r="$T/hook-pub"; make_nas "$r"; mkdir -p "$r/other/Shared"
+hook_check "the hook passes the public share" "$r" \
+    "$r/other/Shared/nzbfast" "" "$r/other/Shared"
+# And a setup that really fails still aborts the install.
+r="$T/hook-fail"; make_nas "$r" Download
+rm -f "$r/volume/.qpkg/nzbfast/bin/nzbfast-x86_64"
+if hook_case "$r" "" ""; then
+    bad "the hook swallowed a failed setup"
+elif grep -q "bin/nzbfast-x86_64 - the build is broken" "$r/hook.log"; then
+    ok "the hook aborts when setup fails"
+else
+    bad "the hook failed for the wrong reason: $(cat "$r/hook.log")"
+fi
+
 # --- the package format -------------------------------------------------
 
 # unpack-qpkg.sh is the only thing that can open a .qpkg where QDK is not
