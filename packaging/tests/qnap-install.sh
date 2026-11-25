@@ -355,6 +355,52 @@ else
     bad "the hook failed for the wrong reason: $(cat "$r/hook.log")"
 fi
 
+# --- starting the service ----------------------------------------------
+
+# QTS has no `nohup` (seen on a TS-X53B, QTS 5.2.11), so a start that
+# needs it dies with "command not found" after an install that looked
+# fine. Run the real service script with a PATH holding only commands
+# that were confirmed on that NAS, and check the daemon comes up, ignores
+# SIGHUP (nohup's job) and stops. Linux only: the script reads /proc.
+if [ -r /proc/self/cmdline ]; then
+    svc="$T/svc"; r="$svc/nas"; make_nas "$r" Download
+    root="$r/volume/.qpkg/nzbfast"
+    mkdir -p "$svc/path"
+    for c in cat grep kill mkdir rm sh sleep tail tr; do
+        p=$(command -v "$c") || continue
+        case "$p" in /*) ln -sf "$p" "$svc/path/$c" ;; esac
+    done
+    printf '#!/bin/sh\ncase "$2" in Install_Path) echo "%s" ;; Enable) echo TRUE ;; esac\n' \
+        "$root" > "$svc/getcfg"
+    chmod 755 "$svc/getcfg"
+    printf '#!/bin/sh\nwhile :; do sleep 1; done\n' > "$root/bin/nzbfast"
+    chmod 755 "$root/bin/nzbfast"
+    printf 'NZBFAST_DATA=%s\nNZBFAST_CONFIG=%s\nNZBFAST_OUT=%s\nNZBFAST_WATCH=%s\n' \
+        "$svc/data" "$svc/data/config/config.json" "$svc/data/downloads" \
+        "$svc/data/watch" > "$root/nzbfast.env"
+    sed -e 's/@@PORT@@/6789/g' -e "s#/sbin/getcfg#$svc/getcfg#" \
+        -e "s#^PIDFILE=.*#PIDFILE=$svc/pid#" \
+        "$QNAP/shared/nzbfast.sh" > "$svc/nzbfast.sh"
+    service() { PATH="$svc/path" "$svc/path/sh" "$svc/nzbfast.sh" "$1" >"$svc/out" 2>&1; }
+    if service start; then
+        ok "the service starts with only the commands QTS has"
+        daemon=$(cat "$svc/pid")
+        kill -HUP "$daemon"; sleep 1
+        if service status; then ok "  and survives a hangup"
+        else bad "  a hangup killed the service"; fi
+        service stop || true
+        if service status; then
+            kill -9 "$daemon"; bad "  stop left the daemon running"
+        else
+            ok "  and stops"
+        fi
+    else
+        bad "the service did not start: $(cat "$svc/out" "$root/nzbfast.log" 2>/dev/null)"
+    fi
+else
+    echo "  skip the service start cases (no /proc here)"
+fi
+
 # --- the package format -------------------------------------------------
 
 # unpack-qpkg.sh is the only thing that can open a .qpkg where QDK is not

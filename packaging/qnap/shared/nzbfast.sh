@@ -73,12 +73,16 @@ case "$1" in
     # from both, so the setting is refused with an explanation instead.
     NZBFAST_PORT_LOCKED=1
     export NZBFAST_PORT_LOCKED
-    nohup "$BIN" serve \
+    # QTS ships no nohup. An ignored signal stays ignored across exec, so
+    # this does the same job without one: closing the SSH session or App
+    # Center's shell does not take the daemon with it.
+    trap '' HUP
+    "$BIN" serve \
         --config "$NZBFAST_CONFIG" \
         --port "$NZBFAST_PORT" \
         --out "$NZBFAST_OUT" \
         --watch "$NZBFAST_WATCH" \
-        >> "$LOGFILE" 2>&1 &
+        </dev/null >> "$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
     # Confirm it is still alive rather than reporting success for a
     # process that exited immediately - the failure mode that makes a
