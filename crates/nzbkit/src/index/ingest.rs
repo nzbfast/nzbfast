@@ -69,23 +69,25 @@ pub fn split_subject(subject: &str) -> Option<(String, u32, u32)> {
 /// value, because `[1/3] "x.mkv" yEnc (1/3)` carries the same pair
 /// twice and a value test reads the trailing counter as the tag.
 pub fn split_subject_at(subject: &str) -> Option<(String, u32, u32, usize)> {
-    let opens: Vec<(usize, char, char)> = subject
-        .char_indices()
-        .filter_map(|(i, c)| match c {
-            '(' => Some((i, '(', ')')),
-            '[' => Some((i, '[', ']')),
-            _ => None,
-        })
-        .collect();
-    for &(open, _, close_ch) in opens.iter().rev() {
-        let Some(close) = subject[open..].find(close_ch).map(|j| j + open) else {
+    let bytes = subject.as_bytes();
+    for (open, &b) in bytes.iter().enumerate().rev() {
+        let close_ch = match b {
+            b'(' => ')',
+            b'[' => ']',
+            _ => continue,
+        };
+        let Some(rel_close) = subject[open + 1..].find(close_ch) else {
             continue;
         };
+        let close = open + 1 + rel_close;
         let inner = &subject[open + 1..close];
-        let sep = inner
-            .find('/')
-            .map(|i| (i, 1))
-            .or_else(|| inner.to_ascii_lowercase().find(" of ").map(|i| (i, 4)));
+        let sep = inner.find('/').map(|i| (i, 1)).or_else(|| {
+            inner
+                .as_bytes()
+                .windows(4)
+                .position(|w| w.eq_ignore_ascii_case(b" of "))
+                .map(|i| (i, 4))
+        });
         let Some((si, sl)) = sep else { continue };
         let (Ok(n), Ok(m)) = (
             inner[..si].trim().parse::<u32>(),
@@ -93,9 +95,11 @@ pub fn split_subject_at(subject: &str) -> Option<(String, u32, u32, usize)> {
         ) else {
             continue;
         };
-        let mut base = String::new();
-        base.push_str(subject[..open].trim_end());
-        base.push_str(subject[close + close_ch.len_utf8()..].trim_end());
+        let left = subject[..open].trim_end();
+        let right = subject[close + 1..].trim_end();
+        let mut base = String::with_capacity(left.len() + right.len());
+        base.push_str(left);
+        base.push_str(right);
         return Some((base, n, m, open));
     }
     None
@@ -208,22 +212,112 @@ pub fn quoted_name(s: &str) -> Option<String> {
 /// numbered part → (message-id, bytes).
 type ClusterFiles = HashMap<String, (u32, BTreeMap<u32, (String, u64)>)>;
 
-/// What one ingest pass makes of a batch of articles in memory, before
-/// it opens a transaction: the clusters themselves, the four per-cluster
-/// side-tables, and the two ledgers of what could not be placed.
-///
-/// A struct rather than seven returned values, because
-/// [`Index::cluster_batch`] is the seam [`Index::ingest_pass`] was split
-/// at and all seven cross it.
-struct Clustered {
-    /// (poster, stem) -> filename -> (total, parts: number -> (msgid, bytes)).
-    clusters: HashMap<(String, String), ClusterFiles>,
+/// Borrowed-lookup key for `Clustered::clusters` so existing clusters
+/// can be looked up by `(&str, &str)` without cloning `poster` or `stem`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ClusterKey(String, String);
+
+trait ClusterKeyRef {
+    fn poster(&self) -> &str;
+    fn stem(&self) -> &str;
+}
+
+impl ClusterKeyRef for ClusterKey {
+    fn poster(&self) -> &str {
+        &self.0
+    }
+    fn stem(&self) -> &str {
+        &self.1
+    }
+}
+
+impl ClusterKeyRef for (&str, &str) {
+    fn poster(&self) -> &str {
+        self.0
+    }
+    fn stem(&self) -> &str {
+        self.1
+    }
+}
+
+impl<'a> std::borrow::Borrow<dyn ClusterKeyRef + 'a> for ClusterKey {
+    fn borrow(&self) -> &(dyn ClusterKeyRef + 'a) {
+        self
+    }
+}
+
+impl PartialEq for dyn ClusterKeyRef + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.poster() == other.poster() && self.stem() == other.stem()
+    }
+}
+
+impl Eq for dyn ClusterKeyRef + '_ {}
+
+impl std::hash::Hash for dyn ClusterKeyRef + '_ {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.poster().hash(state);
+        self.stem().hash(state);
+    }
+}
+
+/// Per-cluster state accumulated during [`Index::cluster_batch`]:
+/// its files plus the three release-level metadata fields that travel
+/// with the same `(poster, stem)` key.
+#[derive(Default)]
+struct ClusterBucket {
+    /// filename -> (total, parts: number -> (msgid, bytes)).
+    files: ClusterFiles,
     /// Earliest article Date per cluster - the release's upload time.
-    posted: HashMap<(String, String), i64>,
-    /// Pesto family: decoded counter range + earliest clock per cluster.
-    pesto: HashMap<(String, String), (i64, i64, i64)>,
-    /// Posting-session tag: the leading "[037/209]" file-of-session marker.
-    sess: HashMap<(String, String), (i64, i64)>,
+    posted: Option<i64>,
+    /// Pesto family (TODO 131 red-team 5a): decoded counter range +
+    /// earliest clock per cluster, persisted so the tiny-PAR2 rung
+    /// can link a sidecar backward to its payload by counter. The
+    /// randomized Date header is NEVER used for this.
+    pesto: Option<(i64, i64, i64)>,
+    /// Posting-session tag: the leading "[037/209]" file-of-session
+    /// marker (13 Aug 2026 census). First parsed value per cluster
+    /// wins - a file has exactly one position in its session.
+    sess: Option<(i64, i64)>,
+}
+
+impl ClusterBucket {
+    /// Fold one entry's release-level metadata (date, pesto counter/clock,
+    /// leading session tag) into this bucket.
+    fn record_meta(&mut self, e: &OverEntry, now: i64) {
+        if e.date > 0 {
+            // Clamp a future Date: header to the scan time. A garbled or
+            // hostile far-future date would otherwise pin the release to
+            // the top of the "newest" sort forever AND make it immune to
+            // age-retention pruning (first_posted < cutoff never holds).
+            let d = e.date.min(now);
+            self.posted = Some(self.posted.map_or(d, |p| p.min(d)));
+        }
+        if let Some(pid) = crate::pesto::parse_msgid(&e.message_id) {
+            let (ctr, clock) = (pid.counter as i64, pid.clock.min(i64::MAX as u64) as i64);
+            self.pesto = Some(match self.pesto {
+                Some((lo, hi, ck)) => (lo.min(ctr), hi.max(ctr), ck.min(clock)),
+                None => (ctr, ctr, clock),
+            });
+        }
+        if self.sess.is_none()
+            && let Some(t) = session_tag(&e.subject)
+        {
+            self.sess = Some(t);
+        }
+    }
+}
+
+/// What one ingest pass makes of a batch of articles in memory, before
+/// it opens a transaction: the clusters (with their per-cluster metadata)
+/// and the ledgers of what could not be placed.
+///
+/// A struct rather than four returned values, because
+/// [`Index::cluster_batch`] is the seam [`Index::ingest_pass`] was split
+/// at and all four cross it.
+struct Clustered {
+    /// (poster, stem) -> files + per-cluster metadata.
+    clusters: HashMap<ClusterKey, ClusterBucket>,
     /// Articles this pass refuses to place - see [`Index::ingest`].
     deferred: Vec<OverEntry>,
     /// Per-slot deferral ledger, for the generation-depth census.
@@ -1743,20 +1837,9 @@ impl Index {
     /// need happens after it returns, which is also why the generation
     /// clash below defers rather than resolves.
     fn cluster_batch(entries: &[OverEntry], now: i64, gp: &mut GenPasses) -> Clustered {
-        // Cluster the batch in memory first: (poster, stem) → filename →
-        // (total, parts: number → (msgid, bytes)).
-        let mut clusters: HashMap<(String, String), ClusterFiles> = HashMap::new();
-        // Earliest article Date per cluster → the release's upload time.
-        let mut posted: HashMap<(String, String), i64> = HashMap::new();
-        // Pesto family (TODO 131 red-team 5a): decoded counter range +
-        // earliest clock per cluster, persisted so the tiny-PAR2 rung
-        // can link a sidecar backward to its payload by counter. The
-        // randomized Date header is NEVER used for this.
-        let mut pesto: HashMap<(String, String), (i64, i64, i64)> = HashMap::new();
-        // Posting-session tag: the leading "[037/209]" file-of-session
-        // marker (13 Aug 2026 census). First parsed value per cluster
-        // wins - a file has exactly one position in its session.
-        let mut sess: HashMap<(String, String), (i64, i64)> = HashMap::new();
+        // Cluster the batch in memory first: (poster, stem) → ClusterBucket
+        // (files + earliest Date + pesto range + session tag).
+        let mut clusters: HashMap<ClusterKey, ClusterBucket> = HashMap::new();
         // Articles this pass refuses to place - see the note at the
         // clash test below. Empty on every ordinary batch.
         let mut deferred: Vec<OverEntry> = Vec::new();
@@ -1830,7 +1913,6 @@ impl Index {
                 drops.empty_stem += 1;
                 continue;
             }
-            let key = (e.from.clone(), stem);
             // The in-memory half of the generation split. `clusters`
             // merges by part number, so without this test an OVER window
             // holding BOTH generations of a release - a backfill leg
@@ -1849,57 +1931,41 @@ impl Index {
             // in memory would mean guessing which of two article sets is
             // the generation the stored row already holds, and the next
             // pass can simply ask.
-            if let Some((have_total, parts)) = clusters.get(&key).and_then(|c| c.get(&fname))
-                && (*have_total != total
-                    || parts
-                        .get(&part)
-                        .is_some_and(|(id, _)| norm_msgid(id) != norm_msgid(&e.message_id)))
-            {
-                let slot = (key.clone(), fname.clone(), part);
-                if !defer_fits_budget(&mut slot_gen, slot, &e.message_id, gp) {
-                    // Provably unplaceable within the pass budget.
-                    drops.gen_depth += 1;
-                    continue;
+            let lookup: &dyn ClusterKeyRef = &(e.from.as_str(), stem.as_str());
+            if let Some(bucket) = clusters.get_mut(lookup) {
+                if let Some((have_total, parts)) = bucket.files.get_mut(&fname) {
+                    if *have_total != total
+                        || parts
+                            .get(&part)
+                            .is_some_and(|(id, _)| norm_msgid(id) != norm_msgid(&e.message_id))
+                    {
+                        let slot = ((e.from.clone(), stem), fname, part);
+                        if !defer_fits_budget(&mut slot_gen, slot, &e.message_id, gp) {
+                            // Provably unplaceable within the pass budget.
+                            drops.gen_depth += 1;
+                            continue;
+                        }
+                        deferred.push(e.clone());
+                        continue;
+                    }
+                    parts.insert(part, (e.message_id.clone(), e.bytes));
+                } else {
+                    let mut parts = BTreeMap::new();
+                    parts.insert(part, (e.message_id.clone(), e.bytes));
+                    bucket.files.insert(fname, (total, parts));
                 }
-                deferred.push(e.clone());
-                continue;
+                bucket.record_meta(e, now);
+            } else {
+                let mut bucket = ClusterBucket::default();
+                bucket.record_meta(e, now);
+                let mut parts = BTreeMap::new();
+                parts.insert(part, (e.message_id.clone(), e.bytes));
+                bucket.files.insert(fname, (total, parts));
+                clusters.insert(ClusterKey(e.from.clone(), stem), bucket);
             }
-            if e.date > 0 {
-                // Clamp a future Date: header to the scan time. A garbled or
-                // hostile far-future date would otherwise pin the release to
-                // the top of the "newest" sort forever AND make it immune to
-                // age-retention pruning (first_posted < cutoff never holds).
-                let d = e.date.min(now);
-                let p = posted.entry(key.clone()).or_insert(d);
-                *p = (*p).min(d);
-            }
-            if let Some(pid) = crate::pesto::parse_msgid(&e.message_id) {
-                let (ctr, clock) = (pid.counter as i64, pid.clock.min(i64::MAX as u64) as i64);
-                pesto
-                    .entry(key.clone())
-                    .and_modify(|(lo, hi, ck)| {
-                        *lo = (*lo).min(ctr);
-                        *hi = (*hi).max(ctr);
-                        *ck = (*ck).min(clock);
-                    })
-                    .or_insert((ctr, ctr, clock));
-            }
-            if let Some(t) = session_tag(&e.subject) {
-                sess.entry(key.clone()).or_insert(t);
-            }
-            clusters
-                .entry(key)
-                .or_default()
-                .entry(fname)
-                .or_insert_with(|| (total, BTreeMap::new()))
-                .1
-                .insert(part, (e.message_id.clone(), e.bytes));
         }
         Clustered {
             clusters,
-            posted,
-            pesto,
-            sess,
             deferred,
             slot_gen,
             drops,
@@ -1978,6 +2044,9 @@ impl Index {
         let mut seen: HashMap<(&str, u32), HashMap<String, std::collections::HashSet<u32>>> =
             HashMap::new();
         for e in entries {
+            if !e.subject.trim_start().starts_with(['(', '[']) {
+                continue;
+            }
             let Some((base, n, m, open)) = split_subject_at(&e.subject) else {
                 continue;
             };
@@ -2034,9 +2103,6 @@ impl Index {
     ) -> rusqlite::Result<Vec<OverEntry>> {
         let Clustered {
             mut clusters,
-            posted,
-            pesto,
-            sess,
             deferred,
             slot_gen,
             drops,
@@ -2054,7 +2120,7 @@ impl Index {
         // mutably and these are reads.
         let mut named: HashMap<String, (String, String)> = HashMap::new();
         if self.predb {
-            for (_, stem) in clusters.keys() {
+            for ClusterKey(_, stem) in clusters.keys() {
                 if named.contains_key(stem) {
                     continue;
                 }
@@ -2064,7 +2130,7 @@ impl Index {
             }
         }
         if let Some(gate) = &self.gate {
-            clusters.retain(|(_, stem), _| {
+            clusters.retain(|ClusterKey(_, stem), _| {
                 gate(named.get(stem).map_or(stem.as_str(), |(t, _)| t.as_str()))
             });
         }
@@ -2084,7 +2150,13 @@ impl Index {
         // `pick_release_row`).
         let mut gen_minted = 0u32;
         let mut gen_dropped = 0u32;
-        for ((poster, stem), files) in clusters {
+        for (ClusterKey(poster, stem), bucket) in clusters {
+            let ClusterBucket {
+                files,
+                posted,
+                pesto,
+                sess,
+            } = bucket;
             // Real upload time when the batch carried Dates; scan time
             // otherwise. MIN on conflict lets an older batch (backfill
             // runs newest-first) walk first_posted back to the truth.
@@ -2092,11 +2164,7 @@ impl Index {
             // untrusted OVER header, and a far-future date would pin the release
             // atop every Latest/Posted view for years AND dodge both retention
             // prunes (they only delete rows OLDER than a cutoff).
-            let up = posted
-                .get(&(poster.clone(), stem.clone()))
-                .copied()
-                .unwrap_or(now)
-                .min(now + 86_400);
+            let up = posted.unwrap_or(now).min(now + 86_400);
             // Which of this triple's rows this batch belongs to, and the
             // file rows that row already holds - fetched once here and
             // reused by the merge below, so the common single-candidate
@@ -2155,7 +2223,7 @@ impl Index {
             // batch's articles. Monotonic (MIN/MAX over NULL via
             // COALESCE), so batches in any order converge on the same
             // range - the property the counter-containment link needs.
-            if let Some((lo, hi, ck)) = pesto.get(&(poster.clone(), stem.clone())) {
+            if let Some((lo, hi, ck)) = pesto {
                 tx.prepare_cached(
                     "UPDATE releases SET
                        pesto_ctr_min = MIN(COALESCE(pesto_ctr_min, ?2), ?2),
@@ -2165,7 +2233,7 @@ impl Index {
                 )?
                 .execute(rusqlite::params![rid, lo, hi, ck])?;
             }
-            if let Some((si, st)) = sess.get(&(poster.clone(), stem.clone())) {
+            if let Some((si, st)) = sess {
                 // First writer wins: a file has one position in its
                 // posting session, and a later disagreeing tag is a
                 // different posting the generation split handles.
