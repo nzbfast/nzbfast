@@ -1732,7 +1732,7 @@ async fn recycle_slow_sheds_after_consecutive_race_losses() {
     assert_eq!(lad.race_losses, 0, "a recycle spends the evidence");
     assert!(sess.inflight.is_empty(), "the shed empties the pipeline");
     assert_eq!(
-        sh.queue.lock().await.front().map(|w| &*w.id),
+        sh.queue.lock_ok().front().map(|w| &*w.id),
         Some("<l2@x>"),
         "the shed article requeues at the front, uncharged"
     );
@@ -1815,7 +1815,7 @@ async fn recycle_slope_redials_a_collapsed_session() {
     assert!(matches!(step, BodyStep::Recycle));
     assert!(sess.inflight.is_empty());
     assert_eq!(
-        sh.queue.lock().await.front().map(|w| &*w.id),
+        sh.queue.lock_ok().front().map(|w| &*w.id),
         Some("<s1@x>"),
         "the shed sibling requeues"
     );

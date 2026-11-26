@@ -1294,7 +1294,7 @@ async fn the_top_up_stops_at_the_live_target_and_holds_one_at_the_wire_cap() {
         sess.inflight.is_empty(),
         "a slot over the target admits nothing, so its pipeline drains"
     );
-    assert_eq!(sh.queue.lock().await.len(), ids.len());
+    assert_eq!(sh.queue.lock_ok().len(), ids.len());
 
     // Ordinary fill: the window is topped up, each dispatch charged and
     // registered, and the server's tried counter moves.
@@ -1489,7 +1489,7 @@ async fn a_duplicate_does_not_spend_a_queued_articles_held_re_ask() {
     // the group's bit remembered in `recheck_430` and cleared out of
     // `tried_430`, the item back in the queue waiting to be re-asked.
     {
-        let mut q = sh.queue.lock().await;
+        let mut q = sh.queue.lock_ok();
         let w = q.front_mut().unwrap();
         assert!(sh.take_recheck(w, &cfg, ctx.group_bits));
         w.tried_430 &= !ctx.group_bits;
@@ -1516,7 +1516,7 @@ async fn a_duplicate_does_not_spend_a_queued_articles_held_re_ask() {
     );
     assert_eq!(sh.pending.load(Ordering::Acquire), 1);
     assert_eq!(
-        sh.queue.lock().await.front().unwrap().tried_430 & ctx.group_bits,
+        sh.queue.lock_ok().front().unwrap().tried_430 & ctx.group_bits,
         0,
         "the bit the hold cleared must stay clear until the re-ask is answered"
     );
@@ -1604,7 +1604,7 @@ async fn a_takedown_flavoured_refusal_flavours_the_terminal_missing() {
     // b's is a plain 430. The union is unanimous at b, and a's hint
     // survives to the outcome.
     for (si, takedown) in [(0usize, true), (1usize, false)] {
-        let w = pop_id(&mut *sh.queue.lock().await, "<t@x>");
+        let w = pop_id(&mut sh.queue.lock_ok(), "<t@x>");
         let mut sess = SessionState::from_inflight([w].into_iter().collect());
         sh.charge_wire();
         handle_missing(
@@ -1632,7 +1632,7 @@ async fn a_takedown_flavoured_refusal_flavours_the_terminal_missing() {
     }
     // <p@x>: plain 430s all the way down stay unflavoured.
     for si in [0usize, 1] {
-        let w = pop_id(&mut *sh.queue.lock().await, "<p@x>");
+        let w = pop_id(&mut sh.queue.lock_ok(), "<p@x>");
         let mut sess = SessionState::from_inflight([w].into_iter().collect());
         sh.charge_wire();
         handle_missing(
@@ -1677,7 +1677,7 @@ async fn a_promoted_articles_refusal_goes_back_to_the_promoted_front() {
     // A promoted article already at the front, so the insert has to pick
     // the position AFTER it rather than the head of the queue.
     {
-        let mut q = sh.queue.lock().await;
+        let mut q = sh.queue.lock_ok();
         q.retain(|w| &*w.id != "<p@x>");
         let mut ahead = work("<q@x>");
         ahead.promoted = true;
@@ -1700,7 +1700,7 @@ async fn a_promoted_articles_refusal_goes_back_to_the_promoted_front() {
     )
     .await;
     assert!(rx.try_recv().is_err(), "another backbone can still answer");
-    let q = sh.queue.lock().await;
+    let q = sh.queue.lock_ok();
     let order: Vec<&str> = q.iter().map(|w| &*w.id).collect();
     assert_eq!(
         order.first().copied(),
@@ -2264,7 +2264,7 @@ async fn a_refusal_that_only_looks_unanimous_because_a_server_left_says_so() {
     // b's last worker has already left; it never saw this article.
     sh.alive[1].store(0, Ordering::SeqCst);
     let (tx, mut rx) = mpsc::channel(8);
-    let w = sh.queue.lock().await.pop_front().expect("queued");
+    let w = sh.queue.lock_ok().pop_front().expect("queued");
     let mut sess = SessionState::from_inflight([w].into_iter().collect());
     sh.charge_wire();
     handle_missing(
@@ -2293,7 +2293,7 @@ async fn a_refusal_that_only_looks_unanimous_because_a_server_left_says_so() {
         other => panic!("expected a terminal Missing, got {other:?}"),
     }
     assert!(
-        sh.queue.lock().await.is_empty(),
+        sh.queue.lock_ok().is_empty(),
         "the article is still terminal - the fleet has nobody who could take it"
     );
 }

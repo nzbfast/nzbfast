@@ -140,7 +140,7 @@ fn a_contended_queue_lock_delays_the_seal_it_does_not_empty_it() {
         let sh = sh.clone();
         let held = held.clone();
         std::thread::spawn(move || {
-            let g = sh.queue.blocking_lock();
+            let g = sh.queue.lock_ok();
             held.wait();
             // TWICE the bound (SEAL_LOCK_TRIES x 10 ms): the seal meets
             // the lock, runs out its bound, complains once - and keeps

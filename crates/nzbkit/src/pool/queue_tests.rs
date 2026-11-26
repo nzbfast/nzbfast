@@ -59,7 +59,7 @@ async fn queue_control_promotes_to_front_preserving_order() {
         .map(|s| Arc::from(*s))
         .collect();
     assert_eq!(ctl.promote(&ids), 3);
-    let q = shared.queue.lock().await;
+    let q = shared.queue.lock_ok();
     let order: Vec<&str> = q.iter().map(|w| &*w.id).collect();
     assert_eq!(
         order,
@@ -98,7 +98,7 @@ async fn queue_control_cancel_removes_pending_and_completes_them() {
         ["<c1>", "<c4>"]
     );
     assert_eq!(shared.pending.load(Ordering::Relaxed), 4);
-    let q = shared.queue.lock().await;
+    let q = shared.queue.lock_ok();
     let order: Vec<&str> = q.iter().map(|w| &*w.id).collect();
     assert_eq!(order, ["<c0>", "<c2>", "<c3>", "<c5>"]);
     drop(q);
@@ -147,7 +147,7 @@ async fn queue_control_requeue_resurrects_cancelled_work() {
     assert_eq!(ctl.requeue(&back), 2);
     assert_eq!(shared.pending.load(Ordering::Relaxed), 4);
     {
-        let q = shared.queue.lock().await;
+        let q = shared.queue.lock_ok();
         let mut order: Vec<&str> = q.iter().map(|w| &*w.id).collect();
         order.sort();
         assert_eq!(order, ["<r0>", "<r1>", "<r2>", "<r3>"]);

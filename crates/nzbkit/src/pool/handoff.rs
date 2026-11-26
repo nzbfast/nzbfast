@@ -1233,7 +1233,7 @@ mod tests {
     /// idle fleet at queue-dry means. Not a loosening of the floor: the
     /// floor's own gate test drives it from the other side.
     async fn refused_everywhere(shared: &Shared) {
-        let mut q = shared.queue.lock().await;
+        let mut q = shared.queue.lock_ok();
         for w in q.iter_mut() {
             w.tried_430 = u32::MAX;
         }
@@ -1806,7 +1806,7 @@ mod tests {
         // never been asked. This is the state a 430 elsewhere leaves
         // behind, and it can arrive AFTER row 1's fleet went idle.
         let ord = {
-            let mut q = shared.queue.lock().await;
+            let mut q = shared.queue.lock_ok();
             let w = q.front_mut().expect("the run's only article");
             w.tried_430 = super::super::server_bit(0);
             w.ord

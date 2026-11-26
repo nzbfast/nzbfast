@@ -24,7 +24,7 @@ async fn next_work_reports_a_dead_article_and_latches_the_tail() {
     sh.alive[0].fetch_add(1, Ordering::AcqRel);
     // Every LIVE server has already 430'd the head article: it is
     // terminal, and waiting on it would rotate it forever.
-    sh.queue.lock().await.front_mut().unwrap().tried_430 = sh.live_mask();
+    sh.queue.lock_ok().front_mut().unwrap().tried_430 = sh.live_mask();
     let (tx, mut rx) = mpsc::channel(4);
     let w = next_work(&sh, ctx, &tx, Pipeline::payload(0))
         .await
@@ -81,7 +81,7 @@ async fn steer_inbox_requeues_are_adopted_in_promoted_first_order() {
         0,
         "the adopt charged promoted_pending and the pick spent it"
     );
-    let q = sh.queue.lock().await;
+    let q = sh.queue.lock_ok();
     let ids: Vec<&str> = q.iter().map(|w| &*w.id).collect();
     // A plain steer goes to the front BEHIND the promoted run, never
     // the back: the consumer already holds a (rejected) copy and is
@@ -116,11 +116,65 @@ async fn a_fill_server_waits_for_every_live_primary_miss() {
     );
     sh.scan_futile[1].store(u64::MAX, Ordering::Relaxed);
     // The primary 430'd it: the gate opens.
-    sh.queue.lock().await.front_mut().unwrap().tried_430 = server_bit(0);
+    sh.queue.lock_ok().front_mut().unwrap().tried_430 = server_bit(0);
+    sh.note_fill_candidate();
     let w = next_work(&sh, ctx1, &tx, Pipeline::payload(0))
         .await
         .expect("gate satisfied");
     assert_eq!(&*w.id, "<a@x>");
+    assert_eq!(sh.fill_candidates.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn fill_candidates_tracks_retention_refusals_and_cancel_requeue() {
+    let mut prime = server("prime");
+    prime.retention_days = 100;
+    let mut fill = server("fill");
+    fill.level = 1;
+    let servers = vec![(prime, PoolConfig::default()), (fill, PoolConfig::default())];
+    let reqs = vec![
+        ArticleReq::fresh("<fresh@x>"),
+        ArticleReq {
+            id: Arc::from("<old@x>"),
+            age_days: 200,
+            part: 0,
+            file: u32::MAX,
+        },
+    ];
+    let (sh, _) = Shared::new(reqs, &servers);
+    sh.alive[0].store(1, Ordering::Release);
+    sh.sessions[0].store(1, Ordering::Release);
+    sh.alive[1].store(1, Ordering::Release);
+    sh.sessions[1].store(1, Ordering::Release);
+    assert_eq!(
+        sh.fill_candidates.load(Ordering::Acquire),
+        1,
+        "retention-seeded item counts as a fill candidate"
+    );
+
+    // Cancel and requeue preserves fill_candidates.
+    let ctl = QueueControl::default();
+    ctl.attach(&sh);
+    let old_set: HashSet<Arc<str>> = [Arc::from("<old@x>")].into_iter().collect();
+    assert_eq!(ctl.cancel(&old_set).len(), 1);
+    assert_eq!(sh.fill_candidates.load(Ordering::Acquire), 0);
+    assert_eq!(ctl.requeue(&[Arc::from("<old@x>")]), 1);
+    assert_eq!(sh.fill_candidates.load(Ordering::Acquire), 1);
+
+    // Fill server picks the retention-excluded item and drops fill_candidates to 0.
+    let (tx, _rx) = mpsc::channel(4);
+    let ctx1 = ctx_for(&servers, 1);
+    let w = next_work(&sh, ctx1, &tx, Pipeline::payload(0))
+        .await
+        .expect("fill server picks retention-seeded article");
+    assert_eq!(&*w.id, "<old@x>");
+    assert_eq!(sh.fill_candidates.load(Ordering::Acquire), 0);
+    // Remaining item has tried_430 == 0: fill server fast-paths to None.
+    assert!(
+        next_work(&sh, ctx1, &tx, Pipeline::payload(0))
+            .await
+            .is_none()
+    );
 }
 
 /// M5: the primary resets on one article every time it is dispatched.
@@ -172,7 +226,7 @@ async fn a_primary_that_spends_its_budget_hands_the_article_down() {
         "the article must not be declared lost while a server that never saw it is live"
     );
     {
-        let q = sh.queue.lock().await;
+        let q = sh.queue.lock_ok();
         let w = q.front().expect("requeued, not failed");
         assert_eq!(w.attempts, 0, "the ladder hands the next tier a budget");
         assert_eq!(
@@ -208,7 +262,7 @@ async fn endgame_ladder_articles_ride_empty_pipelines_only() {
     sh.alive[0].fetch_add(1, Ordering::AcqRel);
     sh.alive[1].fetch_add(1, Ordering::AcqRel);
     // One pending article 430'd by the sibling: an endgame ladder probe.
-    sh.queue.lock().await.front_mut().unwrap().tried_430 = server_bit(1);
+    sh.queue.lock_ok().front_mut().unwrap().tried_430 = server_bit(1);
     let (tx, _rx) = mpsc::channel(4);
     // A busy pipeline holds it back (head-of-line blocking on the last
     // windows was the measured straggler tail).
@@ -239,7 +293,7 @@ async fn untried_promoted_work_is_left_for_a_faster_server() {
     sh.note_stream();
     sh.bytes[1].store(64_000_000, Ordering::Release);
     {
-        let mut q = sh.queue.lock().await;
+        let mut q = sh.queue.lock_ok();
         q.front_mut().unwrap().promoted = true;
         sh.promoted_pending.fetch_add(1, Ordering::AcqRel);
     }
@@ -251,7 +305,7 @@ async fn untried_promoted_work_is_left_for_a_faster_server() {
             .is_none()
     );
     {
-        let q = sh.queue.lock().await;
+        let q = sh.queue.lock_ok();
         assert_eq!(q.front().map(|w| &*w.id), Some("<s@x>"));
         assert!(q.front().unwrap().promoted);
     }
@@ -263,7 +317,7 @@ async fn untried_promoted_work_is_left_for_a_faster_server() {
     // Once ANY backbone has 430'd it, latency beats speed-matching:
     // whoever can serve it, serves it.
     sh.scan_futile[0].store(u64::MAX, Ordering::Relaxed);
-    sh.queue.lock().await.front_mut().unwrap().tried_430 = server_bit(1);
+    sh.queue.lock_ok().front_mut().unwrap().tried_430 = server_bit(1);
     let w = next_work(&sh, ctx0, &tx, Pipeline::payload(0))
         .await
         .expect("a missed promote goes to whoever is standing");
@@ -298,7 +352,7 @@ async fn a_bare_430_defers_the_verdict_and_says_so() {
     let (tx, mut rx) = mpsc::channel(8);
     // Dispatch it the way a worker would, so the queue below counts the
     // requeue and not the seeded entry.
-    let dispatched = sh.queue.lock().await.pop_front().expect("the seeded work");
+    let dispatched = sh.queue.lock_ok().pop_front().expect("the seeded work");
     let mut sess = SessionState::from_inflight([dispatched].into_iter().collect());
     sh.charge_wire();
 
@@ -323,15 +377,14 @@ async fn a_bare_430_defers_the_verdict_and_says_so() {
         rx.try_recv().is_err(),
         "the first bare 430 requeues - it does not resolve the article"
     );
-    assert_eq!(sh.queue.lock().await.len(), 1, "requeued for the recheck");
+    assert_eq!(sh.queue.lock_ok().len(), 1, "requeued for the recheck");
 
     // The confirming repeat lands on the re-aligned session and is
     // authoritative: the article goes terminally Missing, and THAT
     // resolution is the outstanding-count movement the watchdog sees.
     let w = sh
         .queue
-        .lock()
-        .await
+        .lock_ok()
         .pop_front()
         .expect("the requeued work");
     let mut sess = SessionState::from_inflight([w].into_iter().collect());
@@ -373,7 +426,7 @@ async fn the_bare_430_recheck_jumps_the_queue() {
     let cfg = PoolConfig::default();
     let ctx = ctx_for(&servers, 0);
     let (tx, _rx) = mpsc::channel(8);
-    let dispatched = sh.queue.lock().await.pop_front().expect("the seeded work");
+    let dispatched = sh.queue.lock_ok().pop_front().expect("the seeded work");
     assert_eq!(&*dispatched.id, "<a@x>");
     let mut sess = SessionState::from_inflight([dispatched].into_iter().collect());
     sh.charge_wire();
@@ -389,7 +442,7 @@ async fn the_bare_430_recheck_jumps_the_queue() {
         &mut sess,
     )
     .await;
-    let q = sh.queue.lock().await;
+    let q = sh.queue.lock_ok();
     assert_eq!(q.len(), 2, "requeued for the recheck");
     assert_eq!(
         q.front().map(|w| &*w.id),
@@ -433,7 +486,7 @@ async fn a_proven_desync_gives_the_bare_430_pass_back() {
     let mut sess = SessionState::from_inflight(VecDeque::new());
 
     // A desynced session's refusal: bare, and about the article behind.
-    let w = sh.queue.lock().await.pop_front().expect("the seeded work");
+    let w = sh.queue.lock_ok().pop_front().expect("the seeded work");
     sess.inflight.push_back(w);
     sh.charge_wire();
     handle_missing(
@@ -462,8 +515,7 @@ async fn a_proven_desync_gives_the_bare_430_pass_back() {
     // The next bare refusal is therefore FIRST evidence again.
     let w = sh
         .queue
-        .lock()
-        .await
+        .lock_ok()
         .pop_front()
         .expect("the requeued work");
     sess.inflight.push_back(w);
@@ -484,14 +536,13 @@ async fn a_proven_desync_gives_the_bare_430_pass_back() {
         "the voided refusal cannot confirm anything - declaring the \
          article here is the false Missing this item exists to close"
     );
-    assert_eq!(sh.queue.lock().await.len(), 1, "requeued for the recheck");
+    assert_eq!(sh.queue.lock_ok().len(), 1, "requeued for the recheck");
 
     // And with no fresh proof, the pair that follows still resolves it:
     // re-arming may not turn a dead post into a loop.
     let w = sh
         .queue
-        .lock()
-        .await
+        .lock_ok()
         .pop_front()
         .expect("the requeued work");
     sess.inflight.push_back(w);
@@ -538,7 +589,7 @@ async fn the_re_armed_pass_is_capped_so_the_run_still_terminates() {
     // Every single refusal is followed by a proof of desync - the worst
     // case a hostile or badly broken frontend can produce.
     for round in 0..(SOFT_REARM_CAP as usize + 2) {
-        let Some(w) = sh.queue.lock().await.pop_front() else {
+        let Some(w) = sh.queue.lock_ok().pop_front() else {
             break; // resolved: the article left the queue for good
         };
         let mut sess = SessionState::from_inflight([w].into_iter().collect());
@@ -615,7 +666,7 @@ async fn a_fleet_that_shrank_past_an_article_reports_unasked_not_gone() {
     sh.alive[0].store(1, Ordering::Relaxed);
     sh.alive[1].store(1, Ordering::Relaxed);
     // Server a refused the head article. Server b has never seen it.
-    sh.queue.lock().await.front_mut().unwrap().tried_430 = server_bit(0);
+    sh.queue.lock_ok().front_mut().unwrap().tried_430 = server_bit(0);
     // Server b's last worker now leaves mid-run - a spent prepaid block,
     // connect exhaustion, an outage budget: the doors differ, the effect
     // on the mask is the same one.
@@ -649,7 +700,7 @@ async fn a_fleet_that_shrank_past_an_article_reports_unasked_not_gone() {
     // The run still ENDS. The article is out of the queue, not rotating
     // in it - which is the half a frozen-mask terminal test would break.
     assert!(
-        !sh.queue.lock().await.iter().any(|q| &*q.id == "<lost@x>"),
+        !sh.queue.lock_ok().iter().any(|q| &*q.id == "<lost@x>"),
         "terminality is unchanged - a fix that wedged the run is worse than the defect"
     );
 }
@@ -669,7 +720,7 @@ async fn every_participant_refusing_is_still_gone() {
     sh.connected[1].store(true, Ordering::Relaxed);
     sh.alive[0].store(1, Ordering::Relaxed);
     sh.alive[1].store(1, Ordering::Relaxed);
-    sh.queue.lock().await.front_mut().unwrap().tried_430 = server_bit(0) | server_bit(1);
+    sh.queue.lock_ok().front_mut().unwrap().tried_430 = server_bit(0) | server_bit(1);
     // b leaves AFTER refusing: its refusal is on the record, so this is
     // not a fleet that shrank past anything.
     sh.alive[1].store(0, Ordering::Relaxed);
@@ -714,7 +765,7 @@ async fn a_server_that_never_connected_is_not_a_participant() {
         server_bit(0),
         "having never held a connection, it was never asked and never could be"
     );
-    sh.queue.lock().await.front_mut().unwrap().tried_430 = server_bit(0);
+    sh.queue.lock_ok().front_mut().unwrap().tried_430 = server_bit(0);
     let (tx, mut rx) = mpsc::channel(4);
     let _ = next_work(&sh, ctx_for(&servers, 0), &tx, Pipeline::payload(0)).await;
     match rx.try_recv() {
@@ -830,5 +881,111 @@ fn only_missing_cause_decides_a_terminal_refusals_cause() {
             .iter()
             .all(|&(rel, n)| rel == hrel && n >= hfrom && n <= hto),
         "and they must live inside `missing_cause` ({hrel}:{hfrom}-{hto}): {sites:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore]
+async fn bench_next_work_sync_queue_and_fill_fast_path() {
+    const N_ITEMS: usize = 50_000;
+    const N_WORKERS: usize = 32;
+    const FILL_CALLS: usize = 200;
+    const REPS: usize = 7;
+
+    let template_ids: Vec<Arc<str>> = (0..N_ITEMS)
+        .map(|i| Arc::from(format!("<art-{i}@bench.example>")))
+        .collect();
+
+    // (a) High-concurrency next_work pops over 50,000 queued items with 32 primary workers
+    let mut pop_times_ms: Vec<f64> = Vec::with_capacity(REPS);
+    for rep in 0..=REPS {
+        let servers = vec![(server("prime"), PoolConfig::default())];
+        let reqs: Vec<ArticleReq> = template_ids
+            .iter()
+            .map(|id| ArticleReq::fresh(id.clone()))
+            .collect();
+        let (sh, _) = Shared::new(reqs, &servers);
+        let ctx = ctx_for(&servers, 0);
+        sh.alive[0].store(N_WORKERS, Ordering::Release);
+        sh.sessions[0].store(N_WORKERS, Ordering::Release);
+        let (tx, _rx) = mpsc::channel(4);
+        let barrier = Arc::new(tokio::sync::Barrier::new(N_WORKERS + 1));
+
+        let mut handles = Vec::with_capacity(N_WORKERS);
+        for _ in 0..N_WORKERS {
+            let sh = sh.clone();
+            let tx = tx.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let mut popped = 0usize;
+                while next_work(&sh, ctx, &tx, Pipeline::payload(0))
+                    .await
+                    .is_some()
+                {
+                    popped += 1;
+                }
+                popped
+            }));
+        }
+
+        barrier.wait().await;
+        let start = Instant::now();
+        let mut total = 0usize;
+        for h in handles {
+            total += h.await.unwrap();
+        }
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(total, N_ITEMS);
+        if rep > 0 {
+            pop_times_ms.push(elapsed_ms);
+        }
+    }
+    pop_times_ms.sort_by(|a, b| a.total_cmp(b));
+    let pop_median_ms = pop_times_ms[REPS / 2];
+
+    // (b) Fill server (ctx.level = 1) calling next_work against a 50,000-item queue
+    //     with 0 lower-tier refusals
+    let mut fill_times_us: Vec<f64> = Vec::with_capacity(REPS);
+    let mut fill_srv = server("fill");
+    fill_srv.level = 1;
+    let servers = vec![
+        (server("prime"), PoolConfig::default()),
+        (fill_srv, PoolConfig::default()),
+    ];
+    let reqs: Vec<ArticleReq> = template_ids
+        .iter()
+        .map(|id| ArticleReq::fresh(id.clone()))
+        .collect();
+    let (sh, _) = Shared::new(reqs, &servers);
+    let ctx1 = ctx_for(&servers, 1);
+    sh.alive[0].store(1, Ordering::Release);
+    sh.sessions[0].store(1, Ordering::Release);
+    sh.alive[1].store(1, Ordering::Release);
+    sh.sessions[1].store(1, Ordering::Release);
+    let (tx, _rx) = mpsc::channel(4);
+
+    for rep in 0..=REPS {
+        let start = Instant::now();
+        for _ in 0..FILL_CALLS {
+            sh.scan_futile[1].store(u64::MAX, Ordering::Relaxed);
+            let got = next_work(&sh, ctx1, &tx, Pipeline::payload(0)).await;
+            assert!(got.is_none());
+        }
+        let elapsed_us = start.elapsed().as_secs_f64() * 1_000_000.0;
+        if rep > 0 {
+            fill_times_us.push(elapsed_us);
+        }
+    }
+    fill_times_us.sort_by(|a, b| a.total_cmp(b));
+    let fill_median_us = fill_times_us[REPS / 2];
+
+    eprintln!(
+        "BENCH_A_POPS_50K_32W: median={pop_median_ms:.3} ms (per_pop={:.1} ns) all={pop_times_ms:.3?}",
+        (pop_median_ms * 1_000_000.0) / (N_ITEMS as f64)
+    );
+    eprintln!(
+        "BENCH_B_FILL_50K_200CALLS: median={fill_median_us:.1} us (per_call={:.3} us) all={fill_times_us:.1?}",
+        fill_median_us / (FILL_CALLS as f64)
     );
 }

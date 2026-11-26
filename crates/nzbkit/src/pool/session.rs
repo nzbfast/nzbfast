@@ -1543,7 +1543,7 @@ pub(super) async fn handle_missing(
             // Tail queues are tiny (endgame ≤64) - a linear
             // stamp is cheap, and a miss (article mid-hand-
             // off) only costs one redundant attempt.
-            let mut q = shared.queue.lock().await;
+            let mut q = shared.queue.lock_ok();
             if let Some(qi) = q.iter_mut().find(|x| x.id == w.id)
                 // TODO 315: NOT onto a bit this article's late re-ask is
                 // deliberately holding open. `handle_missing` clears the
@@ -1581,7 +1581,11 @@ pub(super) async fn handle_missing(
                     !recheck::holding(qi, ctx.group_bits)
                 }
             {
+                let had = qi.tried_430 != 0;
                 qi.tried_430 |= ctx.group_bits;
+                if !had && qi.tried_430 != 0 {
+                    shared.note_fill_candidate();
+                }
                 unanimous = qi.tried_430 & live == live;
                 verdict_mask = qi.tried_430;
             }
@@ -1706,10 +1710,13 @@ pub(super) async fn handle_missing(
         // above, and a fenced read proves alignment BEFORE any verdict
         // is charged, so the repeat really does converge one round trip
         // later wherever it is read.
-        let mut q = shared.queue.lock().await;
+        let mut q = shared.queue.lock_ok();
         let at = q.iter().take_while(|x| x.promoted).count().min(q.len());
         if w.promoted {
             shared.promoted_pending.fetch_add(1, Ordering::AcqRel);
+        }
+        if w.tried_430 != 0 {
+            shared.note_fill_candidate();
         }
         q.insert(at, w);
         return;
@@ -1782,8 +1789,11 @@ pub(super) async fn handle_missing(
             // measured cost of getting this wrong, and why
             // `recheck_430_max` cannot cover it, are at
             // `recheck::recheck_slot`.
-            let mut q = shared.queue.lock().await;
+            let mut q = shared.queue.lock_ok();
             let at = recheck::recheck_slot(&q);
+            if w.tried_430 != 0 {
+                shared.note_fill_candidate();
+            }
             q.insert(at, w);
             return;
         }
@@ -1803,12 +1813,19 @@ pub(super) async fn handle_missing(
         // back it sits behind gigabytes while the player
         // starves (live wedge: DMCA-holed head articles
         // cycling 430 → back → re-promote → 430).
-        let mut q = shared.queue.lock().await;
+        let mut q = shared.queue.lock_ok();
         let at = q.iter().take_while(|x| x.promoted).count().min(q.len());
         shared.promoted_pending.fetch_add(1, Ordering::AcqRel);
+        if w.tried_430 != 0 {
+            shared.note_fill_candidate();
+        }
         q.insert(at, w);
     } else {
-        shared.queue.lock().await.push_back(w);
+        let mut q = shared.queue.lock_ok();
+        if w.tried_430 != 0 {
+            shared.note_fill_candidate();
+        }
+        q.push_back(w);
     }
 }
 

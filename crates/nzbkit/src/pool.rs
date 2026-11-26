@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 
 use crate::config::ServerConfig;
 use crate::fail::FailCode;
@@ -954,7 +954,13 @@ impl AuthState {
 }
 
 struct Shared {
-    queue: Mutex<VecDeque<Work>>,
+    queue: std::sync::Mutex<VecDeque<Work>>,
+    /// Count of items in `queue` or `steer_inbox` carrying `tried_430 != 0`.
+    /// Upper-bound / exact tracker for `next_work`'s fill-server fast-path:
+    /// when 0 (alongside `spent_n == 0` and `recheck_held == 0`), a fill
+    /// server (`level > 0`, `required != 0`) can skip the full O(q.len())
+    /// queue scan and go straight to `pick_dup`. Must never false-negative.
+    fill_candidates: AtomicUsize,
     /// Articles not yet terminal (Done/Missing/Failed). Workers may only
     /// exit when this hits zero - a queue that looks empty can still
     /// receive requeues from other workers' in-flight failures/430s.
@@ -1785,6 +1791,21 @@ pub fn default_outage_mins() -> u64 {
 const ENDGAME_MAX: usize = 64;
 
 impl Shared {
+    /// Record that an item in `queue` or `steer_inbox` now carries
+    /// `tried_430 != 0`.
+    #[inline]
+    fn note_fill_candidate(&self) {
+        self.fill_candidates.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Record that a `tried_430 != 0` item left `queue` or `steer_inbox`.
+    #[inline]
+    fn unnote_fill_candidate(&self) {
+        let _ =
+            self.fill_candidates
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_sub(1));
+    }
+
     /// Refresh the stream-mode deadline: a reader touched the hub now.
     fn note_stream(&self) {
         let now = self.start.elapsed().as_millis() as u64;
@@ -1820,6 +1841,7 @@ impl Shared {
         let retentions: Vec<u32> = servers.iter().map(|(s, _)| s.retention_days).collect();
         let all = servers_mask(n_servers);
         let mut queue: VecDeque<Work> = VecDeque::with_capacity(reqs.len());
+        let mut init_fill_candidates = 0usize;
         let mut unservable: Vec<Arc<str>> = Vec::new();
         // A repeated id charges `pending` per occurrence but `claim_done`
         // credits once - the run would never turn terminal and every worker
@@ -1842,6 +1864,9 @@ impl Shared {
             if seed & all == all {
                 unservable.push(r.id);
             } else {
+                if seed != 0 {
+                    init_fill_candidates += 1;
+                }
                 // C4: the ordinal is the accepted-request index - the
                 // borrowed-id prepass above already fixed
                 // first-occurrence order, so this is stable per run.
@@ -1882,7 +1907,8 @@ impl Shared {
         let pending = AtomicUsize::new(queue.len());
         let done = std::sync::Mutex::new(DoneBits::new(queue.len()));
         let shared = Arc::new(Shared {
-            queue: Mutex::new(queue),
+            queue: std::sync::Mutex::new(queue),
+            fill_candidates: AtomicUsize::new(init_fill_candidates),
             pending,
             done,
             inflight: std::sync::Mutex::new(HashMap::new()),
