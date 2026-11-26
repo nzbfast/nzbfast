@@ -298,7 +298,13 @@ pub(super) struct RetainSink<'a> {
     full: bool,
 }
 
-impl RetainSink<'_> {
+impl<'a> RetainSink<'a> {
+    /// The shared corpus this sink flushes into, so nested block-parallel
+    /// lanes can spawn sibling sinks against the same budget.
+    pub(super) fn corpus(&self) -> &'a RetainedCorpus {
+        self.corpus
+    }
+
     /// Start block `g`, reserving a whole block of budget for it.
     pub(super) fn begin(&mut self, g: usize) {
         debug_assert!(self.open.is_none(), "begin() with a block still open");
@@ -331,9 +337,11 @@ impl RetainSink<'_> {
         if let Some((g, off)) = self.open.take() {
             let len = self.batch.len() - off;
             self.batch.seal(self.corpus.base_logs[g], off);
-            self.corpus
-                .used
-                .fetch_sub(self.corpus.block_size - len, Ordering::AcqRel);
+            if len < self.corpus.block_size {
+                self.corpus
+                    .used
+                    .fetch_sub(self.corpus.block_size - len, Ordering::AcqRel);
+            }
             self.held.push(g);
         }
     }

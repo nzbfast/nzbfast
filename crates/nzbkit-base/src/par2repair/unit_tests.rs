@@ -345,6 +345,226 @@ fn the_verify_pass_retains_the_blocks_it_proves() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `fast: true` must populate `RetainSink` with the exact same `(log, bytes)`
+/// slices and `held` map as `fast: false`, on both the streaming branch (small
+/// file / 1 thread) and the parallel branch (`disk_len >= VERIFY_PAR_MIN_BYTES`,
+/// multiple threads), including a non-block-aligned tail slice.
+#[test]
+fn fast_pass1_retains_identical_slices_to_chain_pass() {
+    let _policy = crate::par2repair::census::testing::record();
+    let _retain = crate::par2repair::retain::force_policy(16 << 20, true);
+    let dir = tmpdir("retain-fast-vs-chain");
+
+    let collect_sorted = |corpus: retain::RetainedCorpus| {
+        let (batches, held) = corpus.take();
+        let mut slices: Vec<(u32, Vec<u8>)> = batches
+            .iter()
+            .flat_map(|b| {
+                b.slices
+                    .iter()
+                    .map(move |&(k, off, len)| (k, b.arena[off..off + len].to_vec()))
+            })
+            .collect();
+        slices.sort_by_key(|(k, _)| *k);
+        (slices, held)
+    };
+
+    // Case 1: small file (streaming branch) with short tail and damaged slice 1.
+    {
+        let data = payload(200, 11); // 4 slices of 64B, 8-byte tail
+        let meta = meta_for("small.bin", &data, BS);
+        let mut damaged = data.clone();
+        for x in &mut damaged[BS..2 * BS] {
+            *x ^= 0x5a;
+        }
+        let path = dir.join("small.bin");
+        std::fs::write(&path, &damaged).unwrap();
+
+        let c_chain = retain::admit(10, BS).corpus.unwrap();
+        let out_chain = {
+            let mut s = c_chain.sink();
+            verify_pass1_retaining(&path, &meta, BS, 1, 3, Some(&mut s), false).unwrap()
+        };
+        let c_fast = retain::admit(10, BS).corpus.unwrap();
+        let out_fast = {
+            let mut s = c_fast.sink();
+            verify_pass1_retaining(&path, &meta, BS, 1, 3, Some(&mut s), true).unwrap()
+        };
+        assert_eq!(out_fast.present, out_chain.present);
+        assert_eq!(collect_sorted(c_fast), collect_sorted(c_chain));
+    }
+
+    // Case 2: parallel branch (>= 64 KiB under cfg(test), threads = 4) with
+    // short tail and damaged interior + tail-adjacent slices.
+    {
+        const PAR_BS: usize = 8192;
+        let data = payload(12 * PAR_BS + 321, 77); // ~96 KiB, 13 slices
+        let meta = meta_for("par.bin", &data, PAR_BS);
+        let mut damaged = data.clone();
+        for &slot in &[2usize, 7, 11] {
+            for x in &mut damaged[slot * PAR_BS..(slot + 1) * PAR_BS] {
+                *x ^= 0x33;
+            }
+        }
+        let path = dir.join("par.bin");
+        std::fs::write(&path, &damaged).unwrap();
+
+        let c_chain = retain::admit(20, PAR_BS).corpus.unwrap();
+        let out_chain = {
+            let mut s = c_chain.sink();
+            verify_pass1_retaining(&path, &meta, PAR_BS, 4, 5, Some(&mut s), false).unwrap()
+        };
+        let c_fast = retain::admit(20, PAR_BS).corpus.unwrap();
+        let out_fast = {
+            let mut s = c_fast.sink();
+            verify_pass1_retaining(&path, &meta, PAR_BS, 4, 5, Some(&mut s), true).unwrap()
+        };
+        assert_eq!(out_fast.present, out_chain.present);
+        let (fast_slices, fast_held) = collect_sorted(c_fast);
+        let (chain_slices, chain_held) = collect_sorted(c_chain);
+        assert_eq!(fast_held, chain_held);
+        assert_eq!(fast_slices, chain_slices);
+        assert_eq!(fast_slices.len(), 10, "13 slices minus 3 damaged");
+    }
+
+    // Case 3: large block size (> VERIFY_CHUNK = 1 MiB) exercises the
+    // chunked streaming loop inside `verify_block_range`.
+    {
+        const BIG_BS: usize = (1 << 20) + (64 << 10); // 1088 KiB > 1 MiB
+        let data = payload(2 * BIG_BS + 1234, 91); // 3 slices, 1234-byte tail
+        let meta = meta_for("big.bin", &data, BIG_BS);
+        let mut damaged = data.clone();
+        for x in &mut damaged[BIG_BS..BIG_BS + 64] {
+            *x ^= 0xff;
+        }
+        let path = dir.join("big.bin");
+        std::fs::write(&path, &damaged).unwrap();
+
+        let c_chain = retain::admit(6, BIG_BS).corpus.unwrap();
+        let out_chain = {
+            let mut s = c_chain.sink();
+            verify_pass1_retaining(&path, &meta, BIG_BS, 2, 1, Some(&mut s), false).unwrap()
+        };
+        let c_fast = retain::admit(6, BIG_BS).corpus.unwrap();
+        let out_fast = {
+            let mut s = c_fast.sink();
+            verify_pass1_retaining(&path, &meta, BIG_BS, 2, 1, Some(&mut s), true).unwrap()
+        };
+        assert_eq!(out_fast.present, out_chain.present);
+        assert_eq!(collect_sorted(c_fast), collect_sorted(c_chain));
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Oversized files and `all && !head_ok` both decline from `fast_pass1` to the
+/// chain pass without dropping or double-retaining any slice.
+#[test]
+fn fast_pass1_declines_without_duplicate_retention() {
+    let _policy = crate::par2repair::census::testing::record();
+    let _retain = crate::par2repair::retain::force_policy(4 << 20, true);
+    let dir = tmpdir("retain-fast-declines");
+
+    // 1. Oversized file: declines before reading blocks, chain pass retains once.
+    {
+        let data = payload(200, 19);
+        let meta = meta_for("over.bin", &data, BS);
+        let mut oversized = data.clone();
+        oversized.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let path = dir.join("over.bin");
+        std::fs::write(&path, &oversized).unwrap();
+
+        let corpus = retain::admit(8, BS).corpus.unwrap();
+        let out = {
+            let mut s = corpus.sink();
+            verify_pass1_retaining(&path, &meta, BS, 2, 0, Some(&mut s), true).unwrap()
+        };
+        assert!(out.clean && !out.intact);
+        let (batches, held) = corpus.take();
+        let count: usize = batches.iter().map(|b| b.slices.len()).sum();
+        assert_eq!(count, 4, "each slice retained exactly once");
+        assert_eq!(&held[..4], &[true, true, true, true]);
+    }
+
+    // 2. `all && !head_ok`: declines to chain pass with `sink = None` so the
+    //    4 slices retained by `fast_pass1` are not duplicated.
+    {
+        let data = payload(200, 23);
+        let mut meta = meta_for("badhead.bin", &data, BS);
+        meta.md5_16k[0] ^= 0xff;
+        let path = dir.join("badhead.bin");
+        std::fs::write(&path, &data).unwrap();
+
+        let corpus = retain::admit(8, BS).corpus.unwrap();
+        let out = {
+            let mut s = corpus.sink();
+            verify_pass1_retaining(&path, &meta, BS, 2, 0, Some(&mut s), true).unwrap()
+        };
+        assert!(out.clean && out.intact);
+        let (batches, held) = corpus.take();
+        let count: usize = batches.iter().map(|b| b.slices.len()).sum();
+        assert_eq!(count, 4, "no duplicate slices after all && !head_ok decline");
+        assert_eq!(&held[..4], &[true, true, true, true]);
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// End-to-end `repair_dir` with `fast_check` enabled must retain verified
+/// blocks during pass 1 and consume them in the fold instead of re-reading.
+#[test]
+fn repair_dir_with_fast_check_retains_and_consumes_blocks() {
+    struct FastCheckGuard;
+    impl Drop for FastCheckGuard {
+        fn drop(&mut self) {
+            crate::par2::clear_fast_check();
+        }
+    }
+
+    let census = crate::par2repair::census::testing::record();
+    let _retain = crate::par2repair::retain::force_policy(16 << 20, true);
+    crate::par2::set_fast_check(true);
+    let _fast_guard = FastCheckGuard;
+
+    let dir = tmpdir("repair-fast-retain-e2e");
+    const E2E_BS: usize = 8192;
+    let a = payload(10 * E2E_BS + 513, 31); // 11 slices
+    let b = payload(9 * E2E_BS, 37); // 9 slices
+    let files: &[(&str, &[u8])] = &[("a.bin", &a), ("b.bin", &b)];
+    let mut a_damaged = a.clone();
+    for x in &mut a_damaged[2 * E2E_BS..3 * E2E_BS] {
+        *x ^= 0x5a;
+    }
+    let mut b_damaged = b.clone();
+    for x in &mut b_damaged[5 * E2E_BS..6 * E2E_BS] {
+        *x ^= 0xa5;
+    }
+    std::fs::write(dir.join("a.bin"), &a_damaged).unwrap();
+    std::fs::write(dir.join("b.bin"), &b_damaged).unwrap();
+    std::fs::write(dir.join("set.par2"), par2_index(SET, E2E_BS, files)).unwrap();
+    std::fs::write(
+        dir.join("set.vol0+3.par2"),
+        par2_volume(SET, E2E_BS, files, &[0, 1, 2]),
+    )
+    .unwrap();
+
+    let status = repair_dir(&dir).expect("repair_dir succeeds");
+    match status {
+        RepairStatus::Repaired(r) => assert_eq!(r.blocks_rebuilt, 2),
+        other => panic!("expected Repaired, got {other:?}"),
+    }
+    assert_eq!(std::fs::read(dir.join("a.bin")).unwrap(), a);
+    assert_eq!(std::fs::read(dir.join("b.bin")).unwrap(), b);
+
+    let disp = census.of_kind("disposition");
+    let last_disp = disp.last().expect("disposition event emitted");
+    let retained_blocks = last_disp["retained_blocks"].as_u64().unwrap_or(0);
+    let consumed_blocks = last_disp["consumed_blocks"].as_u64().unwrap_or(0);
+    assert_eq!(retained_blocks, 18, "20 total slices minus 2 damaged");
+    assert_eq!(consumed_blocks, 18, "fold must consume all retained blocks");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn damage_and_a_missing_file_rebuild_from_recovery_slices() {
     let dir = tmpdir("rebuild");
@@ -4050,4 +4270,140 @@ fn spill_flush_wanted_rule() {
     // Anything but `1` / `0` is not an override.
     assert!(spill_flush_wanted(Some("yes"), || Some(512 << 20)));
     assert!(!spill_flush_wanted(Some(""), || None));
+}
+
+/// Benchmark end-to-end `repair_dir` on a 128 MiB damaged PAR2 set (~4.7%
+/// damage, `fast_check` ON) to measure verify-pass block retention impact.
+///
+/// Run with:
+/// `cargo test --release -p nzbkit-base --lib --features test-support bench_fast_pass1_retain_repair -- --ignored --nocapture`
+#[test]
+#[ignore = "performance benchmark; run explicitly with --release -- --ignored --nocapture"]
+fn bench_fast_pass1_retain_repair() {
+    use std::io::{Seek, SeekFrom, Write};
+    use std::time::Instant;
+
+    struct FastCheckGuard;
+    impl Drop for FastCheckGuard {
+        fn drop(&mut self) {
+            crate::par2::clear_fast_check();
+        }
+    }
+
+    #[cfg(unix)]
+    fn cpu_time_us() -> (u64, u64) {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // SAFETY: `usage` is a valid out-pointer for `RUSAGE_SELF`.
+        let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        assert_eq!(rc, 0);
+        // SAFETY: initialized by `getrusage` on success.
+        let u = unsafe { usage.assume_init() };
+        let user = u.ru_utime.tv_sec as u64 * 1_000_000 + u.ru_utime.tv_usec as u64;
+        let sys = u.ru_stime.tv_sec as u64 * 1_000_000 + u.ru_stime.tv_usec as u64;
+        (user, sys)
+    }
+    #[cfg(not(unix))]
+    fn cpu_time_us() -> (u64, u64) {
+        (0, 0)
+    }
+
+    let census = crate::par2repair::census::testing::record();
+    crate::par2::set_fast_check(true);
+    let _fast_guard = FastCheckGuard;
+
+    const N_FILES: usize = 8;
+    const FILE_BYTES: usize = 16 << 20; // 16 MiB * 8 = 128 MiB
+    const BLOCK_SIZE: usize = 256 << 10; // 256 KiB -> 64 blocks/file, 512 total
+    const DAMAGED_SLOTS: [usize; 3] = [1, 20, 40]; // 24 damaged blocks (~4.7%)
+    const RECOVERY_BLOCKS: usize = 26;
+    const WARMUP: usize = 1;
+    const REPS: usize = 7;
+
+    let dir = tmpdir("bench-fast-pass1-retain");
+    let mut members = Vec::with_capacity(N_FILES);
+    for fi in 0..N_FILES {
+        let name = format!("vol{fi:02}.bin");
+        let path = dir.join(&name);
+        let data = payload(FILE_BYTES, 100 + fi as u64);
+        std::fs::write(&path, &data).unwrap();
+        members.push(crate::par2gen::Member { name, path });
+    }
+    crate::par2gen::create_into_exact(
+        &dir,
+        &members,
+        "benchset",
+        Some(BLOCK_SIZE as u64),
+        RECOVERY_BLOCKS,
+        crate::par2gen::CreatePlan::ENGINE,
+    )
+    .expect("par2gen creates benchmark set");
+
+    let corrupt_buf = vec![0xA5u8; BLOCK_SIZE];
+    let damage_all = || {
+        for m in &members {
+            let mut f = std::fs::OpenOptions::new().write(true).open(&m.path).unwrap();
+            for &slot in &DAMAGED_SLOTS {
+                f.seek(SeekFrom::Start((slot * BLOCK_SIZE) as u64)).unwrap();
+                f.write_all(&corrupt_buf).unwrap();
+            }
+        }
+    };
+
+    let run_arm = |label: &str, budget: usize| {
+        let _retain = crate::par2repair::retain::force_policy(budget, true);
+        let mut wall_ms = Vec::with_capacity(REPS);
+        let mut user_ms = Vec::with_capacity(REPS);
+        let mut sys_ms = Vec::with_capacity(REPS);
+        let mut last_retained_blocks = 0u64;
+        let mut last_consumed_blocks = 0u64;
+        let mut last_consumed_bytes = 0u64;
+
+        for iter in 0..(WARMUP + REPS) {
+            damage_all();
+            let (u0, s0) = cpu_time_us();
+            let t0 = Instant::now();
+            let status = repair_dir(&dir).expect("repair_dir succeeds");
+            let elapsed = t0.elapsed();
+            let (u1, s1) = cpu_time_us();
+            match status {
+                RepairStatus::Repaired(r) => {
+                    assert_eq!(r.blocks_rebuilt, N_FILES * DAMAGED_SLOTS.len());
+                }
+                other => panic!("expected Repaired, got {other:?}"),
+            }
+            let disp = census.of_kind("disposition");
+            if let Some(ev) = disp.last() {
+                last_retained_blocks = ev["retained_blocks"].as_u64().unwrap_or(0);
+                last_consumed_blocks = ev["consumed_blocks"].as_u64().unwrap_or(0);
+                last_consumed_bytes = ev["consumed_bytes"].as_u64().unwrap_or(0);
+            }
+            if iter >= WARMUP {
+                wall_ms.push(elapsed.as_secs_f64() * 1e3);
+                user_ms.push((u1.saturating_sub(u0)) as f64 / 1e3);
+                sys_ms.push((s1.saturating_sub(s0)) as f64 / 1e3);
+            }
+        }
+
+        let stats = |mut v: Vec<f64>| -> (f64, f64, f64) {
+            v.sort_by(|a, b| a.total_cmp(b));
+            (v[0], v[v.len() / 2], v[v.len() - 1])
+        };
+        let (w_min, w_med, w_max) = stats(wall_ms);
+        let (u_min, u_med, u_max) = stats(user_ms);
+        let (s_min, s_med, s_max) = stats(sys_ms);
+        let present_blocks = (N_FILES * (FILE_BYTES / BLOCK_SIZE)) - (N_FILES * DAMAGED_SLOTS.len());
+        println!(
+            "bench_fast_pass1_retain_repair [{label}] (128 MiB, 8x16 MiB, 256 KiB bs, 24/512 damaged, fast_check=ON, reps={REPS}):\n\
+             \tretained_blocks : {last_retained_blocks} / {present_blocks} present\n\
+             \tconsumed_blocks : {last_consumed_blocks} ({:.1} MiB disk re-reads avoided)\n\
+             \twall_ms         : min={w_min:.2}  median={w_med:.2}  max={w_max:.2}\n\
+             \tuser_cpu_ms     : min={u_min:.2}  median={u_med:.2}  max={u_max:.2}\n\
+             \tsys_cpu_ms      : min={s_min:.2}  median={s_med:.2}  max={s_max:.2}",
+            last_consumed_bytes as f64 / (1024.0 * 1024.0),
+        );
+    };
+
+    run_arm("retain=OFF (baseline / re-read)", 0);
+    run_arm("retain=ON  (fast_pass1 retain)", 512 << 20);
+    let _ = std::fs::remove_dir_all(&dir);
 }

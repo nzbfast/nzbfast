@@ -1044,6 +1044,27 @@ fn regular_file_size_mismatch(is_file: bool, observed: u64, expected: u64) -> bo
     is_file && observed != expected
 }
 
+/// Per-lane sink for retaining verified block bytes during block verification
+/// without coupling `crate::par2` to `crate::par2repair::retain`.
+pub(crate) trait BlockRetainLane {
+    fn begin(&mut self, bidx: usize);
+    fn append(&mut self, data: &[u8]);
+    fn commit(&mut self);
+    fn abort(&mut self);
+    fn retain_resident(&mut self, bidx: usize, data: &[u8]) {
+        self.begin(bidx);
+        self.append(data);
+        self.commit();
+    }
+}
+
+impl BlockRetainLane for () {
+    fn begin(&mut self, _bidx: usize) {}
+    fn append(&mut self, _data: &[u8]) {}
+    fn commit(&mut self) {}
+    fn abort(&mut self) {}
+}
+
 pub(crate) fn verify_blocks_path_or_streaming(
     path: &Path,
     src: &mut File,
@@ -1052,11 +1073,48 @@ pub(crate) fn verify_blocks_path_or_streaming(
     disk_len: u64,
     threads: usize,
 ) -> std::io::Result<Vec<bool>> {
+    verify_blocks_path_or_streaming_retaining(
+        path,
+        src,
+        file,
+        block_size,
+        disk_len,
+        threads,
+        None::<&mut ()>,
+        || None::<()>,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_blocks_path_or_streaming_retaining<L, C, F>(
+    path: &Path,
+    src: &mut File,
+    file: &Par2File,
+    block_size: u64,
+    disk_len: u64,
+    threads: usize,
+    caller_sink: Option<&mut L>,
+    make_child_sink: F,
+) -> std::io::Result<Vec<bool>>
+where
+    L: BlockRetainLane,
+    C: BlockRetainLane,
+    F: Fn() -> Option<C> + Sync,
+{
     if threads > 1 && file.blocks.len() > 1 && disk_len >= VERIFY_PAR_MIN_BYTES && block_size > 0 {
-        verify_blocks_path_parallel(path, src, file, block_size, disk_len, threads)
+        verify_blocks_path_parallel_retaining(
+            path,
+            src,
+            file,
+            block_size,
+            disk_len,
+            threads,
+            caller_sink,
+            make_child_sink,
+        )
     } else {
         src.seek(SeekFrom::Start(0))?;
-        verify_blocks_streaming(file, block_size, src)
+        verify_blocks_streaming_retaining(file, block_size, src, caller_sink)
     }
 }
 
@@ -1317,14 +1375,175 @@ const VERIFY_PAR_MIN_BYTES: u64 = 8 << 20;
 #[cfg(any(test, fuzzing))]
 const VERIFY_PAR_MIN_BYTES: u64 = 64 << 10;
 
+#[cfg(test)]
 fn verify_blocks_path_parallel(
+    path: &Path,
+    source: &File,
+    file: &Par2File,
+    block_size: u64,
+    disk_len: u64,
+    threads: usize,
+) -> std::io::Result<Vec<bool>> {
+    verify_blocks_path_parallel_retaining(
+        path,
+        source,
+        file,
+        block_size,
+        disk_len,
+        threads,
+        None::<&mut ()>,
+        || None::<()>,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_block_range<S: BlockRetainLane>(
+    _source: &File,
+    file: &Par2File,
+    block_size: u64,
+    disk_len: u64,
+    chunk_buf: usize,
+    first_block: usize,
+    oks: &mut [bool],
+    mut lane_sink: Option<&mut S>,
+) -> std::io::Result<()> {
+    // Unix pread is cursor-independent, so every lane can share the
+    // handle already opened for the whole-file pass. Besides avoiding
+    // repeated open/name lookup, this keeps an atomic path replacement
+    // between passes on the same inode and removes up to 64 live
+    // descriptors.
+    #[cfg(unix)]
+    let src = _source;
+    // Windows FileExt::seek_read moves the handle cursor; independent
+    // lanes therefore still require independent handles there. Reopen
+    // from the pinned source handle, never its pathname, so a replacement
+    // between passes cannot switch the file being diagnosed. This includes
+    // the caller range: one handle per simultaneously active lane.
+    #[cfg(windows)]
+    let owned = crate::disk::reopen_read_handle(_source)?;
+    #[cfg(windows)]
+    let src = &owned;
+    let mut buf = Vec::new();
+    // Reuse the selected implementations as well as their state. In
+    // particular, constructing crc32fast::Hasher repeats its runtime
+    // CPU-feature selection.
+    let mut bmd5 = Md5::new();
+    let mut bcrc = crc32fast::Hasher::new();
+    let mut j = 0usize;
+    while j < oks.len() {
+        let bidx = first_block + j;
+        let check = &file.blocks[bidx];
+        // Positioned workers can omit the read as well as both hashes.
+        // This matters for a short IFSC: its fitted UNPROVEN suffix may
+        // span most of a large member, and every corresponding verdict
+        // is already known to be false.
+        if !check.is_proven() {
+            j += 1;
+            continue;
+        }
+        let off = bidx as u64 * block_size;
+        if off >= disk_len {
+            j += 1;
+            continue;
+        }
+        if buf.is_empty() {
+            // Keep the allocator's zero-page behaviour: a resize from an
+            // empty Vec eagerly dirties the buffer on some allocators,
+            // while `vec![0; n]` can stay demand-zero until positioned
+            // reads populate it.
+            buf = vec![0u8; chunk_buf];
+        }
+        let avail = (disk_len - off).min(block_size);
+
+        // One read holds the whole slice whenever the block is no wider
+        // than the read window, which is every block at or below
+        // `VERIFY_CHUNK` - the shape a dense grid actually has. Its
+        // bytes are then resident and the CRC can gate the MD5 for
+        // free. Wider blocks fall through to the interleaved loop.
+        if avail <= buf.len() as u64 {
+            let take = avail as usize;
+            crate::disk::read_exact_at(src, &mut buf[..take], off)?;
+            let ok = prove_resident_block(
+                check,
+                &buf[..take],
+                block_size - avail,
+                &mut bcrc,
+                &mut bmd5,
+            );
+            if ok && let Some(s) = lane_sink.as_deref_mut() {
+                s.retain_resident(bidx, &buf[..take]);
+            }
+            oks[j] = ok;
+            j += 1;
+            continue;
+        }
+
+        if let Some(s) = lane_sink.as_deref_mut() {
+            s.begin(bidx);
+        }
+        let mut pos = 0u64;
+        while pos < avail {
+            let take = crate::disk::chunk_len(avail - pos, buf.len());
+            if let Err(e) = crate::disk::read_exact_at(src, &mut buf[..take], off + pos) {
+                if let Some(s) = lane_sink.as_deref_mut() {
+                    s.abort();
+                }
+                return Err(e);
+            }
+            if let Some(s) = lane_sink.as_deref_mut() {
+                s.append(&buf[..take]);
+            }
+            bmd5.update(&buf[..take]);
+            bcrc.update(&buf[..take]);
+            pos += take as u64;
+        }
+        if avail < block_size {
+            const ZEROS: [u8; 8192] = [0u8; 8192];
+            let mut pad = block_size - avail;
+            while pad > 0 {
+                let take = crate::disk::chunk_len(pad, ZEROS.len());
+                bmd5.update(&ZEROS[..take]);
+                pad -= take as u64;
+            }
+        }
+        let md5: [u8; 16] = bmd5.finalize_reset().into();
+        let crc = bcrc.clone().finalize();
+        bcrc.reset();
+        let crc = if avail == block_size {
+            crc
+        } else {
+            crate::yenc_simd::crc32_zeros(crc, block_size - avail)
+        };
+        let ok = md5 == check.md5 && crc == check.crc32;
+        if let Some(s) = lane_sink.as_deref_mut() {
+            if ok {
+                s.commit();
+            } else {
+                s.abort();
+            }
+        }
+        oks[j] = ok;
+        j += 1;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_blocks_path_parallel_retaining<L, C, F>(
     path: &Path,
     _source: &File,
     file: &Par2File,
     block_size: u64,
     disk_len: u64,
     threads: usize,
-) -> std::io::Result<Vec<bool>> {
+    caller_sink: Option<&mut L>,
+    make_child_sink: F,
+) -> std::io::Result<Vec<bool>>
+where
+    L: BlockRetainLane,
+    C: BlockRetainLane,
+    F: Fn() -> Option<C> + Sync,
+{
     let bs = block_size as usize;
     let diagnostic_blocks = diagnostic_block_count(&file.blocks);
     if bs == 0 || diagnostic_blocks == 0 {
@@ -1431,104 +1650,6 @@ fn verify_blocks_path_parallel(
     let mut blocks = vec![false; file.blocks.len()];
     let (caller_blocks, child_blocks) = blocks[..diagnostic_blocks].split_at_mut(first_end);
     let mut child_out: Vec<std::io::Result<()>> = (1..range_count).map(|_| Ok(())).collect();
-    let verify_range = |first_block: usize, oks: &mut [bool]| -> std::io::Result<()> {
-        // Unix pread is cursor-independent, so every lane can share the
-        // handle already opened for the whole-file pass. Besides avoiding
-        // repeated open/name lookup, this keeps an atomic path replacement
-        // between passes on the same inode and removes up to 64 live
-        // descriptors.
-        #[cfg(unix)]
-        let src = _source;
-        // Windows FileExt::seek_read moves the handle cursor; independent
-        // lanes therefore still require independent handles there. Reopen
-        // from the pinned source handle, never its pathname, so a replacement
-        // between passes cannot switch the file being diagnosed. This includes
-        // the caller range: one handle per simultaneously active lane.
-        #[cfg(windows)]
-        let owned = crate::disk::reopen_read_handle(_source)?;
-        #[cfg(windows)]
-        let src = &owned;
-        let mut buf = Vec::new();
-        // Reuse the selected implementations as well as their state. In
-        // particular, constructing crc32fast::Hasher repeats its runtime
-        // CPU-feature selection.
-        let mut bmd5 = Md5::new();
-        let mut bcrc = crc32fast::Hasher::new();
-        let mut j = 0usize;
-        while j < oks.len() {
-            let bidx = first_block + j;
-            let check = &file.blocks[bidx];
-            // Positioned workers can omit the read as well as both hashes.
-            // This matters for a short IFSC: its fitted UNPROVEN suffix may
-            // span most of a large member, and every corresponding verdict
-            // is already known to be false.
-            if !check.is_proven() {
-                j += 1;
-                continue;
-            }
-            let off = bidx as u64 * block_size;
-            if off >= disk_len {
-                j += 1;
-                continue;
-            }
-            if buf.is_empty() {
-                // Keep the allocator's zero-page behaviour: a resize from an
-                // empty Vec eagerly dirties the buffer on some allocators,
-                // while `vec![0; n]` can stay demand-zero until positioned
-                // reads populate it.
-                buf = vec![0u8; chunk_buf];
-            }
-            let avail = (disk_len - off).min(block_size);
-
-            // One read holds the whole slice whenever the block is no wider
-            // than the read window, which is every block at or below
-            // `VERIFY_CHUNK` - the shape a dense grid actually has. Its
-            // bytes are then resident and the CRC can gate the MD5 for
-            // free. Wider blocks fall through to the interleaved loop.
-            if avail <= buf.len() as u64 {
-                let take = avail as usize;
-                crate::disk::read_exact_at(src, &mut buf[..take], off)?;
-                oks[j] = prove_resident_block(
-                    check,
-                    &buf[..take],
-                    block_size - avail,
-                    &mut bcrc,
-                    &mut bmd5,
-                );
-                j += 1;
-                continue;
-            }
-
-            let mut pos = 0u64;
-            while pos < avail {
-                let take = crate::disk::chunk_len(avail - pos, buf.len());
-                crate::disk::read_exact_at(src, &mut buf[..take], off + pos)?;
-                bmd5.update(&buf[..take]);
-                bcrc.update(&buf[..take]);
-                pos += take as u64;
-            }
-            if avail < block_size {
-                const ZEROS: [u8; 8192] = [0u8; 8192];
-                let mut pad = block_size - avail;
-                while pad > 0 {
-                    let take = crate::disk::chunk_len(pad, ZEROS.len());
-                    bmd5.update(&ZEROS[..take]);
-                    pad -= take as u64;
-                }
-            }
-            let md5: [u8; 16] = bmd5.finalize_reset().into();
-            let crc = bcrc.clone().finalize();
-            bcrc.reset();
-            let crc = if avail == block_size {
-                crc
-            } else {
-                crate::yenc_simd::crc32_zeros(crc, block_size - avail)
-            };
-            oks[j] = md5 == check.md5 && crc == check.crc32;
-            j += 1;
-        }
-        Ok(())
-    };
     let caller_out = std::thread::scope(|scope| {
         if let Some(ranges) = balanced.as_ref() {
             let mut remaining = child_blocks;
@@ -1538,9 +1659,19 @@ fn verify_blocks_path_parallel(
                 remaining = rest;
                 let range_start = first_block;
                 first_block = end;
-                let verify_range = &verify_range;
+                let make_child_sink = &make_child_sink;
                 scope.spawn(move || {
-                    *result = verify_range(range_start, oks);
+                    let mut child_sink = make_child_sink();
+                    *result = verify_block_range(
+                        _source,
+                        file,
+                        block_size,
+                        disk_len,
+                        chunk_buf,
+                        range_start,
+                        oks,
+                        child_sink.as_mut(),
+                    );
                 });
             }
         } else {
@@ -1549,13 +1680,32 @@ fn verify_blocks_path_parallel(
                 .zip(child_out.iter_mut())
                 .enumerate()
             {
-                let verify_range = &verify_range;
+                let make_child_sink = &make_child_sink;
                 scope.spawn(move || {
-                    *result = verify_range((child_index + 1) * per, oks);
+                    let mut child_sink = make_child_sink();
+                    *result = verify_block_range(
+                        _source,
+                        file,
+                        block_size,
+                        disk_len,
+                        chunk_buf,
+                        (child_index + 1) * per,
+                        oks,
+                        child_sink.as_mut(),
+                    );
                 });
             }
         }
-        verify_range(0, caller_blocks)
+        verify_block_range(
+            _source,
+            file,
+            block_size,
+            disk_len,
+            chunk_buf,
+            0,
+            caller_blocks,
+            caller_sink,
+        )
     });
     caller_out?;
     for result in child_out {
@@ -1702,7 +1852,16 @@ fn bounded_verify_workers(requested: usize, blocks: usize, chunk_buf: usize) -> 
 fn verify_blocks_streaming<R: Read>(
     file: &Par2File,
     block_size: u64,
+    src: R,
+) -> std::io::Result<Vec<bool>> {
+    verify_blocks_streaming_retaining(file, block_size, src, None::<&mut ()>)
+}
+
+fn verify_blocks_streaming_retaining<R: Read, L: BlockRetainLane>(
+    file: &Par2File,
+    block_size: u64,
     mut src: R,
+    mut sink: Option<&mut L>,
 ) -> std::io::Result<Vec<bool>> {
     let bs = block_size as usize;
     let diagnostic_blocks = diagnostic_block_count(&file.blocks);
@@ -1717,7 +1876,15 @@ fn verify_blocks_streaming<R: Read>(
     let mut bytes_left = block_size.saturating_mul(diagnostic_blocks as u64);
     while blocks.len() < diagnostic_blocks {
         let take = crate::disk::chunk_len(bytes_left, buf.len());
-        let n = read_retry(&mut src, &mut buf[..take])?;
+        let n = match read_retry(&mut src, &mut buf[..take]) {
+            Ok(n) => n,
+            Err(e) => {
+                if let Some(s) = sink.as_deref_mut() {
+                    s.abort();
+                }
+                return Err(e);
+            }
+        };
         if n == 0 {
             break;
         }
@@ -1725,37 +1892,54 @@ fn verify_blocks_streaming<R: Read>(
         let mut p = 0usize;
         while p < n && blocks.len() < diagnostic_blocks {
             let seg = (bs - filled).min(n - p);
-            let check = &file.blocks[blocks.len()];
+            let bidx = blocks.len();
+            let check = &file.blocks[bidx];
             let proven = check.is_proven();
             // Whole slice resident in this read: CRC gates the MD5 for
             // free. A block split across reads keeps the interleaved feed.
             if filled == 0 && seg == bs {
-                blocks.push(
-                    proven
-                        && prove_resident_block(check, &buf[p..p + seg], 0, &mut bcrc, &mut bmd5),
-                );
+                let ok = proven
+                    && prove_resident_block(check, &buf[p..p + seg], 0, &mut bcrc, &mut bmd5);
+                if ok && let Some(s) = sink.as_deref_mut() {
+                    s.retain_resident(bidx, &buf[p..p + seg]);
+                }
+                blocks.push(ok);
                 p += seg;
                 continue;
             }
             if proven {
+                if let Some(s) = sink.as_deref_mut() {
+                    if filled == 0 {
+                        s.begin(bidx);
+                    }
+                    s.append(&buf[p..p + seg]);
+                }
                 bmd5.update(&buf[p..p + seg]);
                 bcrc.update(&buf[p..p + seg]);
             }
             filled += seg;
             p += seg;
             if filled == bs {
-                if proven {
+                let ok = if proven {
                     let md5: [u8; 16] = std::mem::take(&mut bmd5).finalize().into();
                     let crc = std::mem::replace(&mut bcrc, crc32fast::Hasher::new()).finalize();
-                    blocks.push(md5 == check.md5 && crc == check.crc32);
+                    md5 == check.md5 && crc == check.crc32
                 } else {
-                    blocks.push(false);
+                    false
+                };
+                if proven && let Some(s) = sink.as_deref_mut() {
+                    if ok {
+                        s.commit();
+                    } else {
+                        s.abort();
+                    }
                 }
+                blocks.push(ok);
                 filled = 0;
             }
         }
     }
-    finish_partial_block(file, bs, &mut blocks, bmd5, bcrc, filled);
+    finish_partial_block_retaining(file, bs, &mut blocks, bmd5, bcrc, filled, sink);
     blocks.resize(file.blocks.len(), false);
     Ok(blocks)
 }
@@ -1764,15 +1948,33 @@ fn finish_partial_block(
     file: &Par2File,
     bs: usize,
     blocks: &mut Vec<bool>,
-    mut bmd5: Md5,
+    bmd5: Md5,
     bcrc: crc32fast::Hasher,
     filled: usize,
 ) {
+    finish_partial_block_retaining(file, bs, blocks, bmd5, bcrc, filled, None::<&mut ()>);
+}
+
+fn finish_partial_block_retaining<L: BlockRetainLane>(
+    file: &Par2File,
+    bs: usize,
+    blocks: &mut Vec<bool>,
+    mut bmd5: Md5,
+    bcrc: crc32fast::Hasher,
+    filled: usize,
+    sink: Option<&mut L>,
+) {
     if filled == 0 || blocks.len() >= file.blocks.len() {
+        if let Some(s) = sink {
+            s.abort();
+        }
         return;
     }
     let check = &file.blocks[blocks.len()];
     if !check.is_proven() {
+        if let Some(s) = sink {
+            s.abort();
+        }
         blocks.push(false);
         return;
     }
@@ -1785,7 +1987,15 @@ fn finish_partial_block(
     }
     let md5: [u8; 16] = bmd5.finalize().into();
     let crc = crate::yenc_simd::crc32_zeros(bcrc.finalize(), (bs - filled) as u64);
-    blocks.push(md5 == check.md5 && crc == check.crc32);
+    let ok = md5 == check.md5 && crc == check.crc32;
+    if let Some(s) = sink {
+        if ok {
+            s.commit();
+        } else {
+            s.abort();
+        }
+    }
+    blocks.push(ok);
 }
 
 fn read_retry<R: Read>(src: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
