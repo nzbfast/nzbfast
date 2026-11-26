@@ -28,6 +28,31 @@ fn split_subject_conventions() {
     );
     // No counter at all.
     assert_eq!(split_subject("just a subject (German)"), None);
+    // Case-insensitive " of " (mixed/upper) and UTF-8 / nested / unmatched brackets.
+    assert_eq!(
+        split_subject_at(r#"日本語 - "f.rar" yEnc (3 OF 10) — café"#),
+        Some((
+            r#"日本語 - "f.rar" yEnc — café"#.to_string(),
+            3,
+            10,
+            r#"日本語 - "f.rar" yEnc "#.len()
+        ))
+    );
+    assert_eq!(
+        split_subject_at(r#""f.rar" yEnc (7 Of 20) (Deutsch)"#),
+        Some((r#""f.rar" yEnc (Deutsch)"#.to_string(), 7, 20, 13))
+    );
+    assert_eq!(
+        split_subject_at(r#"((1/2))"#),
+        Some(("()".to_string(), 1, 2, 1))
+    );
+    assert_eq!(
+        split_subject_at(r#"[(3/4)] [unclosed"#),
+        Some(("[] [unclosed".to_string(), 3, 4, 1))
+    );
+    assert_eq!(split_subject_at(r#"(unclosed 1/2"#), None);
+    assert_eq!(split_subject_at(r#"(1 of ) (2/a)"#), None);
+    assert_eq!(split_subject_at(r#"("日本語 of 2")"#), None);
 }
 
 /// A LEADING pair is told from a trailing one by POSITION, never by
@@ -789,4 +814,150 @@ fn absurd_over_byte_counts_store_a_sane_file_size() {
     assert_eq!(fb, file_bytes([u64::MAX]));
     assert_eq!(tb, fb, "the release total is the one file's");
     teardown(&d, ix);
+}
+
+#[test]
+#[ignore = "benchmark, run with --release -- --ignored --nocapture"]
+fn bench_cluster_batch_100k() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    const N: usize = 100_000;
+    const REPS: usize = 7;
+
+    let mut entries = Vec::with_capacity(N);
+    for i in 0..N {
+        let bucket = i % 20;
+        let (subject, from, message_id, date) = if bucket < 11 {
+            // 55%: standard "file.r01" yEnc (p/50)
+            let rel = (i / 100) % 400;
+            let file = (i / 50) % 2;
+            let part = (i % 50) + 1;
+            (
+                format!(
+                    r#"Show.S01E{rel:03} - "Show.S01E{rel:03}.1080p.part{file:02}.rar" yEnc ({part}/50)"#
+                ),
+                format!("poster{}@usenet.example", rel % 25),
+                format!("<std-{i}@msg.example>"),
+                1_750_000_000 + (i as i64 % 86_400),
+            )
+        } else if bucket < 14 {
+            // 15%: (p of 40) / (p OF 40) / (p Of 40)
+            let rel = (i / 80) % 200;
+            let file = (i / 40) % 2;
+            let part = (i % 40) + 1;
+            let kw = match i % 3 {
+                0 => "of",
+                1 => "OF",
+                _ => "Of",
+            };
+            (
+                format!(r#""Movie.{rel:04}.2026.r{file:02}" yEnc ({part} {kw} 40)"#),
+                format!("ofposter{}@usenet.example", rel % 15),
+                format!("<of-{i}@msg.example>"),
+                1_750_000_000 + (i as i64 % 86_400),
+            )
+        } else if bucket < 16 {
+            // 10%: trailing parenthesized tag after counter
+            let rel = (i / 50) % 200;
+            let part = (i % 50) + 1;
+            (
+                format!(r#""Doc.{rel:04}.2026.mkv" yEnc ({part}/50) (German)"#),
+                format!("tagposter{}@usenet.example", rel % 10),
+                format!("<tag-{i}@msg.example>"),
+                1_750_000_000 + (i as i64 % 86_400),
+            )
+        } else if bucket < 18 {
+            // 10%: leading [nn/15] session tag (15-track album sessions)
+            let alb = i / 15;
+            let track = (i % 15) + 1;
+            (
+                format!(r#"[{track:02}/15] "Album.{alb:05}.track{track:02}.mp3" yEnc"#),
+                format!("albumposter{}@usenet.example", alb % 20),
+                format!("<alb-{i}@msg.example>"),
+                1_750_000_000 + (i as i64 % 86_400),
+            )
+        } else {
+            // 10%: pesto message-ids
+            let rel = (i / 50) % 150;
+            let file = (i / 25) % 2;
+            let part = (i % 25) + 1;
+            let ctr = (i & 0xffff) as u32;
+            (
+                format!(r#""Pesto.Rel.{rel:04}.r{file:02}" yEnc ({part}/25)"#),
+                format!("pesto{}@usenet.example", rel % 10),
+                format!("<00000191a2b3c4d5.{ctr:04x}.{i:016x}@pesto.example>"),
+                1_750_000_000 + (i as i64 % 86_400),
+            )
+        };
+        entries.push(OverEntry {
+            number: i as u64 + 1,
+            subject,
+            from,
+            message_id,
+            bytes: 750_000,
+            date,
+        });
+    }
+
+    // Warmup
+    let mut split_sum = 0u64;
+    for e in &entries {
+        if let Some((_, p, t, o)) = split_subject_at(black_box(&e.subject)) {
+            split_sum = split_sum.wrapping_add((p as u64) + (t as u64) + (o as u64));
+        }
+    }
+    black_box(split_sum);
+
+    let mut split_times = Vec::with_capacity(REPS);
+    for _ in 0..REPS {
+        let t0 = Instant::now();
+        let mut acc = 0u64;
+        for e in &entries {
+            if let Some((base, p, t, o)) = split_subject_at(black_box(&e.subject)) {
+                acc = acc.wrapping_add(base.len() as u64 + p as u64 + t as u64 + o as u64);
+            }
+        }
+        black_box(acc);
+        split_times.push(t0.elapsed());
+    }
+    split_times.sort();
+    let split_med = split_times[REPS / 2];
+
+    // Warmup cluster_batch
+    let mut gp = GenPasses {
+        budget: MAX_GEN_PASSES - 1,
+        ..Default::default()
+    };
+    let c0 = Index::cluster_batch(black_box(&entries), 1_750_100_000, &mut gp);
+    let n_clusters = c0.clusters.len();
+    black_box(c0);
+
+    let mut batch_times = Vec::with_capacity(REPS);
+    for _ in 0..REPS {
+        let mut gp = GenPasses {
+            budget: MAX_GEN_PASSES - 1,
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let c = Index::cluster_batch(black_box(&entries), 1_750_100_000, &mut gp);
+        black_box(c.clusters.len());
+        batch_times.push(t0.elapsed());
+    }
+    batch_times.sort();
+    let batch_med = batch_times[REPS / 2];
+
+    eprintln!(
+        "bench_cluster_batch_100k (N={N}, clusters={n_clusters}, reps={REPS}):\n  \
+         split_subject_at: median={:.2} ms ({:.0} headers/sec) [min={:.2}, max={:.2}]\n  \
+         cluster_batch:    median={:.2} ms ({:.0} headers/sec) [min={:.2}, max={:.2}]",
+        split_med.as_secs_f64() * 1e3,
+        N as f64 / split_med.as_secs_f64(),
+        split_times[0].as_secs_f64() * 1e3,
+        split_times[REPS - 1].as_secs_f64() * 1e3,
+        batch_med.as_secs_f64() * 1e3,
+        N as f64 / batch_med.as_secs_f64(),
+        batch_times[0].as_secs_f64() * 1e3,
+        batch_times[REPS - 1].as_secs_f64() * 1e3,
+    );
 }
