@@ -512,22 +512,83 @@ pub fn verify_pass1_tiered(
     verify_pass1_retaining(path, file, bs, threads, 0, None, fast)
 }
 
-/// The fast tier's pass: `None` when it cannot answer (no per-block
-/// checksums for every byte), otherwise the same [`Pass1Out`] shape the
-/// chain pass produces, with `clean` resting on the blocks and the head.
+struct SliceRetainLane<'a, 'b> {
+    first_slice: usize,
+    sink: &'a mut retain::RetainSink<'b>,
+}
+
+impl crate::par2::BlockRetainLane for SliceRetainLane<'_, '_> {
+    fn begin(&mut self, bidx: usize) {
+        self.sink.begin(self.first_slice + bidx);
+    }
+
+    fn append(&mut self, data: &[u8]) {
+        self.sink.append(data);
+    }
+
+    fn commit(&mut self) {
+        self.sink.commit();
+    }
+
+    fn abort(&mut self) {
+        self.sink.abort();
+    }
+}
+
+struct OwnedSliceRetainLane<'b> {
+    first_slice: usize,
+    sink: retain::RetainSink<'b>,
+}
+
+impl crate::par2::BlockRetainLane for OwnedSliceRetainLane<'_> {
+    fn begin(&mut self, bidx: usize) {
+        self.sink.begin(self.first_slice + bidx);
+    }
+
+    fn append(&mut self, data: &[u8]) {
+        self.sink.append(data);
+    }
+
+    fn commit(&mut self) {
+        self.sink.commit();
+    }
+
+    fn abort(&mut self) {
+        self.sink.abort();
+    }
+}
+
+enum FastPass1 {
+    Answered(Pass1Out),
+    /// Declined before retaining anything; the chain pass should run with its
+    /// original `sink`.
+    Declined,
+    /// Declined on `all && !head_ok` after every block passed its IFSC proof
+    /// and was retained into `sink`; the chain pass must run with `sink = None`
+    /// so the same slices are not retained a second time.
+    DeclinedRetained,
+}
+
+/// The fast tier's pass: [`FastPass1::Declined`] when it cannot answer (no
+/// per-block checksums for every byte, or oversized), otherwise the same
+/// [`Pass1Out`] shape the chain pass produces, with `clean` resting on the
+/// blocks and the head. Proven blocks are retained into `sink` as they are
+/// verified so the repair fold does not re-read them from disk.
 fn fast_pass1(
     path: &Path,
     file: &Par2File,
     bs: usize,
     threads: usize,
-) -> Result<Option<Pass1Out>, RepairError> {
+    first_slice: usize,
+    sink: Option<&mut retain::RetainSink<'_>>,
+) -> Result<FastPass1, RepairError> {
     if !crate::par2::ifsc_covers_every_block(file, bs as u64) {
-        return Ok(None);
+        return Ok(FastPass1::Declined);
     }
     let mut f = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Some(Pass1Out {
+            return Ok(FastPass1::Answered(Pass1Out {
                 exists: false,
                 intact: false,
                 clean: false,
@@ -550,11 +611,38 @@ fn fast_pass1(
     // (Gemini 14 Oct 2026 sweep M2,
     // `the_fast_tier_agrees_with_the_chain_on_an_oversized_member`).
     if disk_len > file.length {
-        return Ok(None);
+        return Ok(FastPass1::Declined);
     }
     let head_ok = crate::par2::verify_head(file, &mut f)?;
-    let blocks = crate::par2::verify_blocks_path_or_streaming(
-        path, &mut f, file, bs as u64, disk_len, threads,
+    // A truncated member with a disagreeing head could still hit `all && !head_ok`
+    // (if missing tail bytes are all zeros) and decline to the chain pass, which
+    // marks the truncated tail absent; skip retaining in that narrow case so we
+    // can never leave a block retained that the chain pass marks absent.
+    let active_sink = if head_ok || disk_len == file.length {
+        sink
+    } else {
+        None
+    };
+    let used_sink = active_sink.is_some();
+    let corpus = active_sink.as_deref().map(retain::RetainSink::corpus);
+    let mut caller_lane = active_sink.map(|s| SliceRetainLane {
+        first_slice,
+        sink: s,
+    });
+    let blocks = crate::par2::verify_blocks_path_or_streaming_retaining(
+        path,
+        &mut f,
+        file,
+        bs as u64,
+        disk_len,
+        threads,
+        caller_lane.as_mut(),
+        || {
+            corpus.map(|c| OwnedSliceRetainLane {
+                first_slice,
+                sink: c.sink(),
+            })
+        },
     )?;
     let all = !blocks.is_empty() && blocks.iter().all(|&b| b);
     // Every block verified and only the head disagrees: the FileDesc's
@@ -567,10 +655,14 @@ fn fast_pass1(
     // `VerifyFailed` (9 Nov 2026 Fable sweep, PAR2 residue lead 2).
     // Rare by construction, so the second read it costs is too.
     if all && !head_ok {
-        return Ok(None);
+        return Ok(if used_sink {
+            FastPass1::DeclinedRetained
+        } else {
+            FastPass1::Declined
+        });
     }
     let clean = head_ok && all;
-    Ok(Some(Pass1Out {
+    Ok(FastPass1::Answered(Pass1Out {
         exists: true,
         intact: clean && disk_len == file.length,
         clean,
@@ -622,12 +714,15 @@ pub(super) fn verify_pass1_retaining(
     // The fast-check tier (`verify_pass1_tiered`) sits under the
     // retaining entry too, because the repair's scan comes in here with
     // a sink and its chain up to the first hole was 5.7 s of an 11.4 s
-    // single-member repair. It RETAINS NOTHING: the parallel block
-    // verifier does not hand chunks to the sink, and an empty sink is
-    // the shape retention already has when its budget is spent or the
-    // knob is 0 - the fold re-reads the blocks it needs from the file.
-    if fast && let Some(out) = fast_pass1(path, file, bs, threads)? {
-        return Ok(out);
+    // single-member repair. Proven blocks are retained into `sink` as
+    // each block passes its IFSC proof so the repair fold does not
+    // re-read them from disk.
+    if fast {
+        match fast_pass1(path, file, bs, threads, first_slice, sink.as_deref_mut())? {
+            FastPass1::Answered(out) => return Ok(out),
+            FastPass1::Declined => {}
+            FastPass1::DeclinedRetained => sink = None,
+        }
     }
     let f = match File::open(path) {
         Ok(f) => f,
