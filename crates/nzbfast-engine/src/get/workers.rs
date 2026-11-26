@@ -62,13 +62,24 @@ pub(super) struct ParkedR {
 /// the extractor so far, per slot.
 #[derive(Default)]
 pub(super) struct PendingR {
-    pub(super) parked: Vec<ParkedR>,
-    /// Per slot, the drained fragments and whether each landed as
-    /// PLAINTEXT in an in-stream-decrypted file - see
-    /// [`nzbkit::extract::LatePlacement::crypto`]. The flag decides
-    /// which record the completed article gets, and a `true` anywhere
-    /// in a span's join makes an `R` record impossible for it.
-    pub(super) late: std::collections::HashMap<usize, Vec<(nzbkit::extract::Frag, bool)>>,
+    /// Parked articles partitioned by slot index so off-sweep passes
+    /// visit only slots in `fresh` instead of scanning every parked
+    /// article across all slots.
+    pub(super) parked: std::collections::HashMap<usize, Vec<ParkedR>>,
+    /// Total number of parked articles across all slots for O(1)
+    /// emptiness checks.
+    parked_count: usize,
+    /// Per slot, the drained fragments indexed by `vol_off` and whether
+    /// each landed as PLAINTEXT in an in-stream-decrypted file - see
+    /// [`nzbkit::extract::LatePlacement::crypto`]. A `Vec` per key
+    /// handles duplicate/same-start fragments cleanly while allowing
+    /// O(log L + k) range lookups. The flag decides which record the
+    /// completed article gets, and a `true` anywhere in a span's join
+    /// makes an `R` record impossible for it.
+    pub(super) late: std::collections::HashMap<
+        usize,
+        std::collections::BTreeMap<u64, Vec<(nzbkit::extract::Frag, bool)>>,
+    >,
     /// Slots that gained a late placement since the last re-attempt
     /// pass. A parked article's fate can only change when its own slot
     /// gains placements, or when the volume file's coverage grows under
@@ -78,6 +89,41 @@ pub(super) struct PendingR {
     /// When the last SWEEP - a pass that re-attempted parked articles in
     /// slots with no new placements - ran. See [`PENDING_R_SWEEP`].
     last_sweep: Option<std::time::Instant>,
+}
+
+impl PendingR {
+    pub(super) fn push_parked(&mut self, p: ParkedR) {
+        self.parked.entry(p.sidx).or_default().push(p);
+        self.parked_count += 1;
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.parked_count == 0
+    }
+
+    #[cfg(test)]
+    pub(super) fn parked_len(&self) -> usize {
+        self.parked_count
+    }
+
+    #[cfg(test)]
+    pub(super) fn parked_offsets(&self) -> Vec<u64> {
+        self.parked
+            .values()
+            .flat_map(|v| v.iter().map(|p| p.off))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn push_late(&mut self, slot: usize, frag: nzbkit::extract::Frag, crypto: bool) {
+        self.fresh.insert(slot);
+        self.late
+            .entry(slot)
+            .or_default()
+            .entry(frag.vol_off)
+            .or_default()
+            .push((frag, crypto));
+    }
 }
 
 /// How stale the widening arm's answer may get: a parked article whose
@@ -121,13 +167,15 @@ pub(super) fn flush_pending_r(
     force: bool,
 ) {
     let mut st = pending_r.lock_ok();
-    if st.parked.is_empty() {
+    if st.is_empty() {
         return;
     }
     for lp in extractor.drain_late_placements() {
         st.fresh.insert(lp.slot);
         st.late
             .entry(lp.slot)
+            .or_default()
+            .entry(lp.frag.vol_off)
             .or_default()
             .push((lp.frag, lp.crypto));
     }
@@ -146,150 +194,218 @@ pub(super) fn flush_pending_r(
     }
     let PendingR {
         parked,
+        parked_count,
         late,
         fresh,
         ..
     } = &mut *st;
-    let mut done: Vec<(usize, u64, u64)> = Vec::new();
     // The materialized-volume oracle, captured ONCE for this pass under
-    // ONE routing-lock acquisition. It used to be asked per parked
-    // article, and each ask took that lock - so a sweep over `parked`
-    // (about one entry per member on a many-member stored set) took it a
-    // couple of thousand times in a burst, while holding the `pending_r`
-    // mutex every decode thread queues on at the top of this function.
-    // Round 26 of research/RAR-PERF-AUDIT-2026-09-02.md read that pair as
-    // the two largest waits in the whole profile. Lazy: a pass that never
-    // reaches the widening arm does not take the lock at all.
-    let mut materialized: Option<nzbkit::extract::MaterializedVolumes> = None;
-    // The `E`/`K`/`T` facts every `D` record leans on, drained and
-    // written ONCE per pass and before the first `D` of it, so a record
-    // is never orphaned ahead of the facts that restore it. Lazy: a
-    // pass that completes no crypto article touches the sink at all.
-    let mut events_written = false;
-    parked.retain(|p| {
-        // Off-sweep: only slots that just gained placements can have
-        // changed, and re-reading the rest is the O(parked)-per-article
-        // walk this gate exists to remove.
-        if !sweep && !fresh.contains(&p.sidx) {
-            return true;
-        }
-        let end = p.off + p.len;
-        // A `Persist::Held` return carries PLAIN fragments only
-        // (`compose_persist` filters the crypto ones out), so the
-        // article's own partial view is all `false`.
-        let mut frags: Vec<(nzbkit::extract::Frag, bool)> =
-            p.frags.iter().cloned().map(|f| (f, false)).collect();
-        if let Some(slot_late) = late.get(&p.sidx) {
-            frags.extend(
-                slot_late
-                    .iter()
-                    .filter(|(f, _)| f.vol_off >= p.off && f.vol_off + f.len <= end)
-                    .cloned(),
-            );
-        }
-        frags.sort_by_key(|(f, _)| f.vol_off);
-        let crypto = frags.iter().any(|(_, c)| *c);
-        let mut covered_to = p.off;
-        let mut gap = false;
-        for (f, _) in &frags {
-            if f.vol_off > covered_to {
-                gap = true; // a hole the placements do not fill
-                break;
-            }
-            covered_to = covered_to.max(f.vol_off + f.len);
-        }
-        // TODO 252 (23 Aug 2026): the placement trail is not the only
-        // way an article's bytes reach a MATERIALIZED volume, so where
-        // it comes up short, ask the volume file itself. The demote
-        // reconstruction reports every write it makes (`refeed_active`),
-        // but the post-write re-route in `Extractor::write` and the
-        // forward-delivery re-check both land their bytes with the flag
-        // down and surface nothing - and the read-back skips any range
-        // whose pwrite has not landed yet, which is the window those two
-        // exist to close. The article then stayed parked for the life of
-        // the job and refetched on the next run, ~8% of runs of the e2e
-        // resume rig standalone here and ~40% under a loaded suite.
-        // `materialized_span_on_disk` makes the same claim the slot's
-        // `M` line makes, off the writer's own coverage map rather than
-        // off an inference: an unwritten byte anywhere in the span
-        // answers `None` and the article stays parked, which is the safe
-        // direction.
-        let mut on_disk = None;
-        if gap || frags.is_empty() || covered_to < end {
-            // A crypto span does NOT inherit the widening above it, and
-            // that is a decision rather than an omission (TODO 27.2, 24
-            // Aug 2026). `materialized_span_on_disk` vouches for the
-            // slot's VOLUME file holding these bytes verbatim at their
-            // final offsets, and its answer composes ONE identity
-            // fragment naming that volume - which is an `R` claim in
-            // everything but the letter. Inheriting it would let a span
-            // whose bytes reached a plaintext-once file complete off a
-            // volume it may only partly have reached, mixing a copy
-            // restore with a re-encryption restore over the same range.
-            // A crypto span therefore completes ONLY off its own
-            // placement trail, and where the trail comes up short the
-            // article stays parked and refetches - the safe direction,
-            // and no worse than what it did before it journaled at all.
-            if crypto {
-                return true; // stays parked
-            }
-            let Some((name, size)) = materialized
-                .get_or_insert_with(|| extractor.materialized_volumes())
-                .span_on_disk(p.sidx, p.off, p.len)
-            else {
-                return true; // stays parked
+    // ONE routing-lock acquisition (lazy: a pass that never reaches the
+    // widening arm does not take the lock at all), and the `E`/`K`/`T`
+    // facts drained and written ONCE per pass ahead of the first `D`
+    // record.
+    let mut pass = FlushPass {
+        late,
+        parked_count,
+        extractor,
+        journal,
+        materialized: None,
+        events_written: false,
+        slot_done: Vec::new(),
+    };
+    if sweep {
+        fresh.clear();
+        parked.retain(|&sidx, slot_parked| {
+            pass.flush_slot(sidx, slot_parked);
+            !slot_parked.is_empty()
+        });
+    } else {
+        for sidx in fresh.drain() {
+            let remove = if let Some(slot_parked) = parked.get_mut(&sidx) {
+                pass.flush_slot(sidx, slot_parked);
+                slot_parked.is_empty()
+            } else {
+                false
             };
-            frags = vec![(nzbkit::extract::Frag::identity(&name, p.off, p.len), false)];
-            on_disk = Some((name, size));
-        }
-        // Every byte of the span is durably on disk (the re-feed writes
-        // ran under the extractor's routing lock, before the placements
-        // were surfaced) - journal it exactly like a directly-Placed
-        // article.
-        if p.par2_main {
-            journal.record(&p.id);
-        } else if crypto {
-            if !complete_crypto(p, &frags, extractor, journal, &mut events_written) {
-                return true; // plaintext not settled yet - stays parked
+            if remove {
+                parked.remove(&sidx);
             }
-        } else {
-            let mut frags: Vec<nzbkit::extract::Frag> = frags.into_iter().map(|(f, _)| f).collect();
-            let widened = on_disk.is_some();
-            let slot_file = on_disk.or_else(|| extractor.slot_file_info(p.sidx));
-            // A parked article completing AFTER its slot demoted may mix
-            // identity fragments (the reconstruction's own writes) with
-            // fragments naming inner files the fallback just deleted -
-            // and its record lands after the slot's `M` line, past the
-            // positional rewrite. Same fact, applied at record time: the
-            // materialized volume holds every one of these bytes at its
-            // final offset.
-            // The widened arm above already composed its one fragment
-            // that way, from the same locked read that established the
-            // coverage.
-            if !widened
-                && extractor.slot_materialized(p.sidx)
-                && let Some((name, _)) = slot_file.as_ref()
-            {
-                for f in frags.iter_mut() {
-                    f.rebase_identity(name);
+        }
+    }
+}
+
+struct FlushPass<'a> {
+    late: &'a mut std::collections::HashMap<
+        usize,
+        std::collections::BTreeMap<u64, Vec<(nzbkit::extract::Frag, bool)>>,
+    >,
+    parked_count: &'a mut usize,
+    extractor: &'a nzbkit::extract::Extractor,
+    journal: &'a nzbkit::journal::Journal,
+    materialized: Option<nzbkit::extract::MaterializedVolumes>,
+    events_written: bool,
+    slot_done: Vec<(u64, u64)>,
+}
+
+impl FlushPass<'_> {
+    fn flush_slot(&mut self, sidx: usize, slot_parked: &mut Vec<ParkedR>) {
+        self.slot_done.clear();
+        let before = slot_parked.len();
+        {
+            let slot_late = self.late.get(&sidx);
+            slot_parked.retain(|p| {
+                let end = p.off + p.len;
+                // When `p.frags` is empty (the common whole-span hold), scan
+                // `slot_late.range(p.off..end)` in already-sorted `vol_off`
+                // order without allocating or cloning fragments unless the
+                // span actually completes.
+                let (crypto, gap, empty, covered_to, mut frags) = if p.frags.is_empty() {
+                    let mut covered_to = p.off;
+                    let mut gap = false;
+                    let mut crypto = false;
+                    let mut count = 0usize;
+                    if let Some(sl) = slot_late {
+                        for (_, bucket) in sl.range(p.off..end) {
+                            for (f, c) in bucket {
+                                if f.vol_off + f.len <= end {
+                                    count += 1;
+                                    if *c {
+                                        crypto = true;
+                                    }
+                                    if !gap {
+                                        if f.vol_off > covered_to {
+                                            gap = true;
+                                        } else {
+                                            covered_to = covered_to.max(f.vol_off + f.len);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let frags = if !gap && count > 0 && covered_to >= end && !p.par2_main {
+                        let mut v = Vec::with_capacity(count);
+                        if let Some(sl) = slot_late {
+                            for (_, bucket) in sl.range(p.off..end) {
+                                for (f, c) in bucket {
+                                    if f.vol_off + f.len <= end {
+                                        v.push((f.clone(), *c));
+                                    }
+                                }
+                            }
+                        }
+                        v
+                    } else {
+                        Vec::new()
+                    };
+                    (crypto, gap, count == 0, covered_to, frags)
+                } else {
+                    // A `Persist::Held` return carries PLAIN fragments only
+                    // (`compose_persist` filters the crypto ones out), so the
+                    // article's own partial view is all `false`.
+                    let mut frags: Vec<(nzbkit::extract::Frag, bool)> =
+                        p.frags.iter().cloned().map(|f| (f, false)).collect();
+                    if let Some(sl) = slot_late {
+                        for (_, bucket) in sl.range(p.off..end) {
+                            for (f, c) in bucket {
+                                if f.vol_off + f.len <= end {
+                                    frags.push((f.clone(), *c));
+                                }
+                            }
+                        }
+                    }
+                    frags.sort_by_key(|(f, _)| f.vol_off);
+                    let crypto = frags.iter().any(|(_, c)| *c);
+                    let mut covered_to = p.off;
+                    let mut gap = false;
+                    for (f, _) in &frags {
+                        if f.vol_off > covered_to {
+                            gap = true; // a hole the placements do not fill
+                            break;
+                        }
+                        covered_to = covered_to.max(f.vol_off + f.len);
+                    }
+                    let empty = frags.is_empty();
+                    (crypto, gap, empty, covered_to, frags)
+                };
+                // TODO 252 (23 Aug 2026): the placement trail is not the only
+                // way an article's bytes reach a MATERIALIZED volume, so where
+                // it comes up short, ask the volume file itself.
+                let mut on_disk = None;
+                if gap || empty || covered_to < end {
+                    // A crypto span does NOT inherit the widening above it
+                    // (TODO 27.2, 24 Aug 2026): it completes ONLY off its own
+                    // placement trail.
+                    if crypto {
+                        return true; // stays parked
+                    }
+                    let Some((name, size)) = self
+                        .materialized
+                        .get_or_insert_with(|| self.extractor.materialized_volumes())
+                        .span_on_disk(p.sidx, p.off, p.len)
+                    else {
+                        return true; // stays parked
+                    };
+                    frags = vec![(nzbkit::extract::Frag::identity(&name, p.off, p.len), false)];
+                    on_disk = Some((name, size));
+                }
+                // Every byte of the span is durably on disk - journal it
+                // exactly like a directly-Placed article.
+                if p.par2_main {
+                    self.journal.record(&p.id);
+                } else if crypto {
+                    if !complete_crypto(
+                        p,
+                        &frags,
+                        self.extractor,
+                        self.journal,
+                        &mut self.events_written,
+                    ) {
+                        return true; // plaintext not settled yet - stays parked
+                    }
+                } else {
+                    let mut frags: Vec<nzbkit::extract::Frag> =
+                        frags.into_iter().map(|(f, _)| f).collect();
+                    let widened = on_disk.is_some();
+                    let slot_file = on_disk.or_else(|| self.extractor.slot_file_info(p.sidx));
+                    if !widened
+                        && self.extractor.slot_materialized(p.sidx)
+                        && let Some((name, _)) = slot_file.as_ref()
+                    {
+                        for f in frags.iter_mut() {
+                            f.rebase_identity(name);
+                        }
+                    }
+                    self.journal.record_placed(
+                        p.sidx, &p.id, slot_file, &p.name, p.size, &frags, p.crc,
+                    );
+                }
+                self.slot_done.push((p.off, end));
+                false
+            });
+        }
+        *self.parked_count -= before - slot_parked.len();
+        // The late fragments a journaled article consumed can never match
+        // another article (spans are disjoint) - drop them from this slot's
+        // BTreeMap in O(log L + k) per completed range.
+        if !self.slot_done.is_empty()
+            && let Some(sl) = self.late.get_mut(&sidx)
+        {
+            let mut empty_keys = Vec::new();
+            for &(off, end) in &self.slot_done {
+                for (&k, bucket) in sl.range_mut(off..end) {
+                    bucket.retain(|(f, _)| f.vol_off + f.len > end);
+                    if bucket.is_empty() {
+                        empty_keys.push(k);
+                    }
+                }
+                for k in empty_keys.drain(..) {
+                    sl.remove(&k);
                 }
             }
-            journal.record_placed(p.sidx, &p.id, slot_file, &p.name, p.size, &frags, p.crc);
-        }
-        done.push((p.sidx, p.off, end));
-        false
-    });
-    fresh.clear();
-    // The late fragments a journaled article consumed can never match
-    // another article (spans are disjoint) - drop them so the map does
-    // not grow for the life of the job.
-    if !done.is_empty() {
-        for (slot, v) in late.iter_mut() {
-            v.retain(|(f, _)| {
-                !done
-                    .iter()
-                    .any(|(s, o, e)| s == slot && f.vol_off >= *o && f.vol_off + f.len <= *e)
-            });
+            if sl.is_empty() {
+                self.late.remove(&sidx);
+            }
         }
     }
 }
@@ -1041,7 +1157,7 @@ fn record_placement(
         // cover the span (see flush_pending_r).
         nzbkit::extract::Persist::Held(frags) => {
             if !p.out.is_empty() {
-                sinks.pending_r.lock_ok().parked.push(ParkedR {
+                sinks.pending_r.lock_ok().push_parked(ParkedR {
                     sidx: p.sidx,
                     id: p.id.clone(),
                     name: p.name.to_string(),
