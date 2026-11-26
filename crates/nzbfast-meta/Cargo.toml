@@ -33,7 +33,8 @@ hex = "0.4"
 # pages). Every one of them goes out through `nzbfast_core::netfetch`,
 # which is where the SSRF guard and project invariant 5a live; this is
 # the transport those agents are built on.
-ureq = "3"
+# Same feature set as nzbfast-core: no ring, aws-lc-rs supplied per agent.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "gzip"] }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 
 [features]

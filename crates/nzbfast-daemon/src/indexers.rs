@@ -359,6 +359,7 @@ pub(super) fn shared_indexer_agent() -> ureq::Agent {
                     // guarding the PROXY's address instead of the
                     // indexer's - see `netfetch::agent_config`.
                     .proxy(None)
+                    .tls_config(crate::netfetch::tls_config())
                     .timeout_global(Some(std::time::Duration::from_secs(15)))
                     .max_idle_connections_per_host(0)
                     .build(),

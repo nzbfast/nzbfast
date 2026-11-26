@@ -611,6 +611,22 @@ fn base_resolve(
     DefaultResolver::default().resolve(uri, config, timeout)
 }
 
+/// The TLS settings every agent in this workspace is built with.
+///
+/// ureq is built without its default `rustls` feature, because that
+/// feature pulls in ring and the workspace is aws-lc-rs everywhere
+/// else. ureq then has no crypto provider of its own and would panic on
+/// the first https request, so the provider is named here. The roots are
+/// left at ureq's default, the WebPKI set, which is what it used before.
+pub fn tls_config() -> ureq::tls::TlsConfig {
+    ureq::tls::TlsConfig::builder()
+        .provider(ureq::tls::TlsProvider::Rustls)
+        .unversioned_rustls_crypto_provider(std::sync::Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .build()
+}
+
 /// The config every agent in this module is built on.
 ///
 /// Three settings, and each of them is holding ureq 3 to what ureq 2
@@ -640,6 +656,7 @@ fn agent_config(redirects: u32, timeout_secs: u64) -> ureq::config::Config {
         .max_redirects(redirects)
         .max_redirects_will_error(false)
         .proxy(None)
+        .tls_config(tls_config())
         .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
         .build()
 }
@@ -668,6 +685,7 @@ fn witnessing_agent_config(redirects: u32, timeout_secs: u64) -> ureq::config::C
         .max_redirects(redirects)
         .max_redirects_will_error(false)
         .proxy(None)
+        .tls_config(tls_config())
         .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
         .max_idle_connections_per_host(0)
         .build()
