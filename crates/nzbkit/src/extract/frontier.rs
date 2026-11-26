@@ -100,8 +100,10 @@ pub(super) struct FrontierState {
     pub(super) base: u64,
     /// Contiguous bytes from volume offset `base`.
     pub(super) data: Vec<u8>,
-    /// Spans beyond the frontier, keyed by start offset.
-    pub(super) pending: BTreeMap<u64, Vec<u8>>,
+    /// Spans beyond the frontier, keyed by start offset. All mutations go
+    /// through the `FrontierState` pending helpers so `pending_bytes` and
+    /// `pending_max_len` stay exact in O(1).
+    pending: BTreeMap<u64, Vec<u8>>,
     /// Spans paged out to the holds scratch (start offset -> scratch
     /// region offset + length), disjoint among themselves. Created only
     /// by [`FrontierBuffer::page_cold`] on a chase stalled behind
@@ -128,9 +130,13 @@ pub(super) struct FrontierState {
     /// Retained RAM bytes (frontier + pending; paged spans excluded) -
     /// what the holds budget is charged for.
     pub(super) stored: usize,
+    /// Sum of lengths of all spans currently in `pending`, maintained
+    /// incrementally in O(1) by the `pending` mutation helpers.
+    pending_bytes: usize,
     /// Longest span currently in `pending`, in bytes: the search window
-    /// [`FrontierState::pending_at`] stands on. Recomputed alongside
-    /// `stored`, in the same pass - that walk was already being paid for.
+    /// [`FrontierState::pending_at`] stands on. Maintained incrementally in
+    /// O(1) on insert, and rescanned only when a removal drops a span of
+    /// length `pending_max_len`.
     pending_max_len: usize,
     /// A rewrite arrived whose bytes DIFFERED from what was already
     /// retained for a range the decode had ALREADY READ (below
@@ -325,19 +331,80 @@ impl FrontierState {
             .map(|(&s, v)| (s, v))
     }
 
-    /// Recompute the retained-byte total and the parked-span search
-    /// window together, in one pass over `pending`. Every mutation of
-    /// `pending` ends here before the lock is released, which is what
-    /// keeps `pending_max_len` a true bound rather than a hint.
-    fn resync_retained(&mut self) {
-        let mut stored = self.data.len();
-        let mut max_len = 0usize;
-        for v in self.pending.values() {
-            stored += v.len();
-            max_len = max_len.max(v.len());
+    /// Recompute `pending_max_len` from `pending`. Only called when a
+    /// removal (or shortening overwrite) drops a span whose length equaled
+    /// `pending_max_len`.
+    fn recompute_pending_max_len(&mut self) {
+        self.pending_max_len = self.pending.values().map(Vec::len).max().unwrap_or(0);
+    }
+
+    /// Insert or replace a parked span in `pending`, keeping `pending_bytes`
+    /// and `pending_max_len` exact in O(1) (only rescanning `pending_max_len`
+    /// if a shortening overwrite replaces the longest span).
+    fn insert_pending(&mut self, offset: u64, bytes: Vec<u8>) {
+        let new_len = bytes.len();
+        let old_len = self.pending.insert(offset, bytes).map_or(0, |old| old.len());
+        self.pending_bytes = self.pending_bytes + new_len - old_len;
+        if new_len >= self.pending_max_len {
+            self.pending_max_len = new_len;
+        } else if old_len == self.pending_max_len {
+            self.recompute_pending_max_len();
         }
-        self.stored = stored;
-        self.pending_max_len = max_len;
+    }
+
+    /// Remove a parked span from `pending`, updating `pending_bytes` in O(1)
+    /// and setting `*max_dirty = true` if the removed span had length
+    /// `pending_max_len`. Callers removing in a batch check `max_dirty` once
+    /// after the loop and call [`Self::recompute_pending_max_len`].
+    fn remove_pending_deferred(&mut self, offset: u64, max_dirty: &mut bool) -> Option<Vec<u8>> {
+        let removed = self.pending.remove(&offset)?;
+        let removed_len = removed.len();
+        self.pending_bytes -= removed_len;
+        if removed_len == self.pending_max_len {
+            *max_dirty = true;
+        }
+        Some(removed)
+    }
+
+    /// Pop the lowest-offset parked span from `pending`, updating
+    /// `pending_bytes` in O(1) and rescanning `pending_max_len` only if the
+    /// popped span was the longest.
+    fn pop_first_pending(&mut self) -> Option<(u64, Vec<u8>)> {
+        let (offset, removed) = self.pending.pop_first()?;
+        let removed_len = removed.len();
+        self.pending_bytes -= removed_len;
+        if removed_len == self.pending_max_len {
+            self.recompute_pending_max_len();
+        }
+        Some((offset, removed))
+    }
+
+    /// Batch variant of [`Self::pop_first_pending`] that defers the
+    /// `pending_max_len` rescan until after the caller's loop.
+    fn pop_first_pending_deferred(&mut self, max_dirty: &mut bool) -> Option<(u64, Vec<u8>)> {
+        let (offset, removed) = self.pending.pop_first()?;
+        let removed_len = removed.len();
+        self.pending_bytes -= removed_len;
+        if removed_len == self.pending_max_len {
+            *max_dirty = true;
+        }
+        Some((offset, removed))
+    }
+
+    /// Drain all parked spans from `pending`, resetting `pending_bytes` and
+    /// `pending_max_len` to zero in O(1).
+    #[cfg(test)]
+    fn take_pending(&mut self) -> BTreeMap<u64, Vec<u8>> {
+        self.pending_bytes = 0;
+        self.pending_max_len = 0;
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Recompute the retained-byte total in O(1) from `data.len()` and the
+    /// incrementally maintained `pending_bytes`, and update the
+    /// `holds_reserve` gauge for `data`'s slack.
+    fn sync_stored(&mut self) {
+        self.stored = self.data.len() + self.pending_bytes;
         self.resync_reserve();
     }
 
@@ -355,7 +422,7 @@ impl FrontierState {
     /// the largest single term in the compressed-RAR chase peak and the
     /// whole of what "unattributed" had been hiding.
     ///
-    /// Called from [`Self::resync_retained`], which every mutation of
+    /// Called from [`Self::sync_stored`], which every mutation of
     /// this state already ends with, so there is one site rather than a
     /// list to keep in step. [`FrontierBuffer`]'s `Drop` releases the
     /// remainder.
@@ -687,7 +754,6 @@ impl FrontierBuffer {
         // copies cannot be proven to agree, and the demote's own
         // read-back will surface the I/O error as the job failure.
         if !st.paged.is_empty() && end > base {
-            let mut unpaged = false;
             let overlapping: Vec<(u64, u64, usize)> = {
                 // A single `next_back()` IS sound here: `paged` regions are
                 // disjoint by construction, so only the greatest start at
@@ -741,23 +807,18 @@ impl FrontierBuffer {
                 match st.pending.get_mut(&s) {
                     // A longer same-start park subsumes the region; the
                     // corrected bytes overwrite its copy so every
-                    // retained record agrees.
+                    // retained record agrees (length is unchanged).
                     Some(old) if old.len() >= whole.len() => {
                         old[..whole.len()].copy_from_slice(&whole);
                     }
                     _ => {
-                        st.pending.insert(s, whole);
+                        // `insert_pending` updates `pending_max_len`
+                        // immediately so the parked walk below already sees
+                        // the refreshed bound.
+                        st.insert_pending(s, whole);
                     }
                 }
                 differed = true;
-                unpaged = true;
-            }
-            if unpaged {
-                // An un-paged region just entered `pending` and can be
-                // the longest park there now. Refresh the bound before
-                // the walk below stands on it: a stale (too small)
-                // window is the same miss the walk was fixed for.
-                st.resync_retained();
             }
         }
         if end > frontier {
@@ -830,25 +891,30 @@ impl FrontierBuffer {
                             None => true,
                         };
                     if keep {
-                        st.pending
-                            .insert(stop, bytes[(stop - offset) as usize..].to_vec());
+                        st.insert_pending(stop, bytes[(stop - offset) as usize..].to_vec());
                         accepted = true;
                     }
                 }
             }
             // Fold parked spans the new frontier now reaches. Their
             // overlap with the frontier was reconciled when they were
-            // written, so only the tail is new.
+            // written, so only the tail is new. Defer `pending_max_len`
+            // recomputation until after the loop so folding N equal-sized
+            // spans never rescans `pending` N times.
+            let mut max_dirty = false;
             while let Some((&s, _)) = st.pending.first_key_value() {
                 let f = st.frontier_ram();
                 if s > f {
                     break;
                 }
-                let v = st.pending.remove(&s).unwrap();
+                let (_, v) = st.pop_first_pending_deferred(&mut max_dirty).unwrap();
                 let ve = s + v.len() as u64;
                 if ve > f {
                     st.append_run(&v[(f - s) as usize..]);
                 }
+            }
+            if max_dirty {
+                st.recompute_pending_max_len();
             }
         } else {
             // Park it; a shorter duplicate at the same start is subsumed
@@ -864,7 +930,7 @@ impl FrontierBuffer {
                     None => true,
                 };
             if keep {
-                st.pending.insert(offset, bytes.to_vec());
+                st.insert_pending(offset, bytes.to_vec());
                 // Parked spans wake waiters too: the 7z chase reads at
                 // arbitrary offsets (the promoted footer far past the
                 // frontier), unlike the frontier-sequential RAR reader.
@@ -879,7 +945,7 @@ impl FrontierBuffer {
             // simply what it reads next.
             st.conflict |= diff_low < st.served;
         }
-        st.resync_retained();
+        st.sync_stored();
         let stored = st.retained();
         drop(st);
         super::chasestat::buf_retained(stored);
@@ -1093,10 +1159,10 @@ impl FrontierBuffer {
         if !data.is_empty() {
             out.push((base, data));
         }
-        for (s, v) in std::mem::take(&mut st.pending) {
+        for (s, v) in st.take_pending() {
             out.push((s, v));
         }
-        st.resync_retained();
+        st.sync_stored();
         out
     }
 
@@ -1113,7 +1179,7 @@ impl FrontierBuffer {
         if !st.data.is_empty() {
             let base = st.base;
             let data = std::mem::take(&mut st.data);
-            st.resync_retained();
+            st.sync_stored();
             return Ok(Some((base, data)));
         }
         while let Some((&s, &(po, len))) = st.paged.iter().next() {
@@ -1145,11 +1211,11 @@ impl FrontierBuffer {
             }
             return Ok(Some((s + skip as u64, b)));
         }
-        if let Some((s, v)) = st.pending.pop_first() {
-            st.resync_retained();
+        if let Some((s, v)) = st.pop_first_pending() {
+            st.sync_stored();
             return Ok(Some((s, v)));
         }
-        st.resync_retained();
+        st.sync_stored();
         Ok(None)
     }
 
@@ -1231,7 +1297,7 @@ impl FrontierBuffer {
         }
         let at = st.base;
         st.base = cut;
-        st.resync_retained();
+        st.sync_stored();
         Some((at, out))
     }
 
@@ -1304,7 +1370,7 @@ impl FrontierBuffer {
         let mut st = self.state.lock_ok();
         let n = std::mem::take(&mut st.trim_pending);
         if n == 0 || !Self::trim_consistent(&st, at, n, seq_before) {
-            st.resync_retained();
+            st.sync_stored();
             return None;
         }
         st.data.drain(..n);
@@ -1322,7 +1388,7 @@ impl FrontierBuffer {
             st.data.shrink_to_fit();
         }
         st.base = at + n as u64;
-        st.resync_retained();
+        st.sync_stored();
         Some(n)
     }
 
@@ -1332,7 +1398,7 @@ impl FrontierBuffer {
     pub(super) fn trim_abandon(&self) {
         let mut st = self.state.lock_ok();
         st.trim_pending = 0;
-        st.resync_retained();
+        st.sync_stored();
     }
 
     /// Whether a planned prefix `[at, at+n)` is still exactly the bytes
@@ -1399,6 +1465,7 @@ impl FrontierBuffer {
                 }
                 let mut picked = Vec::new();
                 let mut picked_bytes = 0usize;
+                let mut max_dirty = false;
                 let starts: Vec<u64> = st.pending.keys().rev().copied().collect();
                 for s in starts {
                     if need == 0 || picked_bytes >= BATCH {
@@ -1435,7 +1502,7 @@ impl FrontierBuffer {
                         .filter(|&(ps, plen)| ps + plen as u64 > s);
                     match overlap {
                         Some((ps, plen)) if ps <= s && ps + plen as u64 >= e => {
-                            st.pending.remove(&s);
+                            st.remove_pending_deferred(s, &mut max_dirty);
                             moved += len;
                             need = need.saturating_sub(len);
                             continue;
@@ -1446,7 +1513,10 @@ impl FrontierBuffer {
                     picked_bytes += len;
                     picked.push((s, st.pending[&s].clone()));
                 }
-                st.resync_retained();
+                if max_dirty {
+                    st.recompute_pending_max_len();
+                }
+                st.sync_stored();
                 // The rewrite generation the clones were taken at, read
                 // under the same lock: the commit's byte-identity proof.
                 (picked, st.rewrite_seq)
@@ -1469,6 +1539,7 @@ impl FrontierBuffer {
             page_cold_hook::fire(self);
             {
                 let mut st = self.state.lock_ok();
+                let mut max_dirty = false;
                 for (s, v, off) in written {
                     let e = s + v.len() as u64;
                     // Same length plus an unmoved `rewrite_seq` is the
@@ -1496,7 +1567,7 @@ impl FrontierBuffer {
                         sc.release(v.len());
                         continue;
                     }
-                    st.pending.remove(&s);
+                    st.remove_pending_deferred(s, &mut max_dirty);
                     if let Some(&(_, old_len)) = st.paged.get(&s) {
                         st.paged_bytes -= old_len;
                         sc.release(old_len);
@@ -1506,7 +1577,10 @@ impl FrontierBuffer {
                     need = need.saturating_sub(v.len());
                     st.paged.insert(s, (off, v.len()));
                 }
-                st.resync_retained();
+                if max_dirty {
+                    st.recompute_pending_max_len();
+                }
+                st.sync_stored();
             }
             if refused {
                 // Scratch refusal (ceiling, dead): whatever stayed in
@@ -1573,7 +1647,7 @@ impl FrontierBuffer {
                 moved += bytes.len();
                 need = need.saturating_sub(bytes.len());
                 st.paged.insert(at, (off, bytes.len()));
-                st.resync_retained();
+                st.sync_stored();
             }
         }
         moved
@@ -3648,5 +3722,178 @@ mod tests {
                 ),
             }
         }
+    }
+
+    fn assert_accounting_invariants(buf: &FrontierBuffer) {
+        let st = buf.state.lock_ok();
+        let expected_pending_bytes: usize = st.pending.values().map(Vec::len).sum();
+        let expected_pending_max_len: usize = st.pending.values().map(Vec::len).max().unwrap_or(0);
+        assert_eq!(
+            st.pending_bytes, expected_pending_bytes,
+            "pending_bytes drifted from pending map sum"
+        );
+        assert_eq!(
+            st.pending_max_len, expected_pending_max_len,
+            "pending_max_len drifted from pending map max"
+        );
+        assert_eq!(
+            st.stored,
+            st.data.len() + st.pending_bytes,
+            "stored drifted from data.len() + pending_bytes"
+        );
+        assert_eq!(
+            st.reserve_charged,
+            st.data.capacity() - st.data.len(),
+            "reserve_charged drifted from data slack"
+        );
+    }
+
+    #[test]
+    fn incremental_pending_accounting_matches_full_scan() {
+        let dir = tmpdir("frontier-o1-accounting");
+        let sc = Arc::new(HoldsScratch::new(&dir));
+        let buf = FrontierBuffer::new_gated(200_000, None, Some(sc.clone()), None);
+        assert_accounting_invariants(&buf);
+
+        // Out-of-order inserts of varying lengths, including ties at max.
+        buf.write_span(40_000, &pat(40_000, 12_000));
+        assert_accounting_invariants(&buf);
+        buf.write_span(70_000, &pat(70_000, 20_000));
+        assert_accounting_invariants(&buf);
+        buf.write_span(100_000, &pat(100_000, 20_000)); // tied max
+        assert_accounting_invariants(&buf);
+        buf.write_span(130_000, &pat(130_000, 1_000));
+        assert_accounting_invariants(&buf);
+
+        // Shorter duplicate at same start is subsumed; longer overwrite grows
+        // both pending_bytes and pending_max_len.
+        buf.write_span(70_000, &pat(70_000, 8_000));
+        assert_accounting_invariants(&buf);
+        buf.write_span(70_000, &pat(70_000, 25_000));
+        assert_accounting_invariants(&buf);
+        assert_eq!(buf.state.lock_ok().pending_max_len, 25_000);
+
+        // Partial fold: fill [0, 40_000) to fold the 12_000 span at 40_000
+        // (non-max removal leaves pending_max_len at 25_000).
+        buf.write_span(0, &pat(0, 40_000));
+        assert_accounting_invariants(&buf);
+        assert_eq!(buf.state.lock_ok().pending_max_len, 25_000);
+
+        // Fold across the unique max (25_000 at 70_000) so pending_max_len
+        // rescans down to 20_000.
+        buf.write_span(52_000, &pat(52_000, 18_000));
+        assert_accounting_invariants(&buf);
+        assert_eq!(buf.state.lock_ok().pending_max_len, 20_000);
+
+        // Page cold removes pending spans (including the 20_000 max at 100_000)
+        // and leaves the 1_000 span (below HOLDS_PAGE_MIN) in pending.
+        let moved = buf.page_cold(1 << 20, 25_000, false);
+        assert_eq!(moved, 20_000);
+        assert_accounting_invariants(&buf);
+        assert_eq!(buf.state.lock_ok().pending_max_len, 1_000);
+
+        // Differing rewrite on the paged span un-pages it back into pending
+        // and raises pending_max_len back to 20_000 before the parked walk.
+        buf.write_span(102_000, &[0xEE; 1_000]);
+        assert_accounting_invariants(&buf);
+        assert_eq!(buf.state.lock_ok().pending_max_len, 20_000);
+
+        // Trim paths keep stored and reserve_charged exact.
+        let (at, _n, seq) = buf.trim_plan(20_000, 1).expect("trim_plan");
+        buf.trim_abandon();
+        assert_accounting_invariants(&buf);
+        let _ = buf.trim_plan(20_000, 1).expect("trim_plan 2");
+        assert_eq!(buf.trim_commit(at, seq), Some(20_000));
+        assert_accounting_invariants(&buf);
+        assert!(buf.trim_to(40_000, 1).is_some());
+        assert_accounting_invariants(&buf);
+
+        // pop_span drains data, then pending one by one.
+        while buf.pop_span().unwrap().is_some() {
+            assert_accounting_invariants(&buf);
+        }
+        assert_eq!(buf.stored(), 0);
+        assert_eq!(buf.state.lock_ok().pending_bytes, 0);
+        assert_eq!(buf.state.lock_ok().pending_max_len, 0);
+
+        // take_spans drains pending in one shot.
+        buf.write_span(60_000, &pat(60_000, 10_000));
+        buf.write_span(80_000, &pat(80_000, 15_000));
+        assert_accounting_invariants(&buf);
+        let spans = buf.take_spans();
+        assert_eq!(spans.len(), 2);
+        assert_accounting_invariants(&buf);
+
+        drop(buf);
+        sc.cleanup();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "manual microbenchmark for FrontierBuffer::write_span out-of-order accounting"]
+    fn bench_write_span_out_of_order() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const SPANS: usize = 4_000;
+        const SPAN_LEN: usize = 4_096;
+        const TOTAL: u64 = (SPANS * SPAN_LEN) as u64;
+        const WARMUP: usize = 2;
+        const REPS: usize = 9;
+
+        let payload = vec![0xA5u8; SPAN_LEN];
+        let mut park_ns = Vec::with_capacity(REPS);
+        let mut fold_ns = Vec::with_capacity(REPS);
+        let mut total_ns = Vec::with_capacity(REPS);
+
+        for rep in 0..(WARMUP + REPS) {
+            let buf = FrontierBuffer::new(TOTAL);
+            let t0 = Instant::now();
+            for i in (1..SPANS).rev() {
+                let off = (i * SPAN_LEN) as u64;
+                black_box(buf.write_span(off, &payload));
+            }
+            let t1 = Instant::now();
+            black_box(buf.write_span(0, &payload));
+            let t2 = Instant::now();
+            assert_eq!(buf.frontier(), TOTAL);
+            assert_eq!(buf.stored(), TOTAL as usize);
+
+            if rep >= WARMUP {
+                park_ns.push(t1.duration_since(t0).as_nanos() as u64);
+                fold_ns.push(t2.duration_since(t1).as_nanos() as u64);
+                total_ns.push(t2.duration_since(t0).as_nanos() as u64);
+            }
+        }
+
+        park_ns.sort_unstable();
+        fold_ns.sort_unstable();
+        total_ns.sort_unstable();
+        let mid = REPS / 2;
+        let med_park_us = park_ns[mid] as f64 / 1_000.0;
+        let med_fold_us = fold_ns[mid] as f64 / 1_000.0;
+        let med_total_us = total_ns[mid] as f64 / 1_000.0;
+        let ns_per_park = park_ns[mid] as f64 / (SPANS - 1) as f64;
+        let mib = TOTAL as f64 / (1024.0 * 1024.0);
+        let mib_per_s = mib / (total_ns[mid] as f64 / 1e9);
+
+        println!(
+            "bench_write_span_out_of_order ({SPANS} x {SPAN_LEN} B = {mib:.2} MiB, {REPS} reps):"
+        );
+        println!(
+            "  park  median: {med_park_us:>9.1} us ({ns_per_park:>7.1} ns/span) [min {:.1} us, max {:.1} us]",
+            park_ns[0] as f64 / 1_000.0,
+            park_ns[REPS - 1] as f64 / 1_000.0,
+        );
+        println!(
+            "  fold  median: {med_fold_us:>9.1} us [min {:.1} us, max {:.1} us]",
+            fold_ns[0] as f64 / 1_000.0,
+            fold_ns[REPS - 1] as f64 / 1_000.0,
+        );
+        println!(
+            "  total median: {med_total_us:>9.1} us ({mib_per_s:>8.1} MiB/s) [min {:.1} us, max {:.1} us]",
+            total_ns[0] as f64 / 1_000.0,
+            total_ns[REPS - 1] as f64 / 1_000.0,
+        );
     }
 }
