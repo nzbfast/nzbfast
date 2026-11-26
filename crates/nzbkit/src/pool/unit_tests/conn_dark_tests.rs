@@ -261,13 +261,13 @@ async fn a_dark_server_no_longer_pins_an_article_it_never_refused() {
         let (sh, servers) = fleet(bound, &["<lost@x>", "<ok@x>"]);
         // Server a - the one still serving - has refused it. b and c
         // never saw it and cannot be asked.
-        sh.queue.lock().await.front_mut().unwrap().tried_430 = server_bit(0);
+        sh.queue.lock_ok().front_mut().unwrap().tried_430 = server_bit(0);
         let (tx, mut rx) = mpsc::channel(4);
         let w = next_work(&sh, ctx_for(&servers, 0), &tx, Pipeline::payload(0))
             .await
             .expect("the healthy article is picked either way");
         assert_eq!(&*w.id, "<ok@x>");
-        let held = sh.queue.lock().await.iter().any(|q| &*q.id == "<lost@x>");
+        let held = sh.queue.lock_ok().iter().any(|q| &*q.id == "<lost@x>");
         match (bound, rx.try_recv()) {
             (b, Ok(FetchOutcome::Missing { id, cause })) if b == CONN_DARK => {
                 assert_eq!(&*id, "<lost@x>");

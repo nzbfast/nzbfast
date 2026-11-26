@@ -400,7 +400,7 @@ async fn futile_scan_throttles_before_retrying() {
     let _a = WorkerLife::birth(&shared, 0);
     let _b = WorkerLife::birth(&shared, 1);
     // Server 0 has 430'd the entire queue.
-    for w in shared.queue.lock().await.iter_mut() {
+    for w in shared.queue.lock_ok().iter_mut() {
         w.tried_430 |= 0b01;
     }
     let ctx = ServerCtx {
@@ -421,14 +421,14 @@ async fn futile_scan_throttles_before_retrying() {
 
     // Fresh takeable work appears; within the throttle window the
     // server still sits out (documented ≤SCAN_RETRY_MS latency)…
-    shared.queue.lock().await.push_front(work("<fresh>"));
+    shared.queue.lock_ok().push_front(work("<fresh>"));
     assert!(
         next_work(&shared, ctx, &tx, Pipeline::payload(0))
             .await
             .is_none(),
         "throttled"
     );
-    assert_eq!(shared.queue.lock().await.len(), 51, "queue untouched");
+    assert_eq!(shared.queue.lock_ok().len(), 51, "queue untouched");
 
     // …and picks it up once the window passes.
     tokio::time::sleep(Duration::from_millis(SCAN_RETRY_MS + 30)).await;
@@ -1057,7 +1057,7 @@ async fn a_laddering_article_queues_behind_probes_but_never_behind_payload() {
     // on the merits and only the pipeline rule can turn it away.
     // (`live_mask` is this one server, so the bit must not be ours or
     // the article is already terminal.)
-    shared.queue.lock().await[0].tried_430 = 0b10;
+    shared.queue.lock_ok()[0].tried_430 = 0b10;
 
     assert!(
         next_work(&shared, ctx, &tx, Pipeline::payload(1))
@@ -1066,7 +1066,7 @@ async fn a_laddering_article_queues_behind_probes_but_never_behind_payload() {
         "a probe must not queue behind a body"
     );
     assert_eq!(
-        shared.queue.lock().await.len(),
+        shared.queue.lock_ok().len(),
         1,
         "left for an idle worker"
     );
@@ -1378,7 +1378,7 @@ async fn a_productive_sessions_death_charges_no_article() {
     // Productive session died between responses: nobody is charged.
     requeue_or_fail(&shared, &tx, &cfg, ctx, &mut inflight, LINK, "eof", false).await;
     {
-        let q = shared.queue.lock().await;
+        let q = shared.queue.lock_ok();
         assert_eq!(q.len(), 2, "both articles requeue");
         for w in q.iter() {
             assert_eq!(w.attempts, 0, "an innocent requeue bumps nothing");
@@ -1398,7 +1398,7 @@ async fn a_productive_sessions_death_charges_no_article() {
     }
     let front_id = inflight[0].id.clone();
     requeue_or_fail(&shared, &tx, &cfg, ctx, &mut inflight, LINK, "rst", true).await;
-    let q = shared.queue.lock().await;
+    let q = shared.queue.lock_ok();
     let front = q.iter().find(|w| w.id == front_id).expect("requeued");
     assert_eq!(front.attempts, 1, "zero-work death charges the front");
     assert_eq!(front.tried_fail, ctx.bit, "and brands it with this server");
@@ -1516,7 +1516,7 @@ async fn promoted_work_routes_to_the_faster_server() {
         .expect("slow gets non-promoted work");
     assert_eq!(&*w.id, "<a0>");
     assert_eq!(
-        shared.queue.lock().await.front().map(|w| w.id.clone()),
+        shared.queue.lock_ok().front().map(|w| w.id.clone()),
         Some("<a1>".into()),
         "promoted run must stay at the front for the fast server"
     );
@@ -1530,7 +1530,7 @@ async fn promoted_work_routes_to_the_faster_server() {
     // speed-matching: latency beats routing once it's on a recovery
     // path (the live wedge: fast servers cycling 430 → requeue while
     // slow ones politely skipped).
-    shared.queue.lock().await.front_mut().unwrap().tried_430 = 0b10;
+    shared.queue.lock_ok().front_mut().unwrap().tried_430 = 0b10;
     let w = next_work(&shared, slow, &tx, Pipeline::payload(0))
         .await
         .expect("slow takes the 430-recovery item");
@@ -1575,7 +1575,7 @@ async fn a_shed_dup_gives_the_hedge_budget_back() {
 
     // Worker A dispatches the original and keeps holding it.
     let original = {
-        let mut q = shared.queue.lock().await;
+        let mut q = shared.queue.lock_ok();
         let w = q.pop_front().unwrap();
         shared.charge_wire();
         shared.register_inflight(&w, 0);
@@ -1616,7 +1616,7 @@ async fn a_shed_dup_gives_the_hedge_budget_back() {
     shed_pipeline(&shared, &mut b_pipeline).await;
     assert!(b_pipeline.is_empty());
     assert_eq!(
-        shared.queue.lock().await.len(),
+        shared.queue.lock_ok().len(),
         2,
         "a dup is dropped, never requeued - the original still owns it"
     );
@@ -1671,7 +1671,7 @@ async fn shed_pipeline_requeues_behind_promoted_run_uncharged() {
     // item in a worker's pipeline carries exactly one charge.
     let mut inflight: VecDeque<Work> = VecDeque::new();
     {
-        let mut q = shared.queue.lock().await;
+        let mut q = shared.queue.lock_ok();
         for _ in 0..3 {
             let w = q.pop_front().unwrap();
             shared.charge_wire();
@@ -1708,7 +1708,7 @@ async fn shed_pipeline_requeues_behind_promoted_run_uncharged() {
 
     shed_pipeline(&shared, &mut inflight).await;
     assert!(inflight.is_empty());
-    let q = shared.queue.lock().await;
+    let q = shared.queue.lock_ok();
     let order: Vec<&str> = q.iter().map(|w| &*w.id).collect();
     assert_eq!(
         order,
@@ -1787,7 +1787,7 @@ async fn drain_signals_graceful_and_leaves_the_queue_intact() {
         "is_draining must reflect a requested drain"
     );
     // The queue is untouched - unstarted work is preserved for resume.
-    assert_eq!(shared.queue.lock().await.len(), 8);
+    assert_eq!(shared.queue.lock_ok().len(), 8);
 
     // The ordering that matters in production: the engine only asks
     // AFTER the fetch call returned, which is where the pool's last

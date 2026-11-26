@@ -180,7 +180,7 @@ async fn a_shrinking_fleet_gives_a_held_re_ask_its_budget_back() {
     // is exactly the shape `handle_missing` leaves in the queue - a's bit
     // cleared from `tried_430` and remembered in `recheck_430`.
     {
-        let mut q = sh.queue.lock().await;
+        let mut q = sh.queue.lock_ok();
         let w = q.front_mut().unwrap();
         w.tried_430 = server_bit(1);
         assert!(sh.take_recheck(w, &cfg, server_bit(0)));
@@ -234,7 +234,7 @@ async fn a_live_fleet_still_retires_a_hold_once_its_window_is_up() {
     sh.alive[0].fetch_add(1, Ordering::AcqRel);
     sh.alive[1].fetch_add(1, Ordering::AcqRel);
     {
-        let mut q = sh.queue.lock().await;
+        let mut q = sh.queue.lock_ok();
         let w = q.front_mut().unwrap();
         w.tried_430 = server_bit(1);
         assert!(sh.take_recheck(w, &short, server_bit(0)));
@@ -301,7 +301,7 @@ async fn a_hold_is_stamped_with_the_run_clock() {
         ..Default::default()
     };
     tokio::time::sleep(Duration::from_millis(25)).await;
-    let mut q = sh.queue.lock().await;
+    let mut q = sh.queue.lock_ok();
     let w = q.front_mut().unwrap();
     w.tried_430 = server_bit(1);
     assert!(sh.take_recheck(w, &cfg, server_bit(0)));
@@ -342,7 +342,7 @@ async fn a_duplicates_refusal_folds_once_the_hold_it_waits_on_has_expired() {
     // The queued copy in exactly the shape `handle_missing` leaves: b
     // has refused, a holds its one late re-ask, so a's bit is down.
     {
-        let mut q = sh.queue.lock().await;
+        let mut q = sh.queue.lock_ok();
         let w = q.front_mut().unwrap();
         w.tried_430 = server_bit(1);
         assert!(sh.take_recheck(w, &short, server_bit(0)));
@@ -467,7 +467,7 @@ async fn a_cancelled_hold_gives_its_budget_back_and_a_requeue_takes_it_again() {
     // Exactly the shape `handle_missing` leaves in the queue: server b
     // refused, server a holds the article's one late re-ask.
     {
-        let mut q = sh.queue.lock().await;
+        let mut q = sh.queue.lock_ok();
         let w = q.front_mut().unwrap();
         w.tried_430 = server_bit(1);
         assert!(sh.take_recheck(w, &cfg, server_bit(0)));
@@ -491,7 +491,7 @@ async fn a_cancelled_hold_gives_its_budget_back_and_a_requeue_takes_it_again() {
         "a resurrected hold is charged again, or its later terminal \
          release refunds a slot another article is holding"
     );
-    let q = sh.queue.lock().await;
+    let q = sh.queue.lock_ok();
     assert!(
         q.iter().any(|w| &*w.id == "<held@x>" && w.recheck_430 != 0),
         "the requeued Work still carries the hold it was cancelled with"
@@ -526,8 +526,7 @@ async fn refuse_on(
 
 async fn pop(sh: &Arc<Shared>) -> Work {
     sh.queue
-        .lock()
-        .await
+        .lock_ok()
         .pop_front()
         .expect("the article is queued")
 }
@@ -561,13 +560,13 @@ async fn a_second_backbones_hold_reuses_the_articles_slot() {
     assert_eq!(held(), 1, "B's refusal was the last evidence: a hold");
     // A reconnects.
     sh.alive[0].fetch_add(1, Ordering::AcqRel);
-    let x = sh.queue.lock().await.iter().position(|w| &*w.id == "<x@x>");
-    let x = sh.queue.lock().await.remove(x.unwrap()).unwrap();
+    let x = sh.queue.lock_ok().iter().position(|w| &*w.id == "<x@x>");
+    let x = sh.queue.lock_ok().remove(x.unwrap()).unwrap();
     refuse_on(&sh, &servers, &cfg, 1, x, &tx).await;
     assert!(rx.try_recv().is_err(), "A has not been asked yet");
     assert_eq!(held(), 1, "a requeue keeps the slot");
-    let x = sh.queue.lock().await.iter().position(|w| &*w.id == "<x@x>");
-    let x = sh.queue.lock().await.remove(x.unwrap()).unwrap();
+    let x = sh.queue.lock_ok().iter().position(|w| &*w.id == "<x@x>");
+    let x = sh.queue.lock_ok().remove(x.unwrap()).unwrap();
     refuse_on(&sh, &servers, &cfg, 0, x, &tx).await;
     assert!(
         rx.try_recv().is_err(),
@@ -576,8 +575,8 @@ async fn a_second_backbones_hold_reuses_the_articles_slot() {
          holds the one slot it will ever need"
     );
     assert_eq!(held(), 1, "the same article, the same slot");
-    let x = sh.queue.lock().await.iter().position(|w| &*w.id == "<x@x>");
-    let x = sh.queue.lock().await.remove(x.unwrap()).unwrap();
+    let x = sh.queue.lock_ok().iter().position(|w| &*w.id == "<x@x>");
+    let x = sh.queue.lock_ok().remove(x.unwrap()).unwrap();
     refuse_on(&sh, &servers, &cfg, 0, x, &tx).await;
     assert!(
         matches!(rx.try_recv(), Ok(FetchOutcome::Missing { id, .. }) if &*id == "<x@x>"),
@@ -681,7 +680,7 @@ async fn a_two_group_hold_round_trips_cancel_and_requeue_as_one_slot() {
     let ctl = QueueControl::default();
     ctl.attach(&sh);
     {
-        let mut q = sh.queue.lock().await;
+        let mut q = sh.queue.lock_ok();
         let w = q.front_mut().unwrap();
         assert!(sh.take_recheck(w, &cfg, server_bit(1)));
         w.tried_430 = server_bit(1);
@@ -700,7 +699,7 @@ async fn a_two_group_hold_round_trips_cancel_and_requeue_as_one_slot() {
         "resurrected as the one slot it was cancelled with"
     );
     let w = {
-        let mut q = sh.queue.lock().await;
+        let mut q = sh.queue.lock_ok();
         let at = q.iter().position(|w| &*w.id == "<held@x>").unwrap();
         q.remove(at).unwrap()
     };
@@ -722,7 +721,7 @@ async fn an_expired_two_group_hold_returns_its_one_slot() {
     sh.alive[0].fetch_add(1, Ordering::AcqRel);
     sh.alive[1].fetch_add(1, Ordering::AcqRel);
     {
-        let mut q = sh.queue.lock().await;
+        let mut q = sh.queue.lock_ok();
         let w = q.front_mut().unwrap();
         // B's hold answered (bit back up), A's hold pending (bit down).
         assert!(sh.take_recheck(w, &short, server_bit(1)));

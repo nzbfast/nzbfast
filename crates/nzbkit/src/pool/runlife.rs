@@ -74,7 +74,10 @@ pub(super) fn seal_run_blocking(
     // much longer bound because there is no live run left to starve.
     let mut orphans: Vec<(Arc<str>, u32)> = loop {
         match shared.queue.try_lock() {
-            Ok(mut q) => break q.drain(..).map(|w| (w.id, w.ord)).collect(),
+            Ok(mut q) => {
+                shared.fill_candidates.store(0, Ordering::Release);
+                break q.drain(..).map(|w| (w.id, w.ord)).collect();
+            }
             Err(_) if seal_waits < SEAL_LOCK_TRIES => {
                 seal_waits += 1;
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -529,7 +532,8 @@ pub(super) async fn seal_run(
     // lock order every other path here uses.
     let mut orphans: Vec<(Arc<str>, u32)> = Vec::new();
     {
-        let mut q = shared.queue.lock().await;
+        let mut q = shared.queue.lock_ok();
+        shared.fill_candidates.store(0, Ordering::Release);
         orphans.extend(q.drain(..).map(|w| (w.id, w.ord)));
         let mut inf = shared.inflight.lock_ok();
         orphans.extend(inf.drain().map(|(id, e)| (id, e.ord)));
@@ -576,7 +580,7 @@ pub(super) async fn seal_run(
 pub(super) async fn shed_pipeline(shared: &Shared, inflight: &mut VecDeque<Work>) {
     // B3 wire-cap: the whole pipeline leaves flight in one go.
     shared.release_wire(inflight.len());
-    let mut q = shared.queue.lock().await;
+    let mut q = shared.queue.lock_ok();
     let mut at = q.iter().take_while(|w| w.promoted).count();
     while let Some(w) = inflight.pop_front() {
         if w.dup {
@@ -599,6 +603,9 @@ pub(super) async fn shed_pipeline(shared: &Shared, inflight: &mut VecDeque<Work>
         }
         if w.promoted {
             shared.promoted_pending.fetch_add(1, Ordering::AcqRel);
+        }
+        if w.tried_430 != 0 {
+            shared.note_fill_candidate();
         }
         let idx = at.min(q.len());
         q.insert(idx, w);
@@ -737,7 +744,7 @@ pub(super) async fn requeue_or_fail(
     // B3 wire-cap: the dead connection's whole pipeline leaves flight.
     shared.release_wire(inflight.len());
     {
-        let mut q = shared.queue.lock().await;
+        let mut q = shared.queue.lock_ok();
         // Cursors, not a recomputed position. `inflight` is oldest-
         // first, so a fixed insertion point reverses the casualties:
         // `push_front` puts each successive promoted one at index 0,
@@ -812,6 +819,9 @@ pub(super) async fn requeue_or_fail(
             // shed gate goes quiet while promoted work still waits.
             // And a non-promoted casualty must not cut ahead of the
             // promoted run at the front.
+            if w.tried_430 != 0 {
+                shared.note_fill_candidate();
+            }
             if w.promoted {
                 shared.promoted_pending.fetch_add(1, Ordering::AcqRel);
                 let idx = pat.min(q.len());

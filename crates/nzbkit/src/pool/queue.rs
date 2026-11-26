@@ -560,6 +560,11 @@ impl QueueControl {
             let total = q.iter().filter(|w| w.promoted).count();
             sh.promoted_pending.store(total, Ordering::Release);
         }
+        for w in &removed {
+            if w.tried_430 != 0 {
+                sh.unnote_fill_candidate();
+            }
+        }
         drop(q);
         // Terminal bookkeeping OUTSIDE the queue lock (claim_done takes
         // the done mutex; complete_one may fire the finished watch when
@@ -755,6 +760,9 @@ impl QueueControl {
             // direction. Here in the final commit loop, past every
             // rollback point, so no rollback has to undo it.
             sh.recharge_recheck(&w);
+            if w.tried_430 != 0 {
+                sh.note_fill_candidate();
+            }
             if w.promoted {
                 sh.promoted_pending.fetch_add(1, Ordering::AcqRel);
                 q.insert(at, w);
@@ -1259,6 +1267,10 @@ impl QueueControl {
             sh.part_latch.steers.fetch_add(1, Ordering::Relaxed);
         }
         let mut inbox = sh.steer_inbox.lock_ok();
+        let had_430 = w.tried_430 != 0;
+        if had_430 {
+            sh.note_fill_candidate();
+        }
         inbox.push(w);
         #[cfg(test)]
         {
@@ -1287,6 +1299,9 @@ impl QueueControl {
         // above would have done.
         if sh.workers_live.load(Ordering::Acquire) == 0 {
             inbox.retain(|x| &*x.id != id);
+            if had_430 {
+                sh.unnote_fill_candidate();
+            }
             drop(inbox);
             if dbg {
                 info!(target: "crc-steer", "{id}: own (fleet died during the steer)");

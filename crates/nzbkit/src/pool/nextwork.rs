@@ -99,6 +99,23 @@ pub(super) async fn next_work(
     } else {
         0
     };
+    // Fill-candidate fast-path: when a fill server is gated on lower-tier
+    // refusals (`required != 0`), no queued item can be picked or declared
+    // unservable unless some item in `queue` or `steer_inbox` has a
+    // `tried_430` bit, a `spent` mask, or a held late-reask. Skipping the
+    // full O(q.len()) rotation avoids acquiring and thrashing the queue
+    // lock across tens of thousands of untouched articles.
+    if ctx.level > 0
+        && required != 0
+        && shared.fill_candidates.load(Ordering::Acquire) == 0
+        && shared.spent_n.load(Ordering::Acquire) == 0
+        && shared.recheck_held.load(Ordering::Acquire) == 0
+    {
+        if shared.want_handoff(ctx.idx) {
+            return None;
+        }
+        return shared.pick_dup(ctx.idx, ctx.bit, ctx.group_bits, required, pipe, ctx.level);
+    }
     // Scan throttle: this server's last full scan found nothing takeable
     // and re-shuffled the whole queue for the privilege. Sit out a tick
     // instead of burning the shared queue lock - at scale that burn
@@ -141,7 +158,7 @@ pub(super) async fn next_work(
     // AB/BA). See `FilePark::defers`.
     let pool_idle = shared.park.is_on() && shared.inflight.lock_ok().is_empty();
     let parked_past = {
-        let mut q = shared.queue.lock().await;
+        let mut q = shared.queue.lock_ok();
         // TODO 114 consumer steer: adopt any steered requeues parked
         // in the inbox (the verdict thread never takes this lock -
         // see the `steer_inbox` field doc). Front, behind the promoted
@@ -159,6 +176,7 @@ pub(super) async fn next_work(
         }
         for _ in 0..q.len() {
             let Some(mut w) = q.pop_front() else { break };
+            let was_candidate = w.tried_430 != 0;
             // TODO 315: a late re-ask that has outlived its window gives
             // the suppressed evidence back BEFORE the terminal test
             // reads it, and THIS is the site that has to do it - a held
@@ -181,6 +199,9 @@ pub(super) async fn next_work(
                 );
             }
             if w.tried_430 & live == live {
+                if was_candidate {
+                    shared.unnote_fill_candidate();
+                }
                 // TODO 315: this is the FOURTH place a held article's
                 // Work leaves flight for good, and `Shared::take_recheck`
                 // named only three - the two verdict arms and the
@@ -218,8 +239,14 @@ pub(super) async fn next_work(
                 || (w.tried_fail & ctx.bit != 0 && shared.other_can_take(&w, ctx.idx))
                 || (endgame && pipe.payload > 0 && w.tried_430 != 0)
             {
+                if !was_candidate && w.tried_430 != 0 {
+                    shared.note_fill_candidate();
+                }
                 q.push_back(w);
             } else if shared.park.defers(&w, pool_idle) {
+                if !was_candidate && w.tried_430 != 0 {
+                    shared.note_fill_candidate();
+                }
                 parked_kept.push(w);
             } else if w.promoted
                 && w.tried_430 == 0
@@ -231,6 +258,9 @@ pub(super) async fn next_work(
                 // matching - whoever can serve it, serves it.
                 left_for_faster.push(w);
             } else {
+                if was_candidate {
+                    shared.unnote_fill_candidate();
+                }
                 if w.promoted {
                     let _ = shared.promoted_pending.fetch_update(
                         Ordering::AcqRel,
