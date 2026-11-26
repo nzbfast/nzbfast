@@ -45,7 +45,8 @@ notify = "8.2.0"
 libc = "0.2"
 # Outbound HTTP for the update check, the indexer probes and the webhook
 # sender.
-ureq = "3"
+# Same feature set as nzbfast-core: no ring, aws-lc-rs supplied per agent.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "gzip"] }
 # §129 4a webhook signing (X-NzbFast-Signature) and the update manifest's
 # payload digest.
 sha2 = "0.11"
