@@ -44,7 +44,7 @@ fn held_articles_journal_after_their_holds_drain() {
             .unwrap()
         {
             nzbkit::extract::Persist::Held(frags) => {
-                pending_r.lock_ok().parked.push(ParkedR {
+                pending_r.lock_ok().push_parked(ParkedR {
                     sidx: 0,
                     id: format!("<er-{i}@t>").into(),
                     name: "v.rar".into(),
@@ -64,7 +64,7 @@ fn held_articles_journal_after_their_holds_drain() {
         flush_pending_r(&pending_r, &ex, &journal, true);
     }
     assert_eq!(
-        pending_r.lock_ok().parked.len(),
+        pending_r.lock_ok().parked_len(),
         n - 1,
         "nothing may journal before its bytes drain"
     );
@@ -78,7 +78,7 @@ fn held_articles_journal_after_their_holds_drain() {
     // The line above set `last_sweep`, so this call is NOT a sweep - it
     // completes these records through the fresh path alone.
     flush_pending_r(&pending_r, &ex, &journal, false);
-    let left: Vec<u64> = pending_r.lock_ok().parked.iter().map(|p| p.off).collect();
+    let left: Vec<u64> = pending_r.lock_ok().parked_offsets();
     // Only the final article may stay parked (it carries the
     // end-of-archive block, which never lands in an output file).
     assert!(
@@ -160,7 +160,7 @@ fn parked_articles_journal_off_a_materialized_volume_with_no_placements() {
             .unwrap()
         {
             nzbkit::extract::Persist::Held(frags) => {
-                pending_r.lock_ok().parked.push(ParkedR {
+                pending_r.lock_ok().push_parked(ParkedR {
                     sidx: 0,
                     id: format!("<mat-{i}@t>").into(),
                     name: "r.part1.rar".into(),
@@ -209,7 +209,7 @@ fn parked_articles_journal_off_a_materialized_volume_with_no_placements() {
     pending_r.lock_ok().last_sweep = Some(std::time::Instant::now());
     flush_pending_r(&pending_r, &ex, &journal, false);
     assert_eq!(
-        pending_r.lock_ok().parked.len(),
+        pending_r.lock_ok().parked_len(),
         n - 1,
         "an off-sweep pass with nothing fresh ran the widening arm anyway"
     );
@@ -224,7 +224,7 @@ fn parked_articles_journal_off_a_materialized_volume_with_no_placements() {
     }
     flush_pending_r(&pending_r, &ex, &journal, false);
     assert_eq!(
-        pending_r.lock_ok().parked.len(),
+        pending_r.lock_ok().parked_len(),
         n - 1,
         "an off-sweep pass re-read a slot that gained nothing"
     );
@@ -232,7 +232,7 @@ fn parked_articles_journal_off_a_materialized_volume_with_no_placements() {
     // the decoders' join runs, when the volume coverage is largest -
     // completes every one of them.
     flush_pending_r(&pending_r, &ex, &journal, true);
-    let left: Vec<u64> = pending_r.lock_ok().parked.iter().map(|p| p.off).collect();
+    let left: Vec<u64> = pending_r.lock_ok().parked_offsets();
     assert!(
         left.is_empty(),
         "articles still parked over a materialized volume at offsets {left:?}"
@@ -295,7 +295,7 @@ fn held_crypto_articles_journal_as_d_and_restore_posted_bytes() {
             .unwrap()
         {
             nzbkit::extract::Persist::Held(frags) => {
-                pending_r.lock_ok().parked.push(ParkedR {
+                pending_r.lock_ok().push_parked(ParkedR {
                     sidx: 0,
                     id: format!("<ec-{i}@t>").into(),
                     name: "v.rar".into(),
@@ -315,7 +315,7 @@ fn held_crypto_articles_journal_as_d_and_restore_posted_bytes() {
         flush_pending_r(&pending_r, &ex, &journal, true);
     }
     assert_eq!(
-        pending_r.lock_ok().parked.len(),
+        pending_r.lock_ok().parked_len(),
         n - 1,
         "nothing may journal before its bytes drain"
     );
@@ -324,7 +324,7 @@ fn held_crypto_articles_journal_as_d_and_restore_posted_bytes() {
     ex.write(0, "v.rar", vol.len() as u64, 0, &vol[..art])
         .unwrap();
     flush_pending_r(&pending_r, &ex, &journal, true);
-    let left: Vec<u64> = pending_r.lock_ok().parked.iter().map(|p| p.off).collect();
+    let left: Vec<u64> = pending_r.lock_ok().parked_offsets();
     // Only the final article may stay parked: it carries the
     // end-of-archive block, which lands in no output file.
     assert!(
@@ -381,4 +381,115 @@ fn held_crypto_articles_journal_as_d_and_restore_posted_bytes() {
         none.ids
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore]
+fn bench_flush_pending_r_many_small_stored_members() {
+    const NUM_SLOTS: usize = 20;
+    const ARTS_PER_SLOT: usize = 100;
+    const ART_LEN: u64 = 500_000;
+    const HALF_LEN: u64 = ART_LEN / 2;
+    const BATCH_SIZE: usize = 10;
+    const REPS: usize = 7;
+
+    let mut samples_us = Vec::with_capacity(REPS);
+    for rep in 0..REPS {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-bench-pending-r-{}-{rep}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (journal, _) = nzbkit::journal::Journal::open(&dir, b"bench-pr").unwrap();
+        let ex = nzbkit::extract::Extractor::new(&dir, NUM_SLOTS, true);
+        let pending_r = std::sync::Mutex::new(PendingR::default());
+
+        {
+            let mut st = pending_r.lock_ok();
+            for s in 0..NUM_SLOTS {
+                for i in 0..ARTS_PER_SLOT {
+                    st.push_parked(ParkedR {
+                        sidx: s,
+                        id: format!("<b-{s}-{i}@t>").into(),
+                        name: format!("vol{s:02}.rar"),
+                        size: ARTS_PER_SLOT as u64 * ART_LEN,
+                        off: i as u64 * ART_LEN,
+                        len: ART_LEN,
+                        frags: Vec::new(),
+                        par2_main: false,
+                        crc: Some(0x1234_5678),
+                    });
+                }
+            }
+            st.last_sweep = Some(std::time::Instant::now());
+        }
+
+        let t0 = std::time::Instant::now();
+        // Phase 1: first half of each article arrives in batches of 10 (1 slot per batch),
+        // accumulating 2,000 late placements across 20 slots while all 2,000 articles stay parked.
+        for batch in 0..(ARTS_PER_SLOT / BATCH_SIZE) {
+            for s in 0..NUM_SLOTS {
+                {
+                    let mut st = pending_r.lock_ok();
+                    st.last_sweep = Some(std::time::Instant::now());
+                    for k in 0..BATCH_SIZE {
+                        let i = batch * BATCH_SIZE + k;
+                        st.push_late(
+                            s,
+                            nzbkit::extract::Frag::identity(
+                                &format!("f_{s}_{i}.bin"),
+                                i as u64 * ART_LEN,
+                                HALF_LEN,
+                            ),
+                            false,
+                        );
+                    }
+                }
+                flush_pending_r(&pending_r, &ex, &journal, false);
+            }
+        }
+        assert_eq!(
+            pending_r.lock_ok().parked_len(),
+            NUM_SLOTS * ARTS_PER_SLOT
+        );
+
+        // Phase 2: second half of each article arrives in batches of 10 (1 slot per batch),
+        // completing 10 articles per flush call and pruning done ranges.
+        for batch in 0..(ARTS_PER_SLOT / BATCH_SIZE) {
+            for s in 0..NUM_SLOTS {
+                {
+                    let mut st = pending_r.lock_ok();
+                    st.last_sweep = Some(std::time::Instant::now());
+                    for k in 0..BATCH_SIZE {
+                        let i = batch * BATCH_SIZE + k;
+                        st.push_late(
+                            s,
+                            nzbkit::extract::Frag::identity(
+                                &format!("f_{s}_{i}.bin"),
+                                i as u64 * ART_LEN + HALF_LEN,
+                                HALF_LEN,
+                            ),
+                            false,
+                        );
+                    }
+                }
+                flush_pending_r(&pending_r, &ex, &journal, false);
+            }
+        }
+        let elapsed_us = t0.elapsed().as_micros();
+        assert_eq!(pending_r.lock_ok().parked_len(), 0);
+        assert!(pending_r.lock_ok().late.is_empty());
+        samples_us.push(elapsed_us);
+        drop(journal);
+        drop(ex);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    samples_us.sort_unstable();
+    let median_us = samples_us[REPS / 2];
+    eprintln!(
+        "bench_flush_pending_r_many_small_stored_members: reps_us={samples_us:?} median={:.3}ms ({median_us}us)",
+        median_us as f64 / 1000.0
+    );
 }

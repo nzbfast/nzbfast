@@ -512,8 +512,7 @@ impl ReplayPending {
             Fed::Held(frags) => {
                 self.pending_r
                     .lock_ok()
-                    .parked
-                    .push(super::workers::ParkedR {
+                    .push_parked(super::workers::ParkedR {
                         sidx: seed.slot,
                         id: id.clone(),
                         name: seed.name.clone(),
