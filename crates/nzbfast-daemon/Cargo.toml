@@ -41,7 +41,7 @@ tracing = { version = "0.1", default-features = false, features = ["std", "attri
 # bin. Same vendored + hardened fork the bin links.
 tiny_http = { path = "../../vendor/tiny_http", features = ["ssl-rustls"] }
 # The watch-folder and settings watchers.
-notify = "8.2.0"
+notify = "9.0.0"
 libc = "0.2"
 # Outbound HTTP for the update check, the indexer probes and the webhook
 # sender.
@@ -114,7 +114,7 @@ nzbfast-unpack = { path = "../nzbfast-unpack", features = ["test-support"] }
 # Seed-harvest migration tests open the daemon's closed index directly to
 # model a pre-manifest database. Same version/features nzbkit's index
 # tests already compile, so it adds no production dependency.
-rusqlite = { version = "0.41.0", features = ["hooks"] }
+rusqlite = { version = "0.43.0", features = ["hooks"] }
 # The 7z ENCODER, for the ONE thing a daemon test cannot fake: a
 # genuinely password-protected archive. `job_finalize`'s A6 rollback
 # (N1) turns on what the unlock ladder answers about the payload it just

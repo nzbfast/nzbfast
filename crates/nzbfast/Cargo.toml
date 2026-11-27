@@ -141,7 +141,7 @@ md-5 = "0.10"
 crc32fast = "1.5.0"
 rpassword = "7"
 qrcodegen = "1.8.0"
-notify = "8.2.0"
+notify = "9.0.0"
 # Structured logging. The subscriber writes to the process's own
 # stdout/stderr, which is what logtee tees into the dashboard's log pane -
 # so the viewer keeps working with no plumbing of its own (see logging.rs).
@@ -406,7 +406,7 @@ postfast = { path = "../postfast" }
 # Seed-harvest migration tests open the daemon's closed index directly to
 # model a pre-manifest database. This is the same version/features nzbkit's
 # index tests already compile, so it adds no production dependency.
-rusqlite = { version = "0.41.0", features = ["hooks"] }
+rusqlite = { version = "0.43.0", features = ["hooks"] }
 # TLS daemon tests (§129 2a): rcgen mints the test certificate (end-entity,
 # basicConstraints CA:FALSE by construction - the CaUsedAsEndEntity trap a
 # hand-run `openssl req -x509` falls into), and rustls is the verifying

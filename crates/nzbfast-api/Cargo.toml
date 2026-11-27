@@ -52,7 +52,7 @@ flate2 = "1"
 # The pairing QR the setup card renders.
 qrcodegen = "1.8.0"
 # The watch-folder settings arm hands `notify` its own recursive mode.
-notify = "8.2.0"
+notify = "9.0.0"
 libc = "0.2"
 
 [features]
