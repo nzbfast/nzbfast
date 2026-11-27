@@ -41,7 +41,7 @@ serde_json = "1.0.150"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 # The watch-folder lane's filesystem notifications.
-notify = "8.2.0"
+notify = "9.0.0"
 libc = "0.2"
 # The indexer lane's per-run capability token comes from the platform
 # CSPRNG, not RandomState.
@@ -80,4 +80,4 @@ nzbfast-daemon = { path = "../nzbfast-daemon", features = ["test-support"] }
 # The index-scan and quality-lap tests open the daemon's closed index
 # directly. Same version/features nzbkit's index tests already compile,
 # so it adds no production dependency.
-rusqlite = { version = "0.41.0", features = ["hooks"] }
+rusqlite = { version = "0.43.0", features = ["hooks"] }
